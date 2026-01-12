@@ -1,0 +1,24 @@
+[package]
+name = "era-ingest"
+description = "File ingestion for ERA archive system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+era-common = { workspace = true }
+era-crypto = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "ingest_bench"
+harness = false

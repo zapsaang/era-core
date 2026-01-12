@@ -1,0 +1,29 @@
+[package]
+name = "era-engine"
+description = "Core engine for ERA archive system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+era-common = { workspace = true }
+era-crypto = { workspace = true }
+era-codec = { workspace = true }
+era-storage = { workspace = true }
+era-volume = { workspace = true }
+era-packing = { workspace = true }
+era-ingest = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "engine_bench"
+harness = false

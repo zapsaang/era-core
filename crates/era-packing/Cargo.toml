@@ -1,0 +1,24 @@
+[package]
+name = "era-packing"
+description = "MacroBlock packing for ERA archive system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+era-common = { workspace = true }
+era-crypto = { workspace = true }
+era-codec = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "packing_bench"
+harness = false

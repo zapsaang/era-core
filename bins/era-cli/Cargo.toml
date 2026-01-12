@@ -1,0 +1,26 @@
+[package]
+name = "era-cli"
+description = "Command-line interface for ERA archive system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "era"
+path = "src/main.rs"
+
+[dependencies]
+era-common = { workspace = true }
+era-engine = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rpassword = "7.3"
+indicatif = "0.17"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = { workspace = true }

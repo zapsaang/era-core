@@ -1,0 +1,25 @@
+[package]
+name = "era-crypto"
+description = "Cryptographic primitives for ERA archive system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+era-common = { workspace = true }
+chacha20poly1305 = { workspace = true }
+argon2 = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { version = "1.7", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "crypto_bench"
+harness = false
