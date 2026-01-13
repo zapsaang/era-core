@@ -2,7 +2,9 @@
 
 use anyhow::{Context, Result};
 use era_common::{ArchiveConfig, ErasureCodeConfig};
-use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager};
+use era_engine::{
+    repair_archive, ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager, RepairOptions,
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
@@ -381,20 +383,69 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
             }
         }
 
-        // Explain repair capabilities
+        // Attempt actual repair for erasure-coded archives
         println!();
         if erasure_enabled {
-            println!("Repair Options:");
-            println!("---------------");
-            println!("This archive uses erasure coding, which can recover corrupted blocks");
-            println!("if enough shards remain intact. However, since shards are stored");
-            println!("sequentially in the same file, sector-level corruption often affects");
-            println!("multiple shards together.");
+            println!("Attempting repair using Reed-Solomon erasure coding...");
             println!();
-            println!("For maximum protection, consider distributing ERA volumes across");
-            println!("different storage devices (multi-volume mode).");
-            println!();
-            println!("To extract recoverable data, use: era extract --force <archive>");
+
+            // Create repair options
+            let repair_options = RepairOptions {
+                create_backup: true,
+                dry_run: !force, // Only actually repair if --force is specified
+                continue_on_error: true,
+            };
+
+            match repair_archive(archive, &password, repair_options) {
+                Ok(repair_stats) => {
+                    println!();
+                    println!("Repair Results:");
+                    println!("===============");
+                    println!("Blocks scanned:       {}", repair_stats.blocks_scanned);
+                    println!(
+                        "Blocks with damage:   {}",
+                        repair_stats.blocks_with_corruption
+                    );
+                    println!(
+                        "Corrupted shards:     {}",
+                        repair_stats.corrupted_shards_found
+                    );
+                    println!("Shards repaired:      {}", repair_stats.shards_repaired);
+                    println!(
+                        "Unrecoverable blocks: {}",
+                        repair_stats.unrecoverable_blocks
+                    );
+                    println!();
+
+                    if repair_stats.fully_repaired() {
+                        if force {
+                            println!("✅ Archive successfully repaired!");
+                        } else {
+                            println!(
+                                "✅ Repair is possible. Run with --force to apply repairs."
+                            );
+                        }
+                        return Ok(());
+                    } else {
+                        println!(
+                            "⚠️  Partial repair: {} blocks could not be recovered.",
+                            repair_stats.unrecoverable_blocks
+                        );
+                        if !repair_stats.errors.is_empty() && verbose {
+                            println!();
+                            println!("Unrecoverable errors:");
+                            for (i, err) in repair_stats.errors.iter().enumerate() {
+                                println!("  {}. {}", i + 1, err);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("❌ Repair failed: {}", e);
+                    println!();
+                    println!("To extract recoverable data, use: era extract --force <archive>");
+                }
+            }
         } else {
             println!("Note: This archive was created without erasure coding.");
             println!("Consider recreating with erasure coding for better protection:");
@@ -404,8 +455,7 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
         }
 
         anyhow::bail!(
-            "Archive has {} errors. Use 'era extract --force' to recover what's possible.",
-            verify_stats.errors.len()
+            "Archive has errors. Use 'era extract --force' to recover what's possible."
         );
     }
 

@@ -2,7 +2,7 @@
 //!
 //! These tests verify end-to-end functionality of archive creation and extraction.
 
-use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
+use era_engine::{repair_archive, ArchiveReader, ArchiveWriter, ExtractOptions, RepairOptions};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -640,3 +640,110 @@ fn test_erasure_different_configs() {
         assert_eq!(extracted, content, "Config {}:{} failed", data, parity);
     }
 }
+
+/// Test repair on a healthy erasure archive (should report no repairs needed)
+#[test]
+fn test_repair_healthy_archive() {
+    use era_common::ErasureCodeConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+
+    // Create test file
+    let content = vec![0x55u8; 30_000];
+    create_test_file(&input_dir, "healthy.bin", &content);
+
+    // Create archive with erasure coding
+    let archive_path = temp_dir.path().join("healthy_repair.era");
+    let erasure_config = ErasureCodeConfig {
+        data_shards: 4,
+        parity_shards: 2,
+    };
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("repair_test")
+        .erasure_config(erasure_config)
+        .build()
+        .unwrap();
+
+    writer.add_file(&input_dir.join("healthy.bin")).unwrap();
+    writer.finalize().unwrap();
+
+    // Run repair in dry-run mode
+    let repair_options = RepairOptions {
+        create_backup: false,
+        dry_run: true,
+        continue_on_error: true,
+    };
+
+    let stats = repair_archive(&archive_path, "repair_test", repair_options).unwrap();
+
+    // Should find no corruption
+    assert_eq!(stats.corrupted_shards_found, 0);
+    assert_eq!(stats.shards_repaired, 0);
+    assert_eq!(stats.unrecoverable_blocks, 0);
+    assert!(stats.fully_repaired());
+}
+
+/// Test repair on non-erasure archive (should fail gracefully)
+#[test]
+fn test_repair_non_erasure_archive() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Create a standard archive without erasure coding
+    let archive_path = temp_dir.path().join("standard.era");
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("test_pass")
+        .build()
+        .unwrap();
+
+    writer.add_bytes("test.txt", b"Hello, World!").unwrap();
+    writer.finalize().unwrap();
+
+    // Repair should fail because no erasure coding
+    let repair_options = RepairOptions::default();
+    let result = repair_archive(&archive_path, "test_pass", repair_options);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("erasure coding"),
+        "Error should mention erasure coding: {}",
+        err
+    );
+}
+
+/// Test repair with wrong password (should fail)
+#[test]
+fn test_repair_wrong_password() {
+    use era_common::ErasureCodeConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("secure.era");
+
+    // Create archive
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("correct_password")
+        .erasure_config(ErasureCodeConfig::default())
+        .build()
+        .unwrap();
+
+    writer.add_bytes("secret.txt", b"Secret data").unwrap();
+    writer.finalize().unwrap();
+
+    // Try repair with wrong password
+    let result = repair_archive(&archive_path, "wrong_password", RepairOptions::default());
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("password") || err.to_string().contains("InvalidKey"),
+        "Error should mention password: {}",
+        err
+    );
+}
+
+// TODO: Add real corruption tests that manipulate shard data correctly
+// Current file-level corruption affects catalog/footer and causes bincode errors
+// Need to implement precise shard-level corruption after understanding exact archive layout

@@ -1,5 +1,6 @@
 //! Archive reader - extracts files from ERA archives.
 
+use crate::chunk_processor::MultiChunkState;
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{
@@ -63,23 +64,6 @@ impl ExtractOptions {
         self.overwrite = overwrite;
         self
     }
-}
-
-/// State for tracking multi-chunk file extraction
-/// Uses pre-created files to avoid OOM on large files
-struct MultiChunkState {
-    /// Open file handle for writing chunks directly
-    file: File,
-    /// Output path for logging
-    output_path: PathBuf,
-    /// Expected file size (sum of all chunk lengths)
-    expected_size: u64,
-    /// Track which chunks have been written (for completion check)
-    chunks_written: Vec<bool>,
-    /// Total number of chunks expected
-    total_chunks: usize,
-    /// Number of chunks written so far
-    written_count: usize,
 }
 
 /// Reader for ERA archives
