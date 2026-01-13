@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ErasureCodeConfig;
+
 /// Main archive configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArchiveConfig {
@@ -13,6 +15,8 @@ pub struct ArchiveConfig {
     pub volume: VolumeConfig,
     /// Block configuration
     pub block: BlockConfig,
+    /// Erasure coding configuration (None = disabled)
+    pub erasure: Option<ErasureCodeConfig>,
 }
 
 /// Compression algorithm selection

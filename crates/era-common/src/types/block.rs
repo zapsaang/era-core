@@ -57,8 +57,38 @@ pub struct BlockLocation {
     pub slot_index: u32,
     /// Physical offset in the volume file
     pub physical_offset: u64,
-    /// Size of the encrypted block
+    /// Size of the encrypted block (or first shard if erasure-coded)
     pub encrypted_size: u32,
+    /// Erasure coding info (None = not erasure-coded)
+    /// Note: Do NOT use skip_serializing_if with bincode - it's position-based
+    pub erasure_info: Option<ErasureBlockInfo>,
+}
+
+/// Information about an erasure-coded block
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErasureBlockInfo {
+    /// Number of data shards
+    pub data_shards: u8,
+    /// Number of parity shards  
+    pub parity_shards: u8,
+    /// Size of each shard (all shards are same size)
+    pub shard_size: u32,
+    /// Original data length before padding
+    pub original_len: u32,
+}
+
+impl BlockLocation {
+    /// Check if this block is erasure-coded
+    pub fn is_erasure_coded(&self) -> bool {
+        self.erasure_info.is_some()
+    }
+
+    /// Get total number of shards (data + parity)
+    pub fn total_shards(&self) -> usize {
+        self.erasure_info
+            .map(|e| e.data_shards as usize + e.parity_shards as usize)
+            .unwrap_or(1)
+    }
 }
 
 /// Chunk index entry within a MacroBlock
@@ -151,4 +181,54 @@ pub struct ShardLocation {
     pub physical_offset: u64,
     /// Size of the shard
     pub shard_size: u32,
+}
+
+/// CRC32 checksum for shard integrity validation
+pub fn compute_shard_crc(data: &[u8]) -> u32 {
+    crc32fast::hash(data)
+}
+
+/// Shard header containing metadata and CRC for integrity
+#[derive(Debug, Clone, Copy)]
+pub struct ShardHeader {
+    /// Shard data length
+    pub length: u32,
+    /// CRC32 checksum of shard data
+    pub crc: u32,
+}
+
+impl ShardHeader {
+    /// Size of serialized shard header in bytes
+    pub const SIZE: usize = 8; // 4 bytes length + 4 bytes CRC
+
+    /// Create a new shard header
+    pub fn new(length: u32, crc: u32) -> Self {
+        Self { length, crc }
+    }
+
+    /// Serialize to bytes
+    pub fn to_bytes(&self) -> [u8; 8] {
+        let mut buf = [0u8; 8];
+        buf[0..4].copy_from_slice(&self.length.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.crc.to_le_bytes());
+        buf
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < 8 {
+            return None;
+        }
+        let length = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let crc = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        Some(Self { length, crc })
+    }
+
+    /// Verify shard data against stored CRC
+    pub fn verify(&self, data: &[u8]) -> bool {
+        if data.len() != self.length as usize {
+            return false;
+        }
+        compute_shard_crc(data) == self.crc
+    }
 }

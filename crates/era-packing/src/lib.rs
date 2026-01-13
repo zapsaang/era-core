@@ -7,8 +7,10 @@
 
 mod builder;
 mod erasure_builder;
+mod erasure_unpacker;
 mod unpacker;
 
 pub use builder::MacroBlockBuilder;
 pub use erasure_builder::ErasureBlockBuilder;
+pub use erasure_unpacker::ErasureBlockUnpacker;
 pub use unpacker::MacroBlockUnpacker;

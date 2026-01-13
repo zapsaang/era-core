@@ -11,7 +11,7 @@ pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
 pub const FOOTER_SIZE: usize = 128;
 
 /// Current footer version
-pub const FOOTER_VERSION: u16 = 2;
+pub const FOOTER_VERSION: u16 = 3;
 
 /// Volume footer - stored at the end of each volume
 ///
@@ -35,17 +35,19 @@ pub struct Footer {
     pub catalog_offset: u64,
     /// Size of the catalog block (encrypted size)
     pub catalog_size: u32,
+    /// Block ID of the catalog (for correct decryption)
+    pub catalog_block_id: u32,
     /// Blake3 checksum of the footer (excluding this field)
     pub checksum: [u8; 32],
-    /// Reserved for future use (reduced from 60 to 48 bytes)
+    /// Reserved for future use (reduced from 48 to 44 bytes)
     #[serde(with = "BigArray")]
-    pub _reserved: [u8; 48],
+    pub _reserved: [u8; 44],
 }
 
 impl Footer {
     /// Create a new footer
     pub fn new(data_end_offset: u64, block_count: u32, sequence_number: u64) -> Self {
-        Self::with_catalog(data_end_offset, block_count, sequence_number, 0, 0)
+        Self::with_catalog(data_end_offset, block_count, sequence_number, 0, 0, 0)
     }
 
     /// Create a new footer with catalog location
@@ -55,6 +57,7 @@ impl Footer {
         sequence_number: u64,
         catalog_offset: u64,
         catalog_size: u32,
+        catalog_block_id: u32,
     ) -> Self {
         let mut footer = Self {
             magic: FOOTER_MAGIC,
@@ -65,8 +68,9 @@ impl Footer {
             sequence_number,
             catalog_offset,
             catalog_size,
+            catalog_block_id,
             checksum: [0u8; 32],
-            _reserved: [0u8; 48],
+            _reserved: [0u8; 44],
         };
 
         footer.update_checksum();

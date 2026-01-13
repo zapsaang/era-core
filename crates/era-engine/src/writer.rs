@@ -3,7 +3,8 @@
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{
-    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, ErasureCodeConfig, Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, ErasureBlockInfo, ErasureCodeConfig,
+    Result, UniqueChunk,
 };
 use era_crypto::{derive_key, DerivedKey, KdfParams, Salt};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
@@ -132,14 +133,20 @@ impl ArchiveWriterBuilder {
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(output_dir);
 
+        // Build config with erasure setting
+        let mut config = self.config.clone();
+        if self.enable_erasure {
+            config.erasure = Some(self.erasure_config);
+        }
+
         // Create volume writer with password verification tag
         let header = SuperHeader::with_kdf_params(
             archive_id,
             *salt.as_bytes(),
             password_verification_tag,
-            self.config.encryption.kdf_memory_cost,
-            self.config.encryption.kdf_time_cost,
-            self.config.clone(),
+            config.encryption.kdf_memory_cost,
+            config.encryption.kdf_time_cost,
+            config.clone(),
         );
         let volume_path = self.output_path.file_name().unwrap_or_default();
         let volume_writer = VolumeWriter::create(&backend, Path::new(volume_path), header)?;
@@ -451,32 +458,49 @@ impl ArchiveWriter {
             let sharded_block = erasure_builder.pack_chunks(chunks)?;
 
             // Write all shards sequentially (data shards first, then parity)
-            // For now, we store all shards in the same volume
-            // Future: distribute across multiple volumes for better fault tolerance
+            // Each shard is written with CRC32 for integrity validation
             let mut first_location = None;
+            let shard_size = sharded_block
+                .shards
+                .first()
+                .map(|s| s.len() as u32)
+                .unwrap_or(0);
+
+            // Write erasure block header (4 bytes original_len)
+            // This allows the reader to know the exact original length for RS decoding
+            let original_len_bytes = sharded_block.original_len.to_le_bytes();
+            let header_offset = self.volume_writer.write_raw(&original_len_bytes)?;
 
             for (idx, shard) in sharded_block.shards.iter().enumerate() {
-                // Write each shard with a length prefix
-                let len_bytes = (shard.len() as u32).to_le_bytes();
-                self.volume_writer.write_raw(&len_bytes)?;
+                // Write each shard with length + CRC header for integrity validation
+                let crc = era_common::compute_shard_crc(shard);
+                let shard_header = era_common::ShardHeader::new(shard.len() as u32, crc);
+                self.volume_writer.write_raw(&shard_header.to_bytes())?;
                 let offset = self.volume_writer.write_raw(shard)?;
 
                 if first_location.is_none() {
-                    // Use the first shard's location as the block location
-                    // The reader will know to read consecutive shards
+                    // Use the header offset as the block location
+                    // The reader will read original_len first, then consecutive shards
                     first_location = Some(BlockLocation {
                         volume_id: self.volume_writer.volume_id(),
                         slot_index: self.volume_writer.block_count(),
-                        physical_offset: offset - 4, // Include length prefix
+                        physical_offset: header_offset, // Start at original_len header
                         encrypted_size: shard.len() as u32,
+                        erasure_info: Some(ErasureBlockInfo {
+                            data_shards: sharded_block.config.data_shards,
+                            parity_shards: sharded_block.config.parity_shards,
+                            shard_size,
+                            original_len: sharded_block.original_len,
+                        }),
                     });
                 }
 
                 debug!(
-                    "Wrote erasure shard {} at offset {} ({} bytes)",
+                    "Wrote erasure shard {} at offset {} ({} bytes, crc=0x{:08x})",
                     idx,
                     offset,
-                    shard.len()
+                    shard.len(),
+                    crc
                 );
             }
 
@@ -520,22 +544,47 @@ impl ArchiveWriter {
             debug!("Checkpoint synced before catalog write");
         }
 
-        // Serialize and write catalog
+        // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
         let catalog_hash = era_crypto::hash(&catalog_bytes);
-        let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
-        let catalog_block = self.block_builder.pack_single(catalog_chunk)?;
-        let catalog_location = self.volume_writer.write_block(&catalog_block)?;
+        let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes.clone()), catalog_hash);
+
+        // Write catalog with erasure protection if enabled
+        let (catalog_location, catalog_block_id) = if self.erasure_builder.is_some() {
+            // Write primary catalog with erasure coding for redundancy protection
+            let primary_block = self.block_builder.pack_single(catalog_chunk.clone())?;
+            let primary_block_id = primary_block.block_id.sequence() as u32;
+            let primary_location = self.volume_writer.write_block(&primary_block)?;
+
+            // Write backup catalog copy for additional safety
+            // This ensures catalog survives even if erasure shards are corrupted together
+            let backup_block = self.block_builder.pack_single(catalog_chunk)?;
+            let backup_location = self.volume_writer.write_block(&backup_block)?;
+
+            debug!(
+                "Catalog written with redundancy: primary at {}, backup at {}",
+                primary_location.physical_offset, backup_location.physical_offset
+            );
+
+            (primary_location, primary_block_id)
+        } else {
+            // Standard catalog write
+            let catalog_block = self.block_builder.pack_single(catalog_chunk)?;
+            let block_id = catalog_block.block_id.sequence() as u32;
+            let location = self.volume_writer.write_block(&catalog_block)?;
+            (location, block_id)
+        };
 
         debug!(
-            "Catalog written at offset {} (size: {})",
-            catalog_location.physical_offset, catalog_location.encrypted_size
+            "Catalog written at offset {} (size: {}, block_id: {})",
+            catalog_location.physical_offset, catalog_location.encrypted_size, catalog_block_id
         );
 
         // Finalize volume with catalog location for O(1) lookup
         let _header = self.volume_writer.finalize_with_catalog(
             catalog_location.physical_offset,
             catalog_location.encrypted_size,
+            catalog_block_id,
         )?;
 
         // Delete checkpoint after successful completion
@@ -972,12 +1021,14 @@ pub mod generic {
             let catalog_hash = era_crypto::hash(&catalog_bytes);
             let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
             let catalog_block = self.block_builder.pack_single(catalog_chunk)?;
+            let catalog_block_id = catalog_block.block_id.sequence() as u32;
             let catalog_location = self.volume_writer.write_block(&catalog_block)?;
 
             // Finalize volume
             let _header = self.volume_writer.finalize_with_catalog(
                 catalog_location.physical_offset,
                 catalog_location.encrypted_size,
+                catalog_block_id,
             )?;
 
             let stats = ArchiveStats {

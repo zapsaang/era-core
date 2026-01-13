@@ -5,7 +5,7 @@
 //! recovery of lost shards.
 //!
 //! # Configuration
-//! 
+//!
 //! The default configuration is 4+2:
 //! - 4 data shards (original data split into 4 parts)
 //! - 2 parity shards (can recover from loss of any 2 shards)
@@ -108,7 +108,7 @@ impl ErasureCoder {
         }
 
         let shard_size = self.config.shard_size(data.len());
-        
+
         // Create encoder for this operation
         let mut encoder = reed_solomon_simd::ReedSolomonEncoder::new(
             self.config.data_shards,
@@ -122,13 +122,13 @@ impl ErasureCoder {
         for i in 0..self.config.data_shards {
             let start = i * shard_size;
             let end = ((i + 1) * shard_size).min(data.len());
-            
+
             let mut shard = if start < data.len() {
                 data[start..end].to_vec()
             } else {
                 Vec::new()
             };
-            
+
             // Pad to shard_size
             shard.resize(shard_size, 0);
             data_shards.push(shard);
@@ -136,12 +136,14 @@ impl ErasureCoder {
 
         // Add shards to encoder
         for shard in &data_shards {
-            encoder.add_original_shard(shard)
+            encoder
+                .add_original_shard(shard)
                 .map_err(|e| EraError::other(format!("Failed to add shard: {}", e)))?;
         }
 
         // Generate parity shards
-        let result = encoder.encode()
+        let result = encoder
+            .encode()
             .map_err(|e| EraError::other(format!("Encoding failed: {}", e)))?;
 
         // Collect all shards
@@ -173,8 +175,7 @@ impl ErasureCoder {
         if available_count < self.config.data_shards {
             return Err(EraError::other(format!(
                 "Not enough shards for recovery: have {}, need {}",
-                available_count,
-                self.config.data_shards
+                available_count, self.config.data_shards
             )));
         }
 
@@ -212,17 +213,22 @@ impl ErasureCoder {
         for (i, shard) in shards.iter().enumerate() {
             if let Some(data) = shard {
                 if i < self.config.data_shards {
-                    decoder.add_original_shard(i, data)
-                        .map_err(|e| EraError::other(format!("Failed to add original shard: {}", e)))?;
+                    decoder.add_original_shard(i, data).map_err(|e| {
+                        EraError::other(format!("Failed to add original shard: {}", e))
+                    })?;
                 } else {
-                    decoder.add_recovery_shard(i - self.config.data_shards, data)
-                        .map_err(|e| EraError::other(format!("Failed to add recovery shard: {}", e)))?;
+                    decoder
+                        .add_recovery_shard(i - self.config.data_shards, data)
+                        .map_err(|e| {
+                            EraError::other(format!("Failed to add recovery shard: {}", e))
+                        })?;
                 }
             }
         }
 
         // Decode
-        let result = decoder.decode()
+        let result = decoder
+            .decode()
             .map_err(|e| EraError::other(format!("Decoding failed: {}", e)))?;
 
         // Reconstruct original data
@@ -231,7 +237,8 @@ impl ErasureCoder {
             let shard_data = if let Some(data) = shard {
                 data.as_slice()
             } else {
-                result.restored_original(i)
+                result
+                    .restored_original(i)
                     .ok_or_else(|| EraError::other(format!("Failed to restore shard {}", i)))?
             };
             output.extend_from_slice(shard_data);
@@ -404,12 +411,12 @@ mod tests {
     #[test]
     fn test_large_data_encode_decode() {
         let coder = ErasureCoder::default_config().unwrap();
-        
+
         // 1MB of data
         let original: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
 
         let shards = coder.encode(&original).unwrap();
-        
+
         // Lose one shard
         let mut shard_options: Vec<Option<Vec<u8>>> = shards.into_iter().map(Some).collect();
         shard_options[2] = None;

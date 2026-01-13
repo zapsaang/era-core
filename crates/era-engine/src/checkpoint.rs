@@ -497,6 +497,7 @@ mod tests {
             slot_index: 0,
             physical_offset: offset,
             encrypted_size: size,
+            erasure_info: None,
         }
     }
 

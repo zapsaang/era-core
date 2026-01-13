@@ -51,6 +51,9 @@ zstd = "0.13"
 # Erasure coding
 reed-solomon-simd = "3.0"
 
+# CRC32 for shard integrity
+crc32fast = "1.4"
+
 # UUID
 uuid = { version = "1.6", features = ["v4", "serde"] }
 

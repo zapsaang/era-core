@@ -74,6 +74,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             slot_index: self.block_count,
             physical_offset: offset,
             encrypted_size: block.data.len() as u32,
+            erasure_info: None, // Standard blocks are not erasure-coded
         };
 
         self.position = self.writer.current_size();
@@ -92,7 +93,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Finalize the volume by writing the footer and syncing
     pub fn finalize(self) -> Result<SuperHeader> {
-        self.finalize_with_catalog(0, 0)
+        self.finalize_with_catalog(0, 0, 0)
     }
 
     /// Finalize the volume with catalog location information
@@ -100,6 +101,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         mut self,
         catalog_offset: u64,
         catalog_size: u32,
+        catalog_block_id: u32,
     ) -> Result<SuperHeader> {
         self.sequence += 1;
 
@@ -110,6 +112,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.sequence,
             catalog_offset,
             catalog_size,
+            catalog_block_id,
         );
         let footer_bytes = footer.to_bytes()?;
         self.writer.append(&footer_bytes)?;

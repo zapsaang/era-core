@@ -1,7 +1,7 @@
 //! Volume reader for reading from volumes.
 
 use bytes::Bytes;
-use era_common::{BlockId, BlockLocation, EncryptedMacroBlock, EraError, Result};
+use era_common::{BlockId, BlockLocation, EncryptedMacroBlock, EraError, ErasureBlockInfo, Result};
 use era_storage::{StorageBackend, StorageReader};
 use std::path::Path;
 
@@ -82,6 +82,46 @@ impl<R: StorageReader> VolumeReader<R> {
     /// Read raw data at the given offset
     pub fn read_raw(&self, offset: u64, len: usize) -> Result<Bytes> {
         self.reader.read_at(offset, len)
+    }
+
+    /// Read erasure-coded shards starting at the given offset
+    ///
+    /// Returns a vector of (shard_index, shard_data) pairs for all available shards.
+    /// If a shard read fails, it returns None in place of the data.
+    pub fn read_erasure_shards(
+        &self,
+        location: &BlockLocation,
+        erasure_info: &ErasureBlockInfo,
+    ) -> Result<Vec<(usize, Option<Bytes>)>> {
+        let total_shards = erasure_info.data_shards as usize + erasure_info.parity_shards as usize;
+        let mut shards = Vec::with_capacity(total_shards);
+        let mut offset = location.physical_offset;
+
+        for idx in 0..total_shards {
+            // Read length prefix (4 bytes)
+            let len_bytes = match self.reader.read_at(offset, 4) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    // Shard unavailable
+                    shards.push((idx, None));
+                    // We don't know the actual shard size, so we skip by expected size
+                    offset += 4 + erasure_info.shard_size as u64;
+                    continue;
+                }
+            };
+
+            let shard_len =
+                u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
+                    as usize;
+
+            // Read shard data
+            let shard_data = self.reader.read_at(offset + 4, shard_len).ok();
+
+            shards.push((idx, shard_data));
+            offset += 4 + shard_len as u64;
+        }
+
+        Ok(shards)
     }
 
     /// Get the data region (after header, before footer)

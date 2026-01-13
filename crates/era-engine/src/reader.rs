@@ -1,10 +1,13 @@
 //! Archive reader - extracts files from ERA archives.
 
+use bytes::Bytes;
 use era_codec::ZstdCompressor;
-use era_common::{BlockLocation, ChunkHash, EraError, Result};
+use era_common::{
+    BlockId, BlockLocation, ChunkHash, EraError, ErasureBlockInfo, Result, ShardHeader,
+};
 use era_crypto::{derive_key, KdfParams, Salt};
 use era_ingest::{Catalog, FileEntry};
-use era_packing::MacroBlockUnpacker;
+use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumeReader};
 use std::collections::HashMap;
@@ -83,6 +86,7 @@ struct MultiChunkState {
 pub struct ArchiveReader {
     volume_reader: VolumeReader<era_storage::LocalStorageReader>,
     unpacker: MacroBlockUnpacker,
+    erasure_unpacker: ErasureBlockUnpacker,
     catalog: Option<Catalog>,
 }
 
@@ -115,14 +119,19 @@ impl ArchiveReader {
             return Err(EraError::InvalidKey("Incorrect password".to_string()));
         }
 
-        // Create unpacker with salt as nonce context (must match encryption)
+        // Create unpackers with salt as nonce context (must match encryption)
         let nonce_context = header.crypto_anchor.salt;
         let compressor = Box::new(ZstdCompressor::new(header.config.compression.level));
-        let unpacker = MacroBlockUnpacker::new(key, nonce_context, compressor);
+        let unpacker = MacroBlockUnpacker::new(key.clone(), nonce_context, compressor);
+
+        // Create erasure unpacker for reading erasure-coded blocks
+        let erasure_compressor = Box::new(ZstdCompressor::new(header.config.compression.level));
+        let erasure_unpacker = ErasureBlockUnpacker::new(key, nonce_context, erasure_compressor);
 
         Ok(Self {
             volume_reader,
             unpacker,
+            erasure_unpacker,
             catalog: None,
         })
     }
@@ -147,14 +156,15 @@ impl ArchiveReader {
         let footer = self.volume_reader.footer();
         let catalog_location = if footer.has_catalog_location() {
             debug!(
-                "Using footer catalog location: offset={}, size={}",
-                footer.catalog_offset, footer.catalog_size
+                "Using footer catalog location: offset={}, size={}, block_id={}",
+                footer.catalog_offset, footer.catalog_size, footer.catalog_block_id
             );
             BlockLocation {
                 volume_id: self.volume_reader.header().volume_id,
-                slot_index: block_count - 1,
+                slot_index: footer.catalog_block_id,
                 physical_offset: footer.catalog_offset,
                 encrypted_size: footer.catalog_size,
+                erasure_info: None,
             }
         } else {
             // Fallback: scan for catalog (O(n) - for backwards compatibility)
@@ -211,7 +221,39 @@ impl ArchiveReader {
             slot_index: block_count - 1,
             physical_offset: last_block_offset,
             encrypted_size: last_block_size,
+            erasure_info: None,
         })
+    }
+
+    /// Read a block and extract all chunks, handling both erasure and non-erasure blocks
+    ///
+    /// This is the unified entry point for reading blocks. It automatically detects
+    /// whether the block is erasure-coded based on `location.erasure_info` and uses
+    /// the appropriate unpacker.
+    pub fn read_and_extract_chunks(
+        &self,
+        location: &BlockLocation,
+    ) -> Result<Vec<(ChunkHash, Bytes)>> {
+        if let Some(ref erasure_info) = location.erasure_info {
+            // Erasure-coded block: read shards and decode
+            let shards_with_status = self
+                .volume_reader
+                .read_erasure_shards(location, erasure_info)?;
+
+            // Filter to available shards only
+            let available_shards: Vec<(usize, Bytes)> = shards_with_status
+                .into_iter()
+                .filter_map(|(idx, opt_data)| opt_data.map(|data| (idx, data)))
+                .collect();
+
+            let block_id = BlockId::new(location.slot_index as u64);
+            self.erasure_unpacker
+                .decode_and_extract_all(available_shards, erasure_info, block_id)
+        } else {
+            // Standard block: read and unpack directly
+            let encrypted_block = self.volume_reader.read_block(location)?;
+            self.unpacker.extract_all_chunks(&encrypted_block)
+        }
     }
 
     /// List all files in the archive
@@ -227,9 +269,22 @@ impl ArchiveReader {
     /// - Builds hash→path mapping from catalog
     /// - Writes files directly during block scan
     /// - Supports multi-chunk files (CDC mode) with pre-created files to avoid OOM
+    /// - Supports erasure-coded archives (reads shard groups and decodes)
     pub fn extract_all(&mut self, options: &ExtractOptions) -> Result<ExtractStats> {
         info!("Extracting to: {}", options.output_dir.display());
 
+        // Check if erasure coding is enabled
+        let erasure_config = self.volume_reader.header().config.erasure;
+        if erasure_config.is_some() {
+            return self.extract_all_erasure(options);
+        }
+
+        // Standard extraction (non-erasure)
+        self.extract_all_standard(options)
+    }
+
+    /// Standard extraction for non-erasure archives
+    fn extract_all_standard(&mut self, options: &ExtractOptions) -> Result<ExtractStats> {
         // Load catalog if not already loaded
         self.load_catalog()?;
 
@@ -336,6 +391,7 @@ impl ArchiveReader {
                 slot_index,
                 physical_offset: offset,
                 encrypted_size: block_size,
+                erasure_info: None,
             };
 
             // Read, decrypt block and extract ALL chunks in single operation
@@ -413,6 +469,246 @@ impl ArchiveReader {
         Ok(stats)
     }
 
+    /// Extraction for erasure-coded archives
+    ///
+    /// This method reads shard groups and uses RS decoding to recover the original blocks.
+    fn extract_all_erasure(&mut self, options: &ExtractOptions) -> Result<ExtractStats> {
+        // Load catalog if not already loaded
+        self.load_catalog()?;
+
+        let catalog = self.catalog.as_ref().unwrap();
+        let mut stats = ExtractStats::default();
+
+        // Get erasure config
+        let erasure_config = self
+            .volume_reader
+            .header()
+            .config
+            .erasure
+            .ok_or_else(|| EraError::other("Erasure config not found"))?;
+
+        let total_shards =
+            erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
+
+        // Build maps for extraction (same as standard)
+        let mut single_chunk_pending: HashMap<ChunkHash, Vec<(usize, PathBuf)>> = HashMap::new();
+        let mut multi_chunk_files: HashMap<usize, MultiChunkState> = HashMap::new();
+        let mut chunk_to_files: HashMap<ChunkHash, Vec<(usize, usize, u64)>> = HashMap::new();
+
+        for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            let output_path = options.output_dir.join(&entry.path);
+
+            if output_path.exists() && !options.overwrite {
+                debug!("Skipping existing file: {}", output_path.display());
+                stats.skipped += 1;
+                continue;
+            }
+
+            if entry.size > MAX_DECLARED_FILE_SIZE {
+                return Err(EraError::CorruptedHeader(format!(
+                    "File '{}' declares unreasonable size: {} bytes",
+                    entry.path.display(),
+                    entry.size
+                )));
+            }
+
+            if entry.is_chunked() {
+                let chunk_count = entry.chunks.len();
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let file = File::create(&output_path)?;
+                file.set_len(entry.size)?;
+
+                multi_chunk_files.insert(
+                    file_idx,
+                    MultiChunkState {
+                        file,
+                        output_path,
+                        expected_size: entry.size,
+                        chunks_written: vec![false; chunk_count],
+                        total_chunks: chunk_count,
+                        written_count: 0,
+                    },
+                );
+
+                for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
+                    chunk_to_files.entry(chunk_ref.hash).or_default().push((
+                        file_idx,
+                        chunk_idx,
+                        chunk_ref.offset,
+                    ));
+                }
+            } else if let Some(content_hash) = entry.content_hash {
+                single_chunk_pending
+                    .entry(content_hash)
+                    .or_default()
+                    .push((file_idx, output_path));
+            }
+        }
+
+        if single_chunk_pending.is_empty() && multi_chunk_files.is_empty() {
+            info!("No files to extract");
+            return Ok(stats);
+        }
+
+        // Scan erasure shard groups
+        // Stop before the catalog block (which is stored as a regular block)
+        let (data_start, _data_end) = self.volume_reader.data_region();
+        let footer = self.volume_reader.footer();
+        let erasure_data_end = footer.catalog_offset;
+
+        let mut offset = data_start;
+        let mut block_index = 0u32;
+
+        while offset < erasure_data_end
+            && (!single_chunk_pending.is_empty() || !multi_chunk_files.is_empty())
+        {
+            let block_start_offset = offset;
+
+            // Read erasure block header (4 bytes original_len)
+            let header_bytes = match self.volume_reader.read_raw(offset, 4) {
+                Ok(bytes) if bytes.len() == 4 => bytes,
+                _ => break,
+            };
+            let original_len = u32::from_le_bytes([
+                header_bytes[0],
+                header_bytes[1],
+                header_bytes[2],
+                header_bytes[3],
+            ]);
+            offset += 4;
+
+            // Read all shards for this block (each with 8-byte header: length + CRC)
+            let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(total_shards);
+            let mut corrupted_shards: Vec<usize> = Vec::new();
+            let mut first_shard_size = 0u32;
+
+            for shard_idx in 0..total_shards {
+                // Read shard header (8 bytes: 4 length + 4 CRC)
+                let header_bytes = match self.volume_reader.read_raw(offset, ShardHeader::SIZE) {
+                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                    _ => break,
+                };
+
+                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
+                    Some(h) => h,
+                    None => {
+                        debug!("Invalid shard header at offset {}", offset);
+                        break;
+                    }
+                };
+                let shard_len = shard_header.length as usize;
+
+                if first_shard_size == 0 {
+                    first_shard_size = shard_header.length;
+                }
+
+                // Read shard data
+                if let Ok(shard_data) = self
+                    .volume_reader
+                    .read_raw(offset + ShardHeader::SIZE as u64, shard_len)
+                {
+                    // Verify CRC
+                    if shard_header.verify(&shard_data) {
+                        shards.push((shard_idx, shard_data));
+                    } else {
+                        debug!(
+                            "Shard {} CRC mismatch at offset {}, marking as corrupted",
+                            shard_idx, offset
+                        );
+                        corrupted_shards.push(shard_idx);
+                        // Don't add to shards - RS decoder will treat as missing
+                    }
+                } else {
+                    debug!(
+                        "Failed to read shard {} data at offset {}",
+                        shard_idx, offset
+                    );
+                    corrupted_shards.push(shard_idx);
+                }
+
+                offset += ShardHeader::SIZE as u64 + shard_len as u64;
+            }
+
+            if shards.is_empty() {
+                break;
+            }
+
+            // Create erasure info for decoding using the original_len from header
+            let erasure_info = ErasureBlockInfo {
+                data_shards: erasure_config.data_shards,
+                parity_shards: erasure_config.parity_shards,
+                shard_size: first_shard_size,
+                original_len, // Read from block header
+            };
+
+            let block_id = BlockId::new(block_index as u64);
+
+            // Decode and extract chunks
+            match self
+                .erasure_unpacker
+                .decode_and_extract_all(shards, &erasure_info, block_id)
+            {
+                Ok(chunks) => {
+                    for (hash, data) in chunks {
+                        // Handle single-chunk files
+                        if let Some(entries) = single_chunk_pending.remove(&hash) {
+                            for (_file_idx, output_path) in entries {
+                                if let Some(parent) = output_path.parent() {
+                                    fs::create_dir_all(parent)?;
+                                }
+                                let mut file = File::create(&output_path)?;
+                                file.write_all(&data)?;
+                                debug!("Extracted: {}", output_path.display());
+                                stats.extracted += 1;
+                                stats.bytes_written += data.len() as u64;
+                            }
+                        }
+
+                        // Handle multi-chunk files
+                        if let Some(file_refs) = chunk_to_files.remove(&hash) {
+                            for (file_idx, chunk_idx, chunk_offset) in file_refs {
+                                if let Some(state) = multi_chunk_files.get_mut(&file_idx) {
+                                    state.file.seek(SeekFrom::Start(chunk_offset))?;
+                                    state.file.write_all(&data)?;
+                                    state.chunks_written[chunk_idx] = true;
+                                    state.written_count += 1;
+
+                                    if state.written_count == state.total_chunks {
+                                        state.file.sync_all()?;
+                                        debug!(
+                                            "Extracted (chunked): {}",
+                                            state.output_path.display()
+                                        );
+                                        stats.extracted += 1;
+                                        stats.bytes_written += state.expected_size;
+                                        multi_chunk_files.remove(&file_idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to decode erasure block {} at offset {}: {}",
+                        block_index, block_start_offset, e
+                    );
+                }
+            }
+
+            block_index += 1;
+        }
+
+        info!(
+            "Erasure extraction complete: {} files, {} bytes",
+            stats.extracted, stats.bytes_written
+        );
+
+        Ok(stats)
+    }
+
     /// Verify the integrity of the archive
     ///
     /// This method performs a comprehensive verification:
@@ -423,6 +719,17 @@ impl ArchiveReader {
     pub fn verify(&mut self) -> Result<VerifyStats> {
         info!("Verifying archive integrity...");
 
+        // Check if erasure coding is enabled
+        let erasure_config = self.volume_reader.header().config.erasure;
+        if erasure_config.is_some() {
+            return self.verify_erasure();
+        }
+
+        self.verify_standard()
+    }
+
+    /// Standard verification for non-erasure archives
+    fn verify_standard(&mut self) -> Result<VerifyStats> {
         // Load catalog if not already loaded
         self.load_catalog()?;
 
@@ -493,6 +800,7 @@ impl ArchiveReader {
                 slot_index,
                 physical_offset: offset,
                 encrypted_size: block_size,
+                erasure_info: None,
             };
 
             // Read and decrypt block (AEAD verification happens here)
@@ -584,6 +892,209 @@ impl ArchiveReader {
                 stats.files_incomplete,
                 stats.errors.len()
             );
+        }
+
+        Ok(stats)
+    }
+
+    /// Erasure-coded archive verification
+    fn verify_erasure(&mut self) -> Result<VerifyStats> {
+        // Load catalog if not already loaded
+        self.load_catalog()?;
+
+        let catalog = self.catalog.as_ref().unwrap();
+        let mut stats = VerifyStats::default();
+
+        let erasure_config = self
+            .volume_reader
+            .header()
+            .config
+            .erasure
+            .ok_or_else(|| EraError::other("Erasure config not found"))?;
+
+        let total_shards =
+            erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
+
+        // Build expected chunks map
+        let mut expected_chunks: HashMap<ChunkHash, Vec<(usize, usize, u64)>> = HashMap::new();
+        let mut file_chunk_counts: Vec<usize> = Vec::with_capacity(catalog.entries.len());
+        let mut file_chunks_found: Vec<usize> = vec![0; catalog.entries.len()];
+
+        for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            if entry.is_chunked() {
+                file_chunk_counts.push(entry.chunks.len());
+                for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
+                    expected_chunks.entry(chunk_ref.hash).or_default().push((
+                        file_idx,
+                        chunk_idx,
+                        chunk_ref.length as u64,
+                    ));
+                }
+            } else if let Some(content_hash) = entry.content_hash {
+                file_chunk_counts.push(1);
+                expected_chunks
+                    .entry(content_hash)
+                    .or_default()
+                    .push((file_idx, 0, entry.size));
+            } else {
+                file_chunk_counts.push(0);
+            }
+        }
+
+        // Scan erasure shard groups
+        // Stop before the catalog block (which is stored as a regular block)
+        let (data_start, _data_end) = self.volume_reader.data_region();
+        let footer = self.volume_reader.footer();
+        let erasure_data_end = footer.catalog_offset; // Catalog is after erasure data
+
+        let mut offset = data_start;
+        let mut block_index = 0u32;
+
+        while offset < erasure_data_end {
+            // Read erasure block header (4 bytes original_len)
+            let header_bytes = match self.volume_reader.read_raw(offset, 4) {
+                Ok(bytes) if bytes.len() == 4 => bytes,
+                _ => break,
+            };
+            let original_len = u32::from_le_bytes([
+                header_bytes[0],
+                header_bytes[1],
+                header_bytes[2],
+                header_bytes[3],
+            ]);
+            offset += 4;
+
+            // Read all shards (each with 8-byte header: length + CRC)
+            let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(total_shards);
+            let mut corrupted_shards: Vec<usize> = Vec::new();
+            let mut first_shard_size = 0u32;
+
+            for shard_idx in 0..total_shards {
+                let header_bytes = match self.volume_reader.read_raw(offset, ShardHeader::SIZE) {
+                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                    _ => break,
+                };
+
+                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
+                    Some(h) => h,
+                    None => {
+                        debug!("Invalid shard header at offset {} in verify", offset);
+                        break;
+                    }
+                };
+                let shard_len = shard_header.length as usize;
+
+                if first_shard_size == 0 {
+                    first_shard_size = shard_header.length;
+                }
+
+                if let Ok(shard_data) = self
+                    .volume_reader
+                    .read_raw(offset + ShardHeader::SIZE as u64, shard_len)
+                {
+                    // Verify CRC
+                    if shard_header.verify(&shard_data) {
+                        shards.push((shard_idx, shard_data));
+                    } else {
+                        debug!(
+                            "Shard {} CRC verification failed at offset {}",
+                            shard_idx, offset
+                        );
+                        corrupted_shards.push(shard_idx);
+                        stats.errors.push(format!(
+                            "Block {}: shard {} CRC verification failed",
+                            block_index, shard_idx
+                        ));
+                    }
+                } else {
+                    corrupted_shards.push(shard_idx);
+                }
+
+                offset += ShardHeader::SIZE as u64 + shard_len as u64;
+            }
+
+            if shards.is_empty() {
+                break;
+            }
+
+            let erasure_info = ErasureBlockInfo {
+                data_shards: erasure_config.data_shards,
+                parity_shards: erasure_config.parity_shards,
+                shard_size: first_shard_size,
+                original_len,
+            };
+
+            let block_id = BlockId::new(block_index as u64);
+
+            match self
+                .erasure_unpacker
+                .decode_and_extract_all(shards, &erasure_info, block_id)
+            {
+                Ok(chunks) => {
+                    stats.blocks_verified += 1;
+
+                    for (hash, data) in &chunks {
+                        stats.bytes_verified += data.len() as u64;
+
+                        // Verify chunk hash matches content
+                        let computed_hash = era_crypto::hash(data);
+                        if computed_hash != *hash {
+                            stats
+                                .errors
+                                .push(format!("Block {}: chunk hash mismatch", block_index));
+                        }
+
+                        // Track which files got their chunks
+                        if let Some(file_refs) = expected_chunks.get(hash) {
+                            for (file_idx, _, expected_len) in file_refs {
+                                if data.len() as u64 == *expected_len {
+                                    file_chunks_found[*file_idx] += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    stats.errors.push(format!(
+                        "Block {}: erasure decode failed: {}",
+                        block_index, e
+                    ));
+                    stats.blocks_failed += 1;
+                }
+            }
+
+            block_index += 1;
+        }
+
+        // Check file completeness
+        for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            let expected = file_chunk_counts.get(file_idx).copied().unwrap_or(0);
+            let found = file_chunks_found.get(file_idx).copied().unwrap_or(0);
+
+            if expected == 0 {
+                continue;
+            }
+
+            if found == expected {
+                stats.files_verified += 1;
+            } else {
+                stats.files_incomplete += 1;
+                stats.errors.push(format!(
+                    "File '{}': missing {} of {} chunks",
+                    entry.path.display(),
+                    expected - found,
+                    expected
+                ));
+            }
+        }
+
+        if stats.is_ok() {
+            info!(
+                "Erasure verification passed: {} blocks, {} files, {} bytes",
+                stats.blocks_verified, stats.files_verified, stats.bytes_verified
+            );
+        } else {
+            info!("Erasure verification FAILED: {} errors", stats.errors.len());
         }
 
         Ok(stats)
@@ -964,5 +1475,41 @@ mod tests {
     fn test_max_declared_file_size_constant() {
         // Verify MAX_DECLARED_FILE_SIZE is 100GB
         assert_eq!(super::MAX_DECLARED_FILE_SIZE, 100 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_erasure_simple_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("erasure.era");
+        let password = "test";
+
+        // Create archive with erasure coding
+        let erasure_config = era_common::ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        };
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password(password)
+            .erasure_config(erasure_config)
+            .build()
+            .unwrap();
+
+        writer
+            .add_bytes("test.txt", b"Hello, Erasure World!")
+            .unwrap();
+        let stats = writer.finalize().unwrap();
+        assert_eq!(stats.total_files, 1);
+
+        // Extract and verify
+        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let extract_dir = temp_dir.path().join("extracted");
+        let options = ExtractOptions::new(&extract_dir);
+        let extract_stats = reader.extract_all(&options).unwrap();
+
+        assert_eq!(extract_stats.extracted, 1);
+
+        let content = std::fs::read_to_string(extract_dir.join("test.txt")).unwrap();
+        assert_eq!(content, "Hello, Erasure World!");
     }
 }

@@ -472,3 +472,171 @@ fn test_multifile_packing_efficiency() {
         assert_eq!(extracted, expected, "File {} content mismatch", name);
     }
 }
+
+// ============ Erasure Coding E2E Tests ============
+
+#[test]
+fn test_erasure_coding_roundtrip() {
+    use era_common::ErasureCodeConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+
+    // Create test files
+    let files = vec![
+        ("small.txt", b"Small file content".to_vec()),
+        ("medium.bin", vec![0xABu8; 10_000]),
+        ("large.bin", vec![0xCDu8; 100_000]),
+    ];
+
+    for (name, content) in &files {
+        create_test_file(&input_dir, name, content);
+    }
+
+    // Create archive with erasure coding (4+2 config)
+    let archive_path = temp_dir.path().join("erasure.era");
+    let erasure_config = ErasureCodeConfig {
+        data_shards: 4,
+        parity_shards: 2,
+    };
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("erasure_test")
+        .erasure_config(erasure_config)
+        .build()
+        .unwrap();
+
+    for (name, _) in &files {
+        writer.add_file(&input_dir.join(name)).unwrap();
+    }
+
+    let stats = writer.finalize().unwrap();
+    assert_eq!(stats.total_files, 3);
+
+    // Verify erasure config is stored in header
+    let reader = ArchiveReader::open(&archive_path, "erasure_test").unwrap();
+    let header = reader.header();
+    assert!(
+        header.config.erasure.is_some(),
+        "Erasure config should be stored in header"
+    );
+    let stored_erasure = header.config.erasure.as_ref().unwrap();
+    assert_eq!(stored_erasure.data_shards, 4);
+    assert_eq!(stored_erasure.parity_shards, 2);
+    drop(reader);
+
+    // Extract and verify all files
+    let output_dir = temp_dir.path().join("output");
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").unwrap();
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .unwrap();
+
+    assert_eq!(extract_stats.extracted, 3);
+
+    for (name, content) in &files {
+        let extracted = fs::read(output_dir.join(name)).unwrap();
+        assert_eq!(extracted, *content, "Content mismatch for {}", name);
+    }
+}
+
+#[test]
+fn test_erasure_verify_integration() {
+    use era_common::ErasureCodeConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+
+    // Create test file
+    let content = vec![0xFFu8; 50_000];
+    create_test_file(&input_dir, "data.bin", &content);
+
+    // Create archive with erasure coding
+    let archive_path = temp_dir.path().join("verify_erasure.era");
+    let erasure_config = ErasureCodeConfig {
+        data_shards: 4,
+        parity_shards: 2,
+    };
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("verify_test")
+        .erasure_config(erasure_config)
+        .build()
+        .unwrap();
+
+    writer.add_file(&input_dir.join("data.bin")).unwrap();
+    writer.finalize().unwrap();
+
+    // Verify archive integrity
+    let mut reader = ArchiveReader::open(&archive_path, "verify_test").unwrap();
+    let verify_stats = reader.verify().unwrap();
+
+    assert!(
+        verify_stats.is_ok(),
+        "Verification should pass: {:?}",
+        verify_stats.errors
+    );
+    assert!(verify_stats.blocks_verified > 0);
+    assert_eq!(verify_stats.blocks_failed, 0);
+}
+
+#[test]
+fn test_erasure_different_configs() {
+    use era_common::ErasureCodeConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+
+    // Create test file
+    let content = vec![0x42u8; 20_000];
+    create_test_file(&input_dir, "test.bin", &content);
+
+    // Test different erasure configurations
+    let configs = vec![
+        (2, 1), // 2+1: 50% overhead
+        (4, 2), // 4+2: 50% overhead (default)
+        (8, 4), // 8+4: 50% overhead
+        (6, 3), // 6+3: 50% overhead
+    ];
+
+    for (data, parity) in configs {
+        let archive_path = temp_dir
+            .path()
+            .join(format!("erasure_{}_{}.era", data, parity));
+        let erasure_config = ErasureCodeConfig {
+            data_shards: data,
+            parity_shards: parity,
+        };
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("config_test")
+            .erasure_config(erasure_config)
+            .build()
+            .unwrap();
+
+        writer.add_file(&input_dir.join("test.bin")).unwrap();
+        writer.finalize().unwrap();
+
+        // Verify extraction works
+        let output_dir = temp_dir.path().join(format!("output_{}_{}", data, parity));
+        let mut reader = ArchiveReader::open(&archive_path, "config_test").unwrap();
+
+        // Check header
+        let header = reader.header();
+        let stored = header.config.erasure.as_ref().unwrap();
+        assert_eq!(stored.data_shards, data);
+        assert_eq!(stored.parity_shards, parity);
+
+        // Extract and verify
+        let stats = reader
+            .extract_all(&ExtractOptions::new(&output_dir))
+            .unwrap();
+        assert_eq!(stats.extracted, 1);
+
+        let extracted = fs::read(output_dir.join("test.bin")).unwrap();
+        assert_eq!(extracted, content, "Config {}:{} failed", data, parity);
+    }
+}

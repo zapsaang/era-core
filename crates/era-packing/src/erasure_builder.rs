@@ -71,10 +71,7 @@ impl ErasureBlockBuilder {
         let shards = self.coder.encode(data)?;
 
         // Convert to Bytes
-        let shards = shards
-            .into_iter()
-            .map(bytes::Bytes::from)
-            .collect();
+        let shards = shards.into_iter().map(bytes::Bytes::from).collect();
 
         Ok(ErasureShardedBlock {
             block_id,
@@ -119,8 +116,7 @@ mod tests {
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
-        let builder =
-            ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
+        let builder = ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
 
         let chunk = UniqueChunk::new(
             Bytes::from(vec![42u8; 1024]),
@@ -141,12 +137,17 @@ mod tests {
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
-        let builder =
-            ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
+        let builder = ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
 
         let chunks = vec![
-            UniqueChunk::new(Bytes::from(vec![1u8; 512]), ChunkHash::from_bytes([1u8; 32])),
-            UniqueChunk::new(Bytes::from(vec![2u8; 512]), ChunkHash::from_bytes([2u8; 32])),
+            UniqueChunk::new(
+                Bytes::from(vec![1u8; 512]),
+                ChunkHash::from_bytes([1u8; 32]),
+            ),
+            UniqueChunk::new(
+                Bytes::from(vec![2u8; 512]),
+                ChunkHash::from_bytes([2u8; 32]),
+            ),
         ];
 
         let block = builder.pack_chunks(chunks).unwrap();
@@ -161,25 +162,18 @@ mod tests {
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
-        let builder =
-            ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
+        let builder = ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
 
         let original_data = vec![42u8; 1024];
-        let chunk = UniqueChunk::new(
-            Bytes::from(original_data),
-            ChunkHash::from_bytes([1u8; 32]),
-        );
+        let chunk = UniqueChunk::new(Bytes::from(original_data), ChunkHash::from_bytes([1u8; 32]));
 
         let block = builder.pack_single(chunk).unwrap();
         let original_len = block.original_len as usize;
 
         // Simulate losing 2 shards (parity shards)
-        let mut shards_with_loss: Vec<Option<Vec<u8>>> = block
-            .shards
-            .iter()
-            .map(|s| Some(s.to_vec()))
-            .collect();
-        
+        let mut shards_with_loss: Vec<Option<Vec<u8>>> =
+            block.shards.iter().map(|s| Some(s.to_vec())).collect();
+
         // Remove 2 shards (the last 2 which are parity)
         shards_with_loss[4] = None;
         shards_with_loss[5] = None;

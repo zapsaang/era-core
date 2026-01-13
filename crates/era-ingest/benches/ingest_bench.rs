@@ -23,7 +23,8 @@ fn generate_data(size: usize, compressibility: f64) -> Vec<u8> {
         }
     } else if compressibility > 0.5 {
         // Medium compressibility: text-like data
-        let text_chars: &[u8] = b"abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n";
+        let text_chars: &[u8] =
+            b"abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n";
         for i in 0..size {
             data.push(text_chars[i % text_chars.len()]);
         }

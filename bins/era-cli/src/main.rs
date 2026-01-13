@@ -54,6 +54,12 @@ enum Commands {
         /// Compression level (1-22, default: 3)
         #[arg(short = 'l', long, default_value = "3")]
         level: i32,
+
+        /// Enable erasure coding for data redundancy (format: data:parity, e.g., "4:2")
+        /// With 4:2, data is split into 4 shards + 2 parity shards (50% overhead),
+        /// allowing recovery from any 2 lost shards per block.
+        #[arg(short = 'e', long)]
+        erasure: Option<String>,
     },
 
     /// Extract files from an ERA archive
@@ -153,7 +159,14 @@ fn main() -> anyhow::Result<()> {
             output,
             password,
             level,
-        } => commands::create(&input, &output, password.as_deref(), level),
+            erasure,
+        } => commands::create(
+            &input,
+            &output,
+            password.as_deref(),
+            level,
+            erasure.as_deref(),
+        ),
 
         Commands::Extract {
             input,

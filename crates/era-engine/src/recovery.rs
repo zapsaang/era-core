@@ -36,7 +36,7 @@ pub struct RecoveryStatus {
 }
 
 /// Recovery manager for handling interrupted archive creation
-/// 
+///
 /// Note: This struct uses a reference-based design to avoid cloning
 /// large chunk location maps. Use `written_chunks()` for direct access.
 pub struct RecoveryManager {
@@ -71,10 +71,7 @@ impl RecoveryManager {
         let checkpoint = manager.checkpoint();
 
         let completed_files: Vec<PathBuf> = checkpoint.completed_files.iter().cloned().collect();
-        let in_progress_file = checkpoint
-            .in_progress_file
-            .as_ref()
-            .map(|f| f.path.clone());
+        let in_progress_file = checkpoint.in_progress_file.as_ref().map(|f| f.path.clone());
         let chunks_written = checkpoint.written_chunks.len();
         let bytes_written = checkpoint.total_bytes_written;
 
@@ -316,13 +313,15 @@ impl RecoverableWriter {
             }
         };
 
-        Ok(Self { checkpoint, options })
+        Ok(Self {
+            checkpoint,
+            options,
+        })
     }
 
     /// Check if a file should be skipped (already processed)
     pub fn should_skip_file(&self, path: &Path) -> bool {
-        self.options.strategy == RecoveryStrategy::Resume
-            && self.checkpoint.is_file_completed(path)
+        self.options.strategy == RecoveryStrategy::Resume && self.checkpoint.is_file_completed(path)
     }
 
     /// Check if a chunk was already written
@@ -399,6 +398,7 @@ mod tests {
             slot_index: 0,
             physical_offset: offset,
             encrypted_size: size,
+            erasure_info: None,
         }
     }
 
@@ -429,7 +429,9 @@ mod tests {
             manager.mark_file_completed("/file1.txt").unwrap();
             manager.mark_file_completed("/file2.txt").unwrap();
             manager.start_file("/file3.txt", 10000).unwrap();
-            manager.record_chunk(test_hash(1), test_location(100, 50)).unwrap();
+            manager
+                .record_chunk(test_hash(1), test_location(100, 50))
+                .unwrap();
             manager.save().unwrap();
         }
 
@@ -466,7 +468,8 @@ mod tests {
         {
             let mut cp = CheckpointManager::new(&archive_path);
             cp.mark_file_completed("/completed.txt").unwrap();
-            cp.record_chunk(test_hash(42), test_location(1000, 500)).unwrap();
+            cp.record_chunk(test_hash(42), test_location(1000, 500))
+                .unwrap();
             cp.save().unwrap();
         }
 
@@ -580,7 +583,8 @@ mod tests {
         {
             let mut cp = CheckpointManager::new(&archive_path);
             cp.mark_file_completed("/done.txt").unwrap();
-            cp.record_chunk(test_hash(1), test_location(100, 50)).unwrap();
+            cp.record_chunk(test_hash(1), test_location(100, 50))
+                .unwrap();
             cp.save().unwrap();
         }
 
@@ -609,8 +613,7 @@ mod tests {
         assert!(CheckpointManager::exists(&archive_path));
 
         // Start fresh should delete the checkpoint
-        let writer =
-            RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
+        let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
 
         // Checkpoint should be deleted, so no files should be skipped
         assert!(!writer.should_skip_file(Path::new("/file.txt")));
@@ -625,10 +628,16 @@ mod tests {
             RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
 
         // Track progress
-        writer.start_file(Path::new("/new_file.txt"), 10000).unwrap();
+        writer
+            .start_file(Path::new("/new_file.txt"), 10000)
+            .unwrap();
         writer.update_progress(5000, 3).unwrap();
-        writer.record_chunk(test_hash(99), test_location(500, 250)).unwrap();
-        writer.mark_file_completed(Path::new("/new_file.txt")).unwrap();
+        writer
+            .record_chunk(test_hash(99), test_location(500, 250))
+            .unwrap();
+        writer
+            .mark_file_completed(Path::new("/new_file.txt"))
+            .unwrap();
         writer.update_position(0, 1000, 1000).unwrap();
 
         // Verify state
@@ -653,22 +662,20 @@ mod tests {
 
         // Create with HMAC
         {
-            let mut writer = RecoverableWriter::new(
-                &archive_path,
-                RecoveryOptions::resume().with_hmac_key(key),
-            )
-            .unwrap();
-            writer.mark_file_completed(Path::new("/secure.txt")).unwrap();
+            let mut writer =
+                RecoverableWriter::new(&archive_path, RecoveryOptions::resume().with_hmac_key(key))
+                    .unwrap();
+            writer
+                .mark_file_completed(Path::new("/secure.txt"))
+                .unwrap();
             writer.sync().unwrap();
         }
 
         // Resume with correct key should work
         {
-            let writer = RecoverableWriter::new(
-                &archive_path,
-                RecoveryOptions::resume().with_hmac_key(key),
-            )
-            .unwrap();
+            let writer =
+                RecoverableWriter::new(&archive_path, RecoveryOptions::resume().with_hmac_key(key))
+                    .unwrap();
             assert!(writer.should_skip_file(Path::new("/secure.txt")));
             writer.finalize().unwrap();
         }
@@ -685,12 +692,18 @@ mod tests {
                 RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
 
             writer.start_file(Path::new("/file1.txt"), 1000).unwrap();
-            writer.record_chunk(test_hash(1), test_location(0, 500)).unwrap();
-            writer.record_chunk(test_hash(2), test_location(500, 500)).unwrap();
+            writer
+                .record_chunk(test_hash(1), test_location(0, 500))
+                .unwrap();
+            writer
+                .record_chunk(test_hash(2), test_location(500, 500))
+                .unwrap();
             writer.mark_file_completed(Path::new("/file1.txt")).unwrap();
 
             writer.start_file(Path::new("/file2.txt"), 2000).unwrap();
-            writer.record_chunk(test_hash(3), test_location(1000, 1000)).unwrap();
+            writer
+                .record_chunk(test_hash(3), test_location(1000, 1000))
+                .unwrap();
             writer.update_progress(1000, 1).unwrap();
 
             // Sync but don't finalize (simulating crash)

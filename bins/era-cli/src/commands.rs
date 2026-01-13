@@ -1,7 +1,7 @@
 //! CLI command implementations
 
 use anyhow::{Context, Result};
-use era_common::ArchiveConfig;
+use era_common::{ArchiveConfig, ErasureCodeConfig};
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -15,12 +15,43 @@ fn get_password(password: Option<&str>, prompt: &str) -> Result<String> {
     }
 }
 
+/// Parse erasure config from string format "data:parity" (e.g., "4:2")
+fn parse_erasure_config(s: &str) -> Result<ErasureCodeConfig> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid erasure format. Expected 'data:parity' (e.g., '4:2')");
+    }
+
+    let data_shards: u8 = parts[0]
+        .parse()
+        .context("Invalid data shards value. Must be a number 1-255")?;
+    let parity_shards: u8 = parts[1]
+        .parse()
+        .context("Invalid parity shards value. Must be a number 1-255")?;
+
+    if data_shards == 0 {
+        anyhow::bail!("Data shards must be at least 1");
+    }
+    if parity_shards == 0 {
+        anyhow::bail!("Parity shards must be at least 1");
+    }
+    if data_shards as usize + parity_shards as usize > 255 {
+        anyhow::bail!("Total shards (data + parity) must not exceed 255");
+    }
+
+    Ok(ErasureCodeConfig {
+        data_shards,
+        parity_shards,
+    })
+}
+
 /// Create a new ERA archive
 pub fn create(
     inputs: &[impl AsRef<Path>],
     output: &Path,
     password: Option<&str>,
     compression_level: i32,
+    erasure: Option<&str>,
 ) -> Result<()> {
     // If password provided via CLI, skip confirmation (for scripting)
     let password = if let Some(p) = password {
@@ -38,11 +69,29 @@ pub fn create(
     let mut config = ArchiveConfig::default();
     config.compression.level = compression_level;
 
-    let mut writer = ArchiveWriter::builder(output)
+    // Parse erasure config if provided
+    let erasure_config = match erasure {
+        Some(s) => Some(parse_erasure_config(s)?),
+        None => None,
+    };
+
+    let mut builder = ArchiveWriter::builder(output)
         .password(&password)
-        .config(config)
-        .build()
-        .context("Failed to create archive")?;
+        .config(config);
+
+    // Enable erasure coding if configured
+    if let Some(ec) = erasure_config {
+        builder = builder.erasure_config(ec);
+        println!(
+            "Erasure coding:   {}:{} ({}% overhead, can recover {} lost shards/block)",
+            ec.data_shards,
+            ec.parity_shards,
+            (ec.parity_shards as f64 / ec.data_shards as f64 * 100.0) as u32,
+            ec.parity_shards
+        );
+    }
+
+    let mut writer = builder.build().context("Failed to create archive")?;
 
     println!("Creating archive: {}", output.display());
 
@@ -296,6 +345,25 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
         let mut reader =
             ArchiveReader::open(archive, &password).context("Failed to open archive")?;
 
+        // Check if erasure coding is enabled
+        let header = reader.header();
+        let erasure_enabled = header.config.erasure.is_some();
+        if erasure_enabled {
+            let erasure_config = header.config.erasure.as_ref().unwrap();
+            println!(
+                "Erasure coding:     Enabled ({}/{} data/parity shards)",
+                erasure_config.data_shards, erasure_config.parity_shards
+            );
+            println!(
+                "                    Can recover from up to {} shard losses per block",
+                erasure_config.parity_shards
+            );
+            println!();
+        } else {
+            println!("Erasure coding:     Disabled");
+            println!();
+        }
+
         let verify_stats = reader.verify().context("Verification failed")?;
 
         if verify_stats.is_ok() {
@@ -313,14 +381,30 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
             }
         }
 
-        // Currently we can only detect problems, not fix them
-        // (RS erasure coding would be needed for actual repair)
+        // Explain repair capabilities
         println!();
-        println!("Note: Automatic repair using erasure coding is not yet implemented.");
-        println!("To recover what's possible, try extracting with --force option.");
+        if erasure_enabled {
+            println!("Repair Options:");
+            println!("---------------");
+            println!("This archive uses erasure coding, which can recover corrupted blocks");
+            println!("if enough shards remain intact. However, since shards are stored");
+            println!("sequentially in the same file, sector-level corruption often affects");
+            println!("multiple shards together.");
+            println!();
+            println!("For maximum protection, consider distributing ERA volumes across");
+            println!("different storage devices (multi-volume mode).");
+            println!();
+            println!("To extract recoverable data, use: era extract --force <archive>");
+        } else {
+            println!("Note: This archive was created without erasure coding.");
+            println!("Consider recreating with erasure coding for better protection:");
+            println!("  era create --erasure 4:2 <inputs> -o <output>.era");
+            println!();
+            println!("To extract what's possible, try: era extract --force <archive>");
+        }
 
         anyhow::bail!(
-            "Archive has {} errors and cannot be automatically repaired",
+            "Archive has {} errors. Use 'era extract --force' to recover what's possible.",
             verify_stats.errors.len()
         );
     }
