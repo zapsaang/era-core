@@ -85,7 +85,7 @@ impl ErasureBlockUnpacker {
         // Check if we have enough shards
         let available = shard_array.iter().filter(|s| s.is_some()).count();
         if available < data_shards {
-            return Err(EraError::other(format!(
+            return Err(EraError::ErasureError(format!(
                 "Not enough shards for recovery: have {}, need {}",
                 available, data_shards
             )));

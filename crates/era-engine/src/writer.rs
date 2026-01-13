@@ -224,8 +224,9 @@ impl ArchiveWriterBuilder {
                 }
                 RecoveryStrategy::Abort => {
                     if CheckpointManager::exists(&self.output_path) {
-                        return Err(era_common::EraError::other(
+                        return Err(era_common::EraError::CheckpointError(
                             "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
+                                .into(),
                         ));
                     }
                     CheckpointManager::with_hmac_key(&self.output_path, hmac_key)
@@ -423,17 +424,16 @@ impl ArchiveWriter {
 
             // Pack the large chunk alone (with or without erasure coding)
             let location = self.pack_and_write_chunks(vec![chunk])?;
-            self.chunk_locations.insert(hash, location.clone());
+            let physical_offset = location.physical_offset;
 
             // Record in checkpoint if enabled
             if let Some(ref mut mgr) = self.checkpoint_manager {
                 mgr.record_chunk(hash, location.clone())?;
             }
 
-            debug!(
-                "Large chunk packed alone at offset {}",
-                location.physical_offset
-            );
+            self.chunk_locations.insert(hash, location);
+
+            debug!("Large chunk packed alone at offset {}", physical_offset);
             return Ok(());
         }
 
@@ -600,7 +600,7 @@ impl ArchiveWriter {
         // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
         let catalog_hash = era_crypto::hash(&catalog_bytes);
-        let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes.clone()), catalog_hash);
+        let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
 
         // Use primary writer (Volume 0) for catalog
         let writer = &mut self.volume_writers[0];

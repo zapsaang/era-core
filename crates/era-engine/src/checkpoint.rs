@@ -316,7 +316,9 @@ impl CheckpointManager {
         file.read_to_end(&mut data).map_err(EraError::Io)?;
 
         if data.len() < HMAC_SIZE {
-            return Err(EraError::other("Checkpoint file too small"));
+            return Err(EraError::CheckpointError(
+                "Checkpoint file too small".into(),
+            ));
         }
 
         // Split into HMAC and payload
@@ -327,21 +329,20 @@ impl CheckpointManager {
         // Verify HMAC
         let key_bytes = hmac_key.map(|k| k.as_slice());
         if !verify_hmac(payload, &hmac, key_bytes) {
-            return Err(EraError::other(
-                "Checkpoint HMAC verification failed - file may be corrupted or tampered",
+            return Err(EraError::IntegrityError(
+                "Checkpoint HMAC verification failed - file may be corrupted or tampered".into(),
             ));
         }
 
         // Deserialize with bincode
         let checkpoint: Checkpoint = bincode::deserialize(payload)
-            .map_err(|e| EraError::other(format!("Failed to parse checkpoint: {}", e)))?;
+            .map_err(|e| EraError::Deserialization(format!("Failed to parse checkpoint: {}", e)))?;
 
         // Version check
         if checkpoint.version > CHECKPOINT_VERSION {
-            return Err(EraError::other(format!(
-                "Checkpoint version {} is newer than supported version {}",
-                checkpoint.version, CHECKPOINT_VERSION
-            )));
+            return Err(EraError::UnsupportedVersion {
+                version: checkpoint.version,
+            });
         }
 
         // Handle version migration if needed
@@ -355,8 +356,9 @@ impl CheckpointManager {
         let tmp_path = Checkpoint::checkpoint_tmp_path(&self.archive_path);
 
         // Serialize with bincode (much faster than JSON)
-        let payload = bincode::serialize(&self.checkpoint)
-            .map_err(|e| EraError::other(format!("Failed to serialize checkpoint: {}", e)))?;
+        let payload = bincode::serialize(&self.checkpoint).map_err(|e| {
+            EraError::Serialization(format!("Failed to serialize checkpoint: {}", e))
+        })?;
 
         // Compute HMAC
         let key_bytes = self.hmac_key.as_ref().map(|k| k.as_slice());

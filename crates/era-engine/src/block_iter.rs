@@ -325,7 +325,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             // If we failed to read ANY shards, verification fails.
             // Also if we failed to update offsets correctly, subsequent blocks will fail.
             self.stats.blocks_failed += 1;
-            return Some(Err(EraError::other(format!(
+            return Some(Err(EraError::ErasureError(format!(
                 "No valid shards for block {}",
                 self.block_index
             ))));

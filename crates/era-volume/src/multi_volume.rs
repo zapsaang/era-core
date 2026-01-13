@@ -117,10 +117,12 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         }
 
         // Write the block
-        let writer = self
-            .current_writer
-            .as_mut()
-            .ok_or_else(|| era_common::EraError::other("No active volume writer"))?;
+        let writer = self.current_writer.as_mut().ok_or_else(|| {
+            era_common::EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "No active volume writer",
+            ))
+        })?;
 
         let location = writer.write_block(block)?;
         self.stats.total_blocks += 1;

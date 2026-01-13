@@ -115,7 +115,7 @@ impl ErasureCoder {
             self.config.parity_shards,
             shard_size,
         )
-        .map_err(|e| EraError::other(format!("Failed to create RS encoder: {}", e)))?;
+        .map_err(|e| EraError::ErasureError(format!("Failed to create RS encoder: {}", e)))?;
 
         // Prepare data shards (split and pad)
         let mut data_shards: Vec<Vec<u8>> = Vec::with_capacity(self.config.data_shards);
@@ -138,13 +138,13 @@ impl ErasureCoder {
         for shard in &data_shards {
             encoder
                 .add_original_shard(shard)
-                .map_err(|e| EraError::other(format!("Failed to add shard: {}", e)))?;
+                .map_err(|e| EraError::ErasureError(format!("Failed to add shard: {}", e)))?;
         }
 
         // Generate parity shards
         let result = encoder
             .encode()
-            .map_err(|e| EraError::other(format!("Encoding failed: {}", e)))?;
+            .map_err(|e| EraError::ErasureError(format!("Encoding failed: {}", e)))?;
 
         // Collect all shards
         let mut all_shards = data_shards;
@@ -173,7 +173,7 @@ impl ErasureCoder {
 
         let available_count = shards.iter().filter(|s| s.is_some()).count();
         if available_count < self.config.data_shards {
-            return Err(EraError::other(format!(
+            return Err(EraError::ErasureError(format!(
                 "Not enough shards for recovery: have {}, need {}",
                 available_count, self.config.data_shards
             )));
@@ -199,7 +199,7 @@ impl ErasureCoder {
             .iter()
             .find_map(|s| s.as_ref())
             .map(|s| s.len())
-            .ok_or_else(|| EraError::other("No shards available"))?;
+            .ok_or_else(|| EraError::ErasureError("No shards available".into()))?;
 
         // Create decoder for this operation
         let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(
@@ -207,20 +207,20 @@ impl ErasureCoder {
             self.config.parity_shards,
             shard_size,
         )
-        .map_err(|e| EraError::other(format!("Failed to create RS decoder: {}", e)))?;
+        .map_err(|e| EraError::ErasureError(format!("Failed to create RS decoder: {}", e)))?;
 
         // Add available shards
         for (i, shard) in shards.iter().enumerate() {
             if let Some(data) = shard {
                 if i < self.config.data_shards {
                     decoder.add_original_shard(i, data).map_err(|e| {
-                        EraError::other(format!("Failed to add original shard: {}", e))
+                        EraError::ErasureError(format!("Failed to add original shard: {}", e))
                     })?;
                 } else {
                     decoder
                         .add_recovery_shard(i - self.config.data_shards, data)
                         .map_err(|e| {
-                            EraError::other(format!("Failed to add recovery shard: {}", e))
+                            EraError::ErasureError(format!("Failed to add recovery shard: {}", e))
                         })?;
                 }
             }
@@ -229,7 +229,7 @@ impl ErasureCoder {
         // Decode
         let result = decoder
             .decode()
-            .map_err(|e| EraError::other(format!("Decoding failed: {}", e)))?;
+            .map_err(|e| EraError::ErasureError(format!("Decoding failed: {}", e)))?;
 
         // Reconstruct original data
         let mut output = Vec::with_capacity(original_len);
@@ -237,9 +237,9 @@ impl ErasureCoder {
             let shard_data = if let Some(data) = shard {
                 data.as_slice()
             } else {
-                result
-                    .restored_original(i)
-                    .ok_or_else(|| EraError::other(format!("Failed to restore shard {}", i)))?
+                result.restored_original(i).ok_or_else(|| {
+                    EraError::ErasureError(format!("Failed to restore shard {}", i))
+                })?
             };
             output.extend_from_slice(shard_data);
         }

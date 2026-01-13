@@ -44,12 +44,30 @@ pub enum EraError {
     #[error("Decompression error: {0}")]
     Decompression(String),
 
+    // Erasure Coding Errors
+    #[error("Erasure coding error: {0}")]
+    ErasureError(String),
+
+    // Checkpoint Errors
+    #[error("Checkpoint error: {0}")]
+    CheckpointError(String),
+
+    // Data Integrity Errors
+    #[error("Integrity error: {0}")]
+    IntegrityError(String),
+
     // Archive Format Errors
     #[error("Invalid magic number")]
     InvalidMagic,
 
+    #[error("Empty archive")]
+    EmptyArchive,
+
+    #[error("Empty catalog block")]
+    EmptyCatalog,
+
     #[error("Unsupported version: {version}")]
-    UnsupportedVersion { version: u16 },
+    UnsupportedVersion { version: u32 },
 
     #[error("Corrupted header: {0}")]
     CorruptedHeader(String),

@@ -116,7 +116,9 @@ impl Footer {
         let data = era_common::serialize(self)?;
 
         if data.len() > FOOTER_SIZE {
-            return Err(EraError::other("Footer serialization too large"));
+            return Err(EraError::Serialization(
+                "Footer serialization too large".into(),
+            ));
         }
 
         let mut result = [0u8; FOOTER_SIZE];

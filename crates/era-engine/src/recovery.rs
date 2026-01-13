@@ -263,9 +263,10 @@ impl RecoverableWriter {
     pub fn new(archive_path: &Path, options: RecoveryOptions) -> Result<Self> {
         // Handle Abort strategy - return error if checkpoint exists
         if options.strategy == RecoveryStrategy::Abort && CheckpointManager::exists(archive_path) {
-            return Err(EraError::other(
+            return Err(EraError::CheckpointError(
                 "Checkpoint exists and Abort strategy specified. \
-                 Use Resume to continue or StartFresh to discard progress.",
+                 Use Resume to continue or StartFresh to discard progress."
+                    .into(),
             ));
         }
 

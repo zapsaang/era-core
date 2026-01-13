@@ -175,7 +175,7 @@ impl ArchiveReader {
 
         let block_count = self.volume_readers[0].block_count();
         if block_count == 0 {
-            return Err(EraError::other("Archive is empty"));
+            return Err(EraError::EmptyArchive);
         }
 
         // Try to use catalog location from footer (O(1) lookup)
@@ -203,7 +203,7 @@ impl ArchiveReader {
         let chunks = self.unpacker.extract_all_chunks(&encrypted_block)?;
 
         if chunks.is_empty() {
-            return Err(EraError::other("Catalog block is empty"));
+            return Err(EraError::EmptyCatalog);
         }
 
         let catalog_data = &chunks[0].1;
@@ -271,10 +271,9 @@ impl ArchiveReader {
             let mut available_shards = Vec::with_capacity(total_shards);
 
             // Check shard offsets
-            let shard_offsets = location
-                .shard_offsets
-                .as_ref()
-                .ok_or_else(|| EraError::other("Missing shard offsets for erasure block"))?;
+            let shard_offsets = location.shard_offsets.as_ref().ok_or_else(|| {
+                EraError::IntegrityError("Missing shard offsets for erasure block".into())
+            })?;
 
             // Read Shard 0 (Header + Data) on Volume 0
             // Note: physical_offset points to 4-byte original_len header
@@ -318,7 +317,7 @@ impl ArchiveReader {
                 return Ok(data);
             }
         }
-        Err(EraError::other("Shard verification failed"))
+        Err(EraError::IntegrityError("Shard verification failed".into()))
     }
 
     /// List all files in the archive

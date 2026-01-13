@@ -84,7 +84,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
     // Verify erasure coding is enabled
     let header = volume_reader.header();
     let erasure_config = header.config.erasure.ok_or_else(|| {
-        EraError::other("Archive does not use erasure coding - repair not available")
+        EraError::ErasureError("Archive does not use erasure coding - repair not available".into())
     })?;
 
     info!(
@@ -230,7 +230,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
                 stats.errors.push(msg);
 
                 if !options.continue_on_error {
-                    return Err(EraError::other(format!(
+                    return Err(EraError::ErasureError(format!(
                         "Block {} is unrecoverable",
                         block_index
                     )));
@@ -366,15 +366,18 @@ fn repair_shards_rs(
     let original_data = coder.decode(&shards, original_len as usize)?;
 
     // Re-encode to get all shards
-    let all_shards = coder.encode(&original_data)?;
+    let mut all_shards = coder.encode(&original_data)?;
 
     // Collect repaired shards for corrupted indices
     let mut repaired = Vec::new();
     for &idx in corrupted_indices {
         if idx < all_shards.len() {
-            repaired.push((idx, Bytes::from(all_shards[idx].clone())));
+            repaired.push((idx, Bytes::from(std::mem::take(&mut all_shards[idx]))));
         } else {
-            return Err(EraError::other(format!("Shard index {} out of range", idx)));
+            return Err(EraError::ErasureError(format!(
+                "Shard index {} out of range",
+                idx
+            )));
         }
     }
 
@@ -383,11 +386,7 @@ fn repair_shards_rs(
 
 /// Apply shard repairs to the archive file
 fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| EraError::other(format!("Failed to open archive for writing: {}", e)))?;
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
 
     for repair in repairs {
         // Write new shard header with CRC
