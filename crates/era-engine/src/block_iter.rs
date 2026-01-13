@@ -4,7 +4,9 @@
 //! in both standard and erasure-coded archives, eliminating code duplication.
 
 use bytes::Bytes;
-use era_common::{BlockId, BlockLocation, ChunkHash, EraError, ErasureBlockInfo, Result, ShardHeader};
+use era_common::{
+    BlockId, BlockLocation, ChunkHash, EraError, ErasureBlockInfo, Result, ShardHeader,
+};
 use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker};
 use era_volume::VolumeReader;
 
@@ -62,10 +64,7 @@ pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {
 
 impl<'a, R: era_storage::StorageReader> StandardBlockIterator<'a, R> {
     /// Create a new standard block iterator
-    pub fn new(
-        volume_reader: &'a VolumeReader<R>,
-        unpacker: &'a MacroBlockUnpacker,
-    ) -> Self {
+    pub fn new(volume_reader: &'a VolumeReader<R>, unpacker: &'a MacroBlockUnpacker) -> Self {
         let (data_start, data_end) = volume_reader.data_region();
         Self {
             volume_reader,
@@ -108,7 +107,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             Err(e) => return Some(Err(e)),
         };
 
-        let block_size = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+        let block_size =
+            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
 
         // Validate block size
         if block_size == 0 {
@@ -137,22 +137,20 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
 
         // Read and decrypt block
         let result = match self.volume_reader.read_block(&location) {
-            Ok(encrypted_block) => {
-                match self.unpacker.extract_all_chunks(&encrypted_block) {
-                    Ok(chunks) => {
-                        self.stats.blocks_read += 1;
-                        Ok(DecodedBlock {
-                            block_index: self.block_index,
-                            chunks,
-                            corrupted_shards: 0,
-                        })
-                    }
-                    Err(e) => {
-                        self.stats.blocks_failed += 1;
-                        Err(e)
-                    }
+            Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
+                Ok(chunks) => {
+                    self.stats.blocks_read += 1;
+                    Ok(DecodedBlock {
+                        block_index: self.block_index,
+                        chunks,
+                        corrupted_shards: 0,
+                    })
                 }
-            }
+                Err(e) => {
+                    self.stats.blocks_failed += 1;
+                    Err(e)
+                }
+            },
             Err(e) => {
                 self.stats.blocks_failed += 1;
                 Err(e)
@@ -207,14 +205,14 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
         for reader in volume_readers {
             let (start, end) = reader.data_region();
             // If checking catalog offset from footer is needed, use reader.footer().catalog_offset
-            // But data_region() usually accounts for it if implemented correctly? 
+            // But data_region() usually accounts for it if implemented correctly?
             // reader.rs used catalog_offset from footer explicitly.
             // Let's rely on footer catalog offset as the definitive end of data stream.
             let footer = reader.footer();
             let limit = if footer.has_catalog_location() {
-                 footer.catalog_offset
+                footer.catalog_offset
             } else {
-                 end
+                end
             };
             current_offsets.push(start);
             data_ends.push(limit);
@@ -251,7 +249,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             Err(e) => return Some(Err(e)),
         };
         let original_len = u32::from_le_bytes([
-            header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]
+            header_bytes[0],
+            header_bytes[1],
+            header_bytes[2],
+            header_bytes[3],
         ]);
         self.current_offsets[0] += 4;
 
@@ -283,13 +284,13 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
                 Some(h) => h,
                 None => {
                     corrupted_count += 1;
-                     // Even if header invalid, we read SIZE bytes. 
-                     // But we don't know data length. Sync is lost on this volume.
+                    // Even if header invalid, we read SIZE bytes.
+                    // But we don't know data length. Sync is lost on this volume.
                     // We can assume header was corrupted but maybe we can guess size? No.
                     continue;
                 }
             };
-            
+
             // Advance past header
             self.current_offsets[vol_idx] += ShardHeader::SIZE as u64;
 
@@ -300,10 +301,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Read shard data
-            match reader.read_raw(
-                self.current_offsets[vol_idx],
-                shard_len
-            ) {
+            match reader.read_raw(self.current_offsets[vol_idx], shard_len) {
                 Ok(shard_data) => {
                     // Verify CRC
                     if shard_header.verify(&shard_data) {
@@ -324,8 +322,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
         self.stats.corrupted_shards += corrupted_count as u32;
 
         if shards.is_empty() {
-             // If we failed to read ANY shards, verification fails.
-             // Also if we failed to update offsets correctly, subsequent blocks will fail.
+            // If we failed to read ANY shards, verification fails.
+            // Also if we failed to update offsets correctly, subsequent blocks will fail.
             self.stats.blocks_failed += 1;
             return Some(Err(EraError::other(format!(
                 "No valid shards for block {}",
@@ -344,20 +342,24 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
         let block_id = BlockId::new(self.block_index as u64);
 
         // Decode and extract chunks
-        let result = match self.erasure_unpacker.decode_and_extract_all(shards, &erasure_info, block_id) {
-            Ok(chunks) => {
-                self.stats.blocks_read += 1;
-                Ok(DecodedBlock {
-                    block_index: self.block_index,
-                    chunks,
-                    corrupted_shards: corrupted_count,
-                })
-            }
-            Err(e) => {
-                self.stats.blocks_failed += 1;
-                Err(e)
-            }
-        };
+        let result =
+            match self
+                .erasure_unpacker
+                .decode_and_extract_all(shards, &erasure_info, block_id)
+            {
+                Ok(chunks) => {
+                    self.stats.blocks_read += 1;
+                    Ok(DecodedBlock {
+                        block_index: self.block_index,
+                        chunks,
+                        corrupted_shards: corrupted_count,
+                    })
+                }
+                Err(e) => {
+                    self.stats.blocks_failed += 1;
+                    Err(e)
+                }
+            };
 
         self.block_index += 1;
         Some(result)

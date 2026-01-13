@@ -116,7 +116,7 @@ impl ArchiveWriterBuilder {
     }
 
     /// Set the number of volumes to distribute data across
-    /// 
+    ///
     /// This enables true distributed erasure coding where shards of the same block
     /// are stored on different volumes.
     pub fn volume_count(mut self, count: usize) -> Self {
@@ -161,7 +161,7 @@ impl ArchiveWriterBuilder {
             config.clone(),
         );
         let base_filename = self.output_path.file_name().unwrap_or_default();
-        
+
         let mut volume_writers = Vec::with_capacity(self.volume_count);
         for i in 0..self.volume_count {
             let volume_path = if i == 0 {
@@ -172,10 +172,10 @@ impl ArchiveWriterBuilder {
                 file_name.push(format!(".{:03}", i));
                 PathBuf::from(file_name)
             };
-            
+
             let mut vol_header = header.clone();
             vol_header.volume_sequence = i as u16;
-            
+
             let writer = VolumeWriter::create(&backend, &volume_path, vol_header)?;
             volume_writers.push(writer);
         }
@@ -185,7 +185,9 @@ impl ArchiveWriterBuilder {
         let nonce_context = *salt.as_bytes();
         let compressor: Box<dyn Compressor> = match self.config.compression.algorithm {
             CompressionAlgorithm::None => Box::new(NoCompressor),
-            CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(self.config.compression.level)),
+            CompressionAlgorithm::Zstd => {
+                Box::new(ZstdCompressor::new(self.config.compression.level))
+            }
         };
         let block_builder = MacroBlockBuilder::new(key.clone(), nonce_context, compressor);
 
@@ -249,7 +251,9 @@ impl ArchiveWriterBuilder {
         let erasure_builder = if self.enable_erasure {
             let compressor: Box<dyn Compressor> = match self.config.compression.algorithm {
                 CompressionAlgorithm::None => Box::new(NoCompressor),
-                CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(self.config.compression.level)),
+                CompressionAlgorithm::Zstd => {
+                    Box::new(ZstdCompressor::new(self.config.compression.level))
+                }
             };
             Some(ErasureBlockBuilder::new(
                 key.clone(),
@@ -506,7 +510,8 @@ impl ArchiveWriter {
             let original_len_bytes = sharded_block.original_len.to_le_bytes();
             let mut header_offset = 0;
             // Offsets for shards 1..N (Shard 0 is at header_offset)
-            let mut shard_offsets = Vec::with_capacity(sharded_block.shards.len().saturating_sub(1));
+            let mut shard_offsets =
+                Vec::with_capacity(sharded_block.shards.len().saturating_sub(1));
 
             for (idx, shard) in sharded_block.shards.iter().enumerate() {
                 // Determine which volume to write this shard to
@@ -516,7 +521,7 @@ impl ArchiveWriter {
                 // Write each shard with length + CRC header for integrity validation
                 let crc = era_common::compute_shard_crc(shard);
                 let shard_header = era_common::ShardHeader::new(shard.len() as u32, crc);
-                
+
                 if idx == 0 {
                     // Shard 0 includes the Block Header (original_len)
                     header_offset = writer.write_raw(&original_len_bytes)?;
@@ -528,7 +533,7 @@ impl ArchiveWriter {
                     shard_offsets.push(offset);
                 }
             }
-            
+
             // Get Volume ID and Slot Index from the connection where Shard 0 was written
             let primary_writer_idx = 0; // Since we do idx % len, Shard 0 is always at 0
             let primary_writer = &self.volume_writers[primary_writer_idx];
@@ -536,18 +541,18 @@ impl ArchiveWriter {
             if first_location.is_none() {
                 // Use the header offset as the block location
                 first_location = Some(BlockLocation {
-                        volume_id: primary_writer.volume_id(),
-                        slot_index: primary_writer.block_count(),
-                        physical_offset: header_offset, // Start at original_len header
-                        encrypted_size: shard_size,
-                        erasure_info: Some(ErasureBlockInfo {
-                            data_shards: sharded_block.config.data_shards,
-                            parity_shards: sharded_block.config.parity_shards,
-                            shard_size,
-                            original_len: sharded_block.original_len,
-                        }),
-                        shard_offsets: Some(shard_offsets),
-                    });
+                    volume_id: primary_writer.volume_id(),
+                    slot_index: primary_writer.block_count(),
+                    physical_offset: header_offset, // Start at original_len header
+                    encrypted_size: shard_size,
+                    erasure_info: Some(ErasureBlockInfo {
+                        data_shards: sharded_block.config.data_shards,
+                        parity_shards: sharded_block.config.parity_shards,
+                        shard_size,
+                        original_len: sharded_block.original_len,
+                    }),
+                    shard_offsets: Some(shard_offsets),
+                });
             }
 
             Ok(first_location.expect("at least one shard"))

@@ -399,6 +399,7 @@ mod tests {
             physical_offset: offset,
             encrypted_size: size,
             erasure_info: None,
+            shard_offsets: None,
         }
     }
 

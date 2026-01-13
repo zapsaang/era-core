@@ -202,7 +202,10 @@ impl VerificationContext {
                     } else {
                         stats.errors.push(format!(
                             "Block {}: chunk length mismatch for file {} (expected {}, got {})",
-                            block_index, file_idx, expected_len, data.len()
+                            block_index,
+                            file_idx,
+                            expected_len,
+                            data.len()
                         ));
                     }
                 }

@@ -97,7 +97,7 @@ impl ArchiveReader {
             let mut file_name = p.as_os_str().to_os_string();
             file_name.push(format!(".{:03}", i));
             let sub_path = PathBuf::from(file_name);
-            
+
             // Check if file exists relative to backend (parent_dir)
             if !parent_dir.join(&sub_path).exists() {
                 break;
@@ -138,15 +138,20 @@ impl ArchiveReader {
         let nonce_context = header.crypto_anchor.salt;
         let compressor: Box<dyn era_codec::Compressor> = match header.config.compression.algorithm {
             era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
-            era_common::CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(header.config.compression.level)),
+            era_common::CompressionAlgorithm::Zstd => {
+                Box::new(ZstdCompressor::new(header.config.compression.level))
+            }
         };
         let unpacker = MacroBlockUnpacker::new(key.clone(), nonce_context, compressor);
 
         // Create erasure unpacker for reading erasure-coded blocks
-        let erasure_compressor: Box<dyn era_codec::Compressor> = match header.config.compression.algorithm {
-            era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
-            era_common::CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(header.config.compression.level)),
-        };
+        let erasure_compressor: Box<dyn era_codec::Compressor> =
+            match header.config.compression.algorithm {
+                era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
+                era_common::CompressionAlgorithm::Zstd => {
+                    Box::new(ZstdCompressor::new(header.config.compression.level))
+                }
+            };
         let erasure_unpacker = ErasureBlockUnpacker::new(key, nonce_context, erasure_compressor);
 
         Ok(Self {
@@ -260,20 +265,25 @@ impl ArchiveReader {
         if let Some(ref erasure_info) = location.erasure_info {
             // Erasure-coded block: read shards from multiple volumes
             let num_readers = self.volume_readers.len();
-            let total_shards = erasure_info.data_shards as usize + erasure_info.parity_shards as usize;
-            
+            let total_shards =
+                erasure_info.data_shards as usize + erasure_info.parity_shards as usize;
+
             let mut available_shards = Vec::with_capacity(total_shards);
-            
+
             // Check shard offsets
-            let shard_offsets = location.shard_offsets.as_ref()
+            let shard_offsets = location
+                .shard_offsets
+                .as_ref()
                 .ok_or_else(|| EraError::other("Missing shard offsets for erasure block"))?;
 
             // Read Shard 0 (Header + Data) on Volume 0
             // Note: physical_offset points to 4-byte original_len header
-            if let Ok(shard) = self.read_shard(&self.volume_readers[0], location.physical_offset + 4) {
-                 available_shards.push((0, shard));
+            if let Ok(shard) =
+                self.read_shard(&self.volume_readers[0], location.physical_offset + 4)
+            {
+                available_shards.push((0, shard));
             }
-            
+
             // Read other shards (1..N)
             for (i, &offset) in shard_offsets.iter().enumerate() {
                 let shard_idx = i + 1;
@@ -293,13 +303,20 @@ impl ArchiveReader {
         }
     }
 
-    fn read_shard<R: era_storage::StorageReader>(&self, reader: &VolumeReader<R>, offset: u64) -> Result<Bytes> {
+    fn read_shard<R: era_storage::StorageReader>(
+        &self,
+        reader: &VolumeReader<R>,
+        offset: u64,
+    ) -> Result<Bytes> {
         let header_bytes = reader.read_raw(offset, era_common::ShardHeader::SIZE)?;
         if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
-             let data = reader.read_raw(offset + era_common::ShardHeader::SIZE as u64, header.length as usize)?;
-             if header.verify(&data) {
-                 return Ok(data);
-             }
+            let data = reader.read_raw(
+                offset + era_common::ShardHeader::SIZE as u64,
+                header.length as usize,
+            )?;
+            if header.verify(&data) {
+                return Ok(data);
+            }
         }
         Err(EraError::other("Shard verification failed"))
     }

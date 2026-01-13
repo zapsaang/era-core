@@ -421,9 +421,7 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
                         if force {
                             println!("✅ Archive successfully repaired!");
                         } else {
-                            println!(
-                                "✅ Repair is possible. Run with --force to apply repairs."
-                            );
+                            println!("✅ Repair is possible. Run with --force to apply repairs.");
                         }
                         return Ok(());
                     } else {
@@ -454,9 +452,7 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
             println!("To extract what's possible, try: era extract --force <archive>");
         }
 
-        anyhow::bail!(
-            "Archive has errors. Use 'era extract --force' to recover what's possible."
-        );
+        anyhow::bail!("Archive has errors. Use 'era extract --force' to recover what's possible.");
     }
 
     // Recovery is needed - we have a checkpoint from interrupted creation

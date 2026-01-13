@@ -498,6 +498,7 @@ mod tests {
             physical_offset: offset,
             encrypted_size: size,
             erasure_info: None,
+            shard_offsets: None,
         }
     }
 
@@ -568,8 +569,9 @@ mod tests {
 
         let retrieved = checkpoint.get_chunk_location(&hash);
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().physical_offset, 1024);
-        assert_eq!(retrieved.unwrap().encrypted_size, 512);
+        let location = retrieved.unwrap();
+        assert_eq!(location.physical_offset, 1024);
+        assert_eq!(location.encrypted_size, 512);
 
         // Unknown hash should return None
         assert!(checkpoint.get_chunk_location(&test_hash(2)).is_none());

@@ -1,24 +1,25 @@
-
+use era_common::{ArchiveConfig, CompressionAlgorithm, CompressionConfig, ErasureCodeConfig};
 use era_engine::{ArchiveReader, ArchiveWriterBuilder};
-use era_common::{ErasureCodeConfig, ArchiveConfig, CompressionConfig, CompressionAlgorithm};
-use tempfile::TempDir;
 use std::fs;
+use tempfile::TempDir;
 
 #[test]
 fn test_distributed_erasure_writing() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("dist_test.era");
-    
+
     // Configure 2+1 erasure coding
     let erasure_config = ErasureCodeConfig {
         data_shards: 2,
         parity_shards: 1,
     };
 
-    let mut config = ArchiveConfig::default();
-    config.compression = CompressionConfig {
-        algorithm: CompressionAlgorithm::None,
-        level: 0,
+    let config = ArchiveConfig {
+        compression: CompressionConfig {
+            algorithm: CompressionAlgorithm::None,
+            level: 0,
+        },
+        ..Default::default()
     };
 
     // We want 3 volumes to distribute the 3 shards perfectly
@@ -30,14 +31,14 @@ fn test_distributed_erasure_writing() {
         .config(config)
         .enable_erasure(true)
         .erasure_config(erasure_config)
-        .volume_count(volume_count) 
+        .volume_count(volume_count)
         .build()
         .unwrap();
 
     // Use pseudo-random data to avoid high compression
     let mut data = vec![0u8; 1024 * 1024];
-    for i in 0..data.len() {
-        data[i] = (i.wrapping_mul(7).wrapping_add(13)) as u8;
+    for (i, item) in data.iter_mut().enumerate() {
+        *item = (i.wrapping_mul(7).wrapping_add(13)) as u8;
     }
 
     writer.add_bytes("test_file.bin", &data).unwrap();
@@ -47,7 +48,7 @@ fn test_distributed_erasure_writing() {
     // Vol 0: dist_test.era
     // Vol 1: dist_test.era.001
     // Vol 2: dist_test.era.002
-    
+
     let vol0 = &base_path;
     let vol1 = base_path.with_extension("era.001");
     let vol2 = base_path.with_extension("era.002");
@@ -63,7 +64,7 @@ fn test_distributed_erasure_writing() {
     println!("Sizes: {} {} {}", size0, size1, size2);
 
     // Each volume should have roughly 1 shard (approx 512KB + headers)
-    // 1MB / 2 data shards = 512KB. 
+    // 1MB / 2 data shards = 512KB.
     // Parity shard = 512KB.
     // So all volumes should be populated significantly.
     assert!(size0 > 500_000);
@@ -72,7 +73,7 @@ fn test_distributed_erasure_writing() {
 
     // Reading Verification
     let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
-    
+
     // Check if the file entry exists
     let files = reader.list_files().expect("Failed to list files");
     assert_eq!(files.len(), 1);
@@ -82,13 +83,17 @@ fn test_distributed_erasure_writing() {
     // Extract file content
     let extract_dir = temp_dir.path().join("extract");
     let options = era_engine::ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).expect("Failed to extract files");
-    
+    reader
+        .extract_all(&options)
+        .expect("Failed to extract files");
+
     let extracted_path = extract_dir.join("test_file.bin");
     assert!(extracted_path.exists());
     let extracted_data = fs::read(&extracted_path).expect("Failed to read extracted file");
 
     assert_eq!(extracted_data.len(), 1024 * 1024);
-    assert_eq!(extracted_data, data, "Read data does not match written data");
+    assert_eq!(
+        extracted_data, data,
+        "Read data does not match written data"
+    );
 }
-

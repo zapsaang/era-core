@@ -13,7 +13,9 @@ use tempfile::TempDir;
 /// Create a test file with random-like content
 fn create_test_data(size: usize) -> Vec<u8> {
     // Use a deterministic pattern that's not highly compressible
-    (0..size).map(|i| (i.wrapping_mul(17) ^ (i >> 3)) as u8).collect()
+    (0..size)
+        .map(|i| (i.wrapping_mul(17) ^ (i >> 3)) as u8)
+        .collect()
 }
 
 /// Benchmark archive creation with different file sizes
@@ -84,7 +86,9 @@ fn bench_archive_extraction(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("standard", label), &(), |b, _| {
             b.iter_with_setup(
                 || {
-                    let extract_dir = temp_dir.path().join(format!("extract_{}", rand::random::<u32>()));
+                    let extract_dir = temp_dir
+                        .path()
+                        .join(format!("extract_{}", rand::random::<u32>()));
                     fs::create_dir_all(&extract_dir).unwrap();
                     extract_dir
                 },
@@ -178,7 +182,12 @@ fn bench_multi_file_packing(c: &mut Criterion) {
 
     // Simulate many small files (common scenario)
     let small_files: Vec<(String, Vec<u8>)> = (0..100)
-        .map(|i| (format!("file_{:03}.txt", i), create_test_data(1024 + i * 10)))
+        .map(|i| {
+            (
+                format!("file_{:03}.txt", i),
+                create_test_data(1024 + i * 10),
+            )
+        })
         .collect();
 
     let total_size: u64 = small_files.iter().map(|(_, d)| d.len() as u64).sum();
