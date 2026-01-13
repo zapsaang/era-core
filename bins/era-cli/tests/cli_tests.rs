@@ -278,3 +278,83 @@ fn test_compression_levels() {
     assert!(archive_low.exists());
     assert!(archive_high.exists());
 }
+
+#[test]
+fn test_verify_subcommand_help() {
+    era_cmd()
+        .args(["verify", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verify integrity"))
+        .stdout(predicate::str::contains("--password"))
+        .stdout(predicate::str::contains("--verbose"));
+}
+
+#[test]
+fn test_verify_valid_archive() {
+    let temp = TempDir::new().unwrap();
+
+    // Create test files
+    let input_file = temp.path().join("test.txt");
+    fs::write(&input_file, "test content for verification").unwrap();
+
+    // Create archive
+    let archive_path = temp.path().join("verify_test.era");
+    era_cmd()
+        .args([
+            "create",
+            input_file.to_str().unwrap(),
+            "--output",
+            archive_path.to_str().unwrap(),
+            "--password",
+            "verify_password",
+        ])
+        .assert()
+        .success();
+
+    // Verify the archive
+    era_cmd()
+        .args([
+            "verify",
+            archive_path.to_str().unwrap(),
+            "--password",
+            "verify_password",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verified successfully"));
+}
+
+#[test]
+fn test_verify_wrong_password() {
+    let temp = TempDir::new().unwrap();
+
+    // Create test file
+    let input_file = temp.path().join("test.txt");
+    fs::write(&input_file, "test content").unwrap();
+
+    // Create archive
+    let archive_path = temp.path().join("verify_pwd.era");
+    era_cmd()
+        .args([
+            "create",
+            input_file.to_str().unwrap(),
+            "--output",
+            archive_path.to_str().unwrap(),
+            "--password",
+            "correct_password",
+        ])
+        .assert()
+        .success();
+
+    // Verify with wrong password should fail
+    era_cmd()
+        .args([
+            "verify",
+            archive_path.to_str().unwrap(),
+            "--password",
+            "wrong_password",
+        ])
+        .assert()
+        .failure();
+}

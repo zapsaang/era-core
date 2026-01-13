@@ -183,3 +183,60 @@ pub fn info(archive: &Path, password: Option<&str>) -> Result<()> {
 
     Ok(())
 }
+
+/// Verify integrity of an ERA archive
+pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<()> {
+    let password = get_password(password, "Enter decryption password: ")?;
+
+    println!("Verifying archive: {}", archive.display());
+    println!();
+
+    let mut reader = ArchiveReader::open(archive, &password).context("Failed to open archive")?;
+
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap(),
+    );
+    pb.set_message("Scanning blocks...");
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let stats = reader.verify().context("Verification failed")?;
+
+    pb.finish_and_clear();
+
+    println!("Verification Results");
+    println!("====================");
+    println!();
+    println!("Blocks verified:    {}", stats.blocks_verified);
+    println!("Blocks failed:      {}", stats.blocks_failed);
+    println!("Files verified:     {}", stats.files_verified);
+    println!("Files incomplete:   {}", stats.files_incomplete);
+    println!("Bytes verified:     {}", stats.bytes_verified);
+    println!();
+
+    if stats.is_ok() {
+        println!("✅ Archive integrity verified successfully!");
+        Ok(())
+    } else {
+        println!("❌ Archive integrity check FAILED!");
+        println!();
+        println!("Errors found: {}", stats.errors.len());
+
+        if verbose {
+            println!();
+            println!("Error details:");
+            for (i, error) in stats.errors.iter().enumerate() {
+                println!("  {}. {}", i + 1, error);
+            }
+        } else if !stats.errors.is_empty() {
+            println!("Use --verbose to see error details");
+        }
+
+        anyhow::bail!(
+            "Archive verification failed with {} errors",
+            stats.errors.len()
+        )
+    }
+}

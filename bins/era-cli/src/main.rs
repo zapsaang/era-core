@@ -98,6 +98,20 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
     },
+
+    /// Verify integrity of an ERA archive
+    Verify {
+        /// Archive path
+        archive: PathBuf,
+
+        /// Encryption password (will prompt if not provided)
+        #[arg(short, long)]
+        password: Option<String>,
+
+        /// Show detailed error information
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -137,5 +151,11 @@ fn main() -> anyhow::Result<()> {
         } => commands::list(&archive, password.as_deref(), long),
 
         Commands::Info { archive, password } => commands::info(&archive, password.as_deref()),
+
+        Commands::Verify {
+            archive,
+            password,
+            verbose,
+        } => commands::verify(&archive, password.as_deref(), verbose),
     }
 }

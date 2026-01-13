@@ -13,6 +13,30 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
+/// Maximum allowed block size (16 MB) - prevents malicious archives from causing OOM
+const MAX_BLOCK_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Maximum allowed file size declared in catalog (100 GB) - sanity check
+const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
+
+/// Validate block size to prevent infinite loops and OOM attacks
+#[inline]
+fn validate_block_size(block_size: u32, offset: u64) -> Result<()> {
+    if block_size == 0 {
+        return Err(EraError::CorruptedHeader(format!(
+            "Zero-length block at offset {}",
+            offset
+        )));
+    }
+    if block_size > MAX_BLOCK_SIZE {
+        return Err(EraError::BlockTooLarge {
+            size: block_size as usize,
+            max_size: MAX_BLOCK_SIZE as usize,
+        });
+    }
+    Ok(())
+}
+
 /// Options for extraction
 #[derive(Debug, Clone, Default)]
 pub struct ExtractOptions {
@@ -174,6 +198,9 @@ impl ArchiveReader {
             let block_size =
                 u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
 
+            // Validate block size to prevent infinite loops
+            validate_block_size(block_size, offset)?;
+
             last_block_offset = offset;
             last_block_size = block_size;
             offset += 4 + block_size as u64;
@@ -225,6 +252,16 @@ impl ArchiveReader {
                 debug!("Skipping existing file: {}", output_path.display());
                 stats.skipped += 1;
                 continue;
+            }
+
+            // Validate declared file size to prevent disk-filling attacks
+            if entry.size > MAX_DECLARED_FILE_SIZE {
+                return Err(EraError::CorruptedHeader(format!(
+                    "File '{}' declares unreasonable size: {} bytes (max: {} bytes)",
+                    entry.path.display(),
+                    entry.size,
+                    MAX_DECLARED_FILE_SIZE
+                )));
             }
 
             if entry.is_chunked() {
@@ -290,6 +327,9 @@ impl ArchiveReader {
             }
             let block_size =
                 u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+
+            // Validate block size to prevent infinite loops and OOM
+            validate_block_size(block_size, offset)?;
 
             let location = BlockLocation {
                 volume_id: self.volume_reader.header().volume_id,
@@ -372,6 +412,182 @@ impl ArchiveReader {
 
         Ok(stats)
     }
+
+    /// Verify the integrity of the archive
+    ///
+    /// This method performs a comprehensive verification:
+    /// - Reads and decrypts all blocks (validates AEAD authentication)
+    /// - Verifies chunk hashes match their declared content
+    /// - Checks that all files have their required chunks present
+    /// - Reports any corrupted or missing data
+    pub fn verify(&mut self) -> Result<VerifyStats> {
+        info!("Verifying archive integrity...");
+
+        // Load catalog if not already loaded
+        self.load_catalog()?;
+
+        let catalog = self.catalog.as_ref().unwrap();
+        let mut stats = VerifyStats::default();
+
+        // Build a map of expected chunks for verification
+        // chunk_hash -> list of (file_idx, chunk_idx, expected_len)
+        let mut expected_chunks: HashMap<ChunkHash, Vec<(usize, usize, u64)>> = HashMap::new();
+        let mut file_chunk_counts: Vec<usize> = Vec::with_capacity(catalog.entries.len());
+        let mut file_chunks_found: Vec<usize> = vec![0; catalog.entries.len()];
+
+        for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            if entry.is_chunked() {
+                file_chunk_counts.push(entry.chunks.len());
+                for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
+                    expected_chunks.entry(chunk_ref.hash).or_default().push((
+                        file_idx,
+                        chunk_idx,
+                        chunk_ref.length as u64,
+                    ));
+                }
+            } else if let Some(content_hash) = entry.content_hash {
+                file_chunk_counts.push(1);
+                expected_chunks
+                    .entry(content_hash)
+                    .or_default()
+                    .push((file_idx, 0, entry.size));
+            } else {
+                file_chunk_counts.push(0);
+            }
+        }
+
+        // Scan all blocks and verify each one
+        let (data_start, data_end) = self.volume_reader.data_region();
+        let mut offset = data_start;
+        let mut slot_index = 0u32;
+
+        while offset < data_end {
+            let len_bytes = self.volume_reader.read_raw(offset, 4)?;
+            if len_bytes.len() < 4 {
+                break;
+            }
+            let block_size =
+                u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+
+            // Validate block size
+            if block_size == 0 {
+                stats.errors.push(format!(
+                    "Block {} at offset {}: zero-length block",
+                    slot_index, offset
+                ));
+                stats.blocks_failed += 1;
+                break; // Can't continue with zero-length block
+            }
+
+            if block_size > MAX_BLOCK_SIZE {
+                stats.errors.push(format!(
+                    "Block {} at offset {}: block too large ({} bytes, max: {} bytes)",
+                    slot_index, offset, block_size, MAX_BLOCK_SIZE
+                ));
+                stats.blocks_failed += 1;
+                break; // Can't trust further block sizes
+            }
+
+            let location = BlockLocation {
+                volume_id: self.volume_reader.header().volume_id,
+                slot_index,
+                physical_offset: offset,
+                encrypted_size: block_size,
+            };
+
+            // Read and decrypt block (AEAD verification happens here)
+            let encrypted_block = match self.volume_reader.read_block(&location) {
+                Ok(block) => block,
+                Err(e) => {
+                    stats.errors.push(format!(
+                        "Block {} at offset {}: read error: {}",
+                        slot_index, offset, e
+                    ));
+                    stats.blocks_failed += 1;
+                    offset += 4 + block_size as u64;
+                    slot_index += 1;
+                    continue;
+                }
+            };
+
+            // Try to decrypt and extract chunks
+            match self.unpacker.extract_all_chunks(&encrypted_block) {
+                Ok(chunks) => {
+                    stats.blocks_verified += 1;
+
+                    for (hash, data) in &chunks {
+                        stats.bytes_verified += data.len() as u64;
+
+                        // Verify chunk hash matches content
+                        let computed_hash = era_crypto::hash(data);
+                        if computed_hash != *hash {
+                            stats.errors.push(format!(
+                                "Block {}: chunk hash mismatch (expected {:?}, got {:?})",
+                                slot_index, hash, computed_hash
+                            ));
+                        }
+
+                        // Track which files got their chunks
+                        if let Some(file_refs) = expected_chunks.get(hash) {
+                            for (file_idx, _, expected_len) in file_refs {
+                                if data.len() as u64 == *expected_len {
+                                    file_chunks_found[*file_idx] += 1;
+                                } else {
+                                    stats.errors.push(format!(
+                                        "Block {}: chunk length mismatch for file {} (expected {}, got {})",
+                                        slot_index, file_idx, expected_len, data.len()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    stats.errors.push(format!(
+                        "Block {} at offset {}: decryption/decompression failed: {}",
+                        slot_index, offset, e
+                    ));
+                    stats.blocks_failed += 1;
+                }
+            }
+
+            offset += 4 + block_size as u64;
+            slot_index += 1;
+        }
+
+        // Check that all files have all their chunks
+        for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            let expected = file_chunk_counts[file_idx];
+            let found = file_chunks_found[file_idx];
+            if found == expected && expected > 0 {
+                stats.files_verified += 1;
+            } else if found < expected {
+                stats.files_incomplete += 1;
+                stats.errors.push(format!(
+                    "File '{}': missing {} of {} chunks",
+                    entry.path.display(),
+                    expected - found,
+                    expected
+                ));
+            }
+        }
+
+        if stats.is_ok() {
+            info!(
+                "Verification passed: {} blocks, {} files, {} bytes",
+                stats.blocks_verified, stats.files_verified, stats.bytes_verified
+            );
+        } else {
+            info!(
+                "Verification FAILED: {} block errors, {} incomplete files, {} total errors",
+                stats.blocks_failed,
+                stats.files_incomplete,
+                stats.errors.len()
+            );
+        }
+
+        Ok(stats)
+    }
 }
 
 /// Statistics about extraction
@@ -383,6 +599,30 @@ pub struct ExtractStats {
     pub skipped: u64,
     /// Total bytes written
     pub bytes_written: u64,
+}
+
+/// Statistics about verification
+#[derive(Debug, Default)]
+pub struct VerifyStats {
+    /// Number of blocks verified
+    pub blocks_verified: u64,
+    /// Number of blocks with errors
+    pub blocks_failed: u64,
+    /// Number of files verified
+    pub files_verified: u64,
+    /// Number of files with missing chunks
+    pub files_incomplete: u64,
+    /// Total bytes verified
+    pub bytes_verified: u64,
+    /// List of errors encountered
+    pub errors: Vec<String>,
+}
+
+impl VerifyStats {
+    /// Check if verification passed with no errors
+    pub fn is_ok(&self) -> bool {
+        self.blocks_failed == 0 && self.files_incomplete == 0 && self.errors.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -610,5 +850,119 @@ mod tests {
 
         let shallow = fs::read_to_string(extract_dir.join("a/shallow.txt")).unwrap();
         assert_eq!(shallow, "shallow");
+    }
+
+    #[test]
+    fn test_verify_valid_archive() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("verify.era");
+        let password = "test";
+
+        // Create archive with multiple files
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password(password)
+            .build()
+            .unwrap();
+
+        writer.add_bytes("file1.txt", b"Hello, World!").unwrap();
+        writer.add_bytes("file2.txt", b"More content here").unwrap();
+        writer.add_bytes("binary.bin", &[0u8; 1024]).unwrap();
+        writer.finalize().unwrap();
+
+        // Verify the archive
+        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let stats = reader.verify().unwrap();
+
+        assert!(stats.is_ok(), "Verification should pass");
+        assert!(stats.blocks_verified > 0);
+        assert_eq!(stats.blocks_failed, 0);
+        assert_eq!(stats.files_verified, 3);
+        assert_eq!(stats.files_incomplete, 0);
+        assert!(stats.errors.is_empty());
+    }
+
+    #[test]
+    fn test_verify_large_chunked_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("chunked.era");
+        let password = "test";
+
+        // Create archive with large file that gets chunked
+        let large_data = vec![b'A'; 512 * 1024]; // 512KB
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password(password)
+            .build()
+            .unwrap();
+
+        writer.add_bytes("large.bin", &large_data).unwrap();
+        writer.finalize().unwrap();
+
+        // Verify the archive
+        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let stats = reader.verify().unwrap();
+
+        assert!(stats.is_ok(), "Verification should pass for chunked file");
+        assert!(stats.bytes_verified > 0);
+    }
+
+    #[test]
+    fn test_verify_empty_archive() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("empty.era");
+        let password = "test";
+
+        // Create empty archive
+        let writer = ArchiveWriter::builder(&archive_path)
+            .password(password)
+            .build()
+            .unwrap();
+        writer.finalize().unwrap();
+
+        // Verify empty archive
+        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let stats = reader.verify().unwrap();
+
+        assert!(stats.is_ok(), "Empty archive should verify ok");
+        assert_eq!(stats.files_verified, 0);
+    }
+
+    #[test]
+    fn test_validate_block_size_zero() {
+        // Zero-length block should be rejected
+        let result = super::validate_block_size(0, 1000);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Zero-length"),
+            "Error should mention zero-length: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_block_size_too_large() {
+        // Block larger than MAX_BLOCK_SIZE should be rejected
+        let result = super::validate_block_size(super::MAX_BLOCK_SIZE + 1, 2000);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("too large"),
+            "Error should mention too large: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_block_size_valid() {
+        // Valid block sizes should pass
+        assert!(super::validate_block_size(1, 0).is_ok());
+        assert!(super::validate_block_size(1024, 0).is_ok());
+        assert!(super::validate_block_size(super::MAX_BLOCK_SIZE, 0).is_ok());
+    }
+
+    #[test]
+    fn test_max_declared_file_size_constant() {
+        // Verify MAX_DECLARED_FILE_SIZE is 100GB
+        assert_eq!(super::MAX_DECLARED_FILE_SIZE, 100 * 1024 * 1024 * 1024);
     }
 }

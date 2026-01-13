@@ -8,6 +8,6 @@
 mod reader;
 mod writer;
 
-pub use reader::{ArchiveReader, ExtractOptions};
+pub use reader::{ArchiveReader, ExtractOptions, ExtractStats, VerifyStats};
 pub use writer::generic::{GenericArchiveWriter, GenericArchiveWriterBuilder};
 pub use writer::{ArchiveWriter, ArchiveWriterBuilder};
