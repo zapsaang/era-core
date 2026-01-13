@@ -6,10 +6,15 @@
 
 mod footer;
 mod header;
+mod multi_volume;
 mod reader;
 mod writer;
 
-pub use footer::Footer;
-pub use header::{CryptoAnchor, SuperHeader};
+pub use footer::{Footer, FOOTER_SIZE};
+pub use header::{CryptoAnchor, SuperHeader, HEADER_SIZE};
+pub use multi_volume::{
+    MultiVolumeConfig, MultiVolumeReader, MultiVolumeStats, MultiVolumeWriter,
+    DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE,
+};
 pub use reader::VolumeReader;
 pub use writer::VolumeWriter;
