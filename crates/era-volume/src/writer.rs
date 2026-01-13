@@ -75,6 +75,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             physical_offset: offset,
             encrypted_size: block.data.len() as u32,
             erasure_info: None, // Standard blocks are not erasure-coded
+            shard_offsets: None,
         };
 
         self.position = self.writer.current_size();

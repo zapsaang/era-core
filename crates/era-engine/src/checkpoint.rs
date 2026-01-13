@@ -161,7 +161,7 @@ impl Checkpoint {
 
     /// Check if a chunk has been written
     pub fn get_chunk_location(&self, hash: &ChunkHash) -> Option<BlockLocation> {
-        self.written_chunks.get(hash).copied()
+        self.written_chunks.get(hash).cloned()
     }
 
     /// Update timestamp to current time

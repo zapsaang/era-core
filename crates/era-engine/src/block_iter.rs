@@ -132,6 +132,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             physical_offset: self.current_offset,
             encrypted_size: block_size,
             erasure_info: None,
+            shard_offsets: None,
         };
 
         // Read and decrypt block
@@ -176,16 +177,16 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
 
 /// Iterator for erasure-coded blocks
 pub struct ErasureBlockIterator<'a, R: era_storage::StorageReader> {
-    volume_reader: &'a VolumeReader<R>,
+    volume_readers: &'a [VolumeReader<R>],
     erasure_unpacker: &'a ErasureBlockUnpacker,
     /// Erasure configuration
     data_shards: u8,
     parity_shards: u8,
     total_shards: usize,
-    /// Current offset in the data region
-    current_offset: u64,
-    /// End of erasure data (catalog offset)
-    data_end: u64,
+    /// Current offsets in the data region for each volume
+    current_offsets: Vec<u64>,
+    /// End of data region for each volume
+    data_ends: Vec<u64>,
     /// Current block index
     block_index: u32,
     /// Iteration statistics
@@ -195,23 +196,40 @@ pub struct ErasureBlockIterator<'a, R: era_storage::StorageReader> {
 impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
     /// Create a new erasure block iterator
     pub fn new(
-        volume_reader: &'a VolumeReader<R>,
+        volume_readers: &'a [VolumeReader<R>],
         erasure_unpacker: &'a ErasureBlockUnpacker,
         data_shards: u8,
         parity_shards: u8,
     ) -> Self {
-        let (data_start, _) = volume_reader.data_region();
-        let catalog_offset = volume_reader.footer().catalog_offset;
+        let mut current_offsets = Vec::with_capacity(volume_readers.len());
+        let mut data_ends = Vec::with_capacity(volume_readers.len());
+
+        for reader in volume_readers {
+            let (start, end) = reader.data_region();
+            // If checking catalog offset from footer is needed, use reader.footer().catalog_offset
+            // But data_region() usually accounts for it if implemented correctly? 
+            // reader.rs used catalog_offset from footer explicitly.
+            // Let's rely on footer catalog offset as the definitive end of data stream.
+            let footer = reader.footer();
+            let limit = if footer.has_catalog_location() {
+                 footer.catalog_offset
+            } else {
+                 end
+            };
+            current_offsets.push(start);
+            data_ends.push(limit);
+        }
+
         let total_shards = data_shards as usize + parity_shards as usize;
 
         Self {
-            volume_reader,
+            volume_readers,
             erasure_unpacker,
             data_shards,
             parity_shards,
             total_shards,
-            current_offset: data_start,
-            data_end: catalog_offset,
+            current_offsets,
+            data_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
         }
@@ -220,12 +238,14 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
 
 impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'a, R> {
     fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
-        if self.current_offset >= self.data_end {
+        // Shard 0 is always on Volume 0 (idx % N == 0 for idx=0)
+        // Check if Volume 0 has more data
+        if self.current_offsets[0] >= self.data_ends[0] {
             return None;
         }
 
-        // Read erasure block header (4 bytes original_len)
-        let header_bytes = match self.volume_reader.read_raw(self.current_offset, 4) {
+        // Read erasure block header (4 bytes original_len) from Volume 0
+        let header_bytes = match self.volume_readers[0].read_raw(self.current_offsets[0], 4) {
             Ok(bytes) if bytes.len() == 4 => bytes,
             Ok(_) => return None,
             Err(e) => return Some(Err(e)),
@@ -233,18 +253,26 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
         let original_len = u32::from_le_bytes([
             header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]
         ]);
-        self.current_offset += 4;
+        self.current_offsets[0] += 4;
 
         // Read all shards for this block
         let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(self.total_shards);
         let mut corrupted_count = 0usize;
         let mut first_shard_size = 0u32;
+        let num_volumes = self.volume_readers.len();
 
         for shard_idx in 0..self.total_shards {
+            let vol_idx = shard_idx % num_volumes;
+            let reader = &self.volume_readers[vol_idx];
+            let offset = self.current_offsets[vol_idx];
+
             // Read shard header (8 bytes: 4 length + 4 CRC)
-            let header_bytes = match self.volume_reader.read_raw(self.current_offset, ShardHeader::SIZE) {
+            let header_bytes = match reader.read_raw(offset, ShardHeader::SIZE) {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
-                Ok(_) => break,
+                Ok(_) => {
+                    corrupted_count += 1;
+                    continue;
+                }
                 Err(_) => {
                     corrupted_count += 1;
                     continue;
@@ -255,9 +283,16 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
                 Some(h) => h,
                 None => {
                     corrupted_count += 1;
+                     // Even if header invalid, we read SIZE bytes. 
+                     // But we don't know data length. Sync is lost on this volume.
+                    // We can assume header was corrupted but maybe we can guess size? No.
                     continue;
                 }
             };
+            
+            // Advance past header
+            self.current_offsets[vol_idx] += ShardHeader::SIZE as u64;
+
             let shard_len = shard_header.length as usize;
 
             if first_shard_size == 0 {
@@ -265,8 +300,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Read shard data
-            match self.volume_reader.read_raw(
-                self.current_offset + ShardHeader::SIZE as u64,
+            match reader.read_raw(
+                self.current_offsets[vol_idx],
                 shard_len
             ) {
                 Ok(shard_data) => {
@@ -282,12 +317,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
                 }
             }
 
-            self.current_offset += ShardHeader::SIZE as u64 + shard_len as u64;
+            // Advance past data
+            self.current_offsets[vol_idx] += shard_len as u64;
         }
 
         self.stats.corrupted_shards += corrupted_count as u32;
 
         if shards.is_empty() {
+             // If we failed to read ANY shards, verification fails.
+             // Also if we failed to update offsets correctly, subsequent blocks will fail.
             self.stats.blocks_failed += 1;
             return Some(Err(EraError::other(format!(
                 "No valid shards for block {}",
@@ -326,7 +364,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
     }
 
     fn has_more(&self) -> bool {
-        self.current_offset < self.data_end
+        // If Volume 0 has more data (at least 4 bytes for next header)
+        self.current_offsets[0] + 4 <= self.data_ends[0]
     }
 
     fn stats(&self) -> &BlockIterStats {

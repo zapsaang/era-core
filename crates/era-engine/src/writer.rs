@@ -1,10 +1,10 @@
 //! Archive writer - creates ERA archives.
 
 use bytes::Bytes;
-use era_codec::ZstdCompressor;
+use era_codec::{Compressor, NoCompressor, ZstdCompressor};
 use era_common::{
-    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, ErasureBlockInfo, ErasureCodeConfig,
-    Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, CompressionAlgorithm, ErasureBlockInfo,
+    ErasureCodeConfig, Result, UniqueChunk,
 };
 use era_crypto::{derive_key, DerivedKey, KdfParams, Salt};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
@@ -33,6 +33,8 @@ pub struct ArchiveWriterBuilder {
     enable_erasure: bool,
     /// Erasure coding configuration
     erasure_config: ErasureCodeConfig,
+    /// Number of storage volumes to distribute data across
+    volume_count: usize,
 }
 
 impl ArchiveWriterBuilder {
@@ -48,6 +50,7 @@ impl ArchiveWriterBuilder {
             recovery_options: RecoveryOptions::default(),
             enable_erasure: false,
             erasure_config: ErasureCodeConfig::default(),
+            volume_count: 1,
         }
     }
 
@@ -112,6 +115,15 @@ impl ArchiveWriterBuilder {
         self
     }
 
+    /// Set the number of volumes to distribute data across
+    /// 
+    /// This enables true distributed erasure coding where shards of the same block
+    /// are stored on different volumes.
+    pub fn volume_count(mut self, count: usize) -> Self {
+        self.volume_count = count.max(1);
+        self
+    }
+
     /// Build the archive writer
     pub fn build(self) -> Result<ArchiveWriter> {
         let archive_id = ArchiveId::new();
@@ -148,13 +160,33 @@ impl ArchiveWriterBuilder {
             config.encryption.kdf_time_cost,
             config.clone(),
         );
-        let volume_path = self.output_path.file_name().unwrap_or_default();
-        let volume_writer = VolumeWriter::create(&backend, Path::new(volume_path), header)?;
+        let base_filename = self.output_path.file_name().unwrap_or_default();
+        
+        let mut volume_writers = Vec::with_capacity(self.volume_count);
+        for i in 0..self.volume_count {
+            let volume_path = if i == 0 {
+                PathBuf::from(base_filename)
+            } else {
+                let p = PathBuf::from(base_filename);
+                let mut file_name = p.as_os_str().to_os_string();
+                file_name.push(format!(".{:03}", i));
+                PathBuf::from(file_name)
+            };
+            
+            let mut vol_header = header.clone();
+            vol_header.volume_sequence = i as u16;
+            
+            let writer = VolumeWriter::create(&backend, &volume_path, vol_header)?;
+            volume_writers.push(writer);
+        }
 
         // Create block builder with salt as nonce context
         // This ensures unique nonces across different archives
         let nonce_context = *salt.as_bytes();
-        let compressor = Box::new(ZstdCompressor::new(self.config.compression.level));
+        let compressor: Box<dyn Compressor> = match self.config.compression.algorithm {
+            CompressionAlgorithm::None => Box::new(NoCompressor),
+            CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(self.config.compression.level)),
+        };
         let block_builder = MacroBlockBuilder::new(key.clone(), nonce_context, compressor);
 
         // Configure file reader with CDC if enabled
@@ -215,7 +247,10 @@ impl ArchiveWriterBuilder {
 
         // Create erasure builder if enabled
         let erasure_builder = if self.enable_erasure {
-            let compressor = Box::new(ZstdCompressor::new(self.config.compression.level));
+            let compressor: Box<dyn Compressor> = match self.config.compression.algorithm {
+                CompressionAlgorithm::None => Box::new(NoCompressor),
+                CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(self.config.compression.level)),
+            };
             Some(ErasureBlockBuilder::new(
                 key.clone(),
                 nonce_context,
@@ -230,7 +265,7 @@ impl ArchiveWriterBuilder {
             archive_id,
             output_path: self.output_path,
             key,
-            volume_writer,
+            volume_writers,
             block_builder,
             erasure_builder,
             catalog: Catalog::new(),
@@ -253,7 +288,7 @@ pub struct ArchiveWriter {
     /// Key is stored for potential future re-keying operations
     #[allow(dead_code)]
     key: DerivedKey,
-    volume_writer: VolumeWriter<era_storage::LocalStorageWriter>,
+    volume_writers: Vec<VolumeWriter<era_storage::LocalStorageWriter>>,
     /// Standard block builder
     block_builder: MacroBlockBuilder,
     /// Erasure-coded block builder (optional)
@@ -384,11 +419,11 @@ impl ArchiveWriter {
 
             // Pack the large chunk alone (with or without erasure coding)
             let location = self.pack_and_write_chunks(vec![chunk])?;
-            self.chunk_locations.insert(hash, location);
+            self.chunk_locations.insert(hash, location.clone());
 
             // Record in checkpoint if enabled
             if let Some(ref mut mgr) = self.checkpoint_manager {
-                mgr.record_chunk(hash, location)?;
+                mgr.record_chunk(hash, location.clone())?;
             }
 
             debug!(
@@ -432,13 +467,13 @@ impl ArchiveWriter {
 
         // Record location for all chunks
         for hash in &hashes {
-            self.chunk_locations.insert(*hash, location);
+            self.chunk_locations.insert(*hash, location.clone());
         }
 
         // Record in checkpoint if enabled
         if let Some(ref mut mgr) = self.checkpoint_manager {
             for hash in hashes {
-                mgr.record_chunk(hash, location)?;
+                mgr.record_chunk(hash, location.clone())?;
             }
         }
 
@@ -469,46 +504,59 @@ impl ArchiveWriter {
             // Write erasure block header (4 bytes original_len)
             // This allows the reader to know the exact original length for RS decoding
             let original_len_bytes = sharded_block.original_len.to_le_bytes();
-            let header_offset = self.volume_writer.write_raw(&original_len_bytes)?;
+            let mut header_offset = 0;
+            // Offsets for shards 1..N (Shard 0 is at header_offset)
+            let mut shard_offsets = Vec::with_capacity(sharded_block.shards.len().saturating_sub(1));
 
             for (idx, shard) in sharded_block.shards.iter().enumerate() {
+                // Determine which volume to write this shard to
+                let vol_idx = idx % self.volume_writers.len();
+                let writer = &mut self.volume_writers[vol_idx];
+
                 // Write each shard with length + CRC header for integrity validation
                 let crc = era_common::compute_shard_crc(shard);
                 let shard_header = era_common::ShardHeader::new(shard.len() as u32, crc);
-                self.volume_writer.write_raw(&shard_header.to_bytes())?;
-                let offset = self.volume_writer.write_raw(shard)?;
+                
+                if idx == 0 {
+                    // Shard 0 includes the Block Header (original_len)
+                    header_offset = writer.write_raw(&original_len_bytes)?;
+                    writer.write_raw(&shard_header.to_bytes())?;
+                    writer.write_raw(shard)?;
+                } else {
+                    let offset = writer.write_raw(&shard_header.to_bytes())?;
+                    writer.write_raw(shard)?;
+                    shard_offsets.push(offset);
+                }
+            }
+            
+            // Get Volume ID and Slot Index from the connection where Shard 0 was written
+            let primary_writer_idx = 0; // Since we do idx % len, Shard 0 is always at 0
+            let primary_writer = &self.volume_writers[primary_writer_idx];
 
-                if first_location.is_none() {
-                    // Use the header offset as the block location
-                    // The reader will read original_len first, then consecutive shards
-                    first_location = Some(BlockLocation {
-                        volume_id: self.volume_writer.volume_id(),
-                        slot_index: self.volume_writer.block_count(),
+            if first_location.is_none() {
+                // Use the header offset as the block location
+                first_location = Some(BlockLocation {
+                        volume_id: primary_writer.volume_id(),
+                        slot_index: primary_writer.block_count(),
                         physical_offset: header_offset, // Start at original_len header
-                        encrypted_size: shard.len() as u32,
+                        encrypted_size: shard_size,
                         erasure_info: Some(ErasureBlockInfo {
                             data_shards: sharded_block.config.data_shards,
                             parity_shards: sharded_block.config.parity_shards,
                             shard_size,
                             original_len: sharded_block.original_len,
                         }),
+                        shard_offsets: Some(shard_offsets),
                     });
-                }
-
-                debug!(
-                    "Wrote erasure shard {} at offset {} ({} bytes, crc=0x{:08x})",
-                    idx,
-                    offset,
-                    shard.len(),
-                    crc
-                );
             }
 
             Ok(first_location.expect("at least one shard"))
         } else {
             // Standard non-erasure path
             let encrypted_block = self.block_builder.pack_chunks(chunks)?;
-            self.volume_writer.write_block(&encrypted_block)
+            // Write standard blocks to primary volume (0)
+            // In future versions, we could distribute these too
+            self.volume_writers[0].write_block(&encrypted_block)
         }
     }
 
@@ -549,17 +597,20 @@ impl ArchiveWriter {
         let catalog_hash = era_crypto::hash(&catalog_bytes);
         let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes.clone()), catalog_hash);
 
+        // Use primary writer (Volume 0) for catalog
+        let writer = &mut self.volume_writers[0];
+
         // Write catalog with erasure protection if enabled
         let (catalog_location, catalog_block_id) = if self.erasure_builder.is_some() {
             // Write primary catalog with erasure coding for redundancy protection
             let primary_block = self.block_builder.pack_single(catalog_chunk.clone())?;
             let primary_block_id = primary_block.block_id.sequence() as u32;
-            let primary_location = self.volume_writer.write_block(&primary_block)?;
+            let primary_location = writer.write_block(&primary_block)?;
 
             // Write backup catalog copy for additional safety
             // This ensures catalog survives even if erasure shards are corrupted together
             let backup_block = self.block_builder.pack_single(catalog_chunk)?;
-            let backup_location = self.volume_writer.write_block(&backup_block)?;
+            let backup_location = writer.write_block(&backup_block)?;
 
             debug!(
                 "Catalog written with redundancy: primary at {}, backup at {}",
@@ -571,7 +622,7 @@ impl ArchiveWriter {
             // Standard catalog write
             let catalog_block = self.block_builder.pack_single(catalog_chunk)?;
             let block_id = catalog_block.block_id.sequence() as u32;
-            let location = self.volume_writer.write_block(&catalog_block)?;
+            let location = writer.write_block(&catalog_block)?;
             (location, block_id)
         };
 
@@ -580,12 +631,18 @@ impl ArchiveWriter {
             catalog_location.physical_offset, catalog_location.encrypted_size, catalog_block_id
         );
 
-        // Finalize volume with catalog location for O(1) lookup
-        let _header = self.volume_writer.finalize_with_catalog(
-            catalog_location.physical_offset,
-            catalog_location.encrypted_size,
-            catalog_block_id,
-        )?;
+        // Finalize volumes
+        for (i, writer) in self.volume_writers.drain(..).enumerate() {
+            if i == 0 {
+                writer.finalize_with_catalog(
+                    catalog_location.physical_offset,
+                    catalog_location.encrypted_size,
+                    catalog_block_id,
+                )?;
+            } else {
+                writer.finalize_with_catalog(0, 0, 0)?;
+            }
+        }
 
         // Delete checkpoint after successful completion
         if self.checkpoint_manager.is_some() {
@@ -1004,7 +1061,7 @@ pub mod generic {
             let location = self.volume_writer.write_block(&encrypted_block)?;
 
             for hash in hashes {
-                self.chunk_locations.insert(hash, location);
+                self.chunk_locations.insert(hash, location.clone());
             }
 
             Ok(())

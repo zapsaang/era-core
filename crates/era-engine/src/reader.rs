@@ -66,7 +66,7 @@ impl ExtractOptions {
 
 /// Reader for ERA archives
 pub struct ArchiveReader {
-    volume_reader: VolumeReader<era_storage::LocalStorageReader>,
+    volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>>,
     unpacker: MacroBlockUnpacker,
     erasure_unpacker: ErasureBlockUnpacker,
     catalog: Option<Catalog>,
@@ -82,9 +82,42 @@ impl ArchiveReader {
 
         let parent_dir = path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(parent_dir);
-        let volume_path = path.file_name().unwrap_or_default();
+        let base_filename = path.file_name().unwrap_or_default();
 
-        let volume_reader = VolumeReader::open(&backend, Path::new(volume_path))?;
+        // 1. Open primary volume
+        let mut volume_readers = Vec::new();
+        let primary_reader = VolumeReader::open(&backend, Path::new(base_filename))?;
+        volume_readers.push(primary_reader);
+
+        // 2. Discover and open subsequent volumes
+        // Assumes naming convention: file.era.001, file.era.002, etc.
+        let mut i = 1;
+        loop {
+            let p = PathBuf::from(base_filename);
+            let mut file_name = p.as_os_str().to_os_string();
+            file_name.push(format!(".{:03}", i));
+            let sub_path = PathBuf::from(file_name);
+            
+            // Check if file exists relative to backend (parent_dir)
+            if !parent_dir.join(&sub_path).exists() {
+                break;
+            }
+
+            match VolumeReader::open(&backend, &sub_path) {
+                Ok(reader) => {
+                    volume_readers.push(reader);
+                    i += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open volume {}: {}", sub_path.display(), e);
+                    break;
+                }
+            }
+        }
+
+        info!("Opened {} volumes", volume_readers.len());
+
+        let volume_reader = &volume_readers[0]; // Primary
 
         // Derive key from password and stored salt
         let header = volume_reader.header();
@@ -103,15 +136,21 @@ impl ArchiveReader {
 
         // Create unpackers with salt as nonce context (must match encryption)
         let nonce_context = header.crypto_anchor.salt;
-        let compressor = Box::new(ZstdCompressor::new(header.config.compression.level));
+        let compressor: Box<dyn era_codec::Compressor> = match header.config.compression.algorithm {
+            era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
+            era_common::CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(header.config.compression.level)),
+        };
         let unpacker = MacroBlockUnpacker::new(key.clone(), nonce_context, compressor);
 
         // Create erasure unpacker for reading erasure-coded blocks
-        let erasure_compressor = Box::new(ZstdCompressor::new(header.config.compression.level));
+        let erasure_compressor: Box<dyn era_codec::Compressor> = match header.config.compression.algorithm {
+            era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
+            era_common::CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(header.config.compression.level)),
+        };
         let erasure_unpacker = ErasureBlockUnpacker::new(key, nonce_context, erasure_compressor);
 
         Ok(Self {
-            volume_reader,
+            volume_readers,
             unpacker,
             erasure_unpacker,
             catalog: None,
@@ -120,7 +159,7 @@ impl ArchiveReader {
 
     /// Get the archive header
     pub fn header(&self) -> &SuperHeader {
-        self.volume_reader.header()
+        self.volume_readers[0].header()
     }
 
     /// Load the catalog (stored as the last block before footer)
@@ -129,24 +168,25 @@ impl ArchiveReader {
             return Ok(self.catalog.as_ref().unwrap());
         }
 
-        let block_count = self.volume_reader.block_count();
+        let block_count = self.volume_readers[0].block_count();
         if block_count == 0 {
             return Err(EraError::other("Archive is empty"));
         }
 
         // Try to use catalog location from footer (O(1) lookup)
-        let footer = self.volume_reader.footer();
+        let footer = self.volume_readers[0].footer();
         let catalog_location = if footer.has_catalog_location() {
             debug!(
                 "Using footer catalog location: offset={}, size={}, block_id={}",
                 footer.catalog_offset, footer.catalog_size, footer.catalog_block_id
             );
             BlockLocation {
-                volume_id: self.volume_reader.header().volume_id,
+                volume_id: self.volume_readers[0].header().volume_id,
                 slot_index: footer.catalog_block_id,
                 physical_offset: footer.catalog_offset,
                 encrypted_size: footer.catalog_size,
                 erasure_info: None,
+                shard_offsets: None,
             }
         } else {
             // Fallback: scan for catalog (O(n) - for backwards compatibility)
@@ -154,7 +194,7 @@ impl ArchiveReader {
             self.scan_for_last_block()?
         };
 
-        let encrypted_block = self.volume_reader.read_block(&catalog_location)?;
+        let encrypted_block = self.volume_readers[0].read_block(&catalog_location)?;
         let chunks = self.unpacker.extract_all_chunks(&encrypted_block)?;
 
         if chunks.is_empty() {
@@ -175,15 +215,15 @@ impl ArchiveReader {
 
     /// Scan blocks to find the last one (fallback for old archives)
     fn scan_for_last_block(&self) -> Result<BlockLocation> {
-        let (data_start, data_end) = self.volume_reader.data_region();
-        let block_count = self.volume_reader.block_count();
+        let (data_start, data_end) = self.volume_readers[0].data_region();
+        let block_count = self.volume_readers[0].block_count();
 
         let mut offset = data_start;
         let mut last_block_offset = data_start;
         let mut last_block_size = 0u32;
 
         while offset < data_end {
-            let len_bytes = self.volume_reader.read_raw(offset, 4)?;
+            let len_bytes = self.volume_readers[0].read_raw(offset, 4)?;
             if len_bytes.len() < 4 {
                 break;
             }
@@ -199,11 +239,12 @@ impl ArchiveReader {
         }
 
         Ok(BlockLocation {
-            volume_id: self.volume_reader.header().volume_id,
+            volume_id: self.volume_readers[0].header().volume_id,
             slot_index: block_count - 1,
             physical_offset: last_block_offset,
             encrypted_size: last_block_size,
             erasure_info: None,
+            shard_offsets: None,
         })
     }
 
@@ -217,25 +258,50 @@ impl ArchiveReader {
         location: &BlockLocation,
     ) -> Result<Vec<(ChunkHash, Bytes)>> {
         if let Some(ref erasure_info) = location.erasure_info {
-            // Erasure-coded block: read shards and decode
-            let shards_with_status = self
-                .volume_reader
-                .read_erasure_shards(location, erasure_info)?;
+            // Erasure-coded block: read shards from multiple volumes
+            let num_readers = self.volume_readers.len();
+            let total_shards = erasure_info.data_shards as usize + erasure_info.parity_shards as usize;
+            
+            let mut available_shards = Vec::with_capacity(total_shards);
+            
+            // Check shard offsets
+            let shard_offsets = location.shard_offsets.as_ref()
+                .ok_or_else(|| EraError::other("Missing shard offsets for erasure block"))?;
 
-            // Filter to available shards only
-            let available_shards: Vec<(usize, Bytes)> = shards_with_status
-                .into_iter()
-                .filter_map(|(idx, opt_data)| opt_data.map(|data| (idx, data)))
-                .collect();
+            // Read Shard 0 (Header + Data) on Volume 0
+            // Note: physical_offset points to 4-byte original_len header
+            if let Ok(shard) = self.read_shard(&self.volume_readers[0], location.physical_offset + 4) {
+                 available_shards.push((0, shard));
+            }
+            
+            // Read other shards (1..N)
+            for (i, &offset) in shard_offsets.iter().enumerate() {
+                let shard_idx = i + 1;
+                let vol_idx = shard_idx % num_readers;
+                if let Ok(shard) = self.read_shard(&self.volume_readers[vol_idx], offset) {
+                    available_shards.push((shard_idx, shard));
+                }
+            }
 
             let block_id = BlockId::new(location.slot_index as u64);
             self.erasure_unpacker
                 .decode_and_extract_all(available_shards, erasure_info, block_id)
         } else {
             // Standard block: read and unpack directly
-            let encrypted_block = self.volume_reader.read_block(location)?;
+            let encrypted_block = self.volume_readers[0].read_block(location)?;
             self.unpacker.extract_all_chunks(&encrypted_block)
         }
+    }
+
+    fn read_shard<R: era_storage::StorageReader>(&self, reader: &VolumeReader<R>, offset: u64) -> Result<Bytes> {
+        let header_bytes = reader.read_raw(offset, era_common::ShardHeader::SIZE)?;
+        if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
+             let data = reader.read_raw(offset + era_common::ShardHeader::SIZE as u64, header.length as usize)?;
+             if header.verify(&data) {
+                 return Ok(data);
+             }
+        }
+        Err(EraError::other("Shard verification failed"))
     }
 
     /// List all files in the archive
@@ -427,18 +493,18 @@ impl ArchiveReader {
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
-        let erasure_config = self.volume_reader.header().config.erasure;
+        let erasure_config = self.volume_readers[0].header().config.erasure;
 
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             Box::new(ErasureBlockIterator::new(
-                &self.volume_reader,
+                &self.volume_readers,
                 &self.erasure_unpacker,
                 config.data_shards,
                 config.parity_shards,
             ))
         } else {
             Box::new(StandardBlockIterator::new(
-                &self.volume_reader,
+                &self.volume_readers[0],
                 &self.unpacker,
             ))
         };
@@ -460,18 +526,18 @@ impl ArchiveReader {
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
-        let erasure_config = self.volume_reader.header().config.erasure;
+        let erasure_config = self.volume_readers[0].header().config.erasure;
 
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             Box::new(ErasureBlockIterator::new(
-                &self.volume_reader,
+                &self.volume_readers,
                 &self.erasure_unpacker,
                 config.data_shards,
                 config.parity_shards,
             ))
         } else {
             Box::new(StandardBlockIterator::new(
-                &self.volume_reader,
+                &self.volume_readers[0],
                 &self.unpacker,
             ))
         };
