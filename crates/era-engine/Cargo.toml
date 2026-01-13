@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "e2e_performance_bench"
 harness = false
+
+[[bench]]
+name = "real_world_perf_test"
+harness = false

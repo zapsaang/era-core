@@ -15,29 +15,8 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
-/// Maximum allowed block size (16 MB) - prevents malicious archives from causing OOM
-const MAX_BLOCK_SIZE: u32 = 16 * 1024 * 1024;
-
 /// Maximum allowed file size declared in catalog (100 GB) - sanity check
 const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
-
-/// Validate block size to prevent infinite loops and OOM attacks
-#[inline]
-fn validate_block_size(block_size: u32, offset: u64) -> Result<()> {
-    if block_size == 0 {
-        return Err(EraError::CorruptedHeader(format!(
-            "Zero-length block at offset {}",
-            offset
-        )));
-    }
-    if block_size > MAX_BLOCK_SIZE {
-        return Err(EraError::BlockTooLarge {
-            size: block_size as usize,
-            max_size: MAX_BLOCK_SIZE as usize,
-        });
-    }
-    Ok(())
-}
 
 /// Options for extraction
 #[derive(Debug, Clone, Default)]
@@ -67,6 +46,9 @@ impl ExtractOptions {
 /// Reader for ERA archives
 pub struct ArchiveReader {
     volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>>,
+    /// Indices of each volume in the original multi-volume sequence
+    /// e.g., [0, 2] means we have volume 0 and volume 2 (volume 1 is missing)
+    volume_indices: Vec<usize>,
     unpacker: MacroBlockUnpacker,
     erasure_unpacker: ErasureBlockUnpacker,
     catalog: Option<Catalog>,
@@ -74,6 +56,10 @@ pub struct ArchiveReader {
 
 impl ArchiveReader {
     /// Open an archive for reading
+    ///
+    /// This function can open an archive starting from any available volume.
+    /// It uses the volume header's `volume_sequence` and `total_volumes` fields
+    /// to determine the complete volume set and handle missing volumes.
     ///
     /// This function verifies the password early using the stored verification tag,
     /// providing clear error messages for incorrect passwords.
@@ -84,42 +70,140 @@ impl ArchiveReader {
         let backend = LocalStorageBackend::new(parent_dir);
         let base_filename = path.file_name().unwrap_or_default();
 
-        // 1. Open primary volume
-        let mut volume_readers = Vec::new();
-        let primary_reader = VolumeReader::open(&backend, Path::new(base_filename))?;
-        volume_readers.push(primary_reader);
+        // 1. Try to open the specified file first (could be any volume)
+        let first_reader = VolumeReader::open(&backend, Path::new(base_filename))?;
 
-        // 2. Discover and open subsequent volumes
-        // Assumes naming convention: file.era.001, file.era.002, etc.
-        let mut i = 1;
-        loop {
-            let p = PathBuf::from(base_filename);
-            let mut file_name = p.as_os_str().to_os_string();
-            file_name.push(format!(".{:03}", i));
-            let sub_path = PathBuf::from(file_name);
+        // Read volume metadata from header (copy values before moving reader)
+        let first_vol_sequence = first_reader.header().volume_sequence as usize;
+        let total_volumes = first_reader.header().total_volumes as usize;
+        let erasure_config = first_reader.header().config.erasure;
+        let first_archive_id = first_reader.header().archive_id;
 
-            // Check if file exists relative to backend (parent_dir)
-            if !parent_dir.join(&sub_path).exists() {
-                break;
+        // 2. Determine scan tolerance based on erasure configuration
+        let scan_tolerance = if let Some(config) = erasure_config {
+            (config.parity_shards as usize + 1).max(2)
+        } else {
+            2
+        };
+
+        // 3. Determine how many volumes to scan for
+        // If total_volumes is known, use it; otherwise scan up to MAX_SCAN
+        const MAX_SCAN: usize = 32;
+        let scan_limit = if total_volumes > 0 {
+            total_volumes
+        } else {
+            MAX_SCAN
+        };
+
+        // 4. Build the base path for volume 0 (strip any .NNN suffix)
+        let base_str = base_filename.to_string_lossy();
+        let base_path = if base_str.ends_with(".era") {
+            PathBuf::from(base_filename)
+        } else {
+            // Handle case where user opened .era.001 etc
+            // Strip the .NNN suffix to get base .era path
+            let s = base_str.to_string();
+            if let Some(idx) = s.rfind(".era.") {
+                PathBuf::from(&s[..idx + 4]) // Keep up to ".era"
+            } else {
+                PathBuf::from(base_filename)
+            }
+        };
+
+        // 5. Scan for all available volumes
+        // Store the first reader in Option to handle ownership
+        let mut found_readers: Vec<(usize, VolumeReader<era_storage::LocalStorageReader>)> =
+            Vec::new();
+        let mut missing_count = 0;
+        let mut first_reader_opt = Some(first_reader);
+
+        for i in 0..scan_limit {
+            let volume_path = if i == 0 {
+                base_path.clone()
+            } else {
+                let mut p = base_path.as_os_str().to_os_string();
+                p.push(format!(".{:03}", i));
+                PathBuf::from(p)
+            };
+
+            let full_path = parent_dir.join(&volume_path);
+
+            // Check if this corresponds to the file we already opened
+            if i == first_vol_sequence {
+                if let Some(reader) = first_reader_opt.take() {
+                    found_readers.push((first_vol_sequence, reader));
+                    missing_count = 0;
+                }
+                continue;
             }
 
-            match VolumeReader::open(&backend, &sub_path) {
+            if !full_path.exists() {
+                missing_count += 1;
+                if total_volumes > 0 {
+                    // We know the exact count, continue until we've checked all
+                    continue;
+                } else if missing_count >= scan_tolerance {
+                    break;
+                }
+                continue;
+            }
+
+            missing_count = 0;
+
+            match VolumeReader::open(&backend, &volume_path) {
                 Ok(reader) => {
-                    volume_readers.push(reader);
-                    i += 1;
+                    // Verify it's part of the same archive
+                    if reader.header().archive_id == first_archive_id {
+                        // Use the volume_sequence from header, not filename index
+                        let vol_seq = reader.header().volume_sequence as usize;
+                        found_readers.push((vol_seq, reader));
+                    } else {
+                        tracing::warn!(
+                            "Volume {} has different archive_id, skipping",
+                            volume_path.display()
+                        );
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to open volume {}: {}", sub_path.display(), e);
-                    break;
+                    tracing::warn!("Failed to open volume {}: {}", volume_path.display(), e);
                 }
             }
         }
 
-        info!("Opened {} volumes", volume_readers.len());
+        // If first_reader wasn't used (e.g., its sequence wasn't in scan range), add it now
+        if let Some(reader) = first_reader_opt {
+            found_readers.push((first_vol_sequence, reader));
+        }
 
-        let volume_reader = &volume_readers[0]; // Primary
+        // 6. Sort by volume sequence and build final structures
+        found_readers.sort_by_key(|(seq, _)| *seq);
 
-        // Derive key from password and stored salt
+        let volume_indices: Vec<usize> = found_readers.iter().map(|(seq, _)| *seq).collect();
+        let volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>> =
+            found_readers.into_iter().map(|(_, r)| r).collect();
+
+        if volume_readers.is_empty() {
+            return Err(EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No valid volumes found",
+            )));
+        }
+
+        // Log discovered volumes
+        info!(
+            "Opened {} volumes at sequences {:?} (total expected: {}, scan tolerance: {})",
+            volume_readers.len(),
+            volume_indices,
+            if total_volumes > 0 {
+                total_volumes.to_string()
+            } else {
+                "unknown".to_string()
+            },
+            scan_tolerance
+        );
+
+        // Use first available reader for key derivation (all volumes share same crypto params)
+        let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
         let salt = Salt::from_bytes(header.crypto_anchor.salt);
         let kdf_params = KdfParams {
@@ -156,6 +240,7 @@ impl ArchiveReader {
 
         Ok(Self {
             volume_readers,
+            volume_indices,
             unpacker,
             erasure_unpacker,
             catalog: None,
@@ -167,39 +252,51 @@ impl ArchiveReader {
         self.volume_readers[0].header()
     }
 
-    /// Load the catalog (stored as the last block before footer)
+    /// Load the catalog from any available volume
+    /// Each volume contains a copy of the catalog, enabling recovery from any volume
     pub fn load_catalog(&mut self) -> Result<&Catalog> {
         if self.catalog.is_some() {
             return Ok(self.catalog.as_ref().unwrap());
         }
 
-        let block_count = self.volume_readers[0].block_count();
-        if block_count == 0 {
-            return Err(EraError::EmptyArchive);
+        // Find the first volume that has a valid catalog
+        let mut catalog_reader_idx = None;
+        for (i, reader) in self.volume_readers.iter().enumerate() {
+            let footer = reader.footer();
+            if footer.has_catalog_location() && reader.block_count() > 0 {
+                catalog_reader_idx = Some(i);
+                debug!(
+                    "Found catalog in volume {} (sequence {})",
+                    i,
+                    reader.header().volume_sequence
+                );
+                break;
+            }
         }
 
-        // Try to use catalog location from footer (O(1) lookup)
-        let footer = self.volume_readers[0].footer();
-        let catalog_location = if footer.has_catalog_location() {
-            debug!(
-                "Using footer catalog location: offset={}, size={}, block_id={}",
-                footer.catalog_offset, footer.catalog_size, footer.catalog_block_id
-            );
-            BlockLocation {
-                volume_id: self.volume_readers[0].header().volume_id,
-                slot_index: footer.catalog_block_id,
-                physical_offset: footer.catalog_offset,
-                encrypted_size: footer.catalog_size,
-                erasure_info: None,
-                shard_offsets: None,
-            }
-        } else {
-            // Fallback: scan for catalog (O(n) - for backwards compatibility)
-            debug!("Footer lacks catalog location, scanning blocks...");
-            self.scan_for_last_block()?
+        let reader_idx = catalog_reader_idx.ok_or_else(|| {
+            debug!("No volume with valid catalog found");
+            EraError::EmptyArchive
+        })?;
+
+        let reader = &self.volume_readers[reader_idx];
+        let footer = reader.footer();
+
+        let catalog_location = BlockLocation {
+            volume_id: reader.header().volume_id,
+            slot_index: footer.catalog_block_id,
+            physical_offset: footer.catalog_offset,
+            encrypted_size: footer.catalog_size,
+            erasure_info: None,
+            shard_offsets: None,
         };
 
-        let encrypted_block = self.volume_readers[0].read_block(&catalog_location)?;
+        debug!(
+            "Loading catalog from volume {} at offset={}, size={}, block_id={}",
+            reader_idx, footer.catalog_offset, footer.catalog_size, footer.catalog_block_id
+        );
+
+        let encrypted_block = self.volume_readers[reader_idx].read_block(&catalog_location)?;
         let chunks = self.unpacker.extract_all_chunks(&encrypted_block)?;
 
         if chunks.is_empty() {
@@ -216,41 +313,6 @@ impl ArchiveReader {
 
         self.catalog = Some(catalog);
         Ok(self.catalog.as_ref().unwrap())
-    }
-
-    /// Scan blocks to find the last one (fallback for old archives)
-    fn scan_for_last_block(&self) -> Result<BlockLocation> {
-        let (data_start, data_end) = self.volume_readers[0].data_region();
-        let block_count = self.volume_readers[0].block_count();
-
-        let mut offset = data_start;
-        let mut last_block_offset = data_start;
-        let mut last_block_size = 0u32;
-
-        while offset < data_end {
-            let len_bytes = self.volume_readers[0].read_raw(offset, 4)?;
-            if len_bytes.len() < 4 {
-                break;
-            }
-            let block_size =
-                u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
-
-            // Validate block size to prevent infinite loops
-            validate_block_size(block_size, offset)?;
-
-            last_block_offset = offset;
-            last_block_size = block_size;
-            offset += 4 + block_size as u64;
-        }
-
-        Ok(BlockLocation {
-            volume_id: self.volume_readers[0].header().volume_id,
-            slot_index: block_count - 1,
-            physical_offset: last_block_offset,
-            encrypted_size: last_block_size,
-            erasure_info: None,
-            shard_offsets: None,
-        })
     }
 
     /// Read a block and extract all chunks, handling both erasure and non-erasure blocks
@@ -514,6 +576,7 @@ impl ArchiveReader {
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             Box::new(ErasureBlockIterator::new(
                 &self.volume_readers,
+                &self.volume_indices,
                 &self.erasure_unpacker,
                 config.data_shards,
                 config.parity_shards,
@@ -547,6 +610,7 @@ impl ArchiveReader {
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             Box::new(ErasureBlockIterator::new(
                 &self.volume_readers,
+                &self.volume_indices,
                 &self.erasure_unpacker,
                 config.data_shards,
                 config.parity_shards,
@@ -861,40 +925,6 @@ mod tests {
 
         assert!(stats.is_ok(), "Empty archive should verify ok");
         assert_eq!(stats.files_verified, 0);
-    }
-
-    #[test]
-    fn test_validate_block_size_zero() {
-        // Zero-length block should be rejected
-        let result = super::validate_block_size(0, 1000);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Zero-length"),
-            "Error should mention zero-length: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_validate_block_size_too_large() {
-        // Block larger than MAX_BLOCK_SIZE should be rejected
-        let result = super::validate_block_size(super::MAX_BLOCK_SIZE + 1, 2000);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("too large"),
-            "Error should mention too large: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_validate_block_size_valid() {
-        // Valid block sizes should pass
-        assert!(super::validate_block_size(1, 0).is_ok());
-        assert!(super::validate_block_size(1024, 0).is_ok());
-        assert!(super::validate_block_size(super::MAX_BLOCK_SIZE, 0).is_ok());
     }
 
     #[test]

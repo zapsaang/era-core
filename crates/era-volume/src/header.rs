@@ -71,6 +71,9 @@ pub struct SuperHeader {
     pub archive_id: ArchiveId,
     /// Volume sequence number (0-based)
     pub volume_sequence: u16,
+    /// Total number of volumes in this archive set
+    /// Set to 0 if unknown at creation time (will be updated on finalize)
+    pub total_volumes: u16,
     /// Creation timestamp (Unix seconds)
     pub creation_time: i64,
     /// Feature flags
@@ -101,6 +104,7 @@ impl SuperHeader {
             volume_id: VolumeId::new(),
             archive_id,
             volume_sequence: 0,
+            total_volumes: 0, // Unknown at creation, set by writer
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -126,6 +130,7 @@ impl SuperHeader {
             volume_id: VolumeId::new(),
             archive_id,
             volume_sequence: 0,
+            total_volumes: 0, // Unknown at creation, set by writer
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -150,6 +155,7 @@ impl SuperHeader {
             volume_id: VolumeId::new(),
             archive_id: self.archive_id,
             volume_sequence: self.volume_sequence + 1,
+            total_volumes: self.total_volumes, // Inherit from parent
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

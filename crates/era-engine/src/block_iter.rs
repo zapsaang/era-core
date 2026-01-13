@@ -181,6 +181,11 @@ pub struct ErasureBlockIterator<'a, R: era_storage::StorageReader> {
     data_shards: u8,
     parity_shards: u8,
     total_shards: usize,
+    /// Maps volume index in original sequence to index in volume_readers
+    /// e.g., if original volumes 0 and 2 are present, vol_index_map[0] = Some(0), vol_index_map[1] = None, vol_index_map[2] = Some(1)
+    vol_index_map: Vec<Option<usize>>,
+    /// Total number of volumes in original archive
+    original_volume_count: usize,
     /// Current offsets in the data region for each volume
     current_offsets: Vec<u64>,
     /// End of data region for each volume
@@ -193,8 +198,17 @@ pub struct ErasureBlockIterator<'a, R: era_storage::StorageReader> {
 
 impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
     /// Create a new erasure block iterator
+    ///
+    /// # Arguments
+    /// * `volume_readers` - Available volume readers
+    /// * `volume_indices` - Original index of each volume in the multi-volume sequence
+    ///                      e.g., [0, 2] means volume 0 and volume 2 are present
+    /// * `erasure_unpacker` - Unpacker for erasure-coded blocks  
+    /// * `data_shards` - Number of data shards in erasure config
+    /// * `parity_shards` - Number of parity shards in erasure config
     pub fn new(
         volume_readers: &'a [VolumeReader<R>],
+        volume_indices: &[usize],
         erasure_unpacker: &'a ErasureBlockUnpacker,
         data_shards: u8,
         parity_shards: u8,
@@ -204,10 +218,6 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
 
         for reader in volume_readers {
             let (start, end) = reader.data_region();
-            // If checking catalog offset from footer is needed, use reader.footer().catalog_offset
-            // But data_region() usually accounts for it if implemented correctly?
-            // reader.rs used catalog_offset from footer explicitly.
-            // Let's rely on footer catalog offset as the definitive end of data stream.
             let footer = reader.footer();
             let limit = if footer.has_catalog_location() {
                 footer.catalog_offset
@@ -220,12 +230,24 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
 
         let total_shards = data_shards as usize + parity_shards as usize;
 
+        // Build reverse map: original_vol_index -> position in volume_readers
+        // The original volume count is determined by the maximum index present + any gaps
+        let original_volume_count = volume_indices.iter().copied().max().unwrap_or(0) + 1;
+        let mut vol_index_map = vec![None; original_volume_count];
+        for (reader_idx, &orig_idx) in volume_indices.iter().enumerate() {
+            if orig_idx < original_volume_count {
+                vol_index_map[orig_idx] = Some(reader_idx);
+            }
+        }
+
         Self {
             volume_readers,
             erasure_unpacker,
             data_shards,
             parity_shards,
             total_shards,
+            vol_index_map,
+            original_volume_count,
             current_offsets,
             data_ends,
             block_index: 0,
@@ -236,13 +258,15 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
 
 impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'a, R> {
     fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
-        // Shard 0 is always on Volume 0 (idx % N == 0 for idx=0)
-        // Check if Volume 0 has more data
+        // Find the first available volume to check if there's more data
+        // We need to use the first reader in volume_readers (which is the lowest available volume)
+        // Since each volume has original_len header for each block, we can read from any volume
         if self.current_offsets[0] >= self.data_ends[0] {
             return None;
         }
 
-        // Read erasure block header (4 bytes original_len) from Volume 0
+        // Read erasure block header (4 bytes original_len) from the first available volume
+        // All volumes now have this header written before their first shard of each block
         let header_bytes = match self.volume_readers[0].read_raw(self.current_offsets[0], 4) {
             Ok(bytes) if bytes.len() == 4 => bytes,
             Ok(_) => return None,
@@ -254,18 +278,44 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             header_bytes[2],
             header_bytes[3],
         ]);
+
+        // Advance past the header on the first available volume
         self.current_offsets[0] += 4;
 
         // Read all shards for this block
         let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(self.total_shards);
         let mut corrupted_count = 0usize;
         let mut first_shard_size = 0u32;
-        let num_volumes = self.volume_readers.len();
+
+        // Track which volumes have had their block header read
+        // We already read it from volume_readers[0], so mark that
+        let mut header_read_for_volume = vec![false; self.volume_readers.len()];
+        header_read_for_volume[0] = true;
 
         for shard_idx in 0..self.total_shards {
-            let vol_idx = shard_idx % num_volumes;
-            let reader = &self.volume_readers[vol_idx];
-            let offset = self.current_offsets[vol_idx];
+            // Use original volume count for shard distribution mapping
+            let orig_vol_idx = shard_idx % self.original_volume_count;
+
+            // Look up if this volume is available
+            let reader_idx = match self.vol_index_map.get(orig_vol_idx) {
+                Some(Some(idx)) => *idx,
+                _ => {
+                    // Volume is missing - shard unavailable, count as corrupted
+                    corrupted_count += 1;
+                    continue;
+                }
+            };
+
+            let reader = &self.volume_readers[reader_idx];
+            let mut offset = self.current_offsets[reader_idx];
+
+            // If this is the first shard for this volume in this block,
+            // skip the original_len header (4 bytes)
+            if !header_read_for_volume[reader_idx] {
+                offset += 4;
+                self.current_offsets[reader_idx] += 4;
+                header_read_for_volume[reader_idx] = true;
+            }
 
             // Read shard header (8 bytes: 4 length + 4 CRC)
             let header_bytes = match reader.read_raw(offset, ShardHeader::SIZE) {
@@ -284,15 +334,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
                 Some(h) => h,
                 None => {
                     corrupted_count += 1;
-                    // Even if header invalid, we read SIZE bytes.
-                    // But we don't know data length. Sync is lost on this volume.
-                    // We can assume header was corrupted but maybe we can guess size? No.
                     continue;
                 }
             };
 
             // Advance past header
-            self.current_offsets[vol_idx] += ShardHeader::SIZE as u64;
+            self.current_offsets[reader_idx] += ShardHeader::SIZE as u64;
 
             let shard_len = shard_header.length as usize;
 
@@ -301,7 +348,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Read shard data
-            match reader.read_raw(self.current_offsets[vol_idx], shard_len) {
+            match reader.read_raw(self.current_offsets[reader_idx], shard_len) {
                 Ok(shard_data) => {
                     // Verify CRC
                     if shard_header.verify(&shard_data) {
@@ -316,7 +363,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Advance past data
-            self.current_offsets[vol_idx] += shard_len as u64;
+            self.current_offsets[reader_idx] += shard_len as u64;
         }
 
         self.stats.corrupted_shards += corrupted_count as u32;
@@ -366,7 +413,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
     }
 
     fn has_more(&self) -> bool {
-        // If Volume 0 has more data (at least 4 bytes for next header)
+        // Check the first available volume for more data (at least 4 bytes for next header)
+        // volume_readers[0] is always the first available volume in sorted order
         self.current_offsets[0] + 4 <= self.data_ends[0]
     }
 

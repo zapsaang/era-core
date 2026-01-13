@@ -175,6 +175,7 @@ impl ArchiveWriterBuilder {
 
             let mut vol_header = header.clone();
             vol_header.volume_sequence = i as u16;
+            vol_header.total_volumes = self.volume_count as u16;
 
             let writer = VolumeWriter::create(&backend, &volume_path, vol_header)?;
             volume_writers.push(writer);
@@ -513,20 +514,30 @@ impl ArchiveWriter {
             let mut shard_offsets =
                 Vec::with_capacity(sharded_block.shards.len().saturating_sub(1));
 
+            let volume_count = self.volume_writers.len();
+
             for (idx, shard) in sharded_block.shards.iter().enumerate() {
                 // Determine which volume to write this shard to
-                let vol_idx = idx % self.volume_writers.len();
+                let vol_idx = idx % volume_count;
                 let writer = &mut self.volume_writers[vol_idx];
 
                 // Write each shard with length + CRC header for integrity validation
                 let crc = era_common::compute_shard_crc(shard);
                 let shard_header = era_common::ShardHeader::new(shard.len() as u32, crc);
 
-                if idx == 0 {
-                    // Shard 0 includes the Block Header (original_len)
-                    header_offset = writer.write_raw(&original_len_bytes)?;
+                // Write original_len header before the FIRST shard on EACH volume
+                // This allows reading from any volume when some are missing
+                if idx < volume_count {
+                    // First shard for this volume - write the block header
+                    let offset = writer.write_raw(&original_len_bytes)?;
+                    if idx == 0 {
+                        header_offset = offset;
+                    }
                     writer.write_raw(&shard_header.to_bytes())?;
                     writer.write_raw(shard)?;
+                    if idx > 0 {
+                        shard_offsets.push(offset); // Record the header offset, not just shard offset
+                    }
                 } else {
                     let offset = writer.write_raw(&shard_header.to_bytes())?;
                     writer.write_raw(shard)?;
@@ -602,51 +613,57 @@ impl ArchiveWriter {
         let catalog_hash = era_crypto::hash(&catalog_bytes);
         let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
 
-        // Use primary writer (Volume 0) for catalog
-        let writer = &mut self.volume_writers[0];
+        // Pack catalog ONCE to ensure same block_id (and thus same nonce) for all volumes
+        // This is critical because the block_id is used to derive the encryption nonce
+        let catalog_block = self.block_builder.pack_single(catalog_chunk.clone())?;
+        let catalog_block_id = catalog_block.block_id.sequence() as u32;
 
-        // Write catalog with erasure protection if enabled
-        let (catalog_location, catalog_block_id) = if self.erasure_builder.is_some() {
-            // Write primary catalog with erasure coding for redundancy protection
-            let primary_block = self.block_builder.pack_single(catalog_chunk.clone())?;
-            let primary_block_id = primary_block.block_id.sequence() as u32;
-            let primary_location = writer.write_block(&primary_block)?;
-
-            // Write backup catalog copy for additional safety
-            // This ensures catalog survives even if erasure shards are corrupted together
-            let backup_block = self.block_builder.pack_single(catalog_chunk)?;
-            let backup_location = writer.write_block(&backup_block)?;
-
-            debug!(
-                "Catalog written with redundancy: primary at {}, backup at {}",
-                primary_location.physical_offset, backup_location.physical_offset
-            );
-
-            (primary_location, primary_block_id)
+        // Optionally create a backup block for erasure-coded archives
+        let backup_block = if self.erasure_builder.is_some() {
+            Some(self.block_builder.pack_single(catalog_chunk)?)
         } else {
-            // Standard catalog write
-            let catalog_block = self.block_builder.pack_single(catalog_chunk)?;
-            let block_id = catalog_block.block_id.sequence() as u32;
-            let location = writer.write_block(&catalog_block)?;
-            (location, block_id)
+            None
         };
 
+        // Write catalog to EVERY volume so archive can be opened from any volume
+        // This enables recovery even when some volumes (including the primary) are missing
+        let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
+
+        for (i, writer) in self.volume_writers.iter_mut().enumerate() {
+            // Write the same catalog block to each volume
+            let location = writer.write_block(&catalog_block)?;
+
+            // Write backup copy for erasure-coded archives
+            if let Some(ref backup) = backup_block {
+                let _backup_location = writer.write_block(backup)?;
+                debug!(
+                    "Volume {}: Catalog written with backup at offset {}",
+                    i, location.physical_offset
+                );
+            } else {
+                debug!(
+                    "Volume {}: Catalog written at offset {}",
+                    i, location.physical_offset
+                );
+            }
+
+            catalog_locations.push((
+                location.physical_offset,
+                location.encrypted_size,
+                catalog_block_id,
+            ));
+        }
+
         debug!(
-            "Catalog written at offset {} (size: {}, block_id: {})",
-            catalog_location.physical_offset, catalog_location.encrypted_size, catalog_block_id
+            "Catalog (block_id={}) written to {} volumes for full redundancy",
+            catalog_block_id,
+            catalog_locations.len()
         );
 
-        // Finalize volumes
+        // Finalize volumes with their respective catalog locations
         for (i, writer) in self.volume_writers.drain(..).enumerate() {
-            if i == 0 {
-                writer.finalize_with_catalog(
-                    catalog_location.physical_offset,
-                    catalog_location.encrypted_size,
-                    catalog_block_id,
-                )?;
-            } else {
-                writer.finalize_with_catalog(0, 0, 0)?;
-            }
+            let (offset, size, block_id) = catalog_locations[i];
+            writer.finalize_with_catalog(offset, size, block_id)?;
         }
 
         // Delete checkpoint after successful completion
