@@ -48,6 +48,9 @@ subtle = "2.5"
 # Compression
 zstd = "0.13"
 
+# Erasure coding
+reed-solomon-simd = "3.0"
+
 # UUID
 uuid = { version = "1.6", features = ["v4", "serde"] }
 

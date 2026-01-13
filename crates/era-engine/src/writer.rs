@@ -2,15 +2,20 @@
 
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
-use era_common::{ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, Result, UniqueChunk};
+use era_common::{
+    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, ErasureCodeConfig, Result, UniqueChunk,
+};
 use era_crypto::{derive_key, DerivedKey, KdfParams, Salt};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
-use era_packing::MacroBlockBuilder;
+use era_packing::{ErasureBlockBuilder, MacroBlockBuilder};
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumeWriter};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+use crate::checkpoint::CheckpointManager;
+use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 
 /// Builder for creating an ArchiveWriter
 pub struct ArchiveWriterBuilder {
@@ -19,6 +24,14 @@ pub struct ArchiveWriterBuilder {
     config: ArchiveConfig,
     enable_cdc: bool,
     chunker_config: Option<ChunkerConfig>,
+    /// Enable checkpoint for crash recovery
+    enable_checkpoint: bool,
+    /// Recovery options when checkpoint is enabled
+    recovery_options: RecoveryOptions,
+    /// Enable erasure coding for redundancy
+    enable_erasure: bool,
+    /// Erasure coding configuration
+    erasure_config: ErasureCodeConfig,
 }
 
 impl ArchiveWriterBuilder {
@@ -30,6 +43,10 @@ impl ArchiveWriterBuilder {
             config: ArchiveConfig::default(),
             enable_cdc: false,
             chunker_config: None,
+            enable_checkpoint: false,
+            recovery_options: RecoveryOptions::default(),
+            enable_erasure: false,
+            erasure_config: ErasureCodeConfig::default(),
         }
     }
 
@@ -55,6 +72,42 @@ impl ArchiveWriterBuilder {
     pub fn chunker_config(mut self, config: ChunkerConfig) -> Self {
         self.chunker_config = Some(config);
         self.enable_cdc = true;
+        self
+    }
+
+    /// Enable checkpoint for crash recovery
+    ///
+    /// When enabled, the writer will periodically save progress to a checkpoint file.
+    /// If the process crashes, the next call to build() will automatically resume
+    /// from the last checkpoint.
+    pub fn enable_checkpoint(mut self, enable: bool) -> Self {
+        self.enable_checkpoint = enable;
+        self
+    }
+
+    /// Set recovery options for checkpoint behavior
+    pub fn recovery_options(mut self, options: RecoveryOptions) -> Self {
+        self.recovery_options = options;
+        self.enable_checkpoint = true;
+        self
+    }
+
+    /// Enable erasure coding for redundancy
+    ///
+    /// When enabled, blocks are encoded with Reed-Solomon erasure coding,
+    /// allowing recovery from up to `parity_shards` lost shards.
+    pub fn enable_erasure(mut self, enable: bool) -> Self {
+        self.enable_erasure = enable;
+        self
+    }
+
+    /// Set custom erasure coding configuration
+    ///
+    /// Default is 4+2 (4 data shards, 2 parity shards).
+    /// This allows recovery from loss of any 2 shards.
+    pub fn erasure_config(mut self, config: ErasureCodeConfig) -> Self {
+        self.erasure_config = config;
+        self.enable_erasure = true;
         self
     }
 
@@ -105,18 +158,82 @@ impl ArchiveWriterBuilder {
             FileReader::new()
         };
 
+        // Set up checkpoint manager if enabled
+        let checkpoint_manager = if self.enable_checkpoint {
+            // Derive HMAC key from main key for checkpoint integrity
+            let mut hmac_key = [0u8; 32];
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(key.as_bytes());
+            hasher.update(b"ERA-CHECKPOINT-KEY");
+            let hash = hasher.finalize();
+            hmac_key.copy_from_slice(&hash.as_bytes()[..32]);
+
+            let manager = match self.recovery_options.strategy {
+                RecoveryStrategy::StartFresh => {
+                    // Delete any existing checkpoint
+                    if CheckpointManager::exists(&self.output_path) {
+                        warn!("Starting fresh, deleting existing checkpoint");
+                        let old = CheckpointManager::load_or_create(&self.output_path)?;
+                        old.delete()?;
+                    }
+                    CheckpointManager::with_hmac_key(&self.output_path, hmac_key)
+                }
+                RecoveryStrategy::Resume => {
+                    CheckpointManager::load_or_create_with_key(&self.output_path, Some(hmac_key))?
+                }
+                RecoveryStrategy::Abort => {
+                    if CheckpointManager::exists(&self.output_path) {
+                        return Err(era_common::EraError::other(
+                            "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
+                        ));
+                    }
+                    CheckpointManager::with_hmac_key(&self.output_path, hmac_key)
+                }
+            };
+            Some(manager)
+        } else {
+            None
+        };
+
+        // Load existing chunk locations from checkpoint if resuming
+        let chunk_locations = if let Some(ref mgr) = checkpoint_manager {
+            if self.recovery_options.strategy == RecoveryStrategy::Resume {
+                mgr.written_chunks().clone()
+            } else {
+                HashMap::new()
+            }
+        } else {
+            HashMap::new()
+        };
+
+        // Create erasure builder if enabled
+        let erasure_builder = if self.enable_erasure {
+            let compressor = Box::new(ZstdCompressor::new(self.config.compression.level));
+            Some(ErasureBlockBuilder::new(
+                key.clone(),
+                nonce_context,
+                compressor,
+                self.erasure_config,
+            )?)
+        } else {
+            None
+        };
+
         Ok(ArchiveWriter {
             archive_id,
+            output_path: self.output_path,
             key,
             volume_writer,
             block_builder,
+            erasure_builder,
             catalog: Catalog::new(),
-            chunk_locations: HashMap::new(),
+            chunk_locations,
             file_reader,
             enable_cdc: self.enable_cdc,
             pending_chunks: Vec::new(),
             pending_size: 0,
             target_block_size: 4 * 1024 * 1024, // 4MB
+            checkpoint_manager,
         })
     }
 }
@@ -124,11 +241,16 @@ impl ArchiveWriterBuilder {
 /// Writer for creating ERA archives
 pub struct ArchiveWriter {
     archive_id: ArchiveId,
+    /// Output path for the archive
+    output_path: PathBuf,
     /// Key is stored for potential future re-keying operations
     #[allow(dead_code)]
     key: DerivedKey,
     volume_writer: VolumeWriter<era_storage::LocalStorageWriter>,
+    /// Standard block builder
     block_builder: MacroBlockBuilder,
+    /// Erasure-coded block builder (optional)
+    erasure_builder: Option<ErasureBlockBuilder>,
     catalog: Catalog,
     chunk_locations: HashMap<ChunkHash, BlockLocation>,
     file_reader: FileReader,
@@ -139,6 +261,8 @@ pub struct ArchiveWriter {
     pending_size: usize,
     /// Target block size for batching (default 4MB)
     target_block_size: usize,
+    /// Checkpoint manager for crash recovery (optional)
+    checkpoint_manager: Option<CheckpointManager>,
 }
 
 impl ArchiveWriter {
@@ -250,10 +374,16 @@ impl ArchiveWriter {
             if !self.pending_chunks.is_empty() {
                 self.flush_pending()?;
             }
-            // Pack the large chunk alone
-            let encrypted_block = self.block_builder.pack_single(chunk)?;
-            let location = self.volume_writer.write_block(&encrypted_block)?;
+
+            // Pack the large chunk alone (with or without erasure coding)
+            let location = self.pack_and_write_chunks(vec![chunk])?;
             self.chunk_locations.insert(hash, location);
+
+            // Record in checkpoint if enabled
+            if let Some(ref mut mgr) = self.checkpoint_manager {
+                mgr.record_chunk(hash, location)?;
+            }
+
             debug!(
                 "Large chunk packed alone at offset {}",
                 location.physical_offset
@@ -290,13 +420,19 @@ impl ArchiveWriter {
         let hashes: Vec<_> = chunks.iter().map(|c| c.hash).collect();
         self.pending_size = 0;
 
-        // Pack all chunks together
-        let encrypted_block = self.block_builder.pack_chunks(chunks)?;
-        let location = self.volume_writer.write_block(&encrypted_block)?;
+        // Pack and write chunks (with or without erasure coding)
+        let location = self.pack_and_write_chunks(chunks)?;
 
         // Record location for all chunks
-        for hash in hashes {
-            self.chunk_locations.insert(hash, location);
+        for hash in &hashes {
+            self.chunk_locations.insert(*hash, location);
+        }
+
+        // Record in checkpoint if enabled
+        if let Some(ref mut mgr) = self.checkpoint_manager {
+            for hash in hashes {
+                mgr.record_chunk(hash, location)?;
+            }
         }
 
         debug!(
@@ -306,6 +442,50 @@ impl ArchiveWriter {
         );
 
         Ok(())
+    }
+
+    /// Pack and write chunks, using erasure coding if enabled
+    fn pack_and_write_chunks(&mut self, chunks: Vec<UniqueChunk>) -> Result<BlockLocation> {
+        if let Some(ref erasure_builder) = self.erasure_builder {
+            // Use erasure coding
+            let sharded_block = erasure_builder.pack_chunks(chunks)?;
+
+            // Write all shards sequentially (data shards first, then parity)
+            // For now, we store all shards in the same volume
+            // Future: distribute across multiple volumes for better fault tolerance
+            let mut first_location = None;
+
+            for (idx, shard) in sharded_block.shards.iter().enumerate() {
+                // Write each shard with a length prefix
+                let len_bytes = (shard.len() as u32).to_le_bytes();
+                self.volume_writer.write_raw(&len_bytes)?;
+                let offset = self.volume_writer.write_raw(shard)?;
+
+                if first_location.is_none() {
+                    // Use the first shard's location as the block location
+                    // The reader will know to read consecutive shards
+                    first_location = Some(BlockLocation {
+                        volume_id: self.volume_writer.volume_id(),
+                        slot_index: self.volume_writer.block_count(),
+                        physical_offset: offset - 4, // Include length prefix
+                        encrypted_size: shard.len() as u32,
+                    });
+                }
+
+                debug!(
+                    "Wrote erasure shard {} at offset {} ({} bytes)",
+                    idx,
+                    offset,
+                    shard.len()
+                );
+            }
+
+            Ok(first_location.expect("at least one shard"))
+        } else {
+            // Standard non-erasure path
+            let encrypted_block = self.block_builder.pack_chunks(chunks)?;
+            self.volume_writer.write_block(&encrypted_block)
+        }
     }
 
     /// Add a file from memory
@@ -334,6 +514,12 @@ impl ArchiveWriter {
         // Flush any remaining pending chunks
         self.flush_pending()?;
 
+        // Sync checkpoint before writing catalog (atomic point)
+        if let Some(ref mut mgr) = self.checkpoint_manager {
+            mgr.sync()?;
+            debug!("Checkpoint synced before catalog write");
+        }
+
         // Serialize and write catalog
         let catalog_bytes = self.catalog.to_bytes()?;
         let catalog_hash = era_crypto::hash(&catalog_bytes);
@@ -351,6 +537,18 @@ impl ArchiveWriter {
             catalog_location.physical_offset,
             catalog_location.encrypted_size,
         )?;
+
+        // Delete checkpoint after successful completion
+        if self.checkpoint_manager.is_some() {
+            let checkpoint_path = self.output_path.with_extension("checkpoint");
+            if checkpoint_path.exists() {
+                if let Err(e) = std::fs::remove_file(&checkpoint_path) {
+                    warn!("Failed to remove checkpoint file: {}", e);
+                } else {
+                    debug!("Checkpoint file removed after successful archive creation");
+                }
+            }
+        }
 
         let stats = ArchiveStats {
             archive_id: self.archive_id,

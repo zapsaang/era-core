@@ -112,6 +112,24 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Repair or recover a damaged/incomplete ERA archive
+    Repair {
+        /// Archive path
+        archive: PathBuf,
+
+        /// Encryption password (will prompt if not provided)
+        #[arg(short, long)]
+        password: Option<String>,
+
+        /// Force action (discard checkpoint for interrupted creation)
+        #[arg(short = 'f', long)]
+        force: bool,
+
+        /// Show detailed information
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -157,5 +175,12 @@ fn main() -> anyhow::Result<()> {
             password,
             verbose,
         } => commands::verify(&archive, password.as_deref(), verbose),
+
+        Commands::Repair {
+            archive,
+            password,
+            force,
+            verbose,
+        } => commands::repair(&archive, password.as_deref(), force, verbose),
     }
 }

@@ -6,7 +6,9 @@
 //! For MVP, we use a simplified fixed-size packing strategy.
 
 mod builder;
+mod erasure_builder;
 mod unpacker;
 
 pub use builder::MacroBlockBuilder;
+pub use erasure_builder::ErasureBlockBuilder;
 pub use unpacker::MacroBlockUnpacker;

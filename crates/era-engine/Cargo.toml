@@ -16,9 +16,12 @@ era-packing = { workspace = true }
 era-ingest = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+blake3 = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -26,4 +29,8 @@ criterion = { workspace = true }
 
 [[bench]]
 name = "engine_bench"
+harness = false
+
+[[bench]]
+name = "checkpoint_bench"
 harness = false

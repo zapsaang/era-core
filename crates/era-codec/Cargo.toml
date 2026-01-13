@@ -11,10 +11,15 @@ era-common = { workspace = true }
 bytes = { workspace = true }
 zstd = { workspace = true }
 thiserror = { workspace = true }
+reed-solomon-simd = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 
 [[bench]]
 name = "codec_bench"
+harness = false
+
+[[bench]]
+name = "erasure_bench"
 harness = false

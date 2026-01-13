@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use era_common::ArchiveConfig;
-use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
+use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
@@ -239,4 +239,111 @@ pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<(
             stats.errors.len()
         )
     }
+}
+
+/// Repair a damaged or incomplete ERA archive
+pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool) -> Result<()> {
+    let password = get_password(password, "Enter decryption password: ")?;
+
+    println!("Analyzing archive: {}", archive.display());
+    println!();
+
+    // First, check recovery status
+    let status = RecoveryManager::analyze(archive).context("Failed to analyze archive")?;
+
+    println!("Recovery Analysis");
+    println!("=================");
+    println!();
+    println!(
+        "Checkpoint exists:  {}",
+        if status.checkpoint_exists {
+            "Yes"
+        } else {
+            "No"
+        }
+    );
+    println!(
+        "Archive exists:     {}",
+        if status.archive_exists { "Yes" } else { "No" }
+    );
+    println!(
+        "Recovery needed:    {}",
+        if status.recovery_needed { "Yes" } else { "No" }
+    );
+    println!("Completed files:    {}", status.completed_files.len());
+    println!(
+        "In-progress file:   {}",
+        status
+            .in_progress_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "None".to_string())
+    );
+    println!("Chunks written:     {}", status.chunks_written);
+    println!("Bytes written:      {}", status.bytes_written);
+    println!();
+
+    if !status.checkpoint_exists && !status.archive_exists {
+        println!("❌ No archive or checkpoint found. Nothing to repair.");
+        return Ok(());
+    }
+
+    if !status.recovery_needed {
+        // Archive exists, let's verify it
+        println!("Archive appears complete. Running verification...");
+        println!();
+
+        let mut reader =
+            ArchiveReader::open(archive, &password).context("Failed to open archive")?;
+
+        let verify_stats = reader.verify().context("Verification failed")?;
+
+        if verify_stats.is_ok() {
+            println!("✅ Archive is intact. No repair needed.");
+            return Ok(());
+        }
+
+        println!("❌ Archive has {} errors.", verify_stats.errors.len());
+
+        if verbose {
+            println!();
+            println!("Errors found:");
+            for (i, error) in verify_stats.errors.iter().enumerate() {
+                println!("  {}. {}", i + 1, error);
+            }
+        }
+
+        // Currently we can only detect problems, not fix them
+        // (RS erasure coding would be needed for actual repair)
+        println!();
+        println!("Note: Automatic repair using erasure coding is not yet implemented.");
+        println!("To recover what's possible, try extracting with --force option.");
+
+        anyhow::bail!(
+            "Archive has {} errors and cannot be automatically repaired",
+            verify_stats.errors.len()
+        );
+    }
+
+    // Recovery is needed - we have a checkpoint from interrupted creation
+    println!("Recovery checkpoint found from interrupted archive creation.");
+    println!();
+
+    if !force {
+        println!("To resume the interrupted creation, re-run the original 'era create' command.");
+        println!("The archive writer will automatically detect and resume from the checkpoint.");
+        println!();
+        println!("To discard the checkpoint and start fresh, use --force flag.");
+        return Ok(());
+    }
+
+    // Force flag: delete checkpoint and let user start fresh
+    println!("Discarding checkpoint due to --force flag...");
+
+    let manager = RecoveryManager::new(archive).context("Failed to load recovery state")?;
+    manager.cleanup().context("Failed to clean up checkpoint")?;
+
+    println!("✅ Checkpoint discarded. You can now create a new archive.");
+
+    Ok(())
 }
