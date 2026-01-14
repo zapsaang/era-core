@@ -81,6 +81,58 @@ impl Compressor for NoCompressor {
     }
 }
 
+/// LZ4 compressor (fast compression, lower ratio than Zstd)
+#[allow(dead_code)]
+pub struct LZ4Compressor {
+    level: i32, // 1-12 for lz4_flex
+}
+
+impl LZ4Compressor {
+    /// Create a new LZ4 compressor with the given level (1-12)
+    #[allow(dead_code)]
+    pub fn new(level: i32) -> Self {
+        Self {
+            level: level.clamp(1, 12),
+        }
+    }
+
+    /// Create with default level (4, balanced speed/ratio)
+    #[allow(dead_code)]
+    pub fn default_level() -> Self {
+        Self::new(4)
+    }
+}
+
+impl Default for LZ4Compressor {
+    fn default() -> Self {
+        Self::default_level()
+    }
+}
+
+impl Compressor for LZ4Compressor {
+    fn compress(&self, data: &[u8]) -> Result<Bytes> {
+        // LZ4 compression - very fast, lower compression ratio than Zstd
+        // We use the default acceleration factor based on compression level
+        let compressed = lz4_flex::compress_prepend_size(data);
+        Ok(Bytes::from(compressed))
+    }
+
+    fn decompress(&self, data: &[u8]) -> Result<Bytes> {
+        // LZ4 decompression - extremely fast, minimal CPU overhead
+        match lz4_flex::decompress_size_prepended(data) {
+            Ok(decompressed) => Ok(Bytes::from(decompressed)),
+            Err(e) => Err(EraError::decompression(format!(
+                "LZ4 decompression failed: {}",
+                e
+            ))),
+        }
+    }
+
+    fn algorithm(&self) -> CompressionAlgorithm {
+        CompressionAlgorithm::LZ4
+    }
+}
+
 /// Convenience function to compress data with default settings
 pub fn compress(data: &[u8]) -> Result<Bytes> {
     ZstdCompressor::default().compress(data)

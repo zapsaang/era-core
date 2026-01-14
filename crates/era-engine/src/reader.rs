@@ -390,6 +390,9 @@ impl ArchiveReader {
             era_common::CompressionAlgorithm::Zstd => {
                 Box::new(ZstdCompressor::new(self.compression_level))
             }
+            era_common::CompressionAlgorithm::LZ4 => {
+                Box::new(era_codec::LZ4Compressor::new(self.compression_level))
+            }
         }
     }
 

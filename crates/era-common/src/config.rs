@@ -24,9 +24,11 @@ pub struct ArchiveConfig {
 pub enum CompressionAlgorithm {
     /// No compression
     None,
-    /// Zstandard compression (default)
+    /// Zstandard compression (default, good compression ratio)
     #[default]
     Zstd,
+    /// LZ4 compression (fastest, lower compression ratio but still effective)
+    LZ4,
 }
 
 /// Compression configuration

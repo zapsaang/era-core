@@ -10,6 +10,7 @@ authors.workspace = true
 era-common = { workspace = true }
 bytes = { workspace = true }
 zstd = { workspace = true }
+lz4_flex = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = { workspace = true }
 

@@ -523,6 +523,9 @@ impl ArchiveWriter {
             CompressionAlgorithm::Zstd => {
                 Box::new(ZstdCompressor::new(self.compression_config.level))
             }
+            CompressionAlgorithm::LZ4 => {
+                Box::new(era_codec::LZ4Compressor::new(self.compression_config.level))
+            }
         }
     }
 
@@ -1142,6 +1145,9 @@ pub mod generic {
                 CompressionAlgorithm::None => Box::new(NoCompressor),
                 CompressionAlgorithm::Zstd => {
                     Box::new(ZstdCompressor::new(self.compression_config.level))
+                }
+                CompressionAlgorithm::LZ4 => {
+                    Box::new(era_codec::LZ4Compressor::new(self.compression_config.level))
                 }
             }
         }
