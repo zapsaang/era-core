@@ -212,9 +212,49 @@ impl ArchiveWriterBuilder {
 
         // Determine volume count based on erasure config if matrix distribution is enabled
         let volume_count = if self.enable_matrix_distribution && self.enable_erasure {
-            // Ensure minimum volumes for erasure tolerance
-            let min_volumes = (self.erasure_config.parity_shards as usize + 1).max(2);
-            self.volume_count.max(min_volumes)
+            let erasure = self.erasure_config;
+            let total_shards = (erasure.data_shards + erasure.parity_shards) as usize;
+
+            // For matrix distribution, recommend total_shards volumes for optimal fault tolerance
+            // This allows tolerating up to parity_shards volume failures
+            let recommended_volumes = total_shards;
+
+            if self.volume_count <= 1 {
+                // User didn't specify, use recommended optimal count
+                info!(
+                    "Matrix distribution: automatically using {} volumes \
+                     for optimal fault tolerance (can tolerate {} volume failures)",
+                    recommended_volumes, erasure.parity_shards
+                );
+                recommended_volumes
+            } else if self.volume_count < recommended_volumes {
+                // User specified fewer volumes than optimal
+                let min_viable = (erasure.parity_shards as usize + 1).max(2);
+                if self.volume_count >= min_viable {
+                    warn!(
+                        "Using {} volumes for matrix distribution. \
+                         Note: will tolerate at most 1 volume failure \
+                         (recommended: {} volumes for up to {} volume failures)",
+                        self.volume_count, recommended_volumes, erasure.parity_shards
+                    );
+                    self.volume_count
+                } else {
+                    warn!(
+                        "Insufficient volumes: {} specified, but {} minimum required \
+                         for {},{} erasure. Adjusting to minimum.",
+                        self.volume_count, min_viable, erasure.data_shards, erasure.parity_shards
+                    );
+                    min_viable
+                }
+            } else {
+                // User specified at least recommended count
+                info!(
+                    "Using {} volumes for matrix distribution \
+                     (will tolerate up to {} volume failures)",
+                    self.volume_count, erasure.parity_shards
+                );
+                self.volume_count
+            }
         } else {
             self.volume_count
         };
