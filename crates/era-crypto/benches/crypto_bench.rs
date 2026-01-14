@@ -33,6 +33,47 @@ fn bench_blake3_hash(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_hkdf_key_derivation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hkdf_key_derivation");
+
+    // Setup session
+    let salt = Salt::from_bytes([0u8; 16]);
+    let params = KdfParams {
+        memory_cost: 1024,
+        time_cost: 1,
+        parallelism: 1,
+    };
+    let session = KeySession::new(b"password", &salt, &params).unwrap();
+    let vk = session.derive_volume_key(0);
+    let nonce = [0u8; 16];
+
+    group.bench_function("derive_block_key", |b| {
+        let mut i = 0u64;
+        b.iter(|| {
+            i += 1;
+            session.derive_block_key(&vk, black_box(i), &nonce)
+        })
+    });
+
+    group.bench_function("derive_volume_key_cached", |b| {
+        let mut i = 0u16;
+        b.iter(|| {
+            i = (i + 1) % 1000;
+            session.derive_volume_key(black_box(i))
+        })
+    });
+
+    // Contrast with Argon2id (simulated cost)
+    // We don't want to run full Argon2id in a tight loop, it's too slow.
+    // But we can benchmark the KDF itself once to show the scale.
+    group.sample_size(10);
+    group.bench_function("argon2id_kdf_creation", |b| {
+        b.iter(|| derive_key(b"password", &salt, &params))
+    });
+
+    group.finish();
+}
+
 fn bench_aead_encrypt(c: &mut Criterion) {
     let key = fast_test_key();
     let nonce_context = [42u8; 16];
@@ -113,46 +154,6 @@ fn bench_aead_decrypt(c: &mut Criterion) {
             })
         });
     }
-
-    group.finish();
-}
-
-/// Benchmark HKDF key derivation for volume and block keys
-fn bench_hkdf_key_derivation(c: &mut Criterion) {
-    let salt = Salt::generate();
-    let params = KdfParams {
-        memory_cost: 1024,
-        time_cost: 1,
-        parallelism: 1,
-    };
-    let session = KeySession::new(b"benchmark_password", &salt, &params).unwrap();
-    let vk = session.derive_volume_key(0);
-    let nonce_context = [42u8; 16];
-
-    let mut group = c.benchmark_group("hkdf_key_derivation");
-
-    // Benchmark VolumeKey derivation
-    group.bench_function("volume_key_derivation", |b| {
-        b.iter(|| session.derive_volume_key(black_box(0)))
-    });
-
-    // Benchmark BlockKey derivation
-    group.bench_function("block_key_derivation", |b| {
-        let mut block_id = 0u64;
-        b.iter(|| {
-            block_id = block_id.wrapping_add(1);
-            session.derive_block_key(black_box(&vk), block_id, &nonce_context)
-        })
-    });
-
-    // Benchmark combined: derive 1000 block keys (simulating multi-block file)
-    group.bench_function("derive_1000_block_keys", |b| {
-        b.iter(|| {
-            for i in 0u64..1000 {
-                black_box(session.derive_block_key(&vk, i, &nonce_context));
-            }
-        })
-    });
 
     group.finish();
 }

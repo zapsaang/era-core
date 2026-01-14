@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use era_codec::Compressor;
-use era_common::{BlockChunkIndex, BlockId, ChunkHash, EncryptedMacroBlock, EraError, Result};
+use era_common::{
+    BlockChunkIndex, BlockId, ChunkHash, ChunkVec, EncryptedMacroBlock, EraError, Result,
+};
 use era_crypto::DerivedKey;
 
 /// Unpacker for extracting chunks from MacroBlocks
@@ -96,12 +98,13 @@ impl MacroBlockUnpacker {
     }
 
     /// Extract all chunks from a block
-    pub fn extract_all_chunks(
-        &self,
-        block: &EncryptedMacroBlock,
-    ) -> Result<Vec<(ChunkHash, Bytes)>> {
+    ///
+    /// Returns a ChunkVec (SmallVec) which avoids heap allocation for blocks
+    /// with up to 16 chunks. This provides significant performance improvement
+    /// for extraction operations.
+    pub fn extract_all_chunks(&self, block: &EncryptedMacroBlock) -> Result<ChunkVec> {
         let unpacked = self.unpack(block)?;
-        let mut chunks = Vec::with_capacity(unpacked.index.entries.len());
+        let mut chunks = ChunkVec::new();
 
         for entry in &unpacked.index.entries {
             let start = entry.offset as usize;

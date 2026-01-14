@@ -187,7 +187,16 @@ impl KeySessionBuilder {
         // Safety: If cache_size is 0, allocation handles it gracefully (returns error or empty)
         // But max_volumes=0 creates a session that can't derive VKs. Valid but useless.
 
-        let mut vk_cache = SecureBytes::new(cache_size).map_err(|e| {
+        // Critical Security Config:
+        // We MUST enable guard pages for the long-lived VK cache to prevent
+        // heartbleed-style over-reads from leaking adjacent keys or other memory.
+        let config = SecureMemoryConfig {
+            enable_guard_pages: true, // Force ON for cache
+            enable_mlock: true,       // Force ON for cache
+            strict_mlock: false,      // Warn if mlock fails (don't crash app)
+        };
+
+        let mut vk_cache = SecureBytes::with_config(cache_size, config).map_err(|e| {
             era_common::EraError::Encryption(format!("Failed to allocate VK cache: {}", e))
         })?;
 

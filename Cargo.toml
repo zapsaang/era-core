@@ -56,6 +56,9 @@ reed-solomon-simd = "3.0"
 # CRC32 for shard integrity
 crc32fast = "1.4"
 
+# SmallVec for stack-allocated vectors (performance optimization)
+smallvec = { version = "1.13", features = ["union", "const_generics"] }
+
 # UUID
 uuid = { version = "1.6", features = ["v4", "serde"] }
 

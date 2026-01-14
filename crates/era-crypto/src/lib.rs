@@ -21,7 +21,7 @@ pub use aead::{decrypt_with_context, encrypt_with_context};
 pub use hash::{hash, hash_reader, Hasher};
 pub use kdf::{derive_key, generate_password_verification_tag, verify_password_tag, KdfParams};
 pub use key::{DerivedKey, Salt};
-pub use key_session::{BlockKey, KeySession, VolumeKey};
+pub use key_session::{BlockKey, KeySession, KeySessionBuilder, VolumeKey};
 pub use secure_memory::{
     disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64, SecureMemoryConfig,
 };

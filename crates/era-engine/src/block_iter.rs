@@ -15,7 +15,7 @@
 
 use bytes::Bytes;
 use era_common::{
-    BlockId, BlockLocation, ChunkHash, EraError, ErasureBlockInfo, Result, ShardHeader,
+    BlockId, BlockLocation, ChunkVec, EraError, ErasureBlockInfo, Result, ShardHeader,
 };
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::{
@@ -29,7 +29,9 @@ pub struct DecodedBlock {
     /// Block index (for error reporting)
     pub block_index: u32,
     /// Chunks extracted from the block: (hash, data)
-    pub chunks: Vec<(ChunkHash, Bytes)>,
+    /// Uses SmallVec for stack allocation optimization to avoid per-block heap allocation.
+    /// Most blocks contain ≤16 chunks, which fit entirely on the stack.
+    pub chunks: ChunkVec,
     /// Number of corrupted shards (erasure mode only)
     pub corrupted_shards: usize,
 }

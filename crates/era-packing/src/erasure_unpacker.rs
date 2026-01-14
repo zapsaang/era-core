@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use era_codec::{Compressor, ErasureCoder, ErasureConfig};
-use era_common::{BlockId, ChunkHash, EncryptedMacroBlock, EraError, ErasureBlockInfo, Result};
+use era_common::{
+    BlockId, ChunkHash, ChunkVec, EncryptedMacroBlock, EraError, ErasureBlockInfo, Result,
+};
 use era_crypto::DerivedKey;
 
 use crate::MacroBlockUnpacker;
@@ -32,13 +34,14 @@ impl ErasureBlockUnpacker {
     /// * `block_id` - The block ID for this block
     ///
     /// # Returns
-    /// Vector of (hash, data) pairs for all chunks in the block
+    /// ChunkVec of (hash, data) pairs for all chunks in the block.
+    /// Uses SmallVec for stack allocation optimization.
     pub fn decode_and_extract_all(
         &self,
         shards: Vec<(usize, Bytes)>,
         erasure_info: &ErasureBlockInfo,
         block_id: BlockId,
-    ) -> Result<Vec<(ChunkHash, Bytes)>> {
+    ) -> Result<ChunkVec> {
         let encrypted_block = self.decode_shards(shards, erasure_info, block_id)?;
         self.inner.extract_all_chunks(&encrypted_block)
     }

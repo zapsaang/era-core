@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use bytes::Bytes;
-use era_common::{ChunkHash, Result};
+use era_common::{ChunkHash, ChunkVec, Result};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
@@ -66,11 +66,7 @@ impl ExtractionContext {
     /// - Multi-chunk files: write chunk at correct offset in pre-created file
     ///
     /// Returns the number of files completed and bytes written
-    pub fn process_chunks(
-        &mut self,
-        chunks: Vec<(ChunkHash, Bytes)>,
-        stats: &mut ExtractStats,
-    ) -> Result<()> {
+    pub fn process_chunks(&mut self, chunks: ChunkVec, stats: &mut ExtractStats) -> Result<()> {
         for (hash, data) in chunks {
             // Handle single-chunk files
             if let Some(entries) = self.single_chunk_pending.remove(&hash) {

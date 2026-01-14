@@ -17,7 +17,7 @@
 //! allowing recovery from up to `parity_shards` lost shards.
 
 use era_codec::{Compressor, ErasureCoder, ErasureConfig};
-use era_common::{ErasureCodeConfig, ErasureShardedBlock, Result, UniqueChunk};
+use era_common::{ChunkVec, ErasureCodeConfig, ErasureShardedBlock, Result, UniqueChunk};
 use era_crypto::{KeySession, VolumeKey};
 
 use crate::SessionBlockBuilder;
@@ -185,20 +185,21 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
     /// * `block_id` - The block ID for this block
     ///
     /// # Returns
-    /// Vector of (hash, data) pairs for all chunks in the block
+    /// ChunkVec of (hash, data) pairs for all chunks in the block.
+    /// Uses SmallVec for stack allocation optimization.
     pub fn decode_and_extract_all(
         &self,
         shards: Vec<(usize, bytes::Bytes)>,
         erasure_info: &era_common::ErasureBlockInfo,
         block_id: era_common::BlockId,
-    ) -> Result<Vec<(era_common::ChunkHash, bytes::Bytes)>> {
+    ) -> Result<ChunkVec> {
         let encrypted_block = self.decode_shards(shards, erasure_info, block_id)?;
 
         // Unpack using session-based unpacker (handles per-block key derivation)
         let unpacked = self.inner.unpack(&encrypted_block)?;
 
-        // Extract chunks from unpacked data
-        let mut chunks = Vec::with_capacity(unpacked.index.entries.len());
+        // Extract chunks from unpacked data using ChunkVec for stack allocation
+        let mut chunks = ChunkVec::new();
         for entry in &unpacked.index.entries {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;

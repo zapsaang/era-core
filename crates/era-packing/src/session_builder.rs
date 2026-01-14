@@ -17,7 +17,7 @@
 use bytes::{BufMut, BytesMut};
 use era_codec::Compressor;
 use era_common::{
-    BlockChunkIndex, BlockId, ChunkIndexEntry, EncryptedMacroBlock, Result, UniqueChunk,
+    BlockChunkIndex, BlockId, ChunkIndexEntry, ChunkVec, EncryptedMacroBlock, Result, UniqueChunk,
 };
 use era_crypto::{BlockKey, KeySession, VolumeKey};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -251,12 +251,13 @@ impl<'a> SessionBlockUnpacker<'a> {
     }
 
     /// Extract all chunks from a block with per-block key derivation.
-    pub fn extract_all_chunks(
-        &self,
-        block: &EncryptedMacroBlock,
-    ) -> Result<Vec<(era_common::ChunkHash, bytes::Bytes)>> {
+    ///
+    /// Returns a ChunkVec (SmallVec) which avoids heap allocation for blocks
+    /// with up to 16 chunks. This provides significant performance improvement
+    /// for extraction operations.
+    pub fn extract_all_chunks(&self, block: &EncryptedMacroBlock) -> Result<ChunkVec> {
         let unpacked = self.unpack(block)?;
-        let mut chunks = Vec::with_capacity(unpacked.index.entries.len());
+        let mut chunks = ChunkVec::new();
 
         for entry in &unpacked.index.entries {
             let start = entry.offset as usize;

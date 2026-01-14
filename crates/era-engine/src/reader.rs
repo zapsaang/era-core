@@ -14,7 +14,7 @@ pub use crate::chunk_processor::{ExtractStats, VerifyStats};
 use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
-use era_common::{BlockId, BlockLocation, ChunkHash, EraError, Result};
+use era_common::{BlockId, BlockLocation, ChunkVec, EraError, Result};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
@@ -503,10 +503,7 @@ impl ArchiveReader {
     /// This is the unified entry point for reading blocks. It automatically detects
     /// whether the block is erasure-coded based on `location.erasure_info` and uses
     /// the appropriate unpacker.
-    pub fn read_and_extract_chunks(
-        &self,
-        location: &BlockLocation,
-    ) -> Result<Vec<(ChunkHash, Bytes)>> {
+    pub fn read_and_extract_chunks(&self, location: &BlockLocation) -> Result<ChunkVec> {
         if let Some(ref erasure_info) = location.erasure_info {
             // Erasure-coded block: read shards from multiple volumes
             let num_readers = self.volume_readers.len();
@@ -547,8 +544,8 @@ impl ArchiveReader {
             let unpacker = self.create_unpacker();
             let unpacked = unpacker.unpack(&encrypted_block)?;
 
-            // Extract all chunks from unpacked data
-            let mut chunks = Vec::with_capacity(unpacked.index.entries.len());
+            // Extract all chunks from unpacked data using ChunkVec for stack allocation
+            let mut chunks = ChunkVec::new();
             for entry in &unpacked.index.entries {
                 let start = entry.offset as usize;
                 let end = start + entry.length as usize;
