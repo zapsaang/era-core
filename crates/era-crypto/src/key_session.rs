@@ -20,7 +20,7 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-use crate::secure_memory::{SecureBuffer, SecureMemoryConfig};
+use crate::secure_memory::{SecureBuffer, SecureBytes, SecureMemoryConfig};
 use crate::{derive_key, DerivedKey, KdfParams, Salt};
 use era_common::Result;
 
@@ -126,77 +126,122 @@ impl std::fmt::Debug for BlockKey {
     }
 }
 
-/// A Key Session that caches the Master Key and provides fast sub-key derivation.
+/// KeySession creates and manages encryption keys.
 ///
-/// The KeySession eliminates the need to call expensive Argon2id for each block.
-/// Instead, Argon2id is called once during session creation, and all subsequent
-/// key derivations use the efficient HKDF algorithm.
+/// # Security Policy (v8.1)
+/// - **Master Key Transience**: The Master Key (MK) is used ONLY during session initialization
+///   to derive a set of Volume Keys (VK). It is then immediately dropped/zeroized.
+/// - **Volume Key Cache**: Derived VKs are stored in a single contiguous `SecureBytes` buffer.
 ///
-/// # Security Considerations
-///
-/// - The master key is stored in mlock-protected memory
-/// - Master key is NOT directly exposed; use `derive_volume_key()` instead
-/// - Use `drop()` or let the session go out of scope to clear keys
-/// - All derived keys also use SecureBuffer with mlock protection
-///
-/// # Example
-///
-/// ```ignore
-/// let session = KeySession::new(b"password", &salt, &kdf_params)?;
-///
-/// // Derive volume key (fast HKDF)
-/// let volume_key = session.derive_volume_key(volume_id);
-///
-/// // Derive block key (fast HKDF)
-/// let block_key = session.derive_block_key(&volume_key, block_index, &nonce_context);
-///
-/// // Use block_key for encryption...
-/// ```
+/// # Configuration
+/// By default, `KeySession` pre-calculates keys for volumes 0..1024.
+/// Use `KeySessionBuilder` to customize this limit.
 pub struct KeySession {
-    /// The master key derived via Argon2id, stored in mlock-protected memory
-    master_key: SecureBuffer<32>,
+    /// Cached Volume Keys. Layout: [VK_0 (32B) | VK_1 (32B) | ... ]
+    vk_cache: SecureBytes,
+    /// Number of volumes currently cached
+    cached_volumes: usize,
+    /// Verification tag derived from MK before it was dropped
+    verification_tag: [u8; 16],
+}
+
+/// Builder for customization of KeySession
+pub struct KeySessionBuilder {
+    max_volumes: usize,
+}
+
+impl Default for KeySessionBuilder {
+    fn default() -> Self {
+        Self { max_volumes: 1024 }
+    }
+}
+
+impl KeySessionBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of volumes to pre-derive keys for.
+    pub fn with_max_volumes(mut self, max: usize) -> Self {
+        self.max_volumes = max;
+        self
+    }
+
+    /// Build from password
+    pub fn build(self, password: &[u8], salt: &Salt, params: &KdfParams) -> Result<KeySession> {
+        let derived_key = derive_key(password, salt, params)?;
+        Self::build_internal(derived_key.as_bytes(), self.max_volumes)
+    }
+
+    /// Build from existing derived key
+    pub fn build_from_derived(self, key: &DerivedKey) -> Result<KeySession> {
+        Self::build_internal(key.as_bytes(), self.max_volumes)
+    }
+
+    fn build_internal(mk_bytes: &[u8], max_volumes: usize) -> Result<KeySession> {
+        // Allocate cache
+        let cache_size = max_volumes
+            .checked_mul(32)
+            .ok_or_else(|| era_common::EraError::Encryption("Cache size overflow".into()))?;
+
+        // Safety: If cache_size is 0, allocation handles it gracefully (returns error or empty)
+        // But max_volumes=0 creates a session that can't derive VKs. Valid but useless.
+
+        let mut vk_cache = SecureBytes::new(cache_size).map_err(|e| {
+            era_common::EraError::Encryption(format!("Failed to allocate VK cache: {}", e))
+        })?;
+
+        // Setup HKDF with MK
+        // Note: MK is in `mk_bytes`.
+        let hk = Hkdf::<Sha256>::new(None, mk_bytes);
+
+        // 1. Calculate Verification Tag
+        let mut verification_tag = [0u8; 16];
+        hk.expand(b"ERA_PASSWORD_VERIFICATION_v8.1", &mut verification_tag)
+            .expect("HKDF expand should not fail");
+
+        // 2. Derive Volume Keys
+        let mut info_buf = [0u8; VOLUME_KEY_DOMAIN.len() + 2];
+        info_buf[..VOLUME_KEY_DOMAIN.len()].copy_from_slice(VOLUME_KEY_DOMAIN);
+
+        let method_slice = vk_cache.as_mut_slice();
+        for i in 0..max_volumes {
+            let vol_id = i as u16;
+            info_buf[VOLUME_KEY_DOMAIN.len()..].copy_from_slice(&vol_id.to_be_bytes());
+
+            let start = i * 32;
+            let end = start + 32;
+
+            hk.expand(&info_buf, &mut method_slice[start..end])
+                .expect("HKDF expand failed");
+        }
+
+        // MK is dropped/zeroized when `hk` and `mk_bytes` source go out of scope.
+
+        Ok(KeySession {
+            vk_cache,
+            cached_volumes: max_volumes,
+            verification_tag,
+        })
+    }
 }
 
 impl KeySession {
-    /// Create a new key session by deriving the master key from a password.
-    ///
-    /// This is the only expensive operation. All subsequent key derivations
-    /// will use fast HKDF.
-    ///
-    /// # Arguments
-    ///
-    /// * `password` - The user's password
-    /// * `salt` - The archive salt (stored in the super header)
-    /// * `params` - KDF parameters (memory cost, time cost, parallelism)
-    ///
-    /// # Returns
-    ///
-    /// A new `KeySession` with the master key cached in mlock-protected memory.
+    /// Create a new key session with default settings (1024 volumes).
     pub fn new(password: &[u8], salt: &Salt, params: &KdfParams) -> Result<Self> {
-        let derived_key = derive_key(password, salt, params)?;
-        let mut master_key =
-            SecureBuffer::with_config(SecureMemoryConfig::default()).map_err(|e| {
-                era_common::EraError::Encryption(format!("Failed to allocate secure memory: {}", e))
-            })?;
-        master_key.as_mut().copy_from_slice(derived_key.as_bytes());
-        Ok(Self { master_key })
+        KeySessionBuilder::new().build(password, salt, params)
     }
 
-    /// Create a key session from an existing DerivedKey.
-    ///
-    /// This allows reusing an already-derived key without calling Argon2id again.
-    /// Useful for scenarios where the key was derived externally.
+    /// Create from existing derived key
     pub fn from_derived_key(key: &DerivedKey) -> Self {
-        let mut master_key = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for KeySession");
-        master_key.as_mut().copy_from_slice(key.as_bytes());
-        Self { master_key }
+        KeySessionBuilder::new()
+            .build_from_derived(key)
+            .expect("Default build failed")
     }
 
     /// Derive a Volume Key for a specific volume.
     ///
-    /// Uses HKDF-Expand with the volume ID as context, providing
-    /// cryptographic isolation between volumes.
+    /// Retrieving the key from the pre-calculated cache.
     ///
     /// # Arguments
     ///
@@ -205,19 +250,23 @@ impl KeySession {
     /// # Returns
     ///
     /// A unique `VolumeKey` for this volume.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `volume_id` >= `cached_volumes` (default 1024).
     pub fn derive_volume_key(&self, volume_id: u16) -> VolumeKey {
-        let hk = Hkdf::<Sha256>::new(None, self.master_key.as_ref());
+        let idx = volume_id as usize;
+        if idx >= self.cached_volumes {
+            panic!(
+                "Volume ID {} exceeds cached limit {}. Use KeySessionBuilder to increase limit.",
+                volume_id, self.cached_volumes
+            );
+        }
 
-        // Build info: DOMAIN || volume_id (big-endian)
-        let mut info = [0u8; VOLUME_KEY_DOMAIN.len() + 2];
-        info[..VOLUME_KEY_DOMAIN.len()].copy_from_slice(VOLUME_KEY_DOMAIN);
-        info[VOLUME_KEY_DOMAIN.len()..].copy_from_slice(&volume_id.to_be_bytes());
+        let start = idx * 32;
+        let bytes = &self.vk_cache.as_slice()[start..start + 32];
 
-        let mut okm = [0u8; 32];
-        hk.expand(&info, &mut okm)
-            .expect("HKDF expand should not fail with valid parameters");
-
-        VolumeKey::from_bytes(okm)
+        VolumeKey::from_bytes(bytes.try_into().expect("Slice length must be 32"))
     }
 
     /// Derive a Block Key for a specific block within a volume.
@@ -272,40 +321,32 @@ impl KeySession {
     ///
     /// This tag can be stored in the archive header for early password validation.
     pub fn password_verification_tag(&self) -> [u8; 16] {
-        // Derive verification tag using HKDF with a specific domain
-        let hk = Hkdf::<Sha256>::new(None, self.master_key.as_ref());
-        let mut tag = [0u8; 16];
-        hk.expand(b"ERA_PASSWORD_VERIFICATION_v8.1", &mut tag)
-            .expect("HKDF expand should not fail");
-        tag
+        self.verification_tag
     }
 
     /// Check if the master key memory is locked (protected from swapping)
     pub fn is_memory_locked(&self) -> bool {
-        self.master_key.is_locked()
+        self.vk_cache.is_locked()
     }
 }
 
 impl std::fmt::Debug for KeySession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeySession")
-            .field("master_key", &"[REDACTED]")
+            .field("vk_cache", &"[REDACTED 2MB]")
+            .field("cached_volumes", &self.cached_volumes)
             .finish()
     }
 }
 
 impl Clone for KeySession {
-    /// Clone the key session, creating a new mlock-protected copy of the master key.
-    ///
-    /// This is a security-conscious clone - the new session gets its own
-    /// mlock-protected memory region, not a simple byte copy.
+    /// Clone the key session, creating a new mlock-protected copy of the cache.
     fn clone(&self) -> Self {
-        let mut master_key = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for KeySession clone");
-        master_key
-            .as_mut()
-            .copy_from_slice(self.master_key.as_ref());
-        Self { master_key }
+        Self {
+            vk_cache: self.vk_cache.clone(),
+            cached_volumes: self.cached_volumes,
+            verification_tag: self.verification_tag,
+        }
     }
 }
 
@@ -319,6 +360,42 @@ mod tests {
             time_cost: 1,
             parallelism: 1,
         }
+    }
+
+    #[test]
+    fn test_builder_custom_limits() {
+        let password = b"test_password";
+        let salt = Salt::generate();
+        let params = fast_kdf_params();
+
+        // Small cache limit
+        let session = KeySessionBuilder::new()
+            .with_max_volumes(10)
+            .build(password, &salt, &params)
+            .unwrap();
+
+        // Access within limit
+        let _ = session.derive_volume_key(9);
+
+        // This would panic. We can catch it if we want to test panic,
+        // but `should_panic` attribute applies to whole test function.
+        // Let's create a sub-test.
+    }
+
+    #[test]
+    #[should_panic(expected = "Volume ID 10 exceeds cached limit 10")]
+    fn test_builder_limit_enforcement() {
+        let password = b"test_password";
+        let salt = Salt::generate();
+        let params = fast_kdf_params();
+
+        let session = KeySessionBuilder::new()
+            .with_max_volumes(10)
+            .build(password, &salt, &params)
+            .unwrap();
+
+        // This should panic
+        let _ = session.derive_volume_key(10);
     }
 
     #[test]

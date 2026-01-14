@@ -81,9 +81,19 @@ impl Default for SecureMemoryConfig {
 /// // ...use the key...
 /// drop(secure); // Memory is automatically zeroed
 /// ```
+#[derive(Debug)]
+enum AllocationStrategy {
+    Standard,
+    Guarded {
+        base_ptr: NonNull<u8>,
+        total_len: usize,
+    },
+}
+
 pub struct SecureBuffer<const N: usize> {
     ptr: NonNull<[u8; N]>,
     is_locked: bool,
+    strategy: AllocationStrategy,
 }
 
 impl<const N: usize> SecureBuffer<N> {
@@ -94,41 +104,81 @@ impl<const N: usize> SecureBuffer<N> {
 
     /// Create a new secure buffer with custom configuration
     pub fn with_config(config: SecureMemoryConfig) -> Result<Self, SecureMemoryError> {
-        // Allocate zeroed memory
-        let layout = Layout::new::<[u8; N]>();
-        let ptr = unsafe {
-            let raw = alloc_zeroed(layout);
+        let (ptr, strategy) = if config.enable_guard_pages {
+            #[cfg(unix)]
+            {
+                let (user_ptr, base_ptr, total_len) = allocate_guarded(N)?;
+                let ptr = unsafe { NonNull::new_unchecked(user_ptr as *mut [u8; N]) };
+                let base_ptr = unsafe { NonNull::new_unchecked(base_ptr) };
+                (
+                    ptr,
+                    AllocationStrategy::Guarded {
+                        base_ptr,
+                        total_len,
+                    },
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                #[cfg(debug_assertions)]
+                eprintln!("[era-crypto] Warning: Guard pages not supported on this platform");
+                let layout = Layout::new::<[u8; N]>();
+                let raw = unsafe { alloc_zeroed(layout) };
+                if raw.is_null() {
+                    return Err(SecureMemoryError::AllocationFailed);
+                }
+                let ptr = unsafe { NonNull::new_unchecked(raw as *mut [u8; N]) };
+                (ptr, AllocationStrategy::Standard)
+            }
+        } else {
+            let layout = Layout::new::<[u8; N]>();
+            let raw = unsafe { alloc_zeroed(layout) };
             if raw.is_null() {
                 return Err(SecureMemoryError::AllocationFailed);
             }
-            NonNull::new_unchecked(raw as *mut [u8; N])
+            let ptr = unsafe { NonNull::new_unchecked(raw as *mut [u8; N]) };
+            (ptr, AllocationStrategy::Standard)
         };
 
         let mut is_locked = false;
 
         // Try to lock memory if enabled
         if config.enable_mlock {
-            match mlock(ptr.as_ptr() as *const u8, N) {
-                Ok(()) => {
-                    is_locked = true;
-                }
-                Err(e) => {
-                    if config.strict_mlock {
-                        // Clean up and return error
-                        unsafe {
-                            dealloc(ptr.as_ptr() as *mut u8, layout);
-                        }
-                        return Err(SecureMemoryError::LockFailed(e));
+            unsafe {
+                match mlock(ptr.as_ref().as_ptr(), N) {
+                    Ok(()) => {
+                        is_locked = true;
                     }
-                    // Continue without mlock protection (warn in debug builds)
-                    #[cfg(debug_assertions)]
-                    eprintln!("[era-crypto] Warning: mlock failed ({}), continuing without swap protection", e);
-                    let _ = e; // Suppress unused variable warning in release
+                    Err(e) => {
+                        if config.strict_mlock {
+                            // Clean up and return error
+                            match strategy {
+                                AllocationStrategy::Standard => {
+                                    dealloc(ptr.as_ptr() as *mut u8, Layout::new::<[u8; N]>());
+                                }
+                                AllocationStrategy::Guarded {
+                                    base_ptr,
+                                    total_len,
+                                } => {
+                                    #[cfg(unix)]
+                                    libc::munmap(base_ptr.as_ptr() as *mut libc::c_void, total_len);
+                                }
+                            }
+                            return Err(SecureMemoryError::LockFailed(e));
+                        }
+                        // Continue without mlock protection (warn in debug builds)
+                        #[cfg(debug_assertions)]
+                        eprintln!("[era-crypto] Warning: mlock failed ({}), continuing without swap protection", e);
+                    }
                 }
             }
         }
 
-        Ok(Self { ptr, is_locked })
+        Ok(Self {
+            ptr,
+            is_locked,
+            strategy,
+        })
     }
 
     /// Get a reference to the buffer contents
@@ -160,8 +210,24 @@ impl<const N: usize> Drop for SecureBuffer<N> {
             }
 
             // 3. Deallocate
-            let layout = Layout::new::<[u8; N]>();
-            dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            match self.strategy {
+                AllocationStrategy::Standard => {
+                    let layout = Layout::new::<[u8; N]>();
+                    dealloc(self.ptr.as_ptr() as *mut u8, layout);
+                }
+                AllocationStrategy::Guarded {
+                    base_ptr,
+                    total_len,
+                } => {
+                    #[cfg(unix)]
+                    libc::munmap(base_ptr.as_ptr() as *mut libc::c_void, total_len);
+
+                    #[cfg(not(unix))]
+                    {
+                        let _ = (base_ptr, total_len);
+                    } // suppress unused
+                }
+            }
         }
     }
 }
@@ -304,6 +370,237 @@ pub type SecureKey32 = SecureBuffer<32>;
 /// This is a convenience type for storing 512-bit cryptographic keys or combined keys.
 pub type SecureKey64 = SecureBuffer<64>;
 
+/// A secure memory region with runtime-determined size.
+///
+/// Similar to `SecureBuffer` but allows allocating any size at runtime.
+/// Useful for caches or variable-length secrets.
+pub struct SecureBytes {
+    ptr: NonNull<u8>,
+    size: usize,
+    is_locked: bool,
+    strategy: AllocationStrategy,
+}
+
+impl SecureBytes {
+    /// Create a new secure bytes buffer of `size`
+    pub fn new(size: usize) -> Result<Self, SecureMemoryError> {
+        Self::with_config(size, SecureMemoryConfig::default())
+    }
+
+    /// Create with custom config
+    pub fn with_config(size: usize, config: SecureMemoryConfig) -> Result<Self, SecureMemoryError> {
+        if size == 0 {
+            return Err(SecureMemoryError::AllocationFailed);
+        }
+
+        let (ptr, strategy) = if config.enable_guard_pages {
+            #[cfg(unix)]
+            {
+                let (user_ptr, base_ptr, total_len) = allocate_guarded(size)?;
+                let ptr = unsafe { NonNull::new_unchecked(user_ptr) };
+                let base_ptr = unsafe { NonNull::new_unchecked(base_ptr) };
+                (
+                    ptr,
+                    AllocationStrategy::Guarded {
+                        base_ptr,
+                        total_len,
+                    },
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                #[cfg(debug_assertions)]
+                eprintln!("[era-crypto] Warning: Guard pages not supported on this platform");
+                let layout = Layout::from_size_align(size, 1)
+                    .map_err(|_| SecureMemoryError::AllocationFailed)?;
+                let raw = unsafe { alloc_zeroed(layout) };
+                if raw.is_null() {
+                    return Err(SecureMemoryError::AllocationFailed);
+                }
+                let ptr = unsafe { NonNull::new_unchecked(raw) };
+                (ptr, AllocationStrategy::Standard)
+            }
+        } else {
+            let layout = Layout::from_size_align(size, 1)
+                .map_err(|_| SecureMemoryError::AllocationFailed)?;
+            let raw = unsafe { alloc_zeroed(layout) };
+            if raw.is_null() {
+                return Err(SecureMemoryError::AllocationFailed);
+            }
+            let ptr = unsafe { NonNull::new_unchecked(raw) };
+            (ptr, AllocationStrategy::Standard)
+        };
+
+        let mut is_locked = false;
+
+        if config.enable_mlock {
+            unsafe {
+                match mlock(ptr.as_ptr(), size) {
+                    Ok(()) => {
+                        is_locked = true;
+                    }
+                    Err(e) => {
+                        if config.strict_mlock {
+                            match strategy {
+                                AllocationStrategy::Standard => {
+                                    dealloc(
+                                        ptr.as_ptr(),
+                                        Layout::from_size_align(size, 1).unwrap(),
+                                    );
+                                }
+                                AllocationStrategy::Guarded {
+                                    base_ptr,
+                                    total_len,
+                                } => {
+                                    #[cfg(unix)]
+                                    libc::munmap(base_ptr.as_ptr() as *mut libc::c_void, total_len);
+                                }
+                            }
+                            return Err(SecureMemoryError::LockFailed(e));
+                        }
+                        #[cfg(debug_assertions)]
+                        eprintln!("[era-crypto] Warning: mlock failed ({}), continuing without swap protection", e);
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            ptr,
+            size,
+            is_locked,
+            strategy,
+        })
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.is_locked
+    }
+}
+
+impl Clone for SecureBytes {
+    fn clone(&self) -> Self {
+        let mut new = Self::new(self.size).expect("Failed to allocate secure bytes for clone");
+        new.as_mut_slice().copy_from_slice(self.as_slice());
+        new
+    }
+}
+
+impl Drop for SecureBytes {
+    fn drop(&mut self) {
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size);
+            slice.zeroize();
+
+            if self.is_locked {
+                let _ = munlock(self.ptr.as_ptr(), self.size);
+            }
+
+            match self.strategy {
+                AllocationStrategy::Standard => {
+                    if let Ok(layout) = Layout::from_size_align(self.size, 1) {
+                        dealloc(self.ptr.as_ptr(), layout);
+                    }
+                }
+                AllocationStrategy::Guarded {
+                    base_ptr,
+                    total_len,
+                } => {
+                    #[cfg(unix)]
+                    libc::munmap(base_ptr.as_ptr() as *mut libc::c_void, total_len);
+
+                    #[cfg(not(unix))]
+                    {
+                        let _ = (base_ptr, total_len);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for SecureBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecureBytes")
+            .field("size", &self.size)
+            .field("is_locked", &self.is_locked)
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(unix)]
+fn allocate_guarded(size: usize) -> Result<(*mut u8, *mut u8, usize), SecureMemoryError> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    if page_size == 0 {
+        return Err(SecureMemoryError::GuardPageFailed(
+            "Could not determine page size".to_string(),
+        ));
+    }
+
+    // Calculate total size: Guard + Data + Guard
+    // Data size needs to be at least "size"
+    let data_pages = (size + page_size - 1) / page_size;
+    let data_pages = if data_pages == 0 { 1 } else { data_pages };
+
+    let total_pages = data_pages + 2;
+    let total_len = total_pages * page_size;
+
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            total_len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+
+    if ptr == libc::MAP_FAILED {
+        return Err(SecureMemoryError::AllocationFailed);
+    }
+
+    let ptr = ptr as *mut u8;
+
+    // Protect first page
+    if unsafe { libc::mprotect(ptr as *mut libc::c_void, page_size, libc::PROT_NONE) } != 0 {
+        unsafe { libc::munmap(ptr as *mut libc::c_void, total_len) };
+        return Err(SecureMemoryError::GuardPageFailed(
+            "Failed to protect first guard page".to_string(),
+        ));
+    }
+
+    // Protect last page
+    let last_page_offset = (total_pages - 1) * page_size;
+    if unsafe {
+        libc::mprotect(
+            ptr.add(last_page_offset) as *mut libc::c_void,
+            page_size,
+            libc::PROT_NONE,
+        )
+    } != 0
+    {
+        unsafe { libc::munmap(ptr as *mut libc::c_void, total_len) };
+        return Err(SecureMemoryError::GuardPageFailed(
+            "Failed to protect last guard page".to_string(),
+        ));
+    }
+
+    // User ptr is at start of second page (which is the first data page)
+    let user_ptr = unsafe { ptr.add(page_size) };
+
+    Ok((user_ptr, ptr, total_len))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +659,27 @@ mod tests {
         // On most development systems, this should succeed or be a no-op
         // We don't assert success because it depends on privileges
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_guard_pages_allocation() {
+        let config = SecureMemoryConfig {
+            enable_mlock: true, // Try mlock
+            enable_guard_pages: true,
+            strict_mlock: false,
+        };
+        let buffer = SecureBuffer::<32>::with_config(config).unwrap();
+
+        let ptr = buffer.as_ref().as_ptr();
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+
+        // Verify alignment
+        assert_eq!(ptr as usize % page_size, 0);
+
+        // Verify functionality (write/read)
+        let mut buffer = buffer;
+        buffer.as_mut()[0] = 0xAA;
+        assert_eq!(buffer.as_ref()[0], 0xAA);
     }
 }
