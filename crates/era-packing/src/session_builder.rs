@@ -241,7 +241,11 @@ impl<'a> SessionBlockUnpacker<'a> {
 
         let index: BlockChunkIndex = era_common::deserialize(&decompressed[4..4 + index_len])?;
         let data_start = 4 + index_len;
-        let data = bytes::Bytes::copy_from_slice(&decompressed[data_start..]);
+
+        // CRITICAL OPTIMIZATION: Use slice() instead of copy_from_slice()
+        // slice() returns a reference (zero-copy), copy_from_slice() allocates new Arc buffer
+        // This avoids 1 extra memory allocation per block (~0.5ms for 1MB blocks)
+        let data = decompressed.slice(data_start..);
 
         Ok(crate::unpacker::UnpackedBlock {
             block_id: block.block_id,
