@@ -1,14 +1,23 @@
 //! Archive reader - extracts files from ERA archives.
+//!
+//! ## Security (ERA v8.1)
+//!
+//! This reader implements the HKDF "Onion Model" key derivation:
+//! - **Master Key (MK)**: Derived from password via Argon2id (mlock-protected)
+//! - **Volume Key (VK)**: Derived from MK via HKDF (per-volume isolation)
+//! - **Block Key (BK)**: Derived from VK via HKDF (per-block forward secrecy)
+//!
+//! Each block is decrypted with a unique key derived on-the-fly.
 
-use crate::block_iter::{BlockIterator, ErasureBlockIterator, StandardBlockIterator};
+use crate::block_iter::{BlockIterator, SessionBlockIterator, SessionErasureBlockIterator};
 pub use crate::chunk_processor::{ExtractStats, VerifyStats};
 use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{BlockId, BlockLocation, ChunkHash, EraError, Result};
-use era_crypto::{derive_key, KdfParams, KeySession, Salt};
+use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, FileEntry};
-use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker};
+use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumeReader};
 use std::fs::{self, File};
@@ -44,13 +53,26 @@ impl ExtractOptions {
 }
 
 /// Reader for ERA archives
+///
+/// ## Security (ERA v8.1)
+///
+/// This reader stores the KeySession and VolumeKey in mlock-protected memory.
+/// Each block is decrypted with a unique per-block key derived on-the-fly via HKDF.
 pub struct ArchiveReader {
     volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>>,
     /// Indices of each volume in the original multi-volume sequence
     /// e.g., [0, 2] means we have volume 0 and volume 2 (volume 1 is missing)
     volume_indices: Vec<usize>,
-    unpacker: MacroBlockUnpacker,
-    erasure_unpacker: ErasureBlockUnpacker,
+    /// Key session for per-block key derivation (mlock-protected)
+    session: KeySession,
+    /// Pre-derived volume key for volume 0
+    volume_key: VolumeKey,
+    /// Nonce context (archive salt)
+    nonce_context: [u8; 16],
+    /// Compression configuration
+    compression_level: i32,
+    /// Compression algorithm type
+    compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
 }
 
@@ -211,38 +233,31 @@ impl ArchiveReader {
             time_cost: header.crypto_anchor.kdf_time_cost,
             parallelism: header.crypto_anchor.kdf_parallelism,
         };
-        let key = derive_key(password.as_bytes(), &salt, &kdf_params)?;
+
+        // Create KeySession for per-block key derivation (mlock-protected)
+        let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
 
         // Verify password using stored verification tag
-        if !era_crypto::verify_password_tag(&key, &header.crypto_anchor.password_verification_tag) {
+        if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
             return Err(EraError::InvalidKey("Incorrect password".to_string()));
         }
 
-        // Create unpackers with salt as nonce context (must match encryption)
-        let nonce_context = header.crypto_anchor.salt;
-        let compressor: Box<dyn era_codec::Compressor> = match header.config.compression.algorithm {
-            era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
-            era_common::CompressionAlgorithm::Zstd => {
-                Box::new(ZstdCompressor::new(header.config.compression.level))
-            }
-        };
-        let unpacker = MacroBlockUnpacker::new(key.clone(), nonce_context, compressor);
+        // Derive volume key for volume 0
+        let volume_key = session.derive_volume_key(0);
 
-        // Create erasure unpacker for reading erasure-coded blocks
-        let erasure_compressor: Box<dyn era_codec::Compressor> =
-            match header.config.compression.algorithm {
-                era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
-                era_common::CompressionAlgorithm::Zstd => {
-                    Box::new(ZstdCompressor::new(header.config.compression.level))
-                }
-            };
-        let erasure_unpacker = ErasureBlockUnpacker::new(key, nonce_context, erasure_compressor);
+        // Store nonce context and compression config for creating temporary unpackers
+        let nonce_context = header.crypto_anchor.salt;
+        let compression_level = header.config.compression.level;
+        let compression_algorithm = header.config.compression.algorithm;
 
         Ok(Self {
             volume_readers,
             volume_indices,
-            unpacker,
-            erasure_unpacker,
+            session,
+            volume_key,
+            nonce_context,
+            compression_level,
+            compression_algorithm,
             catalog: None,
         })
     }
@@ -267,6 +282,8 @@ impl ArchiveReader {
     /// let reader1 = ArchiveReader::open_with_session(&path1, &session)?;
     /// let reader2 = ArchiveReader::open_with_session(&path2, &session)?;
     /// ```
+    ///
+    /// Note: The session is cloned internally to ensure the reader owns its key material.
     pub fn open_with_session(path: &Path, session: &KeySession) -> Result<Self> {
         info!("Opening archive with key session: {}", path.display());
 
@@ -337,41 +354,68 @@ impl ArchiveReader {
             }
         }
 
-        // 4. Get key from session and verify password
-        let key = session.master_key();
+        // 4. Verify password using session's verification method
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
 
-        if !era_crypto::verify_password_tag(&key, &header.crypto_anchor.password_verification_tag) {
+        if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
             return Err(EraError::InvalidKey("Incorrect password".to_string()));
         }
 
-        // 5. Create unpackers
-        let nonce_context = header.crypto_anchor.salt;
-        let compressor: Box<dyn era_codec::Compressor> = match header.config.compression.algorithm {
-            era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
-            era_common::CompressionAlgorithm::Zstd => {
-                Box::new(ZstdCompressor::new(header.config.compression.level))
-            }
-        };
-        let unpacker = MacroBlockUnpacker::new(key.clone(), nonce_context, compressor);
+        // 5. Clone session and derive volume key
+        let owned_session = session.clone();
+        let volume_key = owned_session.derive_volume_key(0);
 
-        let erasure_compressor: Box<dyn era_codec::Compressor> =
-            match header.config.compression.algorithm {
-                era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
-                era_common::CompressionAlgorithm::Zstd => {
-                    Box::new(ZstdCompressor::new(header.config.compression.level))
-                }
-            };
-        let erasure_unpacker = ErasureBlockUnpacker::new(key, nonce_context, erasure_compressor);
+        // Store nonce context and compression config
+        let nonce_context = header.crypto_anchor.salt;
+        let compression_level = header.config.compression.level;
+        let compression_algorithm = header.config.compression.algorithm;
 
         Ok(Self {
             volume_readers,
             volume_indices,
-            unpacker,
-            erasure_unpacker,
+            session: owned_session,
+            volume_key,
+            nonce_context,
+            compression_level,
+            compression_algorithm,
             catalog: None,
         })
+    }
+
+    /// Create a fresh compressor based on configuration.
+    fn create_compressor(&self) -> Box<dyn era_codec::Compressor> {
+        match self.compression_algorithm {
+            era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
+            era_common::CompressionAlgorithm::Zstd => {
+                Box::new(ZstdCompressor::new(self.compression_level))
+            }
+        }
+    }
+
+    /// Create a temporary session-based block unpacker.
+    ///
+    /// The returned unpacker borrows the session and volume_key, so its lifetime
+    /// is tied to the reader.
+    fn create_unpacker(&self) -> SessionBlockUnpacker<'_> {
+        let compressor = self.create_compressor();
+        SessionBlockUnpacker::new(
+            &self.session,
+            &self.volume_key,
+            self.nonce_context,
+            compressor,
+        )
+    }
+
+    /// Create a temporary session-based erasure unpacker.
+    fn create_erasure_unpacker(&self) -> SessionErasureBlockUnpacker<'_> {
+        let compressor = self.create_compressor();
+        SessionErasureBlockUnpacker::new(
+            &self.session,
+            &self.volume_key,
+            self.nonce_context,
+            compressor,
+        )
     }
 
     /// Get the archive header
@@ -424,14 +468,26 @@ impl ArchiveReader {
         );
 
         let encrypted_block = self.volume_readers[reader_idx].read_block(&catalog_location)?;
-        let chunks = self.unpacker.extract_all_chunks(&encrypted_block)?;
 
-        if chunks.is_empty() {
+        // Create temporary session-based unpacker for decryption
+        let unpacker = self.create_unpacker();
+        let chunks = unpacker.unpack(&encrypted_block)?;
+
+        // Extract chunk data from unpacked block
+        if chunks.index.entries.is_empty() {
             return Err(EraError::EmptyCatalog);
         }
 
-        let catalog_data = &chunks[0].1;
-        let catalog = Catalog::from_bytes(catalog_data)?;
+        let first_entry = &chunks.index.entries[0];
+        let start = first_entry.offset as usize;
+        let end = start + first_entry.length as usize;
+        if end > chunks.data.len() {
+            return Err(EraError::decompression(
+                "Catalog chunk offset exceeds data size",
+            ));
+        }
+        let catalog_data = chunks.data.slice(start..end);
+        let catalog = Catalog::from_bytes(&catalog_data)?;
 
         info!(
             "Loaded catalog: {} files, {} bytes total",
@@ -482,12 +538,26 @@ impl ArchiveReader {
             }
 
             let block_id = BlockId::new(location.slot_index as u64);
-            self.erasure_unpacker
-                .decode_and_extract_all(available_shards, erasure_info, block_id)
+            // Create temporary session-based erasure unpacker
+            let erasure_unpacker = self.create_erasure_unpacker();
+            erasure_unpacker.decode_and_extract_all(available_shards, erasure_info, block_id)
         } else {
-            // Standard block: read and unpack directly
+            // Standard block: read and unpack directly with session-based unpacker
             let encrypted_block = self.volume_readers[0].read_block(location)?;
-            self.unpacker.extract_all_chunks(&encrypted_block)
+            let unpacker = self.create_unpacker();
+            let unpacked = unpacker.unpack(&encrypted_block)?;
+
+            // Extract all chunks from unpacked data
+            let mut chunks = Vec::with_capacity(unpacked.index.entries.len());
+            for entry in &unpacked.index.entries {
+                let start = entry.offset as usize;
+                let end = start + entry.length as usize;
+                if end > unpacked.data.len() {
+                    return Err(EraError::decompression("Chunk offset exceeds data size"));
+                }
+                chunks.push((entry.hash, unpacked.data.slice(start..end)));
+            }
+            Ok(chunks)
         }
     }
 
@@ -691,6 +761,10 @@ impl ArchiveReader {
     /// - Writes files directly during block scan
     /// - Supports multi-chunk files (CDC mode) with pre-created files to avoid OOM
     /// - Supports erasure-coded archives (reads shard groups and decodes)
+    ///
+    /// ## Security
+    ///
+    /// Each block is decrypted with a unique per-block key derived via HKDF.
     pub fn extract_all(&mut self, options: &ExtractOptions) -> Result<ExtractStats> {
         info!("Extracting to: {}", options.output_dir.display());
 
@@ -700,18 +774,25 @@ impl ArchiveReader {
         // Check if erasure coding is enabled
         let erasure_config = self.volume_readers[0].header().config.erasure;
 
+        // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
-            Box::new(ErasureBlockIterator::new(
+            Box::new(SessionErasureBlockIterator::new(
                 &self.volume_readers,
                 &self.volume_indices,
-                &self.erasure_unpacker,
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                self.create_compressor(),
                 config.data_shards,
                 config.parity_shards,
             ))
         } else {
-            Box::new(StandardBlockIterator::new(
+            Box::new(SessionBlockIterator::new(
                 &self.volume_readers[0],
-                &self.unpacker,
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                self.create_compressor(),
             ))
         };
 
@@ -725,6 +806,10 @@ impl ArchiveReader {
     /// - Verifies chunk hashes match their declared content
     /// - Checks that all files have their required chunks present
     /// - Reports any corrupted or missing data
+    ///
+    /// ## Security
+    ///
+    /// Each block is decrypted with a unique per-block key derived via HKDF.
     pub fn verify(&mut self) -> Result<VerifyStats> {
         info!("Verifying archive integrity...");
 
@@ -734,18 +819,25 @@ impl ArchiveReader {
         // Check if erasure coding is enabled
         let erasure_config = self.volume_readers[0].header().config.erasure;
 
+        // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
-            Box::new(ErasureBlockIterator::new(
+            Box::new(SessionErasureBlockIterator::new(
                 &self.volume_readers,
                 &self.volume_indices,
-                &self.erasure_unpacker,
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                self.create_compressor(),
                 config.data_shards,
                 config.parity_shards,
             ))
         } else {
-            Box::new(StandardBlockIterator::new(
+            Box::new(SessionBlockIterator::new(
                 &self.volume_readers[0],
-                &self.unpacker,
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                self.create_compressor(),
             ))
         };
 

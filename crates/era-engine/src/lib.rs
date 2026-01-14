@@ -14,7 +14,8 @@ mod repair;
 mod writer;
 
 pub use block_iter::{
-    BlockIterStats, BlockIterator, DecodedBlock, ErasureBlockIterator, StandardBlockIterator,
+    BlockIterStats, BlockIterator, DecodedBlock, ErasureBlockIterator, SessionBlockIterator,
+    SessionErasureBlockIterator, StandardBlockIterator,
 };
 pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_VERSION};
 // Re-export KeySession for convenient access

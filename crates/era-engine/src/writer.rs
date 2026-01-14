@@ -1,4 +1,13 @@
 //! Archive writer - creates ERA archives.
+//!
+//! ## Security (ERA v8.1)
+//!
+//! This writer implements the HKDF "Onion Model" key derivation:
+//! - **Master Key (MK)**: Derived from password via Argon2id (expensive, done once)
+//! - **Volume Key (VK)**: Derived from MK via HKDF (fast, per-volume)
+//! - **Block Key (BK)**: Derived from VK via HKDF (fast, per-block)
+//!
+//! Each block is encrypted with a unique key, providing forward and backward security.
 
 use bytes::Bytes;
 use era_codec::{Compressor, NoCompressor, ZstdCompressor};
@@ -6,13 +15,14 @@ use era_common::{
     ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, CompressionAlgorithm, ErasureBlockInfo,
     ErasureCodeConfig, Result, UniqueChunk,
 };
-use era_crypto::{derive_key, DerivedKey, KdfParams, Salt};
+use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
-use era_packing::{ErasureBlockBuilder, MacroBlockBuilder};
+use era_packing::{SessionBlockBuilder, SessionErasureBlockBuilder};
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumeWriter};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
 use crate::checkpoint::CheckpointManager;
@@ -129,17 +139,23 @@ impl ArchiveWriterBuilder {
         let archive_id = ArchiveId::new();
         let salt = Salt::generate();
 
-        // Derive encryption key from password
+        // Derive encryption key from password using Argon2id
         let password = self.password.unwrap_or_default();
         let kdf_params = KdfParams {
             memory_cost: self.config.encryption.kdf_memory_cost,
             time_cost: self.config.encryption.kdf_time_cost,
             parallelism: 4,
         };
-        let key = derive_key(password.as_bytes(), &salt, &kdf_params)?;
 
-        // Generate password verification tag for early password validation
-        let password_verification_tag = era_crypto::generate_password_verification_tag(&key);
+        // Create KeySession - this derives the master key once
+        let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
+
+        // Derive volume key for the primary volume (volume 0)
+        // In multi-volume scenarios, each volume gets its own key
+        let volume_key = session.derive_volume_key(0);
+
+        // Get password verification tag from session
+        let password_verification_tag = session.password_verification_tag();
 
         // Create storage backend
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
@@ -181,16 +197,8 @@ impl ArchiveWriterBuilder {
             volume_writers.push(writer);
         }
 
-        // Create block builder with salt as nonce context
-        // This ensures unique nonces across different archives
+        // Store nonce context (salt) for block encryption
         let nonce_context = *salt.as_bytes();
-        let compressor: Box<dyn Compressor> = match self.config.compression.algorithm {
-            CompressionAlgorithm::None => Box::new(NoCompressor),
-            CompressionAlgorithm::Zstd => {
-                Box::new(ZstdCompressor::new(self.config.compression.level))
-            }
-        };
-        let block_builder = MacroBlockBuilder::new(key.clone(), nonce_context, compressor);
 
         // Configure file reader with CDC if enabled
         let file_reader = if self.enable_cdc {
@@ -202,13 +210,11 @@ impl ArchiveWriterBuilder {
 
         // Set up checkpoint manager if enabled
         let checkpoint_manager = if self.enable_checkpoint {
-            // Derive HMAC key from main key for checkpoint integrity
+            // Derive HMAC key from session for checkpoint integrity
+            // Use HKDF to derive a separate key for checkpoints
+            let checkpoint_vk = session.derive_volume_key(0xFFFF); // Reserved volume ID for checkpoint
             let mut hmac_key = [0u8; 32];
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(key.as_bytes());
-            hasher.update(b"ERA-CHECKPOINT-KEY");
-            let hash = hasher.finalize();
-            hmac_key.copy_from_slice(&hash.as_bytes()[..32]);
+            hmac_key.copy_from_slice(checkpoint_vk.as_bytes());
 
             let manager = match self.recovery_options.strategy {
                 RecoveryStrategy::StartFresh => {
@@ -249,31 +255,19 @@ impl ArchiveWriterBuilder {
             HashMap::new()
         };
 
-        // Create erasure builder if enabled
-        let erasure_builder = if self.enable_erasure {
-            let compressor: Box<dyn Compressor> = match self.config.compression.algorithm {
-                CompressionAlgorithm::None => Box::new(NoCompressor),
-                CompressionAlgorithm::Zstd => {
-                    Box::new(ZstdCompressor::new(self.config.compression.level))
-                }
-            };
-            Some(ErasureBlockBuilder::new(
-                key.clone(),
-                nonce_context,
-                compressor,
-                self.erasure_config,
-            )?)
-        } else {
-            None
-        };
-
         Ok(ArchiveWriter {
             archive_id,
             output_path: self.output_path,
-            key,
+            session,
+            volume_key,
+            nonce_context,
+            compression_config: self.config.compression.clone(),
+            erasure_config: if self.enable_erasure {
+                Some(self.erasure_config)
+            } else {
+                None
+            },
             volume_writers,
-            block_builder,
-            erasure_builder,
             catalog: Catalog::new(),
             chunk_locations,
             file_reader,
@@ -282,35 +276,64 @@ impl ArchiveWriterBuilder {
             pending_size: 0,
             target_block_size: 4 * 1024 * 1024, // 4MB
             checkpoint_manager,
+            next_block_id: AtomicU64::new(0),
         })
     }
 }
 
 /// Writer for creating ERA archives
+/// Archive writer - creates ERA archives with security-first design
+///
+/// ## Security Model (ERA v8.1)
+///
+/// This writer implements the HKDF "Onion Model" key derivation:
+/// - **Master Key (MK)**: Derived from password via Argon2id (mlock-protected)
+/// - **Volume Key (VK)**: Derived from MK via HKDF (per-volume isolation)
+/// - **Block Key (BK)**: Derived from VK via HKDF (per-block forward secrecy)
+///
+/// Each block is encrypted with a unique key. Block keys are derived on-the-fly
+/// and never stored in memory longer than necessary.
 pub struct ArchiveWriter {
     archive_id: ArchiveId,
     /// Output path for the archive
     output_path: PathBuf,
-    /// Key is stored for potential future re-keying operations
-    #[allow(dead_code)]
-    key: DerivedKey,
+
+    // Key Session (security-critical, mlock-protected)
+    /// The KeySession holds the master key, protected by mlock
+    session: KeySession,
+    /// Pre-derived volume key for the primary volume (volume 0)
+    volume_key: VolumeKey,
+    /// Salt-based nonce context for AEAD operations (16 bytes from Salt)
+    nonce_context: [u8; 16],
+
+    // Configuration
+    /// Compression settings
+    compression_config: era_common::CompressionConfig,
+    /// Erasure coding configuration (if enabled)
+    erasure_config: Option<ErasureCodeConfig>,
+
+    // Writers
     volume_writers: Vec<VolumeWriter<era_storage::LocalStorageWriter>>,
-    /// Standard block builder
-    block_builder: MacroBlockBuilder,
-    /// Erasure-coded block builder (optional)
-    erasure_builder: Option<ErasureBlockBuilder>,
+
+    // Catalog and deduplication
     catalog: Catalog,
     chunk_locations: HashMap<ChunkHash, BlockLocation>,
+
+    // File reading
     file_reader: FileReader,
     enable_cdc: bool,
-    /// Pending chunks waiting to be packed together
+
+    // Pending chunks waiting to be packed together
     pending_chunks: Vec<UniqueChunk>,
-    /// Current size of pending chunks
     pending_size: usize,
     /// Target block size for batching (default 4MB)
     target_block_size: usize,
-    /// Checkpoint manager for crash recovery (optional)
+
+    // Checkpoint for crash recovery
     checkpoint_manager: Option<CheckpointManager>,
+
+    /// Block ID counter for per-block key derivation
+    next_block_id: AtomicU64,
 }
 
 impl ArchiveWriter {
@@ -491,10 +514,43 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    /// Pack and write chunks, using erasure coding if enabled
+    /// Create a fresh compressor based on configuration.
+    ///
+    /// This is called for each pack operation since compressors may have internal state.
+    fn create_compressor(&self) -> Box<dyn Compressor> {
+        match self.compression_config.algorithm {
+            CompressionAlgorithm::None => Box::new(NoCompressor),
+            CompressionAlgorithm::Zstd => {
+                Box::new(ZstdCompressor::new(self.compression_config.level))
+            }
+        }
+    }
+
+    /// Get the next block ID and increment the counter.
+    fn next_block_id(&self) -> u64 {
+        self.next_block_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Pack and write chunks, using erasure coding if enabled.
+    ///
+    /// ## Security
+    ///
+    /// Each block is encrypted with a unique per-block key derived via HKDF.
+    /// This provides forward and backward security - compromising one block's
+    /// key doesn't affect other blocks.
     fn pack_and_write_chunks(&mut self, chunks: Vec<UniqueChunk>) -> Result<BlockLocation> {
-        if let Some(ref erasure_builder) = self.erasure_builder {
-            // Use erasure coding
+        if let Some(erasure_config) = self.erasure_config {
+            // Use erasure coding with per-block key derivation
+            let compressor = self.create_compressor();
+            let erasure_builder = SessionErasureBlockBuilder::new(
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                compressor,
+                erasure_config,
+            )?
+            .with_starting_block_id(self.next_block_id());
+
             let sharded_block = erasure_builder.pack_chunks(chunks)?;
 
             // Write all shards sequentially (data shards first, then parity)
@@ -568,8 +624,17 @@ impl ArchiveWriter {
 
             Ok(first_location.expect("at least one shard"))
         } else {
-            // Standard non-erasure path
-            let encrypted_block = self.block_builder.pack_chunks(chunks)?;
+            // Standard non-erasure path with per-block key derivation
+            let compressor = self.create_compressor();
+            let block_builder = SessionBlockBuilder::new(
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                compressor,
+            )
+            .with_starting_block_id(self.next_block_id());
+
+            let encrypted_block = block_builder.pack_chunks(chunks)?;
             // Write standard blocks to primary volume (0)
             // In future versions, we could distribute these too
             self.volume_writers[0].write_block(&encrypted_block)
@@ -613,14 +678,33 @@ impl ArchiveWriter {
         let catalog_hash = era_crypto::hash(&catalog_bytes);
         let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
 
+        // Create session-based builder for catalog encryption
+        let compressor = self.create_compressor();
+        let catalog_builder = SessionBlockBuilder::new(
+            &self.session,
+            &self.volume_key,
+            self.nonce_context,
+            compressor,
+        )
+        .with_starting_block_id(self.next_block_id());
+
         // Pack catalog ONCE to ensure same block_id (and thus same nonce) for all volumes
         // This is critical because the block_id is used to derive the encryption nonce
-        let catalog_block = self.block_builder.pack_single(catalog_chunk.clone())?;
+        let catalog_block = catalog_builder.pack_single(catalog_chunk.clone())?;
         let catalog_block_id = catalog_block.block_id.sequence() as u32;
 
         // Optionally create a backup block for erasure-coded archives
-        let backup_block = if self.erasure_builder.is_some() {
-            Some(self.block_builder.pack_single(catalog_chunk)?)
+        let backup_block = if self.erasure_config.is_some() {
+            // Create another builder for the backup block (will get next block_id)
+            let compressor = self.create_compressor();
+            let backup_builder = SessionBlockBuilder::new(
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                compressor,
+            )
+            .with_starting_block_id(self.next_block_id());
+            Some(backup_builder.pack_single(catalog_chunk)?)
         } else {
             None
         };
@@ -678,11 +762,14 @@ impl ArchiveWriter {
             }
         }
 
+        // Calculate total blocks written using our counter
+        let blocks_written = self.next_block_id.load(Ordering::SeqCst);
+
         let stats = ArchiveStats {
             archive_id: self.archive_id,
             total_files: self.catalog.file_count,
             total_size: self.catalog.total_size,
-            blocks_written: self.block_builder.blocks_created(),
+            blocks_written,
         };
 
         info!(
@@ -950,17 +1037,22 @@ pub mod generic {
             let archive_id = ArchiveId::new();
             let salt = Salt::generate();
 
-            // Derive encryption key
+            // Derive encryption key using KeySession for per-block key derivation
             let password = self.password.unwrap_or_default();
             let kdf_params = KdfParams {
                 memory_cost: self.config.encryption.kdf_memory_cost,
                 time_cost: self.config.encryption.kdf_time_cost,
                 parallelism: 4,
             };
-            let key = derive_key(password.as_bytes(), &salt, &kdf_params)?;
 
-            // Generate password verification tag
-            let password_verification_tag = era_crypto::generate_password_verification_tag(&key);
+            // Create KeySession - this derives the master key once (mlock-protected)
+            let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
+
+            // Derive volume key for volume 0
+            let volume_key = session.derive_volume_key(0);
+
+            // Get password verification tag from session
+            let password_verification_tag = session.password_verification_tag();
 
             // Create volume writer
             let header = SuperHeader::with_kdf_params(
@@ -974,10 +1066,11 @@ pub mod generic {
             let volume_writer =
                 VolumeWriter::create(&self.backend, Path::new(&self.filename), header)?;
 
-            // Create block builder
+            // Store nonce context for block encryption
             let nonce_context = *salt.as_bytes();
-            let compressor = Box::new(ZstdCompressor::new(self.config.compression.level));
-            let block_builder = MacroBlockBuilder::new(key.clone(), nonce_context, compressor);
+
+            // Store compression config for creating compressors on demand
+            let compression_config = self.config.compression.clone();
 
             // Configure file reader
             let file_reader = if self.enable_cdc {
@@ -989,9 +1082,11 @@ pub mod generic {
 
             Ok(GenericArchiveWriter {
                 archive_id,
-                key,
+                session,
+                volume_key,
+                nonce_context,
+                compression_config,
                 volume_writer,
-                block_builder,
                 catalog: Catalog::new(),
                 chunk_locations: HashMap::new(),
                 file_reader,
@@ -999,17 +1094,29 @@ pub mod generic {
                 pending_chunks: Vec::new(),
                 pending_size: 0,
                 target_block_size: 4 * 1024 * 1024,
+                next_block_id: AtomicU64::new(0),
             })
         }
     }
 
     /// Generic archive writer supporting any storage backend
+    ///
+    /// ## Security (ERA v8.1)
+    ///
+    /// This writer implements the HKDF "Onion Model" key derivation:
+    /// - Each block is encrypted with a unique key derived via HKDF
+    /// - Keys are stored in mlock-protected memory
     pub struct GenericArchiveWriter<W: StorageWriter> {
         archive_id: ArchiveId,
-        #[allow(dead_code)]
-        key: DerivedKey,
+        /// Key session for deriving per-block keys (mlock-protected)
+        session: KeySession,
+        /// Pre-derived volume key for volume 0
+        volume_key: VolumeKey,
+        /// Salt-based nonce context for AEAD operations
+        nonce_context: [u8; 16],
+        /// Compression configuration
+        compression_config: era_common::CompressionConfig,
         volume_writer: VolumeWriter<W>,
-        block_builder: MacroBlockBuilder,
         catalog: Catalog,
         chunk_locations: HashMap<ChunkHash, BlockLocation>,
         #[allow(dead_code)]
@@ -1019,12 +1126,29 @@ pub mod generic {
         pending_chunks: Vec<UniqueChunk>,
         pending_size: usize,
         target_block_size: usize,
+        /// Block ID counter for per-block key derivation
+        next_block_id: AtomicU64,
     }
 
     impl<W: StorageWriter> GenericArchiveWriter<W> {
         /// Get the archive ID
         pub fn archive_id(&self) -> ArchiveId {
             self.archive_id
+        }
+
+        /// Create a fresh compressor based on configuration.
+        fn create_compressor(&self) -> Box<dyn Compressor> {
+            match self.compression_config.algorithm {
+                CompressionAlgorithm::None => Box::new(NoCompressor),
+                CompressionAlgorithm::Zstd => {
+                    Box::new(ZstdCompressor::new(self.compression_config.level))
+                }
+            }
+        }
+
+        /// Get the next block ID and increment the counter.
+        fn next_block_id(&self) -> u64 {
+            self.next_block_id.fetch_add(1, Ordering::SeqCst)
         }
 
         /// Add a file from memory
@@ -1053,7 +1177,17 @@ pub mod generic {
                 if !self.pending_chunks.is_empty() {
                     self.flush_pending()?;
                 }
-                let encrypted_block = self.block_builder.pack_single(chunk)?;
+                // Create session-based builder for this block
+                let compressor = self.create_compressor();
+                let block_builder = SessionBlockBuilder::new(
+                    &self.session,
+                    &self.volume_key,
+                    self.nonce_context,
+                    compressor,
+                )
+                .with_starting_block_id(self.next_block_id());
+
+                let encrypted_block = block_builder.pack_single(chunk)?;
                 let location = self.volume_writer.write_block(&encrypted_block)?;
                 self.chunk_locations.insert(hash, location);
                 return Ok(());
@@ -1079,7 +1213,17 @@ pub mod generic {
             let hashes: Vec<_> = chunks.iter().map(|c| c.hash).collect();
             self.pending_size = 0;
 
-            let encrypted_block = self.block_builder.pack_chunks(chunks)?;
+            // Create session-based builder for this block
+            let compressor = self.create_compressor();
+            let block_builder = SessionBlockBuilder::new(
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                compressor,
+            )
+            .with_starting_block_id(self.next_block_id());
+
+            let encrypted_block = block_builder.pack_chunks(chunks)?;
             let location = self.volume_writer.write_block(&encrypted_block)?;
 
             for hash in hashes {
@@ -1099,7 +1243,18 @@ pub mod generic {
             let catalog_bytes = self.catalog.to_bytes()?;
             let catalog_hash = era_crypto::hash(&catalog_bytes);
             let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
-            let catalog_block = self.block_builder.pack_single(catalog_chunk)?;
+
+            // Create session-based builder for catalog encryption
+            let compressor = self.create_compressor();
+            let catalog_builder = SessionBlockBuilder::new(
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                compressor,
+            )
+            .with_starting_block_id(self.next_block_id());
+
+            let catalog_block = catalog_builder.pack_single(catalog_chunk)?;
             let catalog_block_id = catalog_block.block_id.sequence() as u32;
             let catalog_location = self.volume_writer.write_block(&catalog_block)?;
 
@@ -1110,11 +1265,13 @@ pub mod generic {
                 catalog_block_id,
             )?;
 
+            let blocks_written = self.next_block_id.load(Ordering::SeqCst);
+
             let stats = ArchiveStats {
                 archive_id: self.archive_id,
                 total_files: self.catalog.file_count,
                 total_size: self.catalog.total_size,
-                blocks_written: self.block_builder.blocks_created(),
+                blocks_written,
             };
 
             info!(

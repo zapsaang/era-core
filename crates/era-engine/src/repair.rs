@@ -2,14 +2,20 @@
 //!
 //! This module provides the ability to repair damaged ERA archives
 //! by using RS decoding to reconstruct corrupted shards.
+//!
+//! ## Security (ERA v8.1)
+//!
+//! This module uses the HKDF "Onion Model" for per-block key derivation:
+//! - Each block is decrypted/re-encrypted with a unique key derived from the volume key
+//! - This provides forward and backward security isolation
 
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{
     compute_shard_crc, BlockId, EraError, ErasureBlockInfo, ErasureCodeConfig, Result, ShardHeader,
 };
-use era_crypto::{derive_key, KdfParams, Salt};
-use era_packing::ErasureBlockUnpacker;
+use era_crypto::{KdfParams, KeySession, Salt};
+use era_packing::SessionErasureBlockUnpacker;
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use std::fs::OpenOptions;
@@ -92,24 +98,29 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
         erasure_config.data_shards, erasure_config.parity_shards
     );
 
-    // Derive key for decryption
+    // Create key session for per-block key derivation
     let salt = Salt::from_bytes(header.crypto_anchor.salt);
     let kdf_params = KdfParams {
         memory_cost: header.crypto_anchor.kdf_memory_cost,
         time_cost: header.crypto_anchor.kdf_time_cost,
         parallelism: header.crypto_anchor.kdf_parallelism,
     };
-    let key = derive_key(password.as_bytes(), &salt, &kdf_params)?;
+    let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
 
-    // Verify password
-    if !era_crypto::verify_password_tag(&key, &header.crypto_anchor.password_verification_tag) {
+    // Verify password using the session
+    if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
         return Err(EraError::InvalidKey("Incorrect password".to_string()));
     }
 
-    // Create unpacker for RS decoding
+    // Derive volume key for volume 0
+    let volume_key = session.derive_volume_key(0);
+
+    // Create session-based unpacker for RS decoding with per-block key derivation
     let nonce_context = header.crypto_anchor.salt;
-    let compressor = Box::new(ZstdCompressor::new(header.config.compression.level));
-    let erasure_unpacker = ErasureBlockUnpacker::new(key.clone(), nonce_context, compressor);
+    let compressor: Box<dyn era_codec::Compressor> =
+        Box::new(ZstdCompressor::new(header.config.compression.level));
+    let erasure_unpacker =
+        SessionErasureBlockUnpacker::new(&session, &volume_key, nonce_context, compressor);
 
     // Create backup if requested
     if options.create_backup && !options.dry_run {

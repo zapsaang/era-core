@@ -249,6 +249,30 @@ impl<'a> SessionBlockUnpacker<'a> {
             data,
         })
     }
+
+    /// Extract all chunks from a block with per-block key derivation.
+    pub fn extract_all_chunks(
+        &self,
+        block: &EncryptedMacroBlock,
+    ) -> Result<Vec<(era_common::ChunkHash, bytes::Bytes)>> {
+        let unpacked = self.unpack(block)?;
+        let mut chunks = Vec::with_capacity(unpacked.index.entries.len());
+
+        for entry in &unpacked.index.entries {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+
+            if end > unpacked.data.len() {
+                return Err(era_common::EraError::decompression(
+                    "Chunk offset exceeds data size",
+                ));
+            }
+
+            chunks.push((entry.hash, unpacked.data.slice(start..end)));
+        }
+
+        Ok(chunks)
+    }
 }
 
 #[cfg(test)]
