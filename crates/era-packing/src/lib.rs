@@ -19,6 +19,7 @@
 mod builder;
 mod erasure_builder;
 mod erasure_unpacker;
+mod packed_chunk;
 mod session_builder;
 mod session_erasure_builder;
 mod unpacker;
@@ -26,6 +27,7 @@ mod unpacker;
 pub use builder::MacroBlockBuilder;
 pub use erasure_builder::ErasureBlockBuilder;
 pub use erasure_unpacker::ErasureBlockUnpacker;
+pub use packed_chunk::{pack_files, unpack_file, PackedChunk, PackedEntry, PackedHeader};
 pub use session_builder::{SessionBlockBuilder, SessionBlockUnpacker};
 pub use session_erasure_builder::{SessionErasureBlockBuilder, SessionErasureBlockUnpacker};
 pub use unpacker::{MacroBlockUnpacker, UnpackedBlock};

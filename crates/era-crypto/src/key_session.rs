@@ -178,6 +178,24 @@ impl KeySessionBuilder {
         Self::build_internal(key.as_bytes(), self.max_volumes)
     }
 
+    /// Build from raw master key bytes (32 bytes).
+    ///
+    /// This is useful when the master key is obtained from certificate-based
+    /// key exchange (X25519 ECDH) instead of password derivation (Argon2).
+    ///
+    /// # Security Note
+    ///
+    /// The caller is responsible for obtaining the master key securely.
+    /// When using certificate mode, the master key should come from
+    /// `EraKeyPair::decapsulate()` which provides proper key encapsulation.
+    ///
+    /// # Arguments
+    ///
+    /// * `master_key` - 32-byte master key (will be zeroized after use)
+    pub fn build_from_master_key(self, master_key: &[u8; 32]) -> Result<KeySession> {
+        Self::build_internal(master_key, self.max_volumes)
+    }
+
     fn build_internal(mk_bytes: &[u8], max_volumes: usize) -> Result<KeySession> {
         // Allocate cache
         let cache_size = max_volumes
@@ -246,6 +264,32 @@ impl KeySession {
         KeySessionBuilder::new()
             .build_from_derived(key)
             .expect("Default build failed")
+    }
+
+    /// Create a key session from a raw master key (for certificate mode).
+    ///
+    /// This method is ~1000x faster than password-based creation because
+    /// it skips Argon2 key derivation.
+    ///
+    /// # Arguments
+    ///
+    /// * `master_key` - 32-byte master key from certificate decapsulation
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use era_crypto::certificate::{EraKeyPair, KeyEncapsulation};
+    ///
+    /// // Writer side: generate random master key, encapsulate for recipient
+    /// let master_key = [0u8; 32]; // should be random in practice
+    /// let encapsulation = EraKeyPair::encapsulate_for(&recipient_cert, &master_key)?;
+    ///
+    /// // Reader side: decapsulate to get master key
+    /// let decapsulated = my_keypair.decapsulate(&encapsulation)?;
+    /// let session = KeySession::from_master_key(&decapsulated.master_key)?;
+    /// ```
+    pub fn from_master_key(master_key: &[u8; 32]) -> Result<Self> {
+        KeySessionBuilder::new().build_from_master_key(master_key)
     }
 
     /// Derive a Volume Key for a specific volume.

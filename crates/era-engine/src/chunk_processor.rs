@@ -10,6 +10,7 @@
 
 use bytes::Bytes;
 use era_common::{ChunkHash, ChunkVec, Result};
+use era_packing::unpack_file;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
@@ -42,6 +43,8 @@ pub struct ExtractionContext {
     pub multi_chunk_files: HashMap<usize, MultiChunkState>,
     /// Chunk to files mapping: hash -> list of (file_idx, chunk_idx, offset)
     pub chunk_to_files: HashMap<ChunkHash, Vec<(usize, usize, u64)>>,
+    /// Packed chunk mapping: hash -> list of (file_idx, file_index_in_pack, output_path)
+    pub packed_chunks: HashMap<ChunkHash, Vec<(usize, usize, PathBuf)>>,
 }
 
 impl ExtractionContext {
@@ -51,12 +54,15 @@ impl ExtractionContext {
             single_chunk_pending: HashMap::new(),
             multi_chunk_files: HashMap::new(),
             chunk_to_files: HashMap::new(),
+            packed_chunks: HashMap::new(),
         }
     }
 
-    /// Check if there are still files pending extraction
+    /// Check if there are any pending extractions
     pub fn has_pending(&self) -> bool {
-        !self.single_chunk_pending.is_empty() || !self.multi_chunk_files.is_empty()
+        !self.single_chunk_pending.is_empty()
+            || !self.multi_chunk_files.is_empty()
+            || !self.packed_chunks.is_empty()
     }
 
     /// Process a batch of chunks from a decoded block
@@ -68,6 +74,27 @@ impl ExtractionContext {
     /// Returns the number of files completed and bytes written
     pub fn process_chunks(&mut self, chunks: ChunkVec, stats: &mut ExtractStats) -> Result<()> {
         for (hash, data) in chunks {
+            // Handle packed chunks first (small files packed together)
+            if let Some(entries) = self.packed_chunks.remove(&hash) {
+                for (_file_idx, file_index_in_pack, output_path) in entries {
+                    // Unpack the specific file from the packed chunk
+                    let file_data = unpack_file(&data, file_index_in_pack)?;
+
+                    // Create parent directories
+                    if let Some(parent) = output_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+
+                    // Write file
+                    let mut file = File::create(&output_path)?;
+                    file.write_all(&file_data)?;
+
+                    debug!("Extracted (packed): {}", output_path.display());
+                    stats.extracted += 1;
+                    stats.bytes_written += file_data.len() as u64;
+                }
+            }
+
             // Handle single-chunk files
             if let Some(entries) = self.single_chunk_pending.remove(&hash) {
                 for (_file_idx, output_path) in entries {

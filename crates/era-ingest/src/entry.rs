@@ -20,20 +20,57 @@ pub enum FileType {
 pub struct ChunkRef {
     /// Hash of the chunk
     pub hash: ChunkHash,
-    /// Offset within the file
+    /// Offset within the file (for multi-chunk files)
     pub offset: u64,
     /// Length of the chunk
     pub length: u32,
+    /// Packed chunk metadata (if this chunk contains multiple small files)
+    #[serde(default)]
+    pub packed_info: Option<PackedChunkInfo>,
+}
+
+/// Information for packed chunks (multiple small files in one chunk)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackedChunkInfo {
+    /// Index of this file within the packed chunk
+    pub file_index: usize,
+    /// Total number of files in this packed chunk
+    pub total_files: usize,
 }
 
 impl ChunkRef {
-    /// Create a new chunk reference
+    /// Create a new chunk reference for a standalone chunk
     pub fn new(hash: ChunkHash, offset: u64, length: u32) -> Self {
         Self {
             hash,
             offset,
             length,
+            packed_info: None,
         }
+    }
+
+    /// Create a new chunk reference for a file in a packed chunk
+    pub fn new_packed(
+        hash: ChunkHash,
+        offset: u64,
+        length: u32,
+        file_index: usize,
+        total_files: usize,
+    ) -> Self {
+        Self {
+            hash,
+            offset,
+            length,
+            packed_info: Some(PackedChunkInfo {
+                file_index,
+                total_files,
+            }),
+        }
+    }
+
+    /// Check if this is a packed chunk reference
+    pub fn is_packed(&self) -> bool {
+        self.packed_info.is_some()
     }
 }
 
@@ -215,6 +252,14 @@ impl Catalog {
             }
         }
         self.entries.push(entry);
+    }
+
+    /// Reserve capacity for at least `additional` more entries
+    ///
+    /// This is useful for batch operations where the number of entries is known upfront,
+    /// reducing the number of reallocations.
+    pub fn reserve(&mut self, additional: usize) {
+        self.entries.reserve(additional);
     }
 
     /// Serialize the catalog to bytes

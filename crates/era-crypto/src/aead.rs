@@ -2,11 +2,12 @@
 
 use bytes::Bytes;
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead as AeadTrait, KeyInit},
     XChaCha20Poly1305, XNonce,
 };
 use era_common::{BlockId, EraError, Result};
 use rand::RngCore;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::DerivedKey;
 
@@ -15,6 +16,99 @@ pub const NONCE_SIZE: usize = 24;
 
 /// Size of the authentication tag in bytes
 pub const TAG_SIZE: usize = 16;
+
+/// AEAD key wrapper (32 bytes)
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct AeadKey(pub(crate) [u8; 32]);
+
+impl AeadKey {
+    /// Create a new AEAD key from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != 32 {
+            return Err(EraError::InvalidKey("AEAD key must be 32 bytes".into()));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(bytes);
+        Ok(Self(key))
+    }
+
+    /// Get the key as bytes
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Nonce wrapper (24 bytes for XChaCha20)
+#[derive(Clone)]
+pub struct Nonce([u8; NONCE_SIZE]);
+
+impl Nonce {
+    /// Create a zero nonce
+    pub fn zero() -> Self {
+        Self([0u8; NONCE_SIZE])
+    }
+
+    /// Generate a random nonce
+    pub fn generate() -> Self {
+        let mut nonce = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        Self(nonce)
+    }
+
+    /// Create from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != NONCE_SIZE {
+            return Err(EraError::InvalidFormat(format!(
+                "Nonce must be {} bytes",
+                NONCE_SIZE
+            )));
+        }
+        let mut nonce = [0u8; NONCE_SIZE];
+        nonce.copy_from_slice(bytes);
+        Ok(Self(nonce))
+    }
+
+    /// Get as bytes
+    pub fn as_bytes(&self) -> &[u8; NONCE_SIZE] {
+        &self.0
+    }
+}
+
+/// Simple AEAD wrapper for direct encryption/decryption
+pub struct AeadCipher;
+
+impl AeadCipher {
+    /// Create a new AEAD cipher
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Encrypt with key and nonce
+    pub fn encrypt(&self, key: &AeadKey, nonce: &Nonce, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let cipher = XChaCha20Poly1305::new((&key.0).into());
+        let xnonce = XNonce::from(nonce.0);
+
+        cipher
+            .encrypt(&xnonce, plaintext)
+            .map_err(|e| EraError::encryption(e.to_string()))
+    }
+
+    /// Decrypt with key and nonce
+    pub fn decrypt(&self, key: &AeadKey, nonce: &Nonce, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let cipher = XChaCha20Poly1305::new((&key.0).into());
+        let xnonce = XNonce::from(nonce.0);
+
+        cipher
+            .decrypt(&xnonce, ciphertext)
+            .map_err(|e| EraError::decryption(e.to_string()))
+    }
+}
+
+impl Default for AeadCipher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Encrypt data using XChaCha20-Poly1305
 ///

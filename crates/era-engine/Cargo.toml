@@ -22,6 +22,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
 subtle = { workspace = true }
+rand = { workspace = true }
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -42,4 +44,15 @@ harness = false
 
 [[bench]]
 name = "real_world_perf_test"
+harness = false
+
+[[bench]]
+name = "batch_api_bench"
+harness = false
+
+[[bench]]
+name = "small_file_packing_bench"
+harness = false
+[[bench]]
+name = "p17_final_bench"
 harness = false

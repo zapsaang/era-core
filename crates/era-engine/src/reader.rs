@@ -14,12 +14,13 @@ pub use crate::chunk_processor::{ExtractStats, VerifyStats};
 use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
-use era_common::{BlockId, BlockLocation, ChunkVec, EraError, Result};
+use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumeReader};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -640,30 +641,47 @@ impl ArchiveReader {
 
             if entry.is_chunked() {
                 let chunk_count = entry.chunks.len();
-                if let Some(parent) = output_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let file = File::create(&output_path)?;
-                file.set_len(entry.size)?;
 
-                context.multi_chunk_files.insert(
-                    file_idx,
-                    MultiChunkState {
-                        file,
-                        output_path,
-                        expected_size: entry.size,
-                        chunks_written: vec![false; chunk_count],
-                        total_chunks: chunk_count,
-                        written_count: 0,
-                    },
-                );
+                // Check if this is a packed chunk (single chunk with packed_info)
+                let is_packed = chunk_count == 1 && entry.chunks[0].packed_info.is_some();
 
-                for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
+                if is_packed {
+                    // Packed chunk: handle like single-chunk file
+                    let chunk_ref = &entry.chunks[0];
+                    let packed_info = chunk_ref.packed_info.as_ref().unwrap();
+
                     context
-                        .chunk_to_files
+                        .packed_chunks
                         .entry(chunk_ref.hash)
                         .or_default()
-                        .push((file_idx, chunk_idx, chunk_ref.offset));
+                        .push((file_idx, packed_info.file_index, output_path));
+                } else {
+                    // Normal multi-chunk file: pre-create file
+                    if let Some(parent) = output_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let file = File::create(&output_path)?;
+                    file.set_len(entry.size)?;
+
+                    context.multi_chunk_files.insert(
+                        file_idx,
+                        MultiChunkState {
+                            file,
+                            output_path,
+                            expected_size: entry.size,
+                            chunks_written: vec![false; chunk_count],
+                            total_chunks: chunk_count,
+                            written_count: 0,
+                        },
+                    );
+
+                    for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
+                        context
+                            .chunk_to_files
+                            .entry(chunk_ref.hash)
+                            .or_default()
+                            .push((file_idx, chunk_idx, chunk_ref.offset));
+                    }
                 }
             } else if let Some(content_hash) = entry.content_hash {
                 context
@@ -712,15 +730,45 @@ impl ArchiveReader {
 
         let mut context = VerificationContext::new(catalog.entries.len());
 
+        // Track packed chunks to avoid duplicate verification
+        // Key: packed_chunk_hash, Value: list of file indices sharing this packed chunk
+        let mut packed_chunk_files: HashMap<ChunkHash, Vec<usize>> = HashMap::new();
+
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
             if entry.is_chunked() {
-                context.file_chunk_counts.push(entry.chunks.len());
-                for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
-                    context
-                        .expected_chunks
+                let chunk_count = entry.chunks.len();
+
+                // Check if this is a packed chunk (single chunk with packed_info)
+                let is_packed = chunk_count == 1 && entry.chunks[0].packed_info.is_some();
+
+                if is_packed {
+                    // Packed file: track by packed chunk hash
+                    // Multiple files may share the same packed chunk
+                    let chunk_ref = &entry.chunks[0];
+                    packed_chunk_files
                         .entry(chunk_ref.hash)
                         .or_default()
-                        .push((file_idx, chunk_idx, chunk_ref.length as u64));
+                        .push(file_idx);
+
+                    // Only add to expected_chunks once per unique packed chunk
+                    if !context.expected_chunks.contains_key(&chunk_ref.hash) {
+                        context
+                            .expected_chunks
+                            .entry(chunk_ref.hash)
+                            .or_default()
+                            .push((file_idx, 0, chunk_ref.length as u64));
+                    }
+                    context.file_chunk_counts.push(1);
+                } else {
+                    // Normal multi-chunk file
+                    context.file_chunk_counts.push(chunk_count);
+                    for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
+                        context
+                            .expected_chunks
+                            .entry(chunk_ref.hash)
+                            .or_default()
+                            .push((file_idx, chunk_idx, chunk_ref.length as u64));
+                    }
                 }
             } else if let Some(content_hash) = entry.content_hash {
                 context.file_chunk_counts.push(1);
@@ -731,6 +779,21 @@ impl ArchiveReader {
                     .push((file_idx, 0, entry.size));
             } else {
                 context.file_chunk_counts.push(0);
+            }
+        }
+
+        // For packed chunks, update expected_chunks to include all files sharing the chunk
+        for (hash, file_indices) in &packed_chunk_files {
+            if let Some(refs) = context.expected_chunks.get_mut(hash) {
+                // The first entry was already added, add the rest
+                for &file_idx in file_indices.iter().skip(1) {
+                    // Get the chunk ref to get the correct length
+                    if let Some(entry) = catalog.entries.get(file_idx) {
+                        if !entry.chunks.is_empty() {
+                            refs.push((file_idx, 0, entry.chunks[0].length as u64));
+                        }
+                    }
+                }
             }
         }
 

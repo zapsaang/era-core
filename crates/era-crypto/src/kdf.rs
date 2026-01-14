@@ -30,6 +30,32 @@ impl Default for KdfParams {
     }
 }
 
+impl KdfParams {
+    /// Fast parameters for encrypting high-entropy secrets (like private keys)
+    /// Uses minimal memory since the secret is already high-entropy
+    pub fn fast() -> Self {
+        Self {
+            memory_cost: 1024, // 1 MB
+            time_cost: 1,
+            parallelism: 1,
+        }
+    }
+
+    /// Default parameters for user passwords
+    pub fn standard() -> Self {
+        Self::default()
+    }
+
+    /// Production parameters with maximum security
+    pub fn production() -> Self {
+        Self {
+            memory_cost: 262144, // 256 MB
+            time_cost: 3,
+            parallelism: 4,
+        }
+    }
+}
+
 /// Derive a key from a password using Argon2id
 pub fn derive_key(password: &[u8], salt: &Salt, params: &KdfParams) -> Result<DerivedKey> {
     let argon2_params = Params::new(

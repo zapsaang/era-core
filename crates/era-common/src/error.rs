@@ -100,6 +100,12 @@ pub enum EraError {
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 
+    #[error("Invalid format: {0}")]
+    InvalidFormat(String),
+
+    #[error("Key derivation error: {0}")]
+    KeyDerivation(String),
+
     // Concurrency Errors
     #[error("Lock poisoned: {0}")]
     LockPoisoned(String),

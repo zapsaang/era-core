@@ -10,6 +10,7 @@ authors.workspace = true
 era-common = { workspace = true }
 era-crypto = { workspace = true }
 era-codec = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }

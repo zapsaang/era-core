@@ -18,6 +18,10 @@ subtle = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { version = "1.7", features = ["derive"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+serde = { workspace = true }
+bincode = { workspace = true }
+hex = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -30,6 +34,7 @@ windows-sys = { version = "0.52", features = [
 
 [dev-dependencies]
 criterion = { workspace = true }
+tempfile = "3"
 
 [[bench]]
 name = "crypto_bench"
