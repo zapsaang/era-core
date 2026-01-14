@@ -18,7 +18,15 @@ subtle = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { version = "1.7", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+] }
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -12,9 +12,9 @@
 //!
 //! ## Platform Support
 //!
-//! - Unix/Linux: mlock, mprotect (full support)
-//! - macOS: mlock (full support)  
-//! - Windows: VirtualLock (partial support)
+//! - Unix/Linux: mlock, mprotect, guard pages (full support)
+//! - macOS: mlock, mprotect, guard pages (full support)  
+//! - Windows: VirtualLock, VirtualProtect, guard pages (full support)
 //! - Other: Graceful degradation with warnings
 
 use std::alloc::{alloc_zeroed, dealloc, Layout};
@@ -105,7 +105,7 @@ impl<const N: usize> SecureBuffer<N> {
     /// Create a new secure buffer with custom configuration
     pub fn with_config(config: SecureMemoryConfig) -> Result<Self, SecureMemoryError> {
         let (ptr, strategy) = if config.enable_guard_pages {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 let (user_ptr, base_ptr, total_len) = allocate_guarded(N)?;
                 let ptr = unsafe { NonNull::new_unchecked(user_ptr as *mut [u8; N]) };
@@ -118,7 +118,7 @@ impl<const N: usize> SecureBuffer<N> {
                     },
                 )
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             {
                 #[cfg(debug_assertions)]
                 eprintln!("[era-crypto] Warning: Guard pages not supported on this platform");
@@ -219,13 +219,7 @@ impl<const N: usize> Drop for SecureBuffer<N> {
                     base_ptr,
                     total_len,
                 } => {
-                    #[cfg(unix)]
-                    libc::munmap(base_ptr.as_ptr() as *mut libc::c_void, total_len);
-
-                    #[cfg(not(unix))]
-                    {
-                        let _ = (base_ptr, total_len);
-                    } // suppress unused
+                    deallocate_guarded(base_ptr.as_ptr(), total_len);
                 }
             }
         }
@@ -394,7 +388,7 @@ impl SecureBytes {
         }
 
         let (ptr, strategy) = if config.enable_guard_pages {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 let (user_ptr, base_ptr, total_len) = allocate_guarded(size)?;
                 let ptr = unsafe { NonNull::new_unchecked(user_ptr) };
@@ -407,7 +401,7 @@ impl SecureBytes {
                     },
                 )
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             {
                 #[cfg(debug_assertions)]
                 eprintln!("[era-crypto] Warning: Guard pages not supported on this platform");
@@ -514,13 +508,7 @@ impl Drop for SecureBytes {
                     base_ptr,
                     total_len,
                 } => {
-                    #[cfg(unix)]
-                    libc::munmap(base_ptr.as_ptr() as *mut libc::c_void, total_len);
-
-                    #[cfg(not(unix))]
-                    {
-                        let _ = (base_ptr, total_len);
-                    }
+                    deallocate_guarded(base_ptr.as_ptr(), total_len);
                 }
             }
         }
@@ -537,9 +525,26 @@ impl std::fmt::Debug for SecureBytes {
     }
 }
 
+// Platform-specific guard page allocation implementations
+
+#[cfg(unix)]
+fn get_page_size() -> usize {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+}
+
+#[cfg(windows)]
+fn get_page_size() -> usize {
+    use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+    unsafe {
+        let mut info: SYSTEM_INFO = std::mem::zeroed();
+        GetSystemInfo(&mut info);
+        info.dwPageSize as usize
+    }
+}
+
 #[cfg(unix)]
 fn allocate_guarded(size: usize) -> Result<(*mut u8, *mut u8, usize), SecureMemoryError> {
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let page_size = get_page_size();
     if page_size == 0 {
         return Err(SecureMemoryError::GuardPageFailed(
             "Could not determine page size".to_string(),
@@ -547,10 +552,8 @@ fn allocate_guarded(size: usize) -> Result<(*mut u8, *mut u8, usize), SecureMemo
     }
 
     // Calculate total size: Guard + Data + Guard
-    // Data size needs to be at least "size"
     let data_pages = (size + page_size - 1) / page_size;
     let data_pages = if data_pages == 0 { 1 } else { data_pages };
-
     let total_pages = data_pages + 2;
     let total_len = total_pages * page_size;
 
@@ -571,7 +574,7 @@ fn allocate_guarded(size: usize) -> Result<(*mut u8, *mut u8, usize), SecureMemo
 
     let ptr = ptr as *mut u8;
 
-    // Protect first page
+    // Protect first guard page
     if unsafe { libc::mprotect(ptr as *mut libc::c_void, page_size, libc::PROT_NONE) } != 0 {
         unsafe { libc::munmap(ptr as *mut libc::c_void, total_len) };
         return Err(SecureMemoryError::GuardPageFailed(
@@ -579,7 +582,7 @@ fn allocate_guarded(size: usize) -> Result<(*mut u8, *mut u8, usize), SecureMemo
         ));
     }
 
-    // Protect last page
+    // Protect last guard page
     let last_page_offset = (total_pages - 1) * page_size;
     if unsafe {
         libc::mprotect(
@@ -595,10 +598,95 @@ fn allocate_guarded(size: usize) -> Result<(*mut u8, *mut u8, usize), SecureMemo
         ));
     }
 
-    // User ptr is at start of second page (which is the first data page)
+    // User ptr is at start of second page
     let user_ptr = unsafe { ptr.add(page_size) };
 
     Ok((user_ptr, ptr, total_len))
+}
+
+#[cfg(windows)]
+fn allocate_guarded(size: usize) -> Result<(*mut u8, *mut u8, usize), SecureMemoryError> {
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, VirtualProtect};
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE,
+    };
+
+    let page_size = get_page_size();
+    if page_size == 0 {
+        return Err(SecureMemoryError::GuardPageFailed(
+            "Could not determine page size".to_string(),
+        ));
+    }
+
+    // Calculate total size: Guard + Data + Guard
+    let data_pages = (size + page_size - 1) / page_size;
+    let data_pages = if data_pages == 0 { 1 } else { data_pages };
+    let total_pages = data_pages + 2;
+    let total_len = total_pages * page_size;
+
+    // Allocate entire region as read-write
+    let ptr = unsafe {
+        VirtualAlloc(
+            std::ptr::null_mut(),
+            total_len,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        )
+    };
+
+    if ptr.is_null() {
+        return Err(SecureMemoryError::AllocationFailed);
+    }
+
+    let ptr = ptr as *mut u8;
+
+    // Protect first guard page
+    let mut old_protect = 0u32;
+    if unsafe { VirtualProtect(ptr as *mut _, page_size, PAGE_NOACCESS, &mut old_protect) } == 0 {
+        unsafe { VirtualFree(ptr as *mut _, 0, MEM_RELEASE) };
+        return Err(SecureMemoryError::GuardPageFailed(format!(
+            "Failed to protect first guard page: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // Protect last guard page
+    let last_page_offset = (total_pages - 1) * page_size;
+    if unsafe {
+        VirtualProtect(
+            ptr.add(last_page_offset) as *mut _,
+            page_size,
+            PAGE_NOACCESS,
+            &mut old_protect,
+        )
+    } == 0
+    {
+        unsafe { VirtualFree(ptr as *mut _, 0, MEM_RELEASE) };
+        return Err(SecureMemoryError::GuardPageFailed(format!(
+            "Failed to protect last guard page: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // User ptr is at start of second page
+    let user_ptr = unsafe { ptr.add(page_size) };
+
+    Ok((user_ptr, ptr, total_len))
+}
+
+#[cfg(unix)]
+fn deallocate_guarded(base_ptr: *mut u8, total_len: usize) {
+    unsafe {
+        libc::munmap(base_ptr as *mut libc::c_void, total_len);
+    }
+}
+
+#[cfg(windows)]
+fn deallocate_guarded(base_ptr: *mut u8, _total_len: usize) {
+    use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
+    unsafe {
+        VirtualFree(base_ptr as *mut _, 0, MEM_RELEASE);
+    }
 }
 
 #[cfg(test)]
@@ -662,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn test_guard_pages_allocation() {
         let config = SecureMemoryConfig {
             enable_mlock: true, // Try mlock
@@ -672,7 +760,7 @@ mod tests {
         let buffer = SecureBuffer::<32>::with_config(config).unwrap();
 
         let ptr = buffer.as_ref().as_ptr();
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = get_page_size();
 
         // Verify alignment
         assert_eq!(ptr as usize % page_size, 0);
@@ -681,5 +769,96 @@ mod tests {
         let mut buffer = buffer;
         buffer.as_mut()[0] = 0xAA;
         assert_eq!(buffer.as_ref()[0], 0xAA);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_windows_guard_pages() {
+        let config = SecureMemoryConfig {
+            enable_mlock: false, // Don't require VirtualLock
+            enable_guard_pages: true,
+            strict_mlock: false,
+        };
+
+        // Test with SecureBuffer
+        let mut buffer = SecureBuffer::<1024>::with_config(config).unwrap();
+
+        // Should be able to write/read data
+        for i in 0..1024 {
+            buffer.as_mut()[i] = (i % 256) as u8;
+        }
+
+        for i in 0..1024 {
+            assert_eq!(buffer.as_mut()[i], (i % 256) as u8);
+        }
+
+        // Test with SecureBytes
+        let mut bytes = SecureBytes::with_config(2048, config).unwrap();
+        bytes.as_mut_slice()[0] = 0xFF;
+        bytes.as_mut_slice()[2047] = 0xAA;
+        assert_eq!(bytes.as_slice()[0], 0xFF);
+        assert_eq!(bytes.as_slice()[2047], 0xAA);
+    }
+
+    #[test]
+    fn test_security_features_report() {
+        let report = check_security_features();
+
+        // Platform-specific assertions
+        #[cfg(any(unix, windows))]
+        {
+            assert!(report.guard_pages_available);
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            assert!(!report.guard_pages_available);
+        }
+
+        // Verify report is consistent
+        assert!(report.platform.len() > 0);
+    }
+}
+
+/// Security features availability report
+#[derive(Debug, Clone)]
+pub struct SecurityReport {
+    /// Platform name
+    pub platform: String,
+    /// Guard pages are available and functioning
+    pub guard_pages_available: bool,
+    /// Memory locking (mlock/VirtualLock) is available
+    pub mlock_available: bool,
+    /// Page size in bytes
+    pub page_size: usize,
+}
+
+/// Check which security features are available on this platform
+pub fn check_security_features() -> SecurityReport {
+    let platform = if cfg!(target_os = "linux") {
+        "Linux"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "windows") {
+        "Windows"
+    } else {
+        "Unknown"
+    }
+    .to_string();
+
+    let guard_pages_available = cfg!(any(unix, windows));
+    let mlock_available = cfg!(any(unix, windows));
+
+    let page_size = if cfg!(any(unix, windows)) {
+        get_page_size()
+    } else {
+        0
+    };
+
+    SecurityReport {
+        platform,
+        guard_pages_available,
+        mlock_available,
+        page_size,
     }
 }

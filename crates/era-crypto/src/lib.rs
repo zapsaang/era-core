@@ -14,6 +14,7 @@ mod kdf;
 mod key;
 mod key_session;
 mod secure_memory;
+mod security_check;
 
 #[allow(deprecated)]
 pub use aead::{decrypt, encrypt, NONCE_SIZE, TAG_SIZE};
@@ -23,5 +24,7 @@ pub use kdf::{derive_key, generate_password_verification_tag, verify_password_ta
 pub use key::{DerivedKey, Salt};
 pub use key_session::{BlockKey, KeySession, KeySessionBuilder, VolumeKey};
 pub use secure_memory::{
-    disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64, SecureMemoryConfig,
+    check_security_features, disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64,
+    SecureMemoryConfig, SecurityReport,
 };
+pub use security_check::{print_security_report, verify_guard_pages_or_warn, verify_mlock_or_warn};
