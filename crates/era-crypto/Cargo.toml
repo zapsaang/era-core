@@ -18,6 +18,7 @@ subtle = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { version = "1.7", features = ["derive"] }
+libc = "0.2"
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -13,6 +13,7 @@ mod hash;
 mod kdf;
 mod key;
 mod key_session;
+mod secure_memory;
 
 #[allow(deprecated)]
 pub use aead::{decrypt, encrypt, NONCE_SIZE, TAG_SIZE};
@@ -21,3 +22,6 @@ pub use hash::{hash, hash_reader, Hasher};
 pub use kdf::{derive_key, generate_password_verification_tag, verify_password_tag, KdfParams};
 pub use key::{DerivedKey, Salt};
 pub use key_session::{BlockKey, KeySession, VolumeKey};
+pub use secure_memory::{
+    disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64, SecureMemoryConfig,
+};

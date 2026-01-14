@@ -4,7 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use era_common::BlockId;
 use era_crypto::{
     decrypt_with_context, derive_key, encrypt_with_context, generate_password_verification_tag,
-    hash, verify_password_tag, DerivedKey, KdfParams, Salt,
+    hash, verify_password_tag, DerivedKey, KdfParams, KeySession, Salt,
 };
 
 /// Create a test key with fast KDF parameters (for benchmarking encryption, not KDF)
@@ -117,12 +117,53 @@ fn bench_aead_decrypt(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark HKDF key derivation for volume and block keys
+fn bench_hkdf_key_derivation(c: &mut Criterion) {
+    let salt = Salt::generate();
+    let params = KdfParams {
+        memory_cost: 1024,
+        time_cost: 1,
+        parallelism: 1,
+    };
+    let session = KeySession::new(b"benchmark_password", &salt, &params).unwrap();
+    let vk = session.derive_volume_key(0);
+    let nonce_context = [42u8; 16];
+
+    let mut group = c.benchmark_group("hkdf_key_derivation");
+
+    // Benchmark VolumeKey derivation
+    group.bench_function("volume_key_derivation", |b| {
+        b.iter(|| session.derive_volume_key(black_box(0)))
+    });
+
+    // Benchmark BlockKey derivation
+    group.bench_function("block_key_derivation", |b| {
+        let mut block_id = 0u64;
+        b.iter(|| {
+            block_id = block_id.wrapping_add(1);
+            session.derive_block_key(black_box(&vk), block_id, &nonce_context)
+        })
+    });
+
+    // Benchmark combined: derive 1000 block keys (simulating multi-block file)
+    group.bench_function("derive_1000_block_keys", |b| {
+        b.iter(|| {
+            for i in 0u64..1000 {
+                black_box(session.derive_block_key(&vk, i, &nonce_context));
+            }
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_blake3_hash,
     bench_aead_encrypt,
     bench_aead_decrypt,
     bench_kdf_derive,
-    bench_password_verification
+    bench_password_verification,
+    bench_hkdf_key_derivation
 );
 criterion_main!(benches);
