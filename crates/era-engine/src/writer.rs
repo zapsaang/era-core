@@ -129,7 +129,7 @@ impl ArchiveWriterBuilder {
         let archive_id = ArchiveId::new();
         let salt = Salt::generate();
 
-        // Derive encryption key
+        // Derive encryption key from password
         let password = self.password.unwrap_or_default();
         let kdf_params = KdfParams {
             memory_cost: self.config.encryption.kdf_memory_cost,

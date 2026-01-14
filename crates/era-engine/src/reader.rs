@@ -6,7 +6,7 @@ use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationCon
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{BlockId, BlockLocation, ChunkHash, EraError, Result};
-use era_crypto::{derive_key, KdfParams, Salt};
+use era_crypto::{derive_key, KdfParams, KeySession, Salt};
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker};
 use era_storage::LocalStorageBackend;
@@ -229,6 +229,133 @@ impl ArchiveReader {
         let unpacker = MacroBlockUnpacker::new(key.clone(), nonce_context, compressor);
 
         // Create erasure unpacker for reading erasure-coded blocks
+        let erasure_compressor: Box<dyn era_codec::Compressor> =
+            match header.config.compression.algorithm {
+                era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
+                era_common::CompressionAlgorithm::Zstd => {
+                    Box::new(ZstdCompressor::new(header.config.compression.level))
+                }
+            };
+        let erasure_unpacker = ErasureBlockUnpacker::new(key, nonce_context, erasure_compressor);
+
+        Ok(Self {
+            volume_readers,
+            volume_indices,
+            unpacker,
+            erasure_unpacker,
+            catalog: None,
+        })
+    }
+
+    /// Open an archive using a pre-derived key session
+    ///
+    /// This is more efficient than `open()` when opening multiple archives
+    /// with the same password, as it avoids repeated Argon2id derivation.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to any volume file of the archive
+    /// * `session` - A pre-created KeySession containing the derived key
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create session once (expensive)
+    /// let session = KeySession::new(password.as_bytes(), &salt, &params)?;
+    ///
+    /// // Open multiple archives quickly
+    /// let reader1 = ArchiveReader::open_with_session(&path1, &session)?;
+    /// let reader2 = ArchiveReader::open_with_session(&path2, &session)?;
+    /// ```
+    pub fn open_with_session(path: &Path, session: &KeySession) -> Result<Self> {
+        info!("Opening archive with key session: {}", path.display());
+
+        let parent_dir = path.parent().unwrap_or(Path::new("."));
+        let backend = LocalStorageBackend::new(parent_dir);
+        let base_filename = path.file_name().unwrap_or_default();
+
+        // 1. Try to open the specified file first (could be any volume)
+        let first_reader = VolumeReader::open(&backend, Path::new(base_filename))?;
+
+        // Read volume metadata from header
+        let first_vol_sequence = first_reader.header().volume_sequence as usize;
+        let total_volumes = first_reader.header().total_volumes as usize;
+        let erasure_config = first_reader.header().config.erasure;
+        let first_archive_id = first_reader.header().archive_id;
+
+        // 2. Determine scan tolerance
+        let scan_tolerance = if let Some(config) = erasure_config {
+            (config.parity_shards as usize + 1).max(2)
+        } else {
+            2
+        };
+
+        // 3. Scan for volumes
+        let max_scan = if total_volumes > 0 {
+            total_volumes + scan_tolerance
+        } else {
+            100
+        };
+
+        let mut volume_readers = vec![first_reader];
+        let mut volume_indices = vec![first_vol_sequence];
+
+        for i in 0..max_scan {
+            if i == first_vol_sequence {
+                continue;
+            }
+
+            let vol_path = if i == 0 {
+                PathBuf::from(base_filename)
+            } else {
+                let base = PathBuf::from(base_filename);
+                let mut name = base.as_os_str().to_os_string();
+                // Remove existing extension if present
+                let base_str = name.to_string_lossy();
+                let clean_base = if let Some(pos) = base_str.rfind(".era") {
+                    base_str[..pos + 4].to_string()
+                } else {
+                    base_str.to_string()
+                };
+                name = std::ffi::OsString::from(format!("{}.{:03}", clean_base, i));
+                PathBuf::from(name)
+            };
+
+            match VolumeReader::open(&backend, &vol_path) {
+                Ok(reader) => {
+                    if reader.header().archive_id == first_archive_id {
+                        let seq = reader.header().volume_sequence as usize;
+                        let insert_pos = volume_indices
+                            .iter()
+                            .position(|&idx| idx > seq)
+                            .unwrap_or(volume_indices.len());
+                        volume_indices.insert(insert_pos, seq);
+                        volume_readers.insert(insert_pos, reader);
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        // 4. Get key from session and verify password
+        let key = session.master_key();
+        let volume_reader = &volume_readers[0];
+        let header = volume_reader.header();
+
+        if !era_crypto::verify_password_tag(&key, &header.crypto_anchor.password_verification_tag) {
+            return Err(EraError::InvalidKey("Incorrect password".to_string()));
+        }
+
+        // 5. Create unpackers
+        let nonce_context = header.crypto_anchor.salt;
+        let compressor: Box<dyn era_codec::Compressor> = match header.config.compression.algorithm {
+            era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
+            era_common::CompressionAlgorithm::Zstd => {
+                Box::new(ZstdCompressor::new(header.config.compression.level))
+            }
+        };
+        let unpacker = MacroBlockUnpacker::new(key.clone(), nonce_context, compressor);
+
         let erasure_compressor: Box<dyn era_codec::Compressor> =
             match header.config.compression.algorithm {
                 era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),

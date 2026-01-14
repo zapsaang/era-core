@@ -7,7 +7,6 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use era_engine::{ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
-use std::fs;
 use tempfile::TempDir;
 
 /// Create test data with specified pattern
@@ -175,6 +174,118 @@ fn bench_kdf_only(c: &mut Criterion) {
     });
 }
 
+/// Benchmark: HKDF sub-key derivation (KeySession)
+fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
+    use era_crypto::{derive_key, KdfParams, KeySession, Salt};
+
+    // Pre-derive master key once
+    let salt = Salt::generate();
+    let params = KdfParams {
+        memory_cost: 1024,
+        time_cost: 1,
+        parallelism: 4,
+    };
+    let key = derive_key(b"test_password", &salt, &params).unwrap();
+    let session = KeySession::from_derived_key(&key);
+
+    c.bench_function("hkdf_volume_key_derivation", |b| {
+        let mut volume_id = 0u16;
+        b.iter(|| {
+            let _vk = session.derive_volume_key(volume_id);
+            volume_id = volume_id.wrapping_add(1);
+            black_box(_vk);
+        });
+    });
+
+    let volume_key = session.derive_volume_key(0);
+    c.bench_function("hkdf_block_key_derivation", |b| {
+        let nonce_context = [0u8; 16];
+        let mut block_id = 0u64;
+        b.iter(|| {
+            let _bk = session.derive_block_key(&volume_key, block_id, &nonce_context);
+            block_id = block_id.wrapping_add(1);
+            black_box(_bk);
+        });
+    });
+
+    // Compare: derive 1000 block keys vs 1000 KDF calls
+    c.bench_function("hkdf_1000_block_keys", |b| {
+        let nonce_context = [0u8; 16];
+        b.iter(|| {
+            for i in 0..1000 {
+                let _bk = session.derive_block_key(&volume_key, i, &nonce_context);
+                black_box(&_bk);
+            }
+        });
+    });
+}
+
+/// Benchmark: Multiple archive reads with vs without KeySession
+fn bench_key_session_reader_speedup(c: &mut Criterion) {
+    use era_crypto::{KdfParams, KeySession, Salt};
+
+    // Setup: Create test archives
+    let setup_dir = TempDir::new().unwrap();
+    let archive_paths: Vec<_> = (0..5)
+        .map(|i| {
+            let path = setup_dir.path().join(format!("test_{}.era", i));
+
+            let mut config = era_common::ArchiveConfig::default();
+            config.encryption.kdf_memory_cost = 1024;
+            config.encryption.kdf_time_cost = 1;
+
+            let mut writer = ArchiveWriterBuilder::new(&path)
+                .password("benchmark_password")
+                .config(config)
+                .build()
+                .unwrap();
+
+            let data = create_test_data(1024);
+            writer.add_bytes("file.bin", &data).unwrap();
+            writer.finalize().unwrap();
+
+            path
+        })
+        .collect();
+
+    let mut group = c.benchmark_group("key_session_reader_comparison");
+
+    // Benchmark: Open multiple archives WITHOUT KeySession (each calls KDF)
+    group.bench_function("open_5_archives_without_session", |b| {
+        b.iter(|| {
+            for path in &archive_paths {
+                let reader = ArchiveReader::open(path, "benchmark_password").unwrap();
+                black_box(reader);
+            }
+        });
+    });
+
+    // Get salt from first archive for KeySession
+    let first_reader = ArchiveReader::open(&archive_paths[0], "benchmark_password").unwrap();
+    let header = first_reader.header();
+    let salt = Salt::from_bytes(header.crypto_anchor.salt);
+    let kdf_params = KdfParams {
+        memory_cost: header.crypto_anchor.kdf_memory_cost,
+        time_cost: header.crypto_anchor.kdf_time_cost,
+        parallelism: header.crypto_anchor.kdf_parallelism,
+    };
+    drop(first_reader);
+
+    // Note: In this benchmark, each archive has a different salt, so KeySession
+    // can only help with the FIRST archive. For real-world improvement,
+    // users would need to use the same salt across archives.
+    // This benchmark shows the API works correctly.
+    group.bench_function("open_1_archive_with_session", |b| {
+        let session = KeySession::new(b"benchmark_password", &salt, &kdf_params).unwrap();
+        b.iter(|| {
+            let reader = ArchiveReader::open_with_session(&archive_paths[0], &session).unwrap();
+            black_box(reader);
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = real_world_benches;
     config = Criterion::default()
@@ -185,7 +296,9 @@ criterion_group! {
         bench_multiple_small_files_production_kdf,
         bench_large_file_production_kdf,
         bench_extract_production_kdf,
-        bench_kdf_only
+        bench_kdf_only,
+        bench_hkdf_subkey_derivation,
+        bench_key_session_reader_speedup
 }
 
 criterion_main!(real_world_benches);
