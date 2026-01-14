@@ -3,7 +3,8 @@
 use anyhow::{Context, Result};
 use era_common::{ArchiveConfig, ErasureCodeConfig};
 use era_engine::{
-    repair_archive, ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager, RepairOptions,
+    repair_archive, repair_archive_matrix, ArchiveReader, ArchiveWriter, ExtractOptions,
+    RecoveryManager, RepairOptions,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -54,6 +55,9 @@ pub fn create(
     password: Option<&str>,
     compression_level: i32,
     erasure: Option<&str>,
+    volume_count: Option<usize>,
+    max_volume_size: Option<u64>,
+    matrix_distribution: bool,
 ) -> Result<()> {
     // If password provided via CLI, skip confirmation (for scripting)
     let password = if let Some(p) = password {
@@ -91,6 +95,23 @@ pub fn create(
             (ec.parity_shards as f64 / ec.data_shards as f64 * 100.0) as u32,
             ec.parity_shards
         );
+
+        // Enable matrix distribution for better fault tolerance
+        if matrix_distribution {
+            let volumes = volume_count.unwrap_or_else(|| {
+                // Default to total_shards for optimal distribution
+                (ec.data_shards + ec.parity_shards) as usize
+            });
+            builder = builder
+                .volume_count(volumes)
+                .enable_matrix_distribution(true);
+            println!("Matrix distribution: enabled across {} volumes", volumes);
+
+            if let Some(max_size) = max_volume_size {
+                builder = builder.max_volume_size(max_size);
+                println!("Max volume size: {} bytes", max_size);
+            }
+        }
     }
 
     let mut writer = builder.build().context("Failed to create archive")?;
@@ -396,7 +417,19 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
                 continue_on_error: true,
             };
 
-            match repair_archive(archive, &password, repair_options) {
+            // Check for multi-volume archive (matrix distribution)
+            let base_path = archive.with_extension("");
+            let vol1_path = base_path.with_extension("era.001");
+            let is_multi_volume = vol1_path.exists();
+
+            let repair_result = if is_multi_volume {
+                println!("Detected multi-volume archive, using matrix-distributed repair...");
+                repair_archive_matrix(archive, &password, repair_options)
+            } else {
+                repair_archive(archive, &password, repair_options)
+            };
+
+            match repair_result {
                 Ok(repair_stats) => {
                     println!();
                     println!("Repair Results:");

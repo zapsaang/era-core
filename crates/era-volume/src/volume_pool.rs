@@ -1,0 +1,558 @@
+//! Volume pool for matrix distribution and fixed-size volume management.
+//!
+//! This module provides `VolumePool`, which manages multiple volumes for
+//! true matrix-distributed erasure coding with automatic volume rotation
+//! when volumes reach their size limit.
+
+use era_common::{
+    compute_shard_crc, ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig,
+    MatrixShardEntry, Result, ShardHeader,
+};
+use era_storage::{StorageBackend, StorageWriter};
+use std::path::{Path, PathBuf};
+
+use crate::footer::FOOTER_SIZE;
+use crate::{SuperHeader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE};
+
+/// Configuration for the volume pool.
+#[derive(Debug, Clone)]
+pub struct VolumePoolConfig {
+    /// Base path for volume files (without extension)
+    pub base_path: PathBuf,
+    /// Maximum size per volume in bytes
+    pub max_volume_size: u64,
+    /// Initial number of volumes to create
+    pub initial_volume_count: usize,
+    /// Matrix distribution configuration
+    pub distribution: MatrixDistributionConfig,
+}
+
+impl VolumePoolConfig {
+    /// Create a new volume pool configuration.
+    pub fn new(base_path: impl Into<PathBuf>, volume_count: usize) -> Self {
+        Self {
+            base_path: base_path.into(),
+            max_volume_size: DEFAULT_MAX_VOLUME_SIZE,
+            initial_volume_count: volume_count.max(1),
+            distribution: MatrixDistributionConfig::default(),
+        }
+    }
+
+    /// Set maximum volume size.
+    pub fn with_max_size(mut self, max_size: u64) -> Self {
+        self.max_volume_size = max_size.max(MIN_VOLUME_SIZE);
+        self
+    }
+
+    /// Set distribution configuration.
+    pub fn with_distribution(mut self, distribution: MatrixDistributionConfig) -> Self {
+        self.distribution = distribution;
+        self
+    }
+
+    /// Configure based on erasure config.
+    pub fn for_erasure(mut self, erasure: ErasureCodeConfig) -> Self {
+        self.distribution = MatrixDistributionConfig::from_erasure_config(erasure);
+        // Ensure we have enough volumes
+        if self.initial_volume_count < self.distribution.min_volumes {
+            self.initial_volume_count = self.distribution.min_volumes;
+        }
+        self
+    }
+
+    /// Generate volume path for a given sequence number.
+    pub fn volume_path(&self, sequence: u16) -> PathBuf {
+        if sequence == 0 {
+            self.base_path.with_extension("era")
+        } else {
+            let ext = format!("era.{:03}", sequence);
+            self.base_path.with_extension(ext)
+        }
+    }
+}
+
+/// Statistics about the volume pool.
+#[derive(Debug, Clone, Default)]
+pub struct VolumePoolStats {
+    /// Total number of volumes created
+    pub volume_count: usize,
+    /// Total bytes written across all volumes
+    pub total_bytes_written: u64,
+    /// Total shards written
+    pub total_shards_written: u64,
+    /// Total blocks written
+    pub total_blocks_written: u64,
+    /// Volume sizes (volume_sequence -> size)
+    pub volume_sizes: Vec<(u16, u64)>,
+}
+
+/// Volume pool manager for matrix-distributed erasure coding.
+///
+/// This manager handles:
+/// 1. Multiple volume writers with fixed size limits
+/// 2. True matrix distribution of shards across volumes
+/// 3. Automatic volume rotation when size limits are reached
+/// 4. Tracking of shard locations for recovery
+pub struct VolumePool<W: StorageWriter> {
+    /// Configuration
+    config: VolumePoolConfig,
+    /// Template header for creating new volumes
+    template_header: SuperHeader,
+    /// Active volume writers indexed by their pool position
+    /// Position 0..N maps to logical volume slots for distribution
+    writers: Vec<VolumeWriter<W>>,
+    /// Sequence numbers for each writer (for tracking across rotations)
+    sequences: Vec<u16>,
+    /// Block sequence counter for rotation calculation
+    block_sequence: u64,
+    /// Statistics
+    stats: VolumePoolStats,
+}
+
+impl<W: StorageWriter> VolumePool<W> {
+    /// Create a new volume pool.
+    pub fn create<B: StorageBackend<Writer = W>>(
+        backend: &B,
+        config: VolumePoolConfig,
+        template_header: SuperHeader,
+    ) -> Result<Self> {
+        let volume_count = config.initial_volume_count;
+        let mut writers = Vec::with_capacity(volume_count);
+        let mut sequences = Vec::with_capacity(volume_count);
+
+        // Create initial volumes
+        for i in 0..volume_count {
+            let mut header = template_header.clone();
+            header.volume_sequence = i as u16;
+            header.total_volumes = volume_count as u16;
+
+            let volume_path = config.volume_path(i as u16);
+            let volume_filename = volume_path.file_name().unwrap_or_default();
+
+            let writer = VolumeWriter::create(backend, Path::new(volume_filename), header)?;
+            writers.push(writer);
+            sequences.push(i as u16);
+        }
+
+        let stats = VolumePoolStats {
+            volume_count,
+            ..Default::default()
+        };
+
+        Ok(Self {
+            config,
+            template_header,
+            writers,
+            sequences,
+            block_sequence: 0,
+            stats,
+        })
+    }
+
+    /// Get the number of active volumes.
+    pub fn volume_count(&self) -> usize {
+        self.writers.len()
+    }
+
+    /// Get the current block sequence number.
+    pub fn block_sequence(&self) -> u64 {
+        self.block_sequence
+    }
+
+    /// Get the archive ID from the template header.
+    pub fn archive_id(&self) -> era_common::ArchiveId {
+        self.template_header.archive_id
+    }
+
+    /// Calculate which volume slot a shard should go to.
+    fn shard_volume_slot(&self, shard_idx: usize) -> usize {
+        self.config.distribution.strategy.calculate_volume(
+            shard_idx,
+            self.block_sequence,
+            self.writers.len(),
+        )
+    }
+
+    /// Check if a volume can fit additional data.
+    fn volume_can_fit(&self, slot: usize, additional_size: u64) -> bool {
+        if slot >= self.writers.len() {
+            return false;
+        }
+        let current_size = self.writers[slot].current_size();
+        let reserved = FOOTER_SIZE as u64 + 4096; // Reserve for footer + padding
+        current_size + additional_size + reserved <= self.config.max_volume_size
+    }
+
+    /// Get remaining space in a volume.
+    fn volume_remaining_space(&self, slot: usize) -> u64 {
+        if slot >= self.writers.len() {
+            return 0;
+        }
+        let current_size = self.writers[slot].current_size();
+        let reserved = FOOTER_SIZE as u64 + 4096;
+        if current_size + reserved >= self.config.max_volume_size {
+            0
+        } else {
+            self.config.max_volume_size - current_size - reserved
+        }
+    }
+
+    /// Check if a shard size can ever fit in a volume.
+    ///
+    /// Returns an error if the shard is larger than max_volume_size allows.
+    fn validate_shard_size(&self, shard_size: u64) -> Result<()> {
+        let reserved = FOOTER_SIZE as u64 + 4096 + ShardHeader::SIZE as u64 + 4; // footer + padding + header + original_len
+        let max_shard_size = self.config.max_volume_size.saturating_sub(reserved);
+
+        if shard_size > max_shard_size {
+            return Err(era_common::EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Shard size {} exceeds maximum allowed {} (max_volume_size={})",
+                    shard_size, max_shard_size, self.config.max_volume_size
+                ),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Write a shard to its designated volume with matrix distribution.
+    ///
+    /// # Arguments
+    /// * `shard_idx` - The shard index (0..total_shards)
+    /// * `shard_data` - The shard data to write
+    /// * `original_len_header` - Optional 4-byte original length header (for first shard per volume per block)
+    ///
+    /// # Returns
+    /// A `MatrixShardEntry` containing the location information.
+    pub fn write_shard(
+        &mut self,
+        shard_idx: usize,
+        shard_data: &[u8],
+        include_original_len_header: bool,
+        original_len: u32,
+    ) -> Result<MatrixShardEntry> {
+        let preferred_slot = self.shard_volume_slot(shard_idx);
+
+        // Check if the volume can fit this shard
+        let shard_size = shard_data.len() as u64;
+        let header_size = if include_original_len_header { 4 } else { 0 };
+        let total_size = header_size + ShardHeader::SIZE as u64 + shard_size;
+
+        // Try preferred slot first, then find any available volume
+        let slot = if self.volume_can_fit(preferred_slot, total_size) {
+            preferred_slot
+        } else {
+            // Find any volume with enough space (overflow strategy)
+            let mut found_slot = None;
+            for i in 0..self.writers.len() {
+                // Start from preferred slot and wrap around
+                let candidate = (preferred_slot + i) % self.writers.len();
+                if self.volume_can_fit(candidate, total_size) {
+                    found_slot = Some(candidate);
+                    break;
+                }
+            }
+            match found_slot {
+                Some(s) => s,
+                None => {
+                    // All volumes are full - need to expand
+                    // Return error for now; caller can handle expansion
+                    return Err(era_common::EraError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!(
+                            "All {} volumes are full, need volume expansion",
+                            self.writers.len()
+                        ),
+                    )));
+                }
+            }
+        };
+
+        let writer = &mut self.writers[slot];
+        let volume_sequence = self.sequences[slot];
+
+        // Write original length header if needed
+        if include_original_len_header {
+            let len_bytes = original_len.to_le_bytes();
+            writer.write_raw(&len_bytes)?;
+        }
+
+        // Compute CRC and write shard header
+        let crc = compute_shard_crc(shard_data);
+        let shard_header = ShardHeader::new(shard_data.len() as u32, crc);
+        let offset = writer.write_raw(&shard_header.to_bytes())?;
+
+        // Write shard data
+        writer.write_raw(shard_data)?;
+
+        // Update stats
+        self.stats.total_bytes_written += total_size;
+        self.stats.total_shards_written += 1;
+
+        Ok(MatrixShardEntry::new(
+            volume_sequence,
+            offset,
+            shard_data.len() as u32,
+            crc,
+        ))
+    }
+
+    /// Write a complete erasure-coded block with matrix distribution.
+    ///
+    /// # Arguments
+    /// * `block_id` - The block ID
+    /// * `shards` - Vector of shard data (indexed 0..total_shards)
+    /// * `original_len` - Original data length before erasure encoding
+    /// * `erasure_config` - Erasure configuration
+    ///
+    /// # Returns
+    /// A `MatrixBlockLocation` containing all shard locations.
+    pub fn write_erasure_block(
+        &mut self,
+        block_id: era_common::BlockId,
+        shards: &[bytes::Bytes],
+        original_len: u32,
+        erasure_config: ErasureCodeConfig,
+    ) -> Result<MatrixBlockLocation> {
+        // Validate that shards can fit in volumes
+        if let Some(first_shard) = shards.first() {
+            self.validate_shard_size(first_shard.len() as u64)?;
+        }
+
+        // Track which volumes we've written to for this block
+        // We need to write the original_len header to the first shard on each volume
+        let mut volumes_with_header: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+
+        let mut location =
+            MatrixBlockLocation::new(block_id, self.block_sequence, erasure_config, original_len);
+
+        for (shard_idx, shard_data) in shards.iter().enumerate() {
+            let slot = self.shard_volume_slot(shard_idx);
+            let need_header = !volumes_with_header.contains(&slot);
+
+            let entry = self.write_shard(shard_idx, shard_data, need_header, original_len)?;
+            location.add_shard(entry);
+
+            if need_header {
+                volumes_with_header.insert(slot);
+            }
+        }
+
+        // Increment block sequence for next block
+        self.block_sequence += 1;
+        self.stats.total_blocks_written += 1;
+
+        Ok(location)
+    }
+
+    /// Finalize all volumes.
+    pub fn finalize(self) -> Result<VolumePoolStats> {
+        self.finalize_with_catalog(0, 0, 0)
+    }
+
+    /// Finalize all volumes with catalog information.
+    pub fn finalize_with_catalog(
+        mut self,
+        catalog_offset: u64,
+        catalog_size: u32,
+        catalog_block_id: u32,
+    ) -> Result<VolumePoolStats> {
+        let mut stats = self.stats.clone();
+        stats.volume_sizes.clear();
+
+        for (i, writer) in self.writers.drain(..).enumerate() {
+            let size = writer.current_size();
+            let sequence = self.sequences[i];
+            stats.volume_sizes.push((sequence, size));
+            writer.finalize_with_catalog(catalog_offset, catalog_size, catalog_block_id)?;
+        }
+
+        Ok(stats)
+    }
+
+    /// Get current statistics.
+    pub fn stats(&self) -> &VolumePoolStats {
+        &self.stats
+    }
+
+    /// Get a mutable reference to a specific volume writer.
+    ///
+    /// This is useful for writing non-erasure blocks (like catalog) directly.
+    pub fn get_writer_mut(&mut self, slot: usize) -> Option<&mut VolumeWriter<W>> {
+        self.writers.get_mut(slot)
+    }
+
+    /// Get the sequence number for a volume slot.
+    pub fn volume_sequence(&self, slot: usize) -> Option<u16> {
+        self.sequences.get(slot).copied()
+    }
+
+    /// Add a new volume to the pool.
+    ///
+    /// This is called when all existing volumes are full and more space is needed.
+    /// The new volume will use the next available sequence number.
+    pub fn add_volume<B: StorageBackend<Writer = W>>(&mut self, backend: &B) -> Result<usize> {
+        let new_sequence = self.writers.len() as u16;
+
+        let mut header = self.template_header.clone();
+        header.volume_sequence = new_sequence;
+        header.total_volumes = (self.writers.len() + 1) as u16;
+
+        let volume_path = self.config.volume_path(new_sequence);
+        let volume_filename = volume_path.file_name().unwrap_or_default();
+
+        let writer = VolumeWriter::create(backend, Path::new(volume_filename), header)?;
+
+        let slot = self.writers.len();
+        self.writers.push(writer);
+        self.sequences.push(new_sequence);
+        self.stats.volume_count += 1;
+
+        // Update total_volumes in all headers (best effort)
+        // This is a limitation - we can't update already written headers easily
+
+        Ok(slot)
+    }
+
+    /// Check if the pool needs more volumes to write additional data.
+    pub fn needs_expansion(&self, required_size: u64) -> bool {
+        // First check if the data is inherently too large for any single volume
+        // If so, expansion won't help
+        let reserved = FOOTER_SIZE as u64 + 4096;
+        let max_per_volume = self.config.max_volume_size.saturating_sub(reserved);
+        if required_size > max_per_volume {
+            // Shard is too large - expansion won't help
+            // Return false to avoid infinite loop; the write will fail with a clear error
+            return false;
+        }
+
+        // Check if any volume can fit the data
+        for slot in 0..self.writers.len() {
+            if self.volume_can_fit(slot, required_size) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Get total remaining space across all volumes.
+    pub fn total_remaining_space(&self) -> u64 {
+        (0..self.writers.len())
+            .map(|slot| self.volume_remaining_space(slot))
+            .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use era_common::{ArchiveConfig, ArchiveId, BlockId};
+    use era_storage::LocalStorageBackend;
+    use tempfile::TempDir;
+
+    const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
+
+    fn create_test_header() -> SuperHeader {
+        SuperHeader::with_kdf_params(
+            ArchiveId::new(),
+            [0u8; 16],
+            TEST_VERIFICATION_TAG,
+            1024,
+            1,
+            ArchiveConfig::default(),
+        )
+    }
+
+    #[test]
+    fn test_volume_pool_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+
+        let config = VolumePoolConfig::new(&base_path, 3);
+        let header = create_test_header();
+
+        let pool = VolumePool::create(&backend, config, header).unwrap();
+
+        assert_eq!(pool.volume_count(), 3);
+        assert_eq!(pool.block_sequence(), 0);
+    }
+
+    #[test]
+    fn test_matrix_distribution_shard_placement() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+
+        let erasure = ErasureCodeConfig::new(4, 2);
+        let config = VolumePoolConfig::new(&base_path, 3).for_erasure(erasure);
+        let header = create_test_header();
+
+        let mut pool = VolumePool::create(&backend, config, header).unwrap();
+
+        // Create test shards
+        let shards: Vec<Bytes> = (0..6).map(|i| Bytes::from(vec![i as u8; 1024])).collect();
+
+        // Write first block
+        let block_id = BlockId::new(0);
+        let location = pool
+            .write_erasure_block(block_id, &shards, 4096, erasure)
+            .unwrap();
+
+        assert!(location.is_complete());
+        assert_eq!(location.shards.len(), 6);
+
+        // Verify matrix distribution for block 0:
+        // Shard 0 -> (0 + 0) % 3 = 0
+        // Shard 1 -> (1 + 0) % 3 = 1
+        // Shard 2 -> (2 + 0) % 3 = 2
+        // Shard 3 -> (3 + 0) % 3 = 0
+        // Shard 4 -> (4 + 0) % 3 = 1
+        // Shard 5 -> (5 + 0) % 3 = 2
+        assert_eq!(location.shards[0].volume_sequence, 0);
+        assert_eq!(location.shards[1].volume_sequence, 1);
+        assert_eq!(location.shards[2].volume_sequence, 2);
+        assert_eq!(location.shards[3].volume_sequence, 0);
+        assert_eq!(location.shards[4].volume_sequence, 1);
+        assert_eq!(location.shards[5].volume_sequence, 2);
+
+        // Write second block
+        let block_id2 = BlockId::new(1);
+        let location2 = pool
+            .write_erasure_block(block_id2, &shards, 4096, erasure)
+            .unwrap();
+
+        // Verify rotation for block 1:
+        // Shard 0 -> (0 + 1) % 3 = 1
+        // Shard 1 -> (1 + 1) % 3 = 2
+        // Shard 2 -> (2 + 1) % 3 = 0
+        // Shard 3 -> (3 + 1) % 3 = 1
+        // Shard 4 -> (4 + 1) % 3 = 2
+        // Shard 5 -> (5 + 1) % 3 = 0
+        assert_eq!(location2.shards[0].volume_sequence, 1);
+        assert_eq!(location2.shards[1].volume_sequence, 2);
+        assert_eq!(location2.shards[2].volume_sequence, 0);
+        assert_eq!(location2.shards[3].volume_sequence, 1);
+        assert_eq!(location2.shards[4].volume_sequence, 2);
+        assert_eq!(location2.shards[5].volume_sequence, 0);
+    }
+
+    #[test]
+    fn test_volume_pool_finalization() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+
+        let config = VolumePoolConfig::new(&base_path, 2);
+        let header = create_test_header();
+
+        let pool = VolumePool::create(&backend, config, header).unwrap();
+        let stats = pool.finalize().unwrap();
+
+        assert_eq!(stats.volume_count, 2);
+        assert_eq!(stats.volume_sizes.len(), 2);
+    }
+}

@@ -60,6 +60,21 @@ enum Commands {
         /// allowing recovery from any 2 lost shards per block.
         #[arg(short = 'e', long)]
         erasure: Option<String>,
+
+        /// Number of volumes to distribute shards across (default: total shards)
+        /// Use with --matrix-distribution for optimal fault tolerance
+        #[arg(long)]
+        volumes: Option<usize>,
+
+        /// Maximum size per volume in bytes (e.g., 4294967296 for 4GB)
+        /// When exceeded, new volumes are created automatically
+        #[arg(long)]
+        max_volume_size: Option<u64>,
+
+        /// Enable true matrix distribution of erasure shards across volumes
+        /// This ensures each volume contains different shards for better fault tolerance
+        #[arg(long)]
+        matrix_distribution: bool,
     },
 
     /// Extract files from an ERA archive
@@ -165,12 +180,18 @@ fn main() -> anyhow::Result<()> {
             password,
             level,
             erasure,
+            volumes,
+            max_volume_size,
+            matrix_distribution,
         } => commands::create(
             &input,
             &output,
             password.as_deref(),
             level,
             erasure.as_deref(),
+            volumes,
+            max_volume_size,
+            matrix_distribution,
         ),
 
         Commands::Extract {

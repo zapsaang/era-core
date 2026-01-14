@@ -501,6 +501,7 @@ mod tests {
             encrypted_size: size,
             erasure_info: None,
             shard_offsets: None,
+            shard_volumes: None,
         }
     }
 

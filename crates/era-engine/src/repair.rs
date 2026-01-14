@@ -8,6 +8,12 @@
 //! This module uses the HKDF "Onion Model" for per-block key derivation:
 //! - Each block is decrypted/re-encrypted with a unique key derived from the volume key
 //! - This provides forward and backward security isolation
+//!
+//! ## Matrix Distribution Support
+//!
+//! This module supports both legacy (single-volume) and matrix-distributed archives:
+//! - Legacy: All shards in a single volume using `shard_idx % volume_count`
+//! - Matrix: Shards distributed using `(shard_idx + block_sequence) % volume_count`
 
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
@@ -18,9 +24,10 @@ use era_crypto::{KdfParams, KeySession, Salt};
 use era_packing::SessionErasureBlockUnpacker;
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Statistics about the repair operation
@@ -418,6 +425,366 @@ fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
 
     file.sync_all()?;
     Ok(())
+}
+
+/// Repair a multi-volume ERA archive with matrix distribution
+///
+/// This function handles archives where shards are distributed across
+/// multiple volumes using the matrix distribution pattern:
+/// `volume_idx = (shard_idx + block_sequence) % volume_count`
+///
+/// # Arguments
+/// * `path` - Path to the first volume (e.g., "archive.era")
+/// * `password` - Archive password for decryption
+/// * `options` - Repair options
+///
+/// # Returns
+/// RepairStats with details about what was repaired across all volumes.
+pub fn repair_archive_matrix(
+    path: &Path,
+    password: &str,
+    options: RepairOptions,
+) -> Result<RepairStats> {
+    info!(
+        "Starting matrix-distributed archive repair: {}",
+        path.display()
+    );
+
+    let parent_dir = path.parent().unwrap_or(Path::new("."));
+    let backend = LocalStorageBackend::new(parent_dir);
+
+    // Collect all volumes
+    let mut volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>> = Vec::new();
+    let mut volume_paths: Vec<PathBuf> = Vec::new();
+    let mut volume_sequences: Vec<u16> = Vec::new();
+
+    // Open first volume
+    let volume_filename = path.file_name().unwrap_or_default();
+    let first_reader = VolumeReader::open(&backend, Path::new(volume_filename))?;
+    let archive_id = first_reader.header().archive_id;
+    let header = first_reader.header().clone();
+    let total_volumes = first_reader.header().total_volumes as u16;
+
+    volume_sequences.push(0);
+    volume_paths.push(path.to_path_buf());
+    volume_readers.push(first_reader);
+
+    // Find additional volumes - continue even if some are missing
+    let base_path = path.with_extension("");
+    let mut consecutive_missing = 0;
+    let max_gap = 5; // Allow up to 5 consecutive missing volumes before giving up
+
+    for seq in 1..total_volumes.max(100) {
+        let ext = format!("era.{:03}", seq);
+        let next_path = base_path.with_extension(&ext);
+        let next_filename = next_path.file_name().unwrap_or_default();
+
+        match VolumeReader::open(&backend, Path::new(next_filename)) {
+            Ok(reader) => {
+                if reader.header().archive_id != archive_id {
+                    break;
+                }
+                volume_sequences.push(seq);
+                volume_paths.push(next_path);
+                volume_readers.push(reader);
+                consecutive_missing = 0;
+            }
+            Err(_) => {
+                consecutive_missing += 1;
+                if consecutive_missing > max_gap && seq >= total_volumes {
+                    break;
+                }
+            }
+        }
+    }
+
+    let volume_count = volume_readers.len();
+    info!(
+        "Found {} volumes for matrix-distributed archive (expected {})",
+        volume_count, total_volumes
+    );
+
+    if volume_count < 2 {
+        // Fall back to single-volume repair
+        info!("Single volume detected, using legacy repair");
+        return repair_archive(path, password, options);
+    }
+
+    // Verify erasure coding is enabled
+    let erasure_config = header
+        .config
+        .erasure
+        .ok_or_else(|| EraError::ErasureError("Archive does not use erasure coding".into()))?;
+
+    let total_shards = erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
+
+    info!(
+        "Matrix repair: {}/{} erasure, {} volumes found, {} total shards",
+        erasure_config.data_shards, erasure_config.parity_shards, volume_count, total_shards
+    );
+
+    // Create key session
+    let salt = Salt::from_bytes(header.crypto_anchor.salt);
+    let kdf_params = KdfParams {
+        memory_cost: header.crypto_anchor.kdf_memory_cost,
+        time_cost: header.crypto_anchor.kdf_time_cost,
+        parallelism: header.crypto_anchor.kdf_parallelism,
+    };
+    let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
+
+    if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
+        return Err(EraError::InvalidKey("Incorrect password".to_string()));
+    }
+
+    let volume_key = session.derive_volume_key(0);
+    let nonce_context = header.crypto_anchor.salt;
+    let compressor: Box<dyn era_codec::Compressor> =
+        Box::new(ZstdCompressor::new(header.config.compression.level));
+    let erasure_unpacker =
+        SessionErasureBlockUnpacker::new(&session, &volume_key, nonce_context, compressor);
+
+    // Create backups if requested
+    if options.create_backup && !options.dry_run {
+        for vol_path in &volume_paths {
+            let backup_path = vol_path.with_extension(
+                vol_path
+                    .extension()
+                    .map(|e| format!("{}.bak", e.to_string_lossy()))
+                    .unwrap_or_else(|| "bak".to_string()),
+            );
+            if !backup_path.exists() {
+                info!("Creating backup: {}", backup_path.display());
+                std::fs::copy(vol_path, &backup_path)?;
+            }
+        }
+    }
+
+    let mut stats = RepairStats::default();
+    let mut all_repairs: HashMap<usize, Vec<ShardRepair>> = HashMap::new(); // volume_idx -> repairs
+
+    // Scan blocks using matrix distribution pattern
+    // We need to iterate through block sequences and collect shards from each volume
+    let (data_start, _) = volume_readers[0].data_region();
+    let footer = volume_readers[0].footer();
+    let erasure_data_end = footer.catalog_offset;
+
+    // Track offsets for each volume
+    let mut volume_offsets: Vec<u64> = volume_readers.iter().map(|r| r.data_region().0).collect();
+
+    let mut block_sequence: u64 = 0;
+
+    // We iterate by scanning volume 0 for block headers (original_len markers)
+    let mut primary_offset = data_start;
+
+    while primary_offset < erasure_data_end {
+        // Read block header from primary volume
+        let header_bytes = match volume_readers[0].read_raw(primary_offset, 4) {
+            Ok(bytes) if bytes.len() == 4 => bytes,
+            _ => break,
+        };
+        let original_len = u32::from_le_bytes([
+            header_bytes[0],
+            header_bytes[1],
+            header_bytes[2],
+            header_bytes[3],
+        ]);
+
+        // Collect shards from all volumes for this block
+        let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(total_shards);
+        let mut shard_locations: Vec<(usize, usize, u64)> = Vec::new(); // (shard_idx, vol_idx, offset)
+        let mut corrupted_indices: Vec<usize> = Vec::new();
+        let mut first_shard_size = 0u32;
+
+        for shard_idx in 0..total_shards {
+            // Calculate which volume this shard is on using matrix distribution
+            let vol_idx = (shard_idx + block_sequence as usize) % volume_count;
+
+            // For shard 0 of this volume in this block, we already read the header
+            // For other shards, we need to track their positions
+            let shard_offset = if shard_idx == 0 {
+                primary_offset + 4 // Skip the 4-byte original_len header
+            } else {
+                volume_offsets[vol_idx]
+            };
+
+            let shard_header_offset = shard_offset;
+
+            // Read shard header
+            let header_bytes =
+                match volume_readers[vol_idx].read_raw(shard_offset, ShardHeader::SIZE) {
+                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                    _ => {
+                        corrupted_indices.push(shard_idx);
+                        stats.corrupted_shards_found += 1;
+                        continue;
+                    }
+                };
+
+            let shard_header = match ShardHeader::from_bytes(&header_bytes) {
+                Some(h) => h,
+                None => {
+                    corrupted_indices.push(shard_idx);
+                    stats.corrupted_shards_found += 1;
+                    continue;
+                }
+            };
+
+            let shard_len = shard_header.length as usize;
+            if first_shard_size == 0 {
+                first_shard_size = shard_header.length;
+            }
+
+            // Read shard data
+            match volume_readers[vol_idx]
+                .read_raw(shard_offset + ShardHeader::SIZE as u64, shard_len)
+            {
+                Ok(shard_data) => {
+                    if shard_header.verify(&shard_data) {
+                        shards.push((shard_idx, shard_data));
+                        shard_locations.push((shard_idx, vol_idx, shard_header_offset));
+                    } else {
+                        debug!(
+                            "Block {}: shard {} CRC mismatch on volume {}",
+                            block_sequence, shard_idx, vol_idx
+                        );
+                        corrupted_indices.push(shard_idx);
+                        shard_locations.push((shard_idx, vol_idx, shard_header_offset));
+                        stats.corrupted_shards_found += 1;
+                    }
+                }
+                Err(_) => {
+                    corrupted_indices.push(shard_idx);
+                    stats.corrupted_shards_found += 1;
+                }
+            }
+
+            // Update volume offset for next shard from this volume
+            volume_offsets[vol_idx] = shard_offset + ShardHeader::SIZE as u64 + shard_len as u64;
+        }
+
+        // Update primary offset (volume 0)
+        primary_offset = volume_offsets[0];
+
+        stats.blocks_scanned += 1;
+
+        // Attempt repair if needed
+        if !corrupted_indices.is_empty() {
+            stats.blocks_with_corruption += 1;
+
+            let min_shards = erasure_config.data_shards as usize;
+            if shards.len() < min_shards {
+                stats.unrecoverable_blocks += 1;
+                let msg = format!(
+                    "Block {}: only {}/{} shards intact, need {} for recovery",
+                    block_sequence,
+                    shards.len(),
+                    total_shards,
+                    min_shards
+                );
+                warn!("{}", msg);
+                stats.errors.push(msg);
+
+                if !options.continue_on_error {
+                    return Err(EraError::ErasureError(format!(
+                        "Block {} is unrecoverable",
+                        block_sequence
+                    )));
+                }
+            } else {
+                // Attempt RS repair
+                let erasure_info = ErasureBlockInfo {
+                    data_shards: erasure_config.data_shards,
+                    parity_shards: erasure_config.parity_shards,
+                    shard_size: first_shard_size,
+                    original_len,
+                };
+
+                let block_id = BlockId::new(block_sequence);
+
+                match erasure_unpacker.decode_and_extract_all(
+                    shards.clone(),
+                    &erasure_info,
+                    block_id,
+                ) {
+                    Ok(_) => {
+                        // Decode successful, now reconstruct corrupted shards
+                        match repair_shards_rs(
+                            &shards,
+                            &corrupted_indices,
+                            &erasure_config,
+                            first_shard_size as usize,
+                            original_len,
+                        ) {
+                            Ok(repaired_shards) => {
+                                for (shard_idx, shard_data) in repaired_shards {
+                                    // Find the location for this shard
+                                    if let Some(&(_, vol_idx, offset)) =
+                                        shard_locations.iter().find(|(idx, _, _)| *idx == shard_idx)
+                                    {
+                                        all_repairs.entry(vol_idx).or_default().push(ShardRepair {
+                                            offset,
+                                            shard_idx,
+                                            data: shard_data,
+                                        });
+                                        stats.shards_repaired += 1;
+                                    }
+                                }
+                                info!(
+                                    "Block {}: recovered {} shards",
+                                    block_sequence,
+                                    corrupted_indices.len()
+                                );
+                            }
+                            Err(e) => {
+                                stats.unrecoverable_blocks += 1;
+                                let msg = format!(
+                                    "Block {}: RS reconstruction failed: {}",
+                                    block_sequence, e
+                                );
+                                warn!("{}", msg);
+                                stats.errors.push(msg);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        stats.unrecoverable_blocks += 1;
+                        let msg = format!("Block {}: decode failed: {}", block_sequence, e);
+                        warn!("{}", msg);
+                        stats.errors.push(msg);
+                    }
+                }
+            }
+        }
+
+        block_sequence += 1;
+    }
+
+    // Apply repairs to each volume
+    if !options.dry_run && !all_repairs.is_empty() {
+        for (vol_idx, repairs) in &all_repairs {
+            if !repairs.is_empty() {
+                info!("Applying {} repairs to volume {}", repairs.len(), vol_idx);
+                apply_repairs(&volume_paths[*vol_idx], repairs)?;
+            }
+        }
+    } else if options.dry_run {
+        let total_repairs: usize = all_repairs.values().map(|r| r.len()).sum();
+        info!(
+            "Dry run: would repair {} shards across {} volumes",
+            total_repairs,
+            all_repairs.len()
+        );
+    }
+
+    info!(
+        "Matrix repair complete: {} blocks, {} corrupted, {} repaired, {} unrecoverable",
+        stats.blocks_scanned,
+        stats.blocks_with_corruption,
+        stats.shards_repaired,
+        stats.unrecoverable_blocks
+    );
+
+    Ok(stats)
 }
 
 #[cfg(test)]

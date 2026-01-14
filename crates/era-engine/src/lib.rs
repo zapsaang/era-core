@@ -24,6 +24,6 @@ pub use reader::{ArchiveReader, ExtractOptions, ExtractStats, VerifyStats};
 pub use recovery::{
     RecoverableWriter, RecoveryManager, RecoveryOptions, RecoveryStatus, RecoveryStrategy,
 };
-pub use repair::{repair_archive, RepairOptions, RepairStats};
+pub use repair::{repair_archive, repair_archive_matrix, RepairOptions, RepairStats};
 pub use writer::generic::{GenericArchiveWriter, GenericArchiveWriterBuilder};
 pub use writer::{ArchiveWriter, ArchiveWriterBuilder};

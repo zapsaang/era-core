@@ -463,6 +463,7 @@ impl ArchiveReader {
             encrypted_size: footer.catalog_size,
             erasure_info: None,
             shard_offsets: None,
+            shard_volumes: None,
         };
 
         debug!(
@@ -520,20 +521,44 @@ impl ArchiveReader {
                 EraError::IntegrityError("Missing shard offsets for erasure block".into())
             })?;
 
-            // Read Shard 0 (Header + Data) on Volume 0
+            // Determine volume index for each shard
+            // Matrix distribution: use shard_volumes if available
+            // Legacy distribution: use shard_idx % num_readers
+            let get_volume_idx = |shard_idx: usize| -> usize {
+                if let Some(ref volumes) = location.shard_volumes {
+                    // Matrix distribution: use stored volume sequence
+                    if shard_idx < volumes.len() {
+                        (volumes[shard_idx] as usize) % num_readers
+                    } else {
+                        // Fallback for safety
+                        shard_idx % num_readers
+                    }
+                } else {
+                    // Legacy round-robin distribution
+                    shard_idx % num_readers
+                }
+            };
+
+            // Read Shard 0 (Header + Data)
             // Note: physical_offset points to 4-byte original_len header
-            if let Ok(shard) =
-                self.read_shard(&self.volume_readers[0], location.physical_offset + 4)
-            {
-                available_shards.push((0, shard));
+            let vol_idx_0 = get_volume_idx(0);
+            if vol_idx_0 < num_readers {
+                if let Ok(shard) = self.read_shard(
+                    &self.volume_readers[vol_idx_0],
+                    location.physical_offset + 4,
+                ) {
+                    available_shards.push((0, shard));
+                }
             }
 
             // Read other shards (1..N)
             for (i, &offset) in shard_offsets.iter().enumerate() {
                 let shard_idx = i + 1;
-                let vol_idx = shard_idx % num_readers;
-                if let Ok(shard) = self.read_shard(&self.volume_readers[vol_idx], offset) {
-                    available_shards.push((shard_idx, shard));
+                let vol_idx = get_volume_idx(shard_idx);
+                if vol_idx < num_readers {
+                    if let Ok(shard) = self.read_shard(&self.volume_readers[vol_idx], offset) {
+                        available_shards.push((shard_idx, shard));
+                    }
                 }
             }
 

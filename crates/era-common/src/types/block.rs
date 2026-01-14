@@ -65,6 +65,10 @@ pub struct BlockLocation {
     /// Offsets for additional shards in distributed storage
     /// (Shard 0 is at physical_offset, Shard 1 at offsets[0], etc.)
     pub shard_offsets: Option<Vec<u64>>,
+    /// Volume sequence numbers for each shard (for matrix distribution)
+    /// When present, shard i is on volume_sequences[i].
+    /// When None, uses legacy round-robin: shard i on volume (i % num_volumes).
+    pub shard_volumes: Option<Vec<u16>>,
 }
 
 /// Information about an erasure-coded block

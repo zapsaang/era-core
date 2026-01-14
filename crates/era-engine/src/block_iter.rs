@@ -148,6 +148,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             encrypted_size: block_size,
             erasure_info: None,
             shard_offsets: None,
+            shard_volumes: None,
         };
 
         // Read and decrypt block
@@ -548,6 +549,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             encrypted_size: block_size,
             erasure_info: None,
             shard_offsets: None,
+            shard_volumes: None,
         };
 
         // Read and decrypt block with per-block key derivation

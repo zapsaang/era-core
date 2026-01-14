@@ -13,13 +13,13 @@ use bytes::Bytes;
 use era_codec::{Compressor, NoCompressor, ZstdCompressor};
 use era_common::{
     ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, CompressionAlgorithm, ErasureBlockInfo,
-    ErasureCodeConfig, Result, UniqueChunk,
+    ErasureCodeConfig, MatrixBlockLocation, Result, UniqueChunk,
 };
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{SessionBlockBuilder, SessionErasureBlockBuilder};
 use era_storage::LocalStorageBackend;
-use era_volume::{SuperHeader, VolumeWriter};
+use era_volume::{SuperHeader, VolumePool, VolumePoolConfig, VolumeWriter};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +45,10 @@ pub struct ArchiveWriterBuilder {
     erasure_config: ErasureCodeConfig,
     /// Number of storage volumes to distribute data across
     volume_count: usize,
+    /// Enable true matrix distribution for erasure shards
+    enable_matrix_distribution: bool,
+    /// Maximum volume size for fixed-size splitting (bytes)
+    max_volume_size: Option<u64>,
 }
 
 impl ArchiveWriterBuilder {
@@ -61,6 +65,8 @@ impl ArchiveWriterBuilder {
             enable_erasure: false,
             erasure_config: ErasureCodeConfig::default(),
             volume_count: 1,
+            enable_matrix_distribution: false,
+            max_volume_size: None,
         }
     }
 
@@ -134,6 +140,32 @@ impl ArchiveWriterBuilder {
         self
     }
 
+    /// Enable true matrix distribution for erasure shards.
+    ///
+    /// When enabled, each block's shards are distributed across volumes using
+    /// a rotating offset pattern. This ensures that:
+    /// - Consecutive blocks use different starting volumes
+    /// - Loss of any `parity_shards` volumes still allows full recovery
+    /// - Shards are evenly distributed across all volumes
+    ///
+    /// This also automatically enables erasure coding if not already enabled.
+    pub fn enable_matrix_distribution(mut self, enable: bool) -> Self {
+        self.enable_matrix_distribution = enable;
+        if enable {
+            self.enable_erasure = true;
+        }
+        self
+    }
+
+    /// Set maximum volume size for fixed-size splitting.
+    ///
+    /// When set, volumes will automatically split when reaching this size limit.
+    /// Default is 4GB.
+    pub fn max_volume_size(mut self, size: u64) -> Self {
+        self.max_volume_size = Some(size);
+        self
+    }
+
     /// Build the archive writer
     pub fn build(self) -> Result<ArchiveWriter> {
         let archive_id = ArchiveId::new();
@@ -178,24 +210,64 @@ impl ArchiveWriterBuilder {
         );
         let base_filename = self.output_path.file_name().unwrap_or_default();
 
-        let mut volume_writers = Vec::with_capacity(self.volume_count);
-        for i in 0..self.volume_count {
-            let volume_path = if i == 0 {
-                PathBuf::from(base_filename)
+        // Determine volume count based on erasure config if matrix distribution is enabled
+        let volume_count = if self.enable_matrix_distribution && self.enable_erasure {
+            // Ensure minimum volumes for erasure tolerance
+            let min_volumes = (self.erasure_config.parity_shards as usize + 1).max(2);
+            self.volume_count.max(min_volumes)
+        } else {
+            self.volume_count
+        };
+
+        // Create either VolumePool (for matrix distribution) or legacy volume_writers
+        let (volume_writers, volume_pool) =
+            if self.enable_matrix_distribution && self.enable_erasure {
+                // Create VolumePool for matrix distribution
+                let base_path = self
+                    .output_path
+                    .parent()
+                    .map(|p| p.join(base_filename))
+                    .unwrap_or_else(|| PathBuf::from(base_filename));
+
+                let pool_config = VolumePoolConfig::new(&base_path, volume_count)
+                    .for_erasure(self.erasure_config);
+
+                let pool_config = if let Some(max_size) = self.max_volume_size {
+                    pool_config.with_max_size(max_size)
+                } else {
+                    pool_config
+                };
+
+                let pool = VolumePool::create(&backend, pool_config, header.clone())?;
+
+                info!(
+                    "Created VolumePool with {} volumes for matrix distribution",
+                    pool.volume_count()
+                );
+
+                (Vec::new(), Some(pool))
             } else {
-                let p = PathBuf::from(base_filename);
-                let mut file_name = p.as_os_str().to_os_string();
-                file_name.push(format!(".{:03}", i));
-                PathBuf::from(file_name)
+                // Legacy mode: create individual volume writers
+                let mut volume_writers = Vec::with_capacity(volume_count);
+                for i in 0..volume_count {
+                    let volume_path = if i == 0 {
+                        PathBuf::from(base_filename)
+                    } else {
+                        let p = PathBuf::from(base_filename);
+                        let mut file_name = p.as_os_str().to_os_string();
+                        file_name.push(format!(".{:03}", i));
+                        PathBuf::from(file_name)
+                    };
+
+                    let mut vol_header = header.clone();
+                    vol_header.volume_sequence = i as u16;
+                    vol_header.total_volumes = volume_count as u16;
+
+                    let writer = VolumeWriter::create(&backend, &volume_path, vol_header)?;
+                    volume_writers.push(writer);
+                }
+                (volume_writers, None)
             };
-
-            let mut vol_header = header.clone();
-            vol_header.volume_sequence = i as u16;
-            vol_header.total_volumes = self.volume_count as u16;
-
-            let writer = VolumeWriter::create(&backend, &volume_path, vol_header)?;
-            volume_writers.push(writer);
-        }
 
         // Store nonce context (salt) for block encryption
         let nonce_context = *salt.as_bytes();
@@ -268,8 +340,10 @@ impl ArchiveWriterBuilder {
                 None
             },
             volume_writers,
+            volume_pool,
             catalog: Catalog::new(),
             chunk_locations,
+            matrix_locations: HashMap::new(),
             file_reader,
             enable_cdc: self.enable_cdc,
             pending_chunks: Vec::new(),
@@ -277,6 +351,7 @@ impl ArchiveWriterBuilder {
             target_block_size: 4 * 1024 * 1024, // 4MB
             checkpoint_manager,
             next_block_id: AtomicU64::new(0),
+            enable_matrix_distribution: self.enable_matrix_distribution,
         })
     }
 }
@@ -312,12 +387,18 @@ pub struct ArchiveWriter {
     /// Erasure coding configuration (if enabled)
     erasure_config: Option<ErasureCodeConfig>,
 
-    // Writers
+    // Writers - use either legacy volume_writers or new volume_pool
     volume_writers: Vec<VolumeWriter<era_storage::LocalStorageWriter>>,
+    /// Volume pool for matrix distribution (when enabled)
+    volume_pool: Option<VolumePool<era_storage::LocalStorageWriter>>,
 
     // Catalog and deduplication
     catalog: Catalog,
     chunk_locations: HashMap<ChunkHash, BlockLocation>,
+    /// Matrix block locations for erasure blocks (maps chunk hash to matrix location)
+    /// Currently unused but reserved for future recovery features
+    #[allow(dead_code)]
+    matrix_locations: HashMap<ChunkHash, MatrixBlockLocation>,
 
     // File reading
     file_reader: FileReader,
@@ -334,6 +415,9 @@ pub struct ArchiveWriter {
 
     /// Block ID counter for per-block key derivation
     next_block_id: AtomicU64,
+
+    /// Whether matrix distribution is enabled
+    enable_matrix_distribution: bool,
 }
 
 impl ArchiveWriter {
@@ -545,6 +629,7 @@ impl ArchiveWriter {
         if let Some(erasure_config) = self.erasure_config {
             // Use erasure coding with per-block key derivation
             let compressor = self.create_compressor();
+            let block_id_start = self.next_block_id();
             let erasure_builder = SessionErasureBlockBuilder::new(
                 &self.session,
                 &self.volume_key,
@@ -552,12 +637,108 @@ impl ArchiveWriter {
                 compressor,
                 erasure_config,
             )?
-            .with_starting_block_id(self.next_block_id());
+            .with_starting_block_id(block_id_start);
 
             let sharded_block = erasure_builder.pack_chunks(chunks)?;
 
-            // Write all shards sequentially (data shards first, then parity)
-            // Each shard is written with CRC32 for integrity validation
+            // Check if we should use matrix distribution
+            if self.enable_matrix_distribution {
+                if let Some(ref mut pool) = self.volume_pool {
+                    // Calculate required size per shard (approximately)
+                    let shard_size = sharded_block
+                        .shards
+                        .first()
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0);
+                    let per_shard_size = shard_size + era_common::ShardHeader::SIZE as u64 + 4;
+
+                    // Expand pool if needed, with a safety limit
+                    let max_volumes = 256; // Safety limit
+                    while pool.needs_expansion(per_shard_size) {
+                        if pool.volume_count() >= max_volumes {
+                            return Err(era_common::EraError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!(
+                                    "Reached maximum volume limit ({}) - shard size {} may exceed max volume size",
+                                    max_volumes, per_shard_size
+                                ),
+                            )));
+                        }
+                        // Need to borrow backend from volume_writers
+                        // Since we're using LocalStorageBackend, create a new one
+                        let base_path = self
+                            .output_path
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."));
+                        let backend = era_storage::LocalStorageBackend::new(base_path);
+                        pool.add_volume(&backend)?;
+                        debug!("Expanded volume pool to {} volumes", pool.volume_count());
+                    }
+
+                    // Use VolumePool for true matrix distribution
+                    let matrix_location = pool.write_erasure_block(
+                        sharded_block.block_id,
+                        &sharded_block.shards,
+                        sharded_block.original_len,
+                        erasure_config,
+                    )?;
+
+                    let shard_size = sharded_block
+                        .shards
+                        .first()
+                        .map(|s| s.len() as u32)
+                        .unwrap_or(0);
+
+                    // Convert MatrixBlockLocation to BlockLocation for compatibility
+                    let first_shard = matrix_location.shards.first().ok_or_else(|| {
+                        era_common::EraError::ErasureError(
+                            "No shards in matrix location".to_string(),
+                        )
+                    })?;
+
+                    // Build shard_offsets from matrix location (skip first shard)
+                    let shard_offsets: Vec<u64> = matrix_location
+                        .shards
+                        .iter()
+                        .skip(1)
+                        .map(|s| s.physical_offset)
+                        .collect();
+
+                    // Store matrix location for potential recovery
+                    // (The caller will handle storing this based on chunk hashes)
+
+                    let location = BlockLocation {
+                        volume_id: era_common::VolumeId::new(), // Placeholder, actual ID in matrix_location
+                        slot_index: 0,
+                        physical_offset: first_shard.physical_offset,
+                        encrypted_size: shard_size,
+                        erasure_info: Some(ErasureBlockInfo {
+                            data_shards: erasure_config.data_shards,
+                            parity_shards: erasure_config.parity_shards,
+                            shard_size,
+                            original_len: sharded_block.original_len,
+                        }),
+                        shard_offsets: Some(shard_offsets),
+                        shard_volumes: Some(
+                            matrix_location
+                                .shards
+                                .iter()
+                                .map(|s| s.volume_sequence)
+                                .collect(),
+                        ),
+                    };
+
+                    debug!(
+                        "Wrote erasure block with matrix distribution: {} shards across {} volumes",
+                        matrix_location.shards.len(),
+                        pool.volume_count()
+                    );
+
+                    return Ok(location);
+                }
+            }
+
+            // Legacy erasure path: write shards to volume_writers
             let mut first_location = None;
             let shard_size = sharded_block
                 .shards
@@ -622,6 +803,7 @@ impl ArchiveWriter {
                         original_len: sharded_block.original_len,
                     }),
                     shard_offsets: Some(shard_offsets),
+                    shard_volumes: None, // Legacy path uses round-robin distribution
                 });
             }
 
@@ -712,45 +894,96 @@ impl ArchiveWriter {
             None
         };
 
-        // Write catalog to EVERY volume so archive can be opened from any volume
-        // This enables recovery even when some volumes (including the primary) are missing
-        let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
+        // Handle finalization based on whether we're using VolumePool or legacy writers
+        if let Some(mut pool) = self.volume_pool.take() {
+            // Matrix distribution mode: write catalog to each volume in the pool
+            let volume_count = pool.volume_count();
+            let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
 
-        for (i, writer) in self.volume_writers.iter_mut().enumerate() {
-            // Write the same catalog block to each volume
-            let location = writer.write_block(&catalog_block)?;
+            for slot in 0..volume_count {
+                if let Some(writer) = pool.get_writer_mut(slot) {
+                    let location = writer.write_block(&catalog_block)?;
 
-            // Write backup copy for erasure-coded archives
-            if let Some(ref backup) = backup_block {
-                let _backup_location = writer.write_block(backup)?;
-                debug!(
-                    "Volume {}: Catalog written with backup at offset {}",
-                    i, location.physical_offset
-                );
-            } else {
-                debug!(
-                    "Volume {}: Catalog written at offset {}",
-                    i, location.physical_offset
-                );
+                    if let Some(ref backup) = backup_block {
+                        let _backup_location = writer.write_block(backup)?;
+                        debug!(
+                            "Volume {}: Catalog written with backup at offset {}",
+                            slot, location.physical_offset
+                        );
+                    } else {
+                        debug!(
+                            "Volume {}: Catalog written at offset {}",
+                            slot, location.physical_offset
+                        );
+                    }
+
+                    catalog_locations.push((
+                        location.physical_offset,
+                        location.encrypted_size,
+                        catalog_block_id,
+                    ));
+                }
             }
 
-            catalog_locations.push((
-                location.physical_offset,
-                location.encrypted_size,
+            debug!(
+                "Catalog (block_id={}) written to {} volumes for full redundancy",
                 catalog_block_id,
-            ));
-        }
+                catalog_locations.len()
+            );
 
-        debug!(
-            "Catalog (block_id={}) written to {} volumes for full redundancy",
-            catalog_block_id,
-            catalog_locations.len()
-        );
+            // Finalize the pool
+            let first_catalog = catalog_locations.first().cloned().unwrap_or((0, 0, 0));
+            let pool_stats =
+                pool.finalize_with_catalog(first_catalog.0, first_catalog.1, first_catalog.2)?;
 
-        // Finalize volumes with their respective catalog locations
-        for (i, writer) in self.volume_writers.drain(..).enumerate() {
-            let (offset, size, block_id) = catalog_locations[i];
-            writer.finalize_with_catalog(offset, size, block_id)?;
+            info!(
+                "VolumePool finalized: {} volumes, {} total bytes, {} blocks",
+                pool_stats.volume_count,
+                pool_stats.total_bytes_written,
+                pool_stats.total_blocks_written
+            );
+        } else {
+            // Legacy mode: use volume_writers
+            // Write catalog to EVERY volume so archive can be opened from any volume
+            // This enables recovery even when some volumes (including the primary) are missing
+            let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
+
+            for (i, writer) in self.volume_writers.iter_mut().enumerate() {
+                // Write the same catalog block to each volume
+                let location = writer.write_block(&catalog_block)?;
+
+                // Write backup copy for erasure-coded archives
+                if let Some(ref backup) = backup_block {
+                    let _backup_location = writer.write_block(backup)?;
+                    debug!(
+                        "Volume {}: Catalog written with backup at offset {}",
+                        i, location.physical_offset
+                    );
+                } else {
+                    debug!(
+                        "Volume {}: Catalog written at offset {}",
+                        i, location.physical_offset
+                    );
+                }
+
+                catalog_locations.push((
+                    location.physical_offset,
+                    location.encrypted_size,
+                    catalog_block_id,
+                ));
+            }
+
+            debug!(
+                "Catalog (block_id={}) written to {} volumes for full redundancy",
+                catalog_block_id,
+                catalog_locations.len()
+            );
+
+            // Finalize volumes with their respective catalog locations
+            for (i, writer) in self.volume_writers.drain(..).enumerate() {
+                let (offset, size, block_id) = catalog_locations[i];
+                writer.finalize_with_catalog(offset, size, block_id)?;
+            }
         }
 
         // Delete checkpoint after successful completion
