@@ -64,6 +64,16 @@ impl<R: StorageReader> VolumeReader<R> {
     pub fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
         // Read length prefix
         let len_bytes = self.reader.read_at(location.physical_offset, 4)?;
+        
+        // Validate we have enough bytes for the length prefix
+        if len_bytes.len() < 4 {
+            return Err(EraError::CorruptedHeader(format!(
+                "Block at offset {} has insufficient data: expected 4 bytes for length, got {}",
+                location.physical_offset,
+                len_bytes.len()
+            )));
+        }
+        
         let len =
             u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
 
