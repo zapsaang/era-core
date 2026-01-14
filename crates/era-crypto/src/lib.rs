@@ -15,6 +15,7 @@ mod hash;
 mod kdf;
 mod key;
 mod key_session;
+pub mod pem_support;
 mod secure_memory;
 mod security_check;
 
@@ -29,6 +30,10 @@ pub use hash::{hash, hash_reader, Hasher};
 pub use kdf::{derive_key, generate_password_verification_tag, verify_password_tag, KdfParams};
 pub use key::{DerivedKey, Salt};
 pub use key_session::{BlockKey, KeySession, KeySessionBuilder, VolumeKey};
+pub use pem_support::{
+    export_public_key_as_pem, load_private_key_from_pem, load_private_key_from_pem_string,
+    load_public_key_from_pem, load_public_key_from_pem_string, PemFormat,
+};
 pub use secure_memory::{
     check_security_features, disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64,
     SecureMemoryConfig, SecurityReport,

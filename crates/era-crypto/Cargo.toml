@@ -22,6 +22,10 @@ x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 serde = { workspace = true }
 bincode = { workspace = true }
 hex = "0.4"
+pem = "3.0"
+base64 = "0.22"
+asn1 = "0.13"
+x509-parser = "0.16"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

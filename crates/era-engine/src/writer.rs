@@ -329,15 +329,64 @@ impl ArchiveWriterBuilder {
             config.erasure = Some(self.erasure_config);
         }
 
-        // Create volume writer with password verification tag
-        let header = SuperHeader::with_kdf_params(
-            archive_id,
-            *salt.as_bytes(),
-            password_verification_tag,
-            config.encryption.kdf_memory_cost,
-            config.encryption.kdf_time_cost,
-            config.clone(),
-        );
+        // Create volume header based on authentication mode
+        let header = match (&self.auth_mode, &key_encapsulation) {
+            (AuthMode::Password(_), None) => {
+                // Password mode
+                SuperHeader::with_kdf_params(
+                    archive_id,
+                    *salt.as_bytes(),
+                    password_verification_tag,
+                    config.encryption.kdf_memory_cost,
+                    config.encryption.kdf_time_cost,
+                    config.clone(),
+                )
+            }
+            (AuthMode::Certificate(_), Some(encap)) => {
+                // Certificate mode
+                let encap_bytes = bincode::serialize(encap).map_err(|e| {
+                    era_common::EraError::Serialization(format!(
+                        "Failed to serialize key encapsulation: {}",
+                        e
+                    ))
+                })?;
+                SuperHeader::with_certificate(
+                    archive_id,
+                    *salt.as_bytes(),
+                    password_verification_tag,
+                    encap_bytes,
+                    config.clone(),
+                )
+            }
+            (AuthMode::Hybrid { .. }, Some(encap)) => {
+                // Hybrid mode
+                let encap_bytes = bincode::serialize(encap).map_err(|e| {
+                    era_common::EraError::Serialization(format!(
+                        "Failed to serialize key encapsulation: {}",
+                        e
+                    ))
+                })?;
+                SuperHeader::with_hybrid(
+                    archive_id,
+                    *salt.as_bytes(),
+                    password_verification_tag,
+                    config.encryption.kdf_memory_cost,
+                    config.encryption.kdf_time_cost,
+                    encap_bytes,
+                    config.clone(),
+                )
+            }
+            _ => {
+                eprintln!(
+                    "DEBUG: Invalid auth mode combination: {:?}, has encap: {}",
+                    &self.auth_mode,
+                    key_encapsulation.is_some()
+                );
+                return Err(era_common::EraError::InvalidFormat(
+                    "Invalid authentication mode configuration".into(),
+                ));
+            }
+        };
         let base_filename = self.output_path.file_name().unwrap_or_default();
 
         // Determine volume count based on erasure config if matrix distribution is enabled

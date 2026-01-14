@@ -12,7 +12,7 @@ mod volume_pool;
 mod writer;
 
 pub use footer::{Footer, FOOTER_SIZE};
-pub use header::{CryptoAnchor, SuperHeader, HEADER_SIZE};
+pub use header::{AuthMode, CryptoAnchor, SuperHeader, HEADER_SIZE};
 pub use multi_volume::{
     MultiVolumeConfig, MultiVolumeReader, MultiVolumeStats, MultiVolumeWriter,
     DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE,

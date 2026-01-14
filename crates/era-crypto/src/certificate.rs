@@ -98,6 +98,7 @@ pub struct EphemeralKeyPair {
 }
 
 /// 密钥封装结果
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct KeyEncapsulation {
     /// 临时公钥（需要存储在归档中）
     pub ephemeral_public: [u8; KEY_LEN],
@@ -267,7 +268,9 @@ impl EraKeyPair {
 
         if decrypted.len() != KEY_LEN {
             decrypted.zeroize();
-            return Err(EraError::InvalidKey("Decrypted key has wrong length".into()));
+            return Err(EraError::InvalidKey(
+                "Decrypted key has wrong length".into(),
+            ));
         }
 
         Ok(DecapsulatedKey {
@@ -302,11 +305,8 @@ impl EraKeyPair {
         let aead = AeadCipher::new();
         let nonce = Nonce::generate();
         let secret_bytes = self.secret_key.as_bytes();
-        let encrypted_secret = aead.encrypt(
-            &AeadKey(*encryption_key.as_bytes()),
-            &nonce,
-            secret_bytes,
-        )?;
+        let encrypted_secret =
+            aead.encrypt(&AeadKey(*encryption_key.as_bytes()), &nonce, secret_bytes)?;
 
         // 构建文件内容
         // Format: MAGIC(4) + VERSION(1) + SALT(16) + NONCE(24) + KEY_ID(16) + CREATED_AT(8) + ENCRYPTED_SECRET(32+16)
@@ -344,11 +344,14 @@ impl EraKeyPair {
         }
 
         if file_data[4] != KEY_FILE_VERSION {
-            return Err(EraError::InvalidFormat("Unsupported key file version".into()));
+            return Err(EraError::InvalidFormat(
+                "Unsupported key file version".into(),
+            ));
         }
 
         // 解析文件内容
-        let salt_bytes: [u8; 16] = file_data[5..21].try_into()
+        let salt_bytes: [u8; 16] = file_data[5..21]
+            .try_into()
             .map_err(|_| EraError::InvalidFormat("Invalid salt length".into()))?;
         let salt = Salt::from_bytes(salt_bytes);
         let nonce = Nonce::from_bytes(&file_data[21..45])?;
@@ -599,7 +602,9 @@ mod tests {
         let key_path = temp_dir.path().join("test.era-key");
 
         let original = EraKeyPair::generate().unwrap();
-        original.save_encrypted(&key_path, "correct_password").unwrap();
+        original
+            .save_encrypted(&key_path, "correct_password")
+            .unwrap();
 
         let result = EraKeyPair::load_encrypted(&key_path, "wrong_password");
         assert!(result.is_err());

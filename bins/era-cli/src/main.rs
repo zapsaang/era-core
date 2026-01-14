@@ -47,6 +47,11 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
 
+        /// Public key certificate (PEM format, required)
+        /// Use era-keygen to generate a keypair and certificate
+        #[arg(short, long)]
+        certificate: PathBuf,
+
         /// Encryption password (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
@@ -177,6 +182,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Create {
             input,
             output,
+            certificate,
             password,
             level,
             erasure,
@@ -186,6 +192,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::create(
             &input,
             &output,
+            &certificate,
             password.as_deref(),
             level,
             erasure.as_deref(),

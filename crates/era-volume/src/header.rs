@@ -6,11 +6,22 @@ use serde::{Deserialize, Serialize};
 /// Magic bytes for ERA v8.1: "ERA\x08\x01\x00\x00\x00"
 pub const MAGIC: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00];
 
-/// Current header version
-pub const HEADER_VERSION: u16 = 1;
+/// Current header version (incremented for certificate support)
+pub const HEADER_VERSION: u16 = 2;
 
 /// Size of the header region (4KB aligned)
 pub const HEADER_SIZE: usize = 4096;
+
+/// Authentication mode stored in the header
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AuthMode {
+    /// Password-only authentication
+    Password,
+    /// Certificate-only authentication
+    Certificate,
+    /// Both password AND certificate required
+    Hybrid,
+}
 
 /// Cryptographic anchor containing key derivation parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,10 +37,16 @@ pub struct CryptoAnchor {
     /// Password verification tag (16 bytes) - allows early detection of wrong password
     /// This is HMAC(key, "ERA-PASSWORD-VERIFY") truncated to 16 bytes
     pub password_verification_tag: [u8; 16],
+    /// Authentication mode
+    pub auth_mode: AuthMode,
+    /// Certificate key encapsulation (only present for Certificate/Hybrid modes)
+    /// Contains the encrypted master key and ephemeral public key
+    #[serde(default)]
+    pub key_encapsulation: Option<Vec<u8>>, // Serialized KeyEncapsulation
 }
 
 impl CryptoAnchor {
-    /// Create a new crypto anchor with the given salt and verification tag
+    /// Create a new crypto anchor with the given salt and verification tag (password mode)
     pub fn new(salt: [u8; 16], password_verification_tag: [u8; 16]) -> Self {
         Self {
             salt,
@@ -37,10 +54,12 @@ impl CryptoAnchor {
             kdf_time_cost: 3,
             kdf_parallelism: 4,
             password_verification_tag,
+            auth_mode: AuthMode::Password,
+            key_encapsulation: None,
         }
     }
 
-    /// Create a new crypto anchor with default KDF parameters
+    /// Create a new crypto anchor with default KDF parameters (password mode)
     pub fn with_params(
         salt: [u8; 16],
         password_verification_tag: [u8; 16],
@@ -54,6 +73,45 @@ impl CryptoAnchor {
             kdf_time_cost,
             kdf_parallelism,
             password_verification_tag,
+            auth_mode: AuthMode::Password,
+            key_encapsulation: None,
+        }
+    }
+
+    /// Create a crypto anchor for certificate mode
+    pub fn with_certificate(
+        salt: [u8; 16],
+        password_verification_tag: [u8; 16],
+        key_encapsulation: Vec<u8>,
+    ) -> Self {
+        Self {
+            salt,
+            kdf_memory_cost: 0, // Not used for certificate mode
+            kdf_time_cost: 0,
+            kdf_parallelism: 0,
+            password_verification_tag,
+            auth_mode: AuthMode::Certificate,
+            key_encapsulation: Some(key_encapsulation),
+        }
+    }
+
+    /// Create a crypto anchor for hybrid mode (both password and certificate)
+    pub fn with_hybrid(
+        salt: [u8; 16],
+        password_verification_tag: [u8; 16],
+        kdf_memory_cost: u32,
+        kdf_time_cost: u32,
+        kdf_parallelism: u32,
+        key_encapsulation: Vec<u8>,
+    ) -> Self {
+        Self {
+            salt,
+            kdf_memory_cost,
+            kdf_time_cost,
+            kdf_parallelism,
+            password_verification_tag,
+            auth_mode: AuthMode::Hybrid,
+            key_encapsulation: Some(key_encapsulation),
         }
     }
 }
@@ -142,6 +200,69 @@ impl SuperHeader {
                 kdf_memory_cost,
                 kdf_time_cost,
                 4, // parallelism
+            ),
+            config,
+        }
+    }
+
+    /// Create a new super header with certificate authentication
+    pub fn with_certificate(
+        archive_id: ArchiveId,
+        salt: [u8; 16],
+        password_verification_tag: [u8; 16],
+        key_encapsulation: Vec<u8>,
+        config: ArchiveConfig,
+    ) -> Self {
+        Self {
+            magic: MAGIC,
+            version: HEADER_VERSION,
+            volume_id: VolumeId::new(),
+            archive_id,
+            volume_sequence: 0,
+            total_volumes: 0,
+            creation_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            feature_flags: 0,
+            crypto_anchor: CryptoAnchor::with_certificate(
+                salt,
+                password_verification_tag,
+                key_encapsulation,
+            ),
+            config,
+        }
+    }
+
+    /// Create a new super header with hybrid authentication (password + certificate)
+    pub fn with_hybrid(
+        archive_id: ArchiveId,
+        salt: [u8; 16],
+        password_verification_tag: [u8; 16],
+        kdf_memory_cost: u32,
+        kdf_time_cost: u32,
+        key_encapsulation: Vec<u8>,
+        config: ArchiveConfig,
+    ) -> Self {
+        Self {
+            magic: MAGIC,
+            version: HEADER_VERSION,
+            volume_id: VolumeId::new(),
+            archive_id,
+            volume_sequence: 0,
+            total_volumes: 0,
+            creation_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            feature_flags: 0,
+            crypto_anchor: CryptoAnchor::with_hybrid(
+                salt,
+                password_verification_tag,
+                kdf_memory_cost,
+                kdf_time_cost,
+                4,
+                key_encapsulation,
             ),
             config,
         }

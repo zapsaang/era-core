@@ -52,6 +52,7 @@ fn parse_erasure_config(s: &str) -> Result<ErasureCodeConfig> {
 pub fn create(
     inputs: &[impl AsRef<Path>],
     output: &Path,
+    certificate_path: &Path,
     password: Option<&str>,
     compression_level: i32,
     erasure: Option<&str>,
@@ -59,6 +60,12 @@ pub fn create(
     max_volume_size: Option<u64>,
     matrix_distribution: bool,
 ) -> Result<()> {
+    // 加载公钥证书
+    println!("Loading certificate: {}", certificate_path.display());
+    let certificate = era_crypto::load_public_key_from_pem(certificate_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load certificate: {}", e))?;
+    println!("✓ Certificate loaded successfully");
+
     // If password provided via CLI, skip confirmation (for scripting)
     let password = if let Some(p) = password {
         p.to_string()
@@ -83,6 +90,7 @@ pub fn create(
 
     let mut builder = ArchiveWriter::builder(output)
         .password(&password)
+        .certificate(certificate)
         .config(config);
 
     // Enable erasure coding if configured
