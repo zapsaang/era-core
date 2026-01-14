@@ -16,8 +16,8 @@
 //! ```
 
 mod commands;
-
 use clap::{Parser, Subcommand};
+use era_crypto::disable_core_dumps;
 use std::path::PathBuf;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -139,6 +139,11 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    if let Err(e) = disable_core_dumps() {
+        eprintln!("Warning：Cannot disable core dumps: {}", e);
+    } else {
+        println!("Core Dumps disabeld.");
+    }
     let cli = Cli::parse();
 
     // Set up logging

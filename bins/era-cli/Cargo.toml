@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 era-common = { workspace = true }
+era-crypto = { workspace = true }
 era-engine = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }
