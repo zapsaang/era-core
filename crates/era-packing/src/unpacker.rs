@@ -2,10 +2,10 @@
 
 use bytes::Bytes;
 use era_codec::Compressor;
-use era_common::{
-    BlockChunkIndex, BlockId, ChunkHash, ChunkVec, EncryptedMacroBlock, EraError, Result,
-};
+use era_common::{BlockChunkIndex, BlockId, ChunkHash, ChunkVec, EncryptedMacroBlock, Result};
 use era_crypto::DerivedKey;
+
+use crate::block_codec;
 
 /// Unpacker for extracting chunks from MacroBlocks
 pub struct MacroBlockUnpacker {
@@ -34,41 +34,13 @@ impl MacroBlockUnpacker {
 
     /// Decrypt and decompress a MacroBlock, returning raw data and index
     pub fn unpack(&self, block: &EncryptedMacroBlock) -> Result<UnpackedBlock> {
-        // Decrypt with nonce context
-        let compressed = era_crypto::decrypt_with_context(
+        let (index, data) = block_codec::decrypt_and_decompress(
             &self.key,
             &self.nonce_context,
             block.block_id,
             &block.data,
+            self.compressor.as_ref(),
         )?;
-
-        // Decompress (optimized: Bytes::from(Vec) avoids extra copy)
-        let decompressed = self.compressor.decompress(&compressed)?;
-
-        // Parse index
-        if decompressed.len() < 4 {
-            return Err(EraError::decompression("Block too small"));
-        }
-
-        let index_len = u32::from_le_bytes([
-            decompressed[0],
-            decompressed[1],
-            decompressed[2],
-            decompressed[3],
-        ]) as usize;
-
-        if decompressed.len() < 4 + index_len {
-            return Err(EraError::decompression("Index length exceeds block size"));
-        }
-
-        // Use safe deserialization with size limits
-        let index: BlockChunkIndex = era_common::deserialize(&decompressed[4..4 + index_len])?;
-        let data_start = 4 + index_len;
-
-        // CRITICAL OPTIMIZATION: Use slice() instead of copy_from_slice()
-        // slice() returns a reference (zero-copy), copy_from_slice() allocates new Arc buffer
-        // This avoids 1 extra memory allocation per block (~0.5ms for 1MB blocks)
-        let data = decompressed.slice(data_start..);
 
         Ok(UnpackedBlock {
             block_id: block.block_id,
@@ -84,21 +56,7 @@ impl MacroBlockUnpacker {
         chunk_hash: &ChunkHash,
     ) -> Result<Option<Bytes>> {
         let unpacked = self.unpack(block)?;
-
-        for entry in &unpacked.index.entries {
-            if &entry.hash == chunk_hash {
-                let start = entry.offset as usize;
-                let end = start + entry.length as usize;
-
-                if end > unpacked.data.len() {
-                    return Err(EraError::decompression("Chunk offset exceeds data size"));
-                }
-
-                return Ok(Some(unpacked.data.slice(start..end)));
-            }
-        }
-
-        Ok(None)
+        block_codec::extract_chunk_by_hash(&unpacked.index, &unpacked.data, chunk_hash)
     }
 
     /// Extract all chunks from a block
@@ -108,20 +66,7 @@ impl MacroBlockUnpacker {
     /// for extraction operations.
     pub fn extract_all_chunks(&self, block: &EncryptedMacroBlock) -> Result<ChunkVec> {
         let unpacked = self.unpack(block)?;
-        let mut chunks = ChunkVec::new();
-
-        for entry in &unpacked.index.entries {
-            let start = entry.offset as usize;
-            let end = start + entry.length as usize;
-
-            if end > unpacked.data.len() {
-                return Err(EraError::decompression("Chunk offset exceeds data size"));
-            }
-
-            chunks.push((entry.hash, unpacked.data.slice(start..end)));
-        }
-
-        Ok(chunks)
+        block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
 }
 

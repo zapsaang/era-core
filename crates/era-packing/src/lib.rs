@@ -16,6 +16,7 @@
 //! For combined security and redundancy, use `SessionErasureBlockBuilder` which
 //! provides both per-block key derivation AND Reed-Solomon erasure coding.
 
+mod block_codec;
 mod builder;
 mod erasure_builder;
 mod erasure_unpacker;

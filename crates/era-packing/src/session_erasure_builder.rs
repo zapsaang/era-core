@@ -194,24 +194,8 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         block_id: era_common::BlockId,
     ) -> Result<ChunkVec> {
         let encrypted_block = self.decode_shards(shards, erasure_info, block_id)?;
-
-        // Unpack using session-based unpacker (handles per-block key derivation)
         let unpacked = self.inner.unpack(&encrypted_block)?;
-
-        // Extract chunks from unpacked data using ChunkVec for stack allocation
-        let mut chunks = ChunkVec::new();
-        for entry in &unpacked.index.entries {
-            let start = entry.offset as usize;
-            let end = start + entry.length as usize;
-            if end > unpacked.data.len() {
-                return Err(era_common::EraError::decompression(
-                    "Chunk offset exceeds data size",
-                ));
-            }
-            chunks.push((entry.hash, unpacked.data.slice(start..end)));
-        }
-
-        Ok(chunks)
+        crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
 
     /// Decode shards and extract a specific chunk by hash.
@@ -224,21 +208,7 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
     ) -> Result<Option<bytes::Bytes>> {
         let encrypted_block = self.decode_shards(shards, erasure_info, block_id)?;
         let unpacked = self.inner.unpack(&encrypted_block)?;
-
-        for entry in &unpacked.index.entries {
-            if &entry.hash == chunk_hash {
-                let start = entry.offset as usize;
-                let end = start + entry.length as usize;
-                if end > unpacked.data.len() {
-                    return Err(era_common::EraError::decompression(
-                        "Chunk offset exceeds data size",
-                    ));
-                }
-                return Ok(Some(unpacked.data.slice(start..end)));
-            }
-        }
-
-        Ok(None)
+        crate::block_codec::extract_chunk_by_hash(&unpacked.index, &unpacked.data, chunk_hash)
     }
 
     /// Decode available shards into the original EncryptedMacroBlock.
