@@ -144,6 +144,19 @@ impl StorageWriter for LocalStorageWriter {
         Ok(offset)
     }
 
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        // Save current position
+        let current_pos = self.file.stream_position()?;
+
+        // Write at offset
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(data)?;
+
+        // Restore position
+        self.file.seek(SeekFrom::Start(current_pos))?;
+        Ok(())
+    }
+
     fn sync(&mut self) -> Result<()> {
         self.file.sync_all()?;
         Ok(())

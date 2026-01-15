@@ -83,11 +83,13 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         let volume_path = config.volume_path(0);
         let volume_filename = volume_path.file_name().unwrap_or_default();
 
-        let volume_writer = VolumeWriter::create(
+        let mut volume_writer = VolumeWriter::create(
             backend,
             std::path::Path::new(volume_filename),
             header.clone(),
         )?;
+
+        volume_writer.set_max_size(config.max_volume_size);
 
         let stats = MultiVolumeStats {
             volume_count: 1,
@@ -149,8 +151,9 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         let volume_path = self.config.volume_path(self.stats.volume_count);
         let volume_filename = volume_path.file_name().unwrap_or_default();
 
-        let volume_writer =
+        let mut volume_writer =
             VolumeWriter::create(backend, std::path::Path::new(volume_filename), next_header)?;
+        volume_writer.set_max_size(self.config.max_volume_size);
 
         self.current_writer = Some(volume_writer);
         self.stats.volume_count += 1;

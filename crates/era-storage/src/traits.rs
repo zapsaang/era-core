@@ -47,6 +47,9 @@ pub trait StorageWriter: Send {
     /// Returns the offset where the data was written
     fn append(&mut self, data: &[u8]) -> Result<u64>;
 
+    /// Write data at a specific offset
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
+
     /// Force data to be written to persistent storage
     fn sync(&mut self) -> Result<()>;
 

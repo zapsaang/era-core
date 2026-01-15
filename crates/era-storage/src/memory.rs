@@ -133,6 +133,27 @@ impl StorageWriter for MemoryStorageWriter {
         Ok(offset)
     }
 
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        let start = offset as usize;
+        let end = start + data.len();
+
+        if start > self.buffer.len() {
+            self.buffer.resize(start, 0);
+        }
+
+        if end > self.buffer.len() {
+            self.buffer.resize(end, 0);
+        }
+
+        self.buffer[start..end].copy_from_slice(data);
+
+        // Sync to shared storage
+        self.storage
+            .write()
+            .insert(self.path.clone(), self.buffer.clone());
+        Ok(())
+    }
+
     fn sync(&mut self) -> Result<()> {
         // Already synced on each write
         Ok(())

@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
 serde-big-array = "0.5"
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

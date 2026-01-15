@@ -37,17 +37,19 @@ pub struct Footer {
     pub catalog_size: u32,
     /// Block ID of the catalog (for correct decryption)
     pub catalog_block_id: u32,
+    /// Offset of the last checkpoint (for atomic updates)
+    pub last_checkpoint_offset: u64,
     /// Blake3 checksum of the footer (excluding this field)
     pub checksum: [u8; 32],
-    /// Reserved for future use (reduced from 48 to 44 bytes)
+    /// Reserved for future use (reduced from 48 to 36 bytes)
     #[serde(with = "BigArray")]
-    pub _reserved: [u8; 44],
+    pub _reserved: [u8; 36],
 }
 
 impl Footer {
     /// Create a new footer
     pub fn new(data_end_offset: u64, block_count: u32, sequence_number: u64) -> Self {
-        Self::with_catalog(data_end_offset, block_count, sequence_number, 0, 0, 0)
+        Self::with_catalog(data_end_offset, block_count, sequence_number, 0, 0, 0, 0)
     }
 
     /// Create a new footer with catalog location
@@ -58,6 +60,7 @@ impl Footer {
         catalog_offset: u64,
         catalog_size: u32,
         catalog_block_id: u32,
+        last_checkpoint_offset: u64,
     ) -> Self {
         let mut footer = Self {
             magic: FOOTER_MAGIC,
@@ -69,8 +72,9 @@ impl Footer {
             catalog_offset,
             catalog_size,
             catalog_block_id,
+            last_checkpoint_offset,
             checksum: [0u8; 32],
-            _reserved: [0u8; 44],
+            _reserved: [0u8; 36],
         };
 
         footer.update_checksum();

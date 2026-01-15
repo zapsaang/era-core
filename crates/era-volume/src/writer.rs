@@ -19,6 +19,10 @@ pub struct VolumeWriter<W: StorageWriter> {
     block_count: u32,
     /// Sequence number for footer
     sequence: u64,
+    /// Maximum volume size (for padding)
+    max_size: Option<u64>,
+    /// Last checkpoint offset
+    last_checkpoint_offset: u64,
 }
 
 impl<W: StorageWriter> VolumeWriter<W> {
@@ -40,7 +44,60 @@ impl<W: StorageWriter> VolumeWriter<W> {
             position: HEADER_SIZE as u64,
             block_count: 0,
             sequence: 0,
+            max_size: None,
+            last_checkpoint_offset: 0,
         })
+    }
+
+    /// Set the maximum size for this volume
+    pub fn set_max_size(&mut self, max_size: u64) {
+        self.max_size = Some(max_size);
+    }
+
+    /// Update the last checkpoint offset
+    pub fn set_last_checkpoint(&mut self, offset: u64) {
+        self.last_checkpoint_offset = offset;
+    }
+
+    /// Commit a checkpoint by updating the footer atomically
+    pub fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
+        let max_size = self.max_size.ok_or_else(|| {
+            era_common::EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Cannot commit checkpoint without max_size (requires fixed footer location)",
+            ))
+        })?;
+
+        // 1. Ensure all data is on disk
+        self.writer.sync()?;
+
+        // 2. Update internal state
+        self.set_last_checkpoint(checkpoint_offset);
+
+        // 3. Construct new footer
+        // Note: Checkpoints utilize the fixed footer location at max_size - FOOTER_SIZE
+        // The data_end_offset points to current valid data
+        let footer = crate::Footer::with_catalog(
+            self.position,
+            self.block_count,
+            self.sequence,
+            0,
+            0,
+            0,
+            self.last_checkpoint_offset,
+        );
+
+        let footer_bytes = footer.to_bytes()?;
+
+        // 4. Overwrite Footer at fixed end
+        use crate::footer::FOOTER_SIZE;
+        let footer_offset = max_size - FOOTER_SIZE as u64;
+        self.writer.write_at(footer_offset, &footer_bytes)?;
+
+        // 5. Sync footer
+        self.writer.sync()?;
+
+        Ok(())
     }
 
     /// Get the volume ID
@@ -61,9 +118,22 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// Write an encrypted macro block to the volume
     pub fn write_block(&mut self, block: &EncryptedMacroBlock) -> Result<BlockLocation> {
         let offset = self.position;
+        let block_len = block.data.len() as u32;
+        let total_len = block_len as u64 + 4; // 4 bytes for length prefix
+
+        // Check availability if max_size is set
+        if let Some(max_size) = self.max_size {
+            let footer_size = crate::footer::FOOTER_SIZE as u64;
+            if offset + total_len + footer_size > max_size {
+                return Err(era_common::EraError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Volume full",
+                )));
+            }
+        }
 
         // Write block length prefix (4 bytes)
-        let len_bytes = (block.data.len() as u32).to_le_bytes();
+        let len_bytes = block_len.to_le_bytes();
         self.writer.append(&len_bytes)?;
 
         // Write block data
@@ -73,7 +143,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             volume_id: self.header.volume_id,
             slot_index: self.block_count,
             physical_offset: offset,
-            encrypted_size: block.data.len() as u32,
+            encrypted_size: block_len,
             erasure_info: None, // Standard blocks are not erasure-coded
             shard_offsets: None,
             shard_volumes: None,
@@ -107,6 +177,35 @@ impl<W: StorageWriter> VolumeWriter<W> {
     ) -> Result<SuperHeader> {
         self.sequence += 1;
 
+        // Random padding if max_size is set
+        if let Some(max_size) = self.max_size {
+            use crate::footer::FOOTER_SIZE;
+            use rand::Rng;
+
+            let footer_size = FOOTER_SIZE as u64;
+            let current_pos = self.position;
+
+            if current_pos + footer_size < max_size {
+                let padding_len = max_size - current_pos - footer_size;
+                let mut rng = rand::thread_rng();
+                // Create padding in chunks to avoid large allocations
+                let chunk_size = 1024 * 1024; // 1MB chunks
+                let mut remaining = padding_len;
+                let mut buffer = vec![0u8; chunk_size.min(remaining as usize)];
+
+                while remaining > 0 {
+                    let to_write = remaining.min(chunk_size as u64) as usize;
+                    if buffer.len() != to_write {
+                        buffer.resize(to_write, 0);
+                    }
+                    rng.fill(&mut buffer[..]);
+                    self.writer.append(&buffer)?;
+                    remaining -= to_write as u64;
+                }
+                self.position += padding_len;
+            }
+        }
+
         // Write footer with catalog location
         let footer = Footer::with_catalog(
             self.position,
@@ -115,6 +214,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             catalog_offset,
             catalog_size,
             catalog_block_id,
+            self.last_checkpoint_offset,
         );
         let footer_bytes = footer.to_bytes()?;
         self.writer.append(&footer_bytes)?;
@@ -189,5 +289,53 @@ mod tests {
         assert_eq!(location.encrypted_size, 1024);
 
         writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn test_volume_padding_and_atomic_check() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+
+        let header = SuperHeader::new(
+            ArchiveId::new(),
+            [0u8; 16],
+            TEST_VERIFICATION_TAG,
+            ArchiveConfig::default(),
+        );
+
+        let mut writer = VolumeWriter::create(&backend, Path::new("padded.era"), header).unwrap();
+
+        let header_size = crate::header::HEADER_SIZE as u64;
+        let footer_size = crate::footer::FOOTER_SIZE as u64;
+
+        // Define max size: Header + 1 Block (1024) + Padding (500) + Footer
+        let data_len = 1020;
+        let block_disk_size = data_len as u64 + 4; // 1024
+        let padding_size = 500;
+
+        let max_size = header_size + block_disk_size + padding_size + footer_size;
+        writer.set_max_size(max_size);
+
+        let block = EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from(vec![0u8; data_len]),
+            original_size: 2048,
+            compressed_size: data_len as u32,
+            chunk_count: 1,
+        };
+
+        // Write block 1: Success
+        writer.write_block(&block).unwrap();
+
+        // Write block 2: Should fail (needs 1024 + footer, only 500 + footer available minus footer reservation)
+        assert!(writer.write_block(&block).is_err());
+
+        // Finalize: Should fill padding
+        writer.finalize().unwrap();
+
+        // Verify file size
+        let file_path = temp_dir.path().join("padded.era");
+        let metadata = std::fs::metadata(file_path).unwrap();
+        assert_eq!(metadata.len(), max_size);
     }
 }
