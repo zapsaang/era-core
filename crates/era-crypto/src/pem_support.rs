@@ -106,6 +106,60 @@ pub fn load_private_key_from_pem_string(
     ))
 }
 
+/// 将私钥导出为 PKCS#8 PEM 格式 (未加密)
+///
+/// 注意：此函数不加密私钥！仅用于测试或导出到安全位置。
+pub fn export_private_key_as_pem(keypair: &EraKeyPair) -> Result<String> {
+    // Manually construct PKCS#8 components for X25519
+    let secret = keypair.secret_key.to_bytes();
+
+    // 1. Inner CurvePrivateKey ::= OCTET STRING (32 bytes)
+    // Structure: 04 20 [32 bytes]
+    let mut key_field = Vec::with_capacity(34);
+    key_field.push(0x04);
+    key_field.push(0x20); // 32 bytes length
+    key_field.extend_from_slice(&secret);
+
+    // 2. AlgorithmIdentifier for X25519
+    // OID: 1.3.101.110 -> 2B 65 6E
+    // Sequence: 30 05 06 03 2B 65 6E
+    let algo_id = [0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e];
+
+    // 3. Version: 0 -> 02 01 00
+    let version = [0x02, 0x01, 0x00];
+
+    // 4. PrivateKey wrapper field (OCTET STRING containing key_field)
+    // Structure: 04 [len] [key_field]
+    let mut key_wrapper = Vec::with_capacity(36);
+    key_wrapper.push(0x04);
+    key_wrapper.push(key_field.len() as u8);
+    key_wrapper.extend_from_slice(&key_field);
+
+    // 5. Outer Sequence (PrivateKeyInfo)
+    // Structure: 30 [len] [Version] [Algo] [KeyWrapper]
+    let mut seq_content = Vec::new();
+    seq_content.extend_from_slice(&version);
+    seq_content.extend_from_slice(&algo_id);
+    seq_content.extend_from_slice(&key_wrapper);
+
+    let mut der = Vec::new();
+    der.push(0x30); // SEQUENCE
+    der.push(seq_content.len() as u8);
+    der.extend_from_slice(&seq_content);
+
+    // Encode as PEM
+    let b64 = base64_encode(&der);
+    let mut pem = String::new();
+    pem.push_str("-----BEGIN PRIVATE KEY-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.push_str(&String::from_utf8_lossy(chunk));
+        pem.push('\n');
+    }
+    pem.push_str("-----END PRIVATE KEY-----\n");
+
+    Ok(pem)
+}
+
 /// 从 PEM 文件加载公钥
 pub fn load_public_key_from_pem<P: AsRef<Path>>(path: P) -> Result<EraCertificate> {
     let content = std::fs::read_to_string(&path)
@@ -337,7 +391,14 @@ fn extract_private_key_from_pkcs8(der_bytes: &[u8]) -> Result<EraKeyPair> {
         .map_err(|e| EraError::InvalidFormat(format!("Failed to parse PKCS#8: {}", e)))?;
 
     // 提取私钥数据（OCTET STRING 中的数据）
-    let private_key_bytes = private_key_info.private_key;
+    let mut private_key_bytes = private_key_info.private_key;
+
+    // Fix for X25519 wrapping (CurvePrivateKey ::= OCTET STRING)
+    // standard PKCS#8 for X25519 wraps the key in an OCTET STRING
+    // which results in 04 20 <32 bytes> (total 34 bytes)
+    if private_key_bytes.len() == KEY_LEN + 2 && private_key_bytes[0] == 0x04 && private_key_bytes[1] == 0x20 {
+         private_key_bytes = &private_key_bytes[2..];
+    }
 
     if private_key_bytes.len() < KEY_LEN {
         return Err(EraError::InvalidKey("PKCS#8 private key too short".into()));

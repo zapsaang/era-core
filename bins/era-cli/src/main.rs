@@ -46,10 +46,10 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Public key certificate (PEM format, required)
+        /// Public key certificate (PEM format, optional for password mode)
         /// Use era-keygen to generate a keypair and certificate
         #[arg(short, long)]
-        certificate: PathBuf,
+        certificate: Option<PathBuf>,
 
         /// Encryption password (will prompt if not provided)
         #[arg(short, long)]
@@ -95,6 +95,10 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
 
+        /// Private key file for certificate mode (PEM format)
+        #[arg(short = 'k', long)]
+        key: Option<PathBuf>,
+
         /// Overwrite existing files
         #[arg(short = 'f', long)]
         force: bool,
@@ -108,6 +112,10 @@ enum Commands {
         /// Encryption password (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
+
+        /// Private key file for certificate mode (PEM format)
+        #[arg(short = 'k', long)]
+        key: Option<PathBuf>,
 
         /// Show detailed information
         #[arg(short, long)]
@@ -197,7 +205,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::create(
             &input,
             &output,
-            &certificate,
+            certificate.as_deref(),
             password.as_deref(),
             level,
             erasure.as_deref(),
@@ -210,14 +218,16 @@ fn main() -> anyhow::Result<()> {
             input,
             output,
             password,
+            key,
             force,
-        } => commands::extract(&input, &output, password.as_deref(), force),
+        } => commands::extract(&input, &output, password.as_deref(), key.as_deref(), force),
 
         Commands::List {
             archive,
             password,
+            key,
             long,
-        } => commands::list(&archive, password.as_deref(), long),
+        } => commands::list(&archive, password.as_deref(), key.as_deref(), long),
 
         Commands::Info { archive, password } => commands::info(&archive, password.as_deref()),
 

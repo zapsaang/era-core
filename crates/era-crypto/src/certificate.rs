@@ -64,7 +64,7 @@ const KEY_FILE_VERSION: u8 = 1;
 pub struct EraKeyPair {
     /// 私钥 (32 bytes)
     #[zeroize(skip)] // StaticSecret has its own zeroize
-    secret_key: StaticSecret,
+    pub(crate) secret_key: StaticSecret,
     /// 公钥 (32 bytes)
     public_key: PublicKey,
     /// 密钥ID (用于识别密钥)

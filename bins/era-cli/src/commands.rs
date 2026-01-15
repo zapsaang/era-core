@@ -77,7 +77,7 @@ fn parse_erasure_config(s: &str) -> Result<ErasureCodeConfig> {
 pub fn create(
     inputs: &[impl AsRef<Path>],
     output: &Path,
-    certificate_path: &Path,
+    certificate_path: Option<&Path>,
     password: Option<&str>,
     compression_level: i32,
     erasure: Option<&str>,
@@ -86,13 +86,23 @@ pub fn create(
     matrix_distribution: bool,
 ) -> Result<()> {
     // 加载公钥证书
-    info!("Loading certificate: {}", certificate_path.display());
-    let certificate = era_crypto::load_public_key_from_pem(certificate_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load certificate: {}", e))?;
-    info!("✓ Certificate loaded successfully");
+    let certificate = if let Some(path) = certificate_path {
+        info!("Loading certificate: {}", path.display());
+        let cert = era_crypto::load_public_key_from_pem(path)
+            .map_err(|e| anyhow::anyhow!("Failed to load certificate: {}", e))?;
+        info!("✓ Certificate loaded successfully");
+        Some(cert)
+    } else {
+        None
+    };
 
-    // Get password with confirmation for new archives
-    let password = get_password_with_confirmation(password)?;
+    // Get password with confirmation (only if not using certificate mode)
+    // Note: Hybrid mode is not yet fully supported via CLI arguments, prioritizing pure Certificate mode
+    let password = if certificate.is_some() {
+        password.map(|p| p.to_string()).unwrap_or_default()
+    } else {
+        get_password_with_confirmation(password)?
+    };
 
     let mut config = ArchiveConfig::default();
     config.compression.level = compression_level;
@@ -105,8 +115,11 @@ pub fn create(
 
     let mut builder = ArchiveWriter::builder(output)
         .password(&password)
-        .certificate(certificate)
         .config(config);
+
+    if let Some(cert) = certificate {
+        builder = builder.certificate(cert);
+    }
 
     // Enable erasure coding if configured
     if let Some(ec) = erasure_config {
@@ -179,12 +192,25 @@ pub fn create(
 }
 
 /// Extract files from an ERA archive
-pub fn extract(input: &Path, output: &Path, password: Option<&str>, force: bool) -> Result<()> {
-    let password = get_password(password, "Enter decryption password: ")?;
-
+pub fn extract(
+    input: &Path,
+    output: &Path,
+    password: Option<&str>,
+    key_path: Option<&Path>,
+    force: bool,
+) -> Result<()> {
     info!("Opening archive: {}", input.display());
 
-    let mut reader = ArchiveReader::open(input, &password).context("Failed to open archive")?;
+    let mut reader = if let Some(kp_path) = key_path {
+        info!("Loading private key: {}", kp_path.display());
+        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
+            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
+        ArchiveReader::open_with_keypair(input, &keypair)
+            .context("Failed to open archive with key")?
+    } else {
+        let password = get_password(password, "Enter decryption password: ")?;
+        ArchiveReader::open(input, &password).context("Failed to open archive")?
+    };
 
     let options = ExtractOptions::new(output).overwrite(force);
 
@@ -208,10 +234,22 @@ pub fn extract(input: &Path, output: &Path, password: Option<&str>, force: bool)
 }
 
 /// List contents of an ERA archive
-pub fn list(archive: &Path, password: Option<&str>, long_format: bool) -> Result<()> {
-    let password = get_password(password, "Enter decryption password: ")?;
-
-    let mut reader = ArchiveReader::open(archive, &password).context("Failed to open archive")?;
+pub fn list(
+    archive: &Path,
+    password: Option<&str>,
+    key_path: Option<&Path>,
+    long_format: bool,
+) -> Result<()> {
+    let mut reader = if let Some(kp_path) = key_path {
+        info!("Loading private key: {}", kp_path.display());
+        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
+            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
+        ArchiveReader::open_with_keypair(archive, &keypair)
+            .context("Failed to open archive with key")?
+    } else {
+        let password = get_password(password, "Enter decryption password: ")?;
+        ArchiveReader::open(archive, &password).context("Failed to open archive")?
+    };
 
     let files = reader.list_files().context("Failed to read catalog")?;
 

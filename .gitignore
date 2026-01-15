@@ -24,4 +24,4 @@ Cargo.lock
 *.md
 !README.md
 
-*.prompt.md
+bench_data/

@@ -17,7 +17,9 @@ mod chunker;
 mod entry;
 mod reader;
 
-pub use chunker::{ChunkIterator, Chunker, ChunkerConfig, StreamingChunker};
-pub use chunker::{DEFAULT_AVG_SIZE, DEFAULT_MAX_SIZE, DEFAULT_MIN_SIZE};
-pub use entry::{Catalog, ChunkRef, FileEntry, FileType};
-pub use reader::FileReader;
+pub use chunker::{
+    ChunkIterator, Chunker, ChunkerConfig, StreamingChunker, DEFAULT_AVG_SIZE, DEFAULT_MAX_SIZE,
+    DEFAULT_MIN_SIZE,
+};
+pub use entry::{Catalog, ChunkRef, FileEntry, FileType, PackedChunkInfo};
+pub use reader::{DirectoryScanner, FileReader, ScanOptions};

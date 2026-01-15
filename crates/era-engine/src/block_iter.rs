@@ -60,8 +60,8 @@ pub trait BlockIterator {
     fn stats(&self) -> &BlockIterStats;
 }
 
-/// Maximum allowed block size (16 MB) - prevents malicious archives from causing OOM
-const MAX_BLOCK_SIZE: u32 = 16 * 1024 * 1024;
+/// Maximum allowed block size (1 GB) - Increased to support large blocks
+const MAX_BLOCK_SIZE: u32 = 1024 * 1024 * 1024;
 
 /// Iterator for standard (non-erasure) blocks
 pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {

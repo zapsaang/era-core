@@ -2,6 +2,7 @@
 
 use era_common::ChunkHash;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Type of file entry
@@ -92,6 +93,15 @@ pub struct FileEntry {
     pub mtime: Option<u64>,
     /// Symlink target (if applicable)
     pub symlink_target: Option<PathBuf>,
+    /// Owner UID (Unix)
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Owner GID (Unix)
+    #[serde(default)]
+    pub gid: Option<u32>,
+    /// Extended attributes
+    #[serde(default)]
+    pub xattrs: BTreeMap<String, Vec<u8>>,
     /// Hash of the file content (for single-chunk files only)
     /// Deprecated: Use `chunks` for new archives
     pub content_hash: Option<ChunkHash>,
@@ -136,6 +146,14 @@ impl FileEntry {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
 
+        #[cfg(unix)]
+        let (uid, gid) = {
+            use std::os::unix::fs::MetadataExt;
+            (Some(metadata.uid()), Some(metadata.gid()))
+        };
+        #[cfg(not(unix))]
+        let (uid, gid) = (None, None);
+
         let symlink_target = if file_type == FileType::Symlink {
             std::fs::read_link(path).ok()
         } else {
@@ -153,6 +171,9 @@ impl FileEntry {
             permissions,
             mtime,
             symlink_target,
+            uid,
+            gid,
+            xattrs: BTreeMap::new(),
             content_hash: None,
             chunks: Vec::new(),
         })
@@ -167,6 +188,9 @@ impl FileEntry {
             permissions: 0o644,
             mtime: None,
             symlink_target: None,
+            uid: None,
+            gid: None,
+            xattrs: BTreeMap::new(),
             content_hash: None,
             chunks: Vec::new(),
         }
