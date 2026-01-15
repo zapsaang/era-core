@@ -238,23 +238,10 @@ impl<'a> SessionBlockUnpacker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::helpers::*;
     use bytes::Bytes;
     use era_codec::ZstdCompressor;
     use era_common::ChunkHash;
-    use era_crypto::{KdfParams, Salt};
-
-    const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
-
-    fn test_session() -> (KeySession, Salt) {
-        let salt = Salt::from_bytes([0u8; 16]);
-        let params = KdfParams {
-            memory_cost: 1024,
-            time_cost: 1,
-            parallelism: 1,
-        };
-        let session = KeySession::new(b"test_password", &salt, &params).unwrap();
-        (session, salt)
-    }
 
     #[test]
     fn test_session_builder_pack_unpack_roundtrip() {

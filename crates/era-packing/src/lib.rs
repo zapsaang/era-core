@@ -25,6 +25,9 @@ mod session_builder;
 mod session_erasure_builder;
 mod unpacker;
 
+#[cfg(test)]
+mod test_helpers;
+
 pub use block_codec::{decrypt_and_decompress, extract_all_chunks, extract_chunk_by_hash};
 pub use builder::MacroBlockBuilder;
 pub use erasure_builder::ErasureBlockBuilder;

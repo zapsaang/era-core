@@ -99,23 +99,11 @@ impl UnpackedBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::helpers::*;
     use crate::MacroBlockBuilder;
     use era_codec::ZstdCompressor;
     use era_common::UniqueChunk;
     use era_crypto::{derive_key, KdfParams, Salt};
-
-    /// Test nonce context (must match the one used in builder tests)
-    const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
-
-    fn test_key() -> DerivedKey {
-        let salt = Salt::from_bytes([0u8; 16]);
-        let params = KdfParams {
-            memory_cost: 1024,
-            time_cost: 1,
-            parallelism: 1,
-        };
-        derive_key(b"test_password", &salt, &params).unwrap()
-    }
 
     #[test]
     fn test_pack_unpack_roundtrip() {
