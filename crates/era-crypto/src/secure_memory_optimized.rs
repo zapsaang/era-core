@@ -19,6 +19,7 @@
 //! - Other: Graceful degradation with warnings
 
 use std::fmt;
+use std::ptr::NonNull;
 use zeroize::Zeroize;
 
 /// Error type for secure memory operations
@@ -191,7 +192,7 @@ impl SecureBytes {
         }
 
         // Allocate via zeroize-alloc
-        let data = vec![0u8; size];
+        let mut data = vec![0u8; size];
 
         let is_locked = if config.enable_mlock {
             match mlock(data.as_ptr(), size) {

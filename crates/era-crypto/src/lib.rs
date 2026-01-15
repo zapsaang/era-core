@@ -38,4 +38,4 @@ pub use secure_memory::{
     check_security_features, disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64,
     SecureMemoryConfig, SecurityReport,
 };
-pub use security_check::{print_security_report, verify_guard_pages_or_warn, verify_mlock_or_warn};
+pub use security_check::{print_security_report, verify_mlock_or_warn, verify_security_or_warn};

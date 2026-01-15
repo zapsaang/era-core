@@ -27,8 +27,8 @@
 
 use crate::certificate::{EraCertificate, EraKeyPair, KEY_LEN};
 use era_common::{EraError, Result};
-use std::path::Path;
 use ssh_key::PrivateKey as SshPrivateKey;
+use std::path::Path;
 
 /// Base64 编码
 fn base64_encode(data: &[u8]) -> String {
@@ -218,39 +218,41 @@ fn decode_openssh_private_key(data: &[u8], _password: Option<&str>) -> Result<Er
             // 从 OpenSSH 格式提取密钥
             // ssh-key crate 的 KeypairData 是一个 Bytes，我们需要直接处理它
             let private_bytes = data;
-            
+
             // OpenSSH Ed25519 格式: magic | cipher_name | kdf_name | kdf_options | ... | keytype | public_key | private_key_blob | ...
             // private_key_blob 包含: checkint | keytype | public_key | private_key (64 bytes) | comment | ...
-            
+
             // 简化处理：在 OpenSSH 格式中，Ed25519 私钥通常包含 32 字节的种子
             // 我们可以尝试通过内容提取
             const OPENSSH_MAGIC: &[u8; 15] = b"openssh-key-v1\0";
             if private_bytes.len() < 15 || &private_bytes[0..15] != OPENSSH_MAGIC {
                 return Err(EraError::InvalidFormat("Invalid OpenSSH key format".into()));
             }
-            
+
             // 查找 ssh-ed25519 字符串后的公钥和私钥数据
             if let Some(pos) = private_bytes.windows(11).position(|w| w == b"ssh-ed25519") {
                 // 跳过键类型名称长度和名称本身
                 let mut search_pos = pos + 11;
-                
+
                 // 查找 32 字节公钥后跟 64 字节私钥的模式
                 while search_pos + 64 < private_bytes.len() {
                     // 尝试提取 32 字节的种子（私钥的第一半）
                     let candidate = &private_bytes[search_pos..search_pos + KEY_LEN];
-                    
+
                     // 验证这不完全是零
                     if candidate.iter().any(|&b| b != 0) {
                         let mut secret_bytes = [0u8; KEY_LEN];
                         secret_bytes.copy_from_slice(candidate);
                         return EraKeyPair::from_bytes(&secret_bytes);
                     }
-                    
+
                     search_pos += 1;
                 }
             }
-            
-            Err(EraError::InvalidKey("Could not extract Ed25519 key from OpenSSH format".into()))
+
+            Err(EraError::InvalidKey(
+                "Could not extract Ed25519 key from OpenSSH format".into(),
+            ))
         }
         _ => Err(EraError::InvalidFormat(
             "Only Ed25519 OpenSSH keys are supported".into(),
@@ -269,7 +271,7 @@ fn decode_x509_certificate(der_bytes: &[u8]) -> Result<EraCertificate> {
     // 简单的 X.509 DER 解析：查找公钥所在位置
     // 我们支持的是标准 X.509 格式，使用二进制搜索方法
     // 这是一个已知能工作的方法，避免 x509-parser API 复杂性
-    
+
     let mut i = 0;
     while i < der_bytes.len().saturating_sub(35) {
         // 寻找公钥候选项：BIT STRING 后跟长度字节和 0x00（无未使用位）
@@ -279,7 +281,7 @@ fn decode_x509_certificate(der_bytes: &[u8]) -> Result<EraCertificate> {
                 i += 1;
                 continue;
             }
-            
+
             let len = der_bytes[i + 1] as usize;
 
             // 检查这是否可能是有效的公钥 (应该是 33 字节: 1 byte unused bits + 32 bytes key)
@@ -328,8 +330,8 @@ fn encode_spki_public_key(public_key: &[u8; KEY_LEN]) -> Result<String> {
     // AlgorithmIdentifier: SEQUENCE { OID for X25519, NULL }
     // OID for X25519: 1.3.101.110 = 06 03 2b 65 6e
     let algo_id = [
-        0x30, 0x05,             // SEQUENCE, length 5
-        0x06, 0x03, 0x2b, 0x65, 0x6e,  // OID 1.3.101.110
+        0x30, 0x05, // SEQUENCE, length 5
+        0x06, 0x03, 0x2b, 0x65, 0x6e, // OID 1.3.101.110
     ];
     der.extend_from_slice(&algo_id);
 
@@ -391,22 +393,20 @@ fn is_encrypted_pkcs8(der_bytes: &[u8]) -> bool {
 fn extract_private_key_from_pkcs8(der_bytes: &[u8]) -> Result<EraKeyPair> {
     // 使用 pkcs8 crate 解析 PKCS#8 格式
     use pkcs8::PrivateKeyInfo;
-    
+
     let private_key_info = PrivateKeyInfo::try_from(der_bytes)
         .map_err(|e| EraError::InvalidFormat(format!("Failed to parse PKCS#8: {}", e)))?;
 
     // 提取私钥数据（OCTET STRING 中的数据）
     let private_key_bytes = private_key_info.private_key;
-    
+
     if private_key_bytes.len() < KEY_LEN {
-        return Err(EraError::InvalidKey(
-            "PKCS#8 private key too short".into(),
-        ));
+        return Err(EraError::InvalidKey("PKCS#8 private key too short".into()));
     }
 
     let mut secret_bytes = [0u8; KEY_LEN];
     secret_bytes.copy_from_slice(&private_key_bytes[0..KEY_LEN]);
-    
+
     EraKeyPair::from_bytes(&secret_bytes)
 }
 
@@ -414,7 +414,7 @@ fn extract_private_key_from_pkcs8(der_bytes: &[u8]) -> Result<EraKeyPair> {
 fn extract_public_key_from_spki(der_bytes: &[u8]) -> Result<EraCertificate> {
     // 使用简单的二进制搜索来提取公钥
     // SubjectPublicKeyInfo 结构中，BIT STRING (tag 0x03) 包含公钥数据
-    
+
     let mut i = 0;
     while i < der_bytes.len().saturating_sub(1) {
         if der_bytes[i] == 0x03 {
@@ -422,9 +422,9 @@ fn extract_public_key_from_spki(der_bytes: &[u8]) -> Result<EraCertificate> {
             if i + 2 >= der_bytes.len() {
                 break;
             }
-            
+
             let len = der_bytes[i + 1] as usize;
-            
+
             // 公钥应该是 32 字节，加上 1 字节的"未使用位"标识符
             if len == KEY_LEN + 1 && i + 3 + KEY_LEN <= der_bytes.len() {
                 // 检查"未使用位"字节
