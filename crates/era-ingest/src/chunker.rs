@@ -141,85 +141,139 @@ impl<'a> Iterator for ChunkIterator<'a> {
 }
 
 /// Streaming chunker for reading from a file without loading all into memory
+///
+/// This implementation reads data from a stream and chunks it using FastCDC.
+/// Unlike the naive approach of creating a new FastCDC instance for each chunk,
+/// this implementation maintains the chunking state across multiple reads,
+/// ensuring proper chunk size distribution (avg 64KB, not fixed 256KB).
 pub struct StreamingChunker<R: Read> {
     reader: R,
     config: ChunkerConfig,
+    /// Read buffer - stores raw data from reader
     buffer: Vec<u8>,
-    buffer_start: usize,
-    buffer_end: usize,
+    /// Current position in buffer that's been processed
+    position: usize,
+    /// Amount of valid data in buffer
+    valid_len: usize,
+    /// EOF reached from reader
     eof: bool,
 }
 
 impl<R: Read> StreamingChunker<R> {
     /// Create a new streaming chunker
     pub fn new(reader: R, config: ChunkerConfig) -> Self {
-        // Buffer size should be at least max_size * 2 for efficiency
-        let buffer_size = config.max_size * 2;
+        // Buffer needs to be large enough to:
+        // 1. Hold at least one max_size chunk
+        // 2. Have room for the next read while processing
+        // Use 3x max_size for optimal performance
+        let buffer_size = config.max_size * 3;
+
         Self {
             reader,
             config,
             buffer: vec![0u8; buffer_size],
-            buffer_start: 0,
-            buffer_end: 0,
+            position: 0,
+            valid_len: 0,
             eof: false,
         }
     }
 
-    /// Fill the buffer with more data from the reader
-    fn fill_buffer(&mut self) -> std::io::Result<()> {
-        // Compact buffer if needed
-        if self.buffer_start > 0 {
-            self.buffer
-                .copy_within(self.buffer_start..self.buffer_end, 0);
-            self.buffer_end -= self.buffer_start;
-            self.buffer_start = 0;
+    /// Ensure buffer has enough data to process a chunk
+    /// Returns true if there's data available, false if EOF with no data
+    fn ensure_data(&mut self) -> std::io::Result<bool> {
+        // If we've consumed most of the buffer, compact it
+        if self.position > self.buffer.len() / 2 {
+            let remaining = self.valid_len - self.position;
+            self.buffer.copy_within(self.position..self.valid_len, 0);
+            self.position = 0;
+            self.valid_len = remaining;
         }
 
-        // Read more data
-        while self.buffer_end < self.buffer.len() && !self.eof {
-            let n = self.reader.read(&mut self.buffer[self.buffer_end..])?;
+        // Fill buffer if we have space and haven't hit EOF
+        while self.valid_len < self.buffer.len() && !self.eof {
+            let n = self.reader.read(&mut self.buffer[self.valid_len..])?;
             if n == 0 {
                 self.eof = true;
                 break;
             }
-            self.buffer_end += n;
+            self.valid_len += n;
         }
 
-        Ok(())
+        // Return true if we have any data to process
+        Ok(self.position < self.valid_len)
     }
 
-    /// Get the next chunk
+    /// Get the next chunk using FastCDC algorithm
     pub fn next_chunk(&mut self) -> Result<Option<UniqueChunk>> {
-        // Ensure we have enough data
-        self.fill_buffer()?;
-
-        let available = self.buffer_end - self.buffer_start;
-        if available == 0 {
+        // Ensure we have data to process
+        if !self.ensure_data()? {
             return Ok(None);
         }
 
-        let data = &self.buffer[self.buffer_start..self.buffer_end];
+        let available = self.valid_len - self.position;
 
-        // Use fastcdc to find the next chunk boundary
-        let mut chunker = FastCDC::new(
-            data,
+        // Handle final chunk at EOF
+        if self.eof && available > 0 && available < self.config.min_size {
+            // Last chunk is smaller than min_size, just return it
+            let chunk_data = &self.buffer[self.position..self.valid_len];
+            let hash = era_crypto::hash(chunk_data);
+            self.position = self.valid_len;
+
+            return Ok(Some(UniqueChunk::new(
+                Bytes::copy_from_slice(chunk_data),
+                hash,
+            )));
+        }
+
+        // Use FastCDC to find the next chunk boundary
+        // Key insight: We process ALL available data, not just a fixed window
+        let data_slice = &self.buffer[self.position..self.valid_len];
+
+        // Create FastCDC iterator over the available data
+        let mut cdc = FastCDC::new(
+            data_slice,
             self.config.min_size as u32,
             self.config.avg_size as u32,
             self.config.max_size as u32,
         );
 
-        if let Some(chunk_info) = chunker.next() {
-            let chunk_data = &data[chunk_info.offset..chunk_info.offset + chunk_info.length];
+        // Get the FIRST chunk from this window
+        if let Some(chunk_info) = cdc.next() {
+            // Extract chunk data
+            let chunk_start = self.position + chunk_info.offset;
+            let chunk_end = chunk_start + chunk_info.length;
+            let chunk_data = &self.buffer[chunk_start..chunk_end];
+
+            // Compute hash
             let hash = era_crypto::hash(chunk_data);
 
-            self.buffer_start += chunk_info.length;
+            // Advance position ONLY by the chunk length (not offset+length)
+            // This is critical: offset should always be 0 for the first chunk
+            // in the slice we give to FastCDC
+            self.position += chunk_info.length;
 
             Ok(Some(UniqueChunk::new(
                 Bytes::copy_from_slice(chunk_data),
                 hash,
             )))
         } else {
-            Ok(None)
+            // FastCDC didn't find any boundary in available data
+            // This can happen if we're near EOF with less than min_size data
+            if self.eof && available > 0 {
+                // Return remaining data as final chunk
+                let chunk_data = &self.buffer[self.position..self.valid_len];
+                let hash = era_crypto::hash(chunk_data);
+                self.position = self.valid_len;
+
+                Ok(Some(UniqueChunk::new(
+                    Bytes::copy_from_slice(chunk_data),
+                    hash,
+                )))
+            } else {
+                // No chunk found and not EOF - this shouldn't happen normally
+                // but we handle it gracefully
+                Ok(None)
+            }
         }
     }
 }

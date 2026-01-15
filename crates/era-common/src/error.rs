@@ -106,6 +106,16 @@ pub enum EraError {
     #[error("Key derivation error: {0}")]
     KeyDerivation(String),
 
+    // Index Errors
+    #[error("Index error: {0}")]
+    IndexError(String),
+
+    #[error("Index not found: {0}")]
+    IndexNotFound(String),
+
+    #[error("Index corruption: {0}")]
+    IndexCorruption(String),
+
     // Concurrency Errors
     #[error("Lock poisoned: {0}")]
     LockPoisoned(String),

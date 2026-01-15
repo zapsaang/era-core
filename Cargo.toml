@@ -8,6 +8,7 @@ members = [
     "crates/era-volume",
     "crates/era-packing",
     "crates/era-ingest",
+    "crates/era-index",
     "crates/era-engine",
     "bins/era-cli",
 ]
@@ -28,6 +29,7 @@ era-storage = { path = "crates/era-storage" }
 era-volume = { path = "crates/era-volume" }
 era-packing = { path = "crates/era-packing" }
 era-ingest = { path = "crates/era-ingest" }
+era-index = { path = "crates/era-index" }
 era-engine = { path = "crates/era-engine" }
 
 # Async runtime
@@ -71,6 +73,9 @@ hex = "0.4"
 
 # Concurrency primitives (faster than std::sync)
 parking_lot = "0.12"
+
+# RocksDB for LSM-Tree index
+rocksdb = { version = "0.22", features = ["multi-threaded-cf"] }
 
 # Content-defined chunking (FastCDC)
 fastcdc = "3.2"

@@ -14,9 +14,19 @@
 //!
 //! Certificate mode is recommended for automated scenarios where key management
 //! is handled separately (e.g., backup servers, cloud storage).
+//!
+//! ## Chunk Index Backend
+//!
+//! ERA supports two chunk deduplication backends:
+//!
+//! - **Memory**: In-memory HashMap (legacy, not recommended for production)
+//! - **LSM**: RocksDB-based LSM-Tree (enable with `lsm` feature)
+//!
+//! For production workloads with incremental backups, enable the `lsm` feature.
 
 mod block_iter;
 mod checkpoint;
+pub mod chunk_index;
 pub(crate) mod chunk_processor;
 pub mod metrics_collector;
 mod reader;
@@ -29,6 +39,7 @@ pub use block_iter::{
     SessionErasureBlockIterator, StandardBlockIterator,
 };
 pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_VERSION};
+pub use chunk_index::{ChunkIndex, ChunkIndexBackend, MemoryChunkIndex, create_chunk_index};
 // Re-export KeySession for convenient access
 pub use era_crypto::KeySession;
 // Re-export certificate types for convenient access
