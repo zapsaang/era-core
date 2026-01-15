@@ -17,9 +17,7 @@
 //! - HKDF provides cryptographic key isolation between volumes and blocks
 //! - Master key is not directly exposed; use VolumeKey/BlockKey instead
 
-use hkdf::Hkdf;
-use sha2::Sha256;
-
+use crate::hkdf_utils::derive_key_hkdf;
 use crate::secure_memory::{SecureBuffer, SecureBytes, SecureMemoryConfig};
 use crate::{derive_key, DerivedKey, KdfParams, Salt};
 use era_common::Result;
@@ -218,16 +216,12 @@ impl KeySessionBuilder {
             era_common::EraError::Encryption(format!("Failed to allocate VK cache: {}", e))
         })?;
 
-        // Setup HKDF with MK
-        // Note: MK is in `mk_bytes`.
-        let hk = Hkdf::<Sha256>::new(None, mk_bytes);
-
-        // 1. Calculate Verification Tag
+        // 1. Calculate Verification Tag using HKDF
         let mut verification_tag = [0u8; 16];
-        hk.expand(b"ERA_PASSWORD_VERIFICATION_v8.1", &mut verification_tag)
+        derive_key_hkdf(mk_bytes, None, b"ERA_PASSWORD_VERIFICATION_v8.1", &mut verification_tag)
             .expect("HKDF expand should not fail");
 
-        // 2. Derive Volume Keys
+        // 2. Derive Volume Keys using HKDF
         let mut info_buf = [0u8; VOLUME_KEY_DOMAIN.len() + 2];
         info_buf[..VOLUME_KEY_DOMAIN.len()].copy_from_slice(VOLUME_KEY_DOMAIN);
 
@@ -239,7 +233,7 @@ impl KeySessionBuilder {
             let start = i * 32;
             let end = start + 32;
 
-            hk.expand(&info_buf, &mut method_slice[start..end])
+            derive_key_hkdf(mk_bytes, None, &info_buf, &mut method_slice[start..end])
                 .expect("HKDF expand failed");
         }
 
@@ -342,8 +336,6 @@ impl KeySession {
         block_index: u64,
         nonce_context: &[u8; 16],
     ) -> BlockKey {
-        let hk = Hkdf::<Sha256>::new(None, volume_key.as_bytes());
-
         // Build info: DOMAIN || block_index (big-endian) || nonce_context
         // Use stack allocation instead of Vec for performance
         let mut info = [0u8; 42]; // 18 (domain) + 8 (block_index) + 16 (nonce)
@@ -353,7 +345,7 @@ impl KeySession {
         info[domain_len + 8..domain_len + 8 + 16].copy_from_slice(nonce_context);
 
         let mut okm = [0u8; 32];
-        hk.expand(&info[..domain_len + 8 + 16], &mut okm)
+        derive_key_hkdf(volume_key.as_bytes(), None, &info[..domain_len + 8 + 16], &mut okm)
             .expect("HKDF expand should not fail with valid parameters");
 
         BlockKey::from_bytes(okm)

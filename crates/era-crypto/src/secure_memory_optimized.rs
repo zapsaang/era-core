@@ -231,7 +231,8 @@ impl SecureBytes {
 
 impl Clone for SecureBytes {
     fn clone(&self) -> Self {
-        let mut new = Self::new(self.data.len()).expect("Failed to allocate secure bytes for clone");
+        let mut new =
+            Self::new(self.data.len()).expect("Failed to allocate secure bytes for clone");
         new.as_mut_slice().copy_from_slice(self.as_slice());
         new
     }

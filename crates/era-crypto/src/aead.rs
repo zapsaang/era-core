@@ -1,15 +1,12 @@
 //! XChaCha20-Poly1305 AEAD encryption.
 
 use bytes::Bytes;
-use chacha20poly1305::{
-    aead::{Aead as AeadTrait, KeyInit},
-    XChaCha20Poly1305, XNonce,
-};
-use era_common::{BlockId, EraError, Result};
 use rand::RngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::DerivedKey;
+use crate::aead_context::AeadContext;
+use crate::{DerivedKey, XChaCha20Poly1305Context};
+use era_common::{BlockId, EraError, Result};
 
 /// Size of the nonce in bytes (24 bytes for XChaCha20)
 pub const NONCE_SIZE: usize = 24;
@@ -74,7 +71,7 @@ impl Nonce {
     }
 }
 
-/// Simple AEAD wrapper for direct encryption/decryption
+/// Simple AEAD wrapper for direct encryption/decryption (trait-based)
 pub struct AeadCipher;
 
 impl AeadCipher {
@@ -83,24 +80,16 @@ impl AeadCipher {
         Self
     }
 
-    /// Encrypt with key and nonce
+    /// Encrypt with key and nonce (delegates to AeadContext trait)
     pub fn encrypt(&self, key: &AeadKey, nonce: &Nonce, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let cipher = XChaCha20Poly1305::new((&key.0).into());
-        let xnonce = XNonce::from(nonce.0);
-
-        cipher
-            .encrypt(&xnonce, plaintext)
-            .map_err(|e| EraError::encryption(e.to_string()))
+        let context = XChaCha20Poly1305Context::new(&key.0)?;
+        context.encrypt(nonce.as_bytes(), &[], plaintext)
     }
 
-    /// Decrypt with key and nonce
+    /// Decrypt with key and nonce (delegates to AeadContext trait)
     pub fn decrypt(&self, key: &AeadKey, nonce: &Nonce, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let cipher = XChaCha20Poly1305::new((&key.0).into());
-        let xnonce = XNonce::from(nonce.0);
-
-        cipher
-            .decrypt(&xnonce, ciphertext)
-            .map_err(|e| EraError::decryption(e.to_string()))
+        let context = XChaCha20Poly1305Context::new(&key.0)?;
+        context.decrypt(nonce.as_bytes(), &[], ciphertext)
     }
 }
 
@@ -127,13 +116,8 @@ pub fn encrypt_with_context(
     block_id: BlockId,
     plaintext: &[u8],
 ) -> Result<Bytes> {
-    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
-    let nonce = derive_nonce_with_context(nonce_context, block_id);
-
-    let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|e| EraError::encryption(e.to_string()))?;
-
+    let context = XChaCha20Poly1305Context::from_derived_key(key)?;
+    let ciphertext = context.encrypt_with_context(nonce_context, block_id, plaintext)?;
     Ok(Bytes::from(ciphertext))
 }
 
@@ -144,13 +128,8 @@ pub fn decrypt_with_context(
     block_id: BlockId,
     ciphertext: &[u8],
 ) -> Result<Bytes> {
-    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
-    let nonce = derive_nonce_with_context(nonce_context, block_id);
-
-    let plaintext = cipher
-        .decrypt(&nonce, ciphertext)
-        .map_err(|e| EraError::decryption(e.to_string()))?;
-
+    let context = XChaCha20Poly1305Context::from_derived_key(key)?;
+    let plaintext = context.decrypt_with_context(nonce_context, block_id, ciphertext)?;
     Ok(Bytes::from(plaintext))
 }
 
@@ -175,31 +154,6 @@ pub fn encrypt(key: &DerivedKey, block_id: BlockId, plaintext: &[u8]) -> Result<
 )]
 pub fn decrypt(key: &DerivedKey, block_id: BlockId, ciphertext: &[u8]) -> Result<Bytes> {
     decrypt_with_context(key, &[0u8; 16], block_id, ciphertext)
-}
-
-/// Derive a nonce from context and block ID
-///
-/// Uses Blake3 to derive a 24-byte nonce from the context and block ID.
-/// This ensures each block has a unique nonce while being deterministic.
-fn derive_nonce_with_context(context: &[u8; 16], block_id: BlockId) -> XNonce {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"ERA-NONCE-V2"); // Updated version tag
-    hasher.update(context); // Unique per-archive context (e.g., salt)
-    hasher.update(&block_id.sequence().to_le_bytes());
-
-    let hash = hasher.finalize();
-    let mut nonce = [0u8; NONCE_SIZE];
-    nonce.copy_from_slice(&hash.as_bytes()[..NONCE_SIZE]);
-
-    XNonce::from(nonce)
-}
-
-/// Generate a random nonce (for cases where determinism is not needed)
-#[allow(dead_code)]
-fn generate_random_nonce() -> XNonce {
-    let mut nonce = [0u8; NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    XNonce::from(nonce)
 }
 
 #[cfg(test)]
