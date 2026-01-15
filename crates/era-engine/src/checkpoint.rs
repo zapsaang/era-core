@@ -335,10 +335,13 @@ impl CheckpointManager {
         }
 
         // Deserialize with bincode
-        let checkpoint: Checkpoint = bincode::deserialize(payload)
-            .map_err(|e| EraError::Deserialization(format!("Failed to parse checkpoint: {}", e)))?;
+    let (checkpoint, _): (Checkpoint, usize) = bincode::serde::decode_from_slice(
+        payload,
+        bincode::config::standard(),
+    )
+    .map_err(|e| EraError::Deserialization(format!("Failed to parse checkpoint: {}", e)))?;
 
-        // Version check
+    // Version check
         if checkpoint.version > CHECKPOINT_VERSION {
             return Err(EraError::UnsupportedVersion {
                 version: checkpoint.version,
@@ -356,11 +359,12 @@ impl CheckpointManager {
         let tmp_path = Checkpoint::checkpoint_tmp_path(&self.archive_path);
 
         // Serialize with bincode (much faster than JSON)
-        let payload = bincode::serialize(&self.checkpoint).map_err(|e| {
+    let payload = bincode::serde::encode_to_vec(&self.checkpoint, bincode::config::standard())
+        .map_err(|e| {
             EraError::Serialization(format!("Failed to serialize checkpoint: {}", e))
         })?;
 
-        // Compute HMAC
+    // Compute HMAC
         let key_bytes = self.hmac_key.as_ref().map(|k| k.as_slice());
         let hmac = compute_hmac(&payload, key_bytes);
 

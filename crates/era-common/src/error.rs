@@ -152,8 +152,14 @@ impl EraError {
     }
 }
 
-impl From<bincode::Error> for EraError {
-    fn from(err: bincode::Error) -> Self {
+impl From<bincode::error::EncodeError> for EraError {
+    fn from(err: bincode::error::EncodeError) -> Self {
         Self::Serialization(err.to_string())
+    }
+}
+
+impl From<bincode::error::DecodeError> for EraError {
+    fn from(err: bincode::error::DecodeError) -> Self {
+        Self::Deserialization(err.to_string())
     }
 }

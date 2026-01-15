@@ -2,9 +2,10 @@
 
 use bytes::Bytes;
 use era_common::{EraError, Result};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::{StorageBackend, StorageMetadata, StorageReader, StorageWriter};
 
@@ -33,23 +34,12 @@ impl MemoryStorageBackend {
 
     /// Get all stored data (for testing)
     pub fn get_data(&self, path: &Path) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .storage
-            .read()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
-            .get(path)
-            .cloned())
+        Ok(self.storage.read().get(path).cloned())
     }
 
     /// List all stored paths (for testing)
     pub fn list_paths(&self) -> Result<Vec<PathBuf>> {
-        Ok(self
-            .storage
-            .read()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
-            .keys()
-            .cloned()
-            .collect())
+        Ok(self.storage.read().keys().cloned().collect())
     }
 }
 
@@ -59,10 +49,7 @@ impl StorageBackend for MemoryStorageBackend {
 
     fn create(&self, path: &Path) -> Result<Self::Writer> {
         // Initialize with empty data
-        self.storage
-            .write()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
-            .insert(path.to_path_buf(), Vec::new());
+        self.storage.write().insert(path.to_path_buf(), Vec::new());
 
         Ok(MemoryStorageWriter {
             storage: self.storage.clone(),
@@ -72,13 +59,7 @@ impl StorageBackend for MemoryStorageBackend {
     }
 
     fn open_append(&self, path: &Path) -> Result<Self::Writer> {
-        let buffer = self
-            .storage
-            .read()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
-            .get(path)
-            .cloned()
-            .unwrap_or_default();
+        let buffer = self.storage.read().get(path).cloned().unwrap_or_default();
 
         Ok(MemoryStorageWriter {
             storage: self.storage.clone(),
@@ -88,15 +69,14 @@ impl StorageBackend for MemoryStorageBackend {
     }
 
     fn open_read(&self, path: &Path) -> Result<Self::Reader> {
-        let data = self
-            .storage
-            .read()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
-            .get(path)
-            .cloned()
-            .ok_or_else(|| EraError::FileNotFound {
-                path: path.to_path_buf(),
-            })?;
+        let data =
+            self.storage
+                .read()
+                .get(path)
+                .cloned()
+                .ok_or_else(|| EraError::FileNotFound {
+                    path: path.to_path_buf(),
+                })?;
 
         Ok(MemoryStorageReader {
             data: Bytes::from(data),
@@ -104,17 +84,12 @@ impl StorageBackend for MemoryStorageBackend {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        // For testing, if lock is poisoned, treat as not existing
-        self.storage
-            .read()
-            .map(|guard| guard.contains_key(path))
-            .unwrap_or(false)
+        self.storage.read().contains_key(path)
     }
 
     fn delete(&self, path: &Path) -> Result<()> {
         self.storage
             .write()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
             .remove(path)
             .ok_or_else(|| EraError::FileNotFound {
                 path: path.to_path_buf(),
@@ -123,15 +98,14 @@ impl StorageBackend for MemoryStorageBackend {
     }
 
     fn stat(&self, path: &Path) -> Result<StorageMetadata> {
-        let data = self
-            .storage
-            .read()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
-            .get(path)
-            .cloned()
-            .ok_or_else(|| EraError::FileNotFound {
-                path: path.to_path_buf(),
-            })?;
+        let data =
+            self.storage
+                .read()
+                .get(path)
+                .cloned()
+                .ok_or_else(|| EraError::FileNotFound {
+                    path: path.to_path_buf(),
+                })?;
 
         Ok(StorageMetadata {
             size: data.len() as u64,
@@ -155,7 +129,6 @@ impl StorageWriter for MemoryStorageWriter {
         // Immediately sync to shared storage
         self.storage
             .write()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
             .insert(self.path.clone(), self.buffer.clone());
         Ok(offset)
     }
@@ -171,10 +144,7 @@ impl StorageWriter for MemoryStorageWriter {
 
     fn close(self) -> Result<()> {
         // Final sync
-        self.storage
-            .write()
-            .map_err(|e| EraError::LockPoisoned(e.to_string()))?
-            .insert(self.path.clone(), self.buffer);
+        self.storage.write().insert(self.path.clone(), self.buffer);
         Ok(())
     }
 }

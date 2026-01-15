@@ -445,7 +445,11 @@ impl ArchiveReader {
             .clone();
 
         // Deserialize key encapsulation
-        let encapsulation: KeyEncapsulation = bincode::deserialize(&encap_bytes).map_err(|e| {
+        let (encapsulation, _): (KeyEncapsulation, usize) = bincode::serde::decode_from_slice(
+            &encap_bytes,
+            bincode::config::standard(),
+        )
+        .map_err(|e| {
             EraError::InvalidFormat(format!("Failed to deserialize key encapsulation: {}", e))
         })?;
 

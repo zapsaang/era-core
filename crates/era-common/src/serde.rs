@@ -5,25 +5,19 @@
 //! excessive memory allocation.
 
 use crate::{EraError, Result};
-use bincode::Options;
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Maximum allowed size for deserialization (16 MB)
-const MAX_DESERIALIZE_SIZE: u64 = 16 * 1024 * 1024;
+const MAX_DESERIALIZE_SIZE: usize = 16 * 1024 * 1024;
 
-/// Safe bincode options with size limits
-/// Uses the same encoding as bincode::serialize/deserialize for compatibility
-fn safe_options() -> impl Options {
-    bincode::DefaultOptions::new()
-        .with_varint_encoding() // Match default bincode encoding
-        .allow_trailing_bytes() // Required for padded structures like Header/Footer
-        .with_limit(MAX_DESERIALIZE_SIZE)
+/// Get the standard bincode configuration
+fn config() -> bincode::config::Configuration {
+    bincode::config::standard()
 }
 
-/// Serialize a value to bytes using safe bincode options
+/// Serialize a value to bytes using bincode 2.0 with serde compatibility
 pub fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    safe_options()
-        .serialize(value)
+    bincode::serde::encode_to_vec(value, config())
         .map_err(|e| EraError::Serialization(e.to_string()))
 }
 
@@ -32,19 +26,33 @@ pub fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 /// This function protects against malicious payloads that could
 /// cause excessive memory allocation.
 pub fn deserialize<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
-    safe_options()
-        .deserialize(data)
-        .map_err(|e| EraError::Serialization(e.to_string()))
+    if data.len() > MAX_DESERIALIZE_SIZE {
+        return Err(EraError::Deserialization(format!(
+            "Data size {} exceeds maximum allowed size {}",
+            data.len(),
+            MAX_DESERIALIZE_SIZE
+        )));
+    }
+    
+    bincode::serde::decode_from_slice(data, config())
+        .map(|(value, _)| value)
+        .map_err(|e| EraError::Deserialization(e.to_string()))
 }
 
 /// Deserialize with a custom size limit
 pub fn deserialize_with_limit<T: DeserializeOwned>(data: &[u8], max_size: u64) -> Result<T> {
-    bincode::DefaultOptions::new()
-        .with_varint_encoding()
-        .allow_trailing_bytes()
-        .with_limit(max_size)
-        .deserialize(data)
-        .map_err(|e| EraError::Serialization(e.to_string()))
+    let max_size = max_size as usize;
+    if data.len() > max_size {
+        return Err(EraError::Deserialization(format!(
+            "Data size {} exceeds maximum allowed size {}",
+            data.len(),
+            max_size
+        )));
+    }
+    
+    bincode::serde::decode_from_slice(data, config())
+        .map(|(value, _)| value)
+        .map_err(|e| EraError::Deserialization(e.to_string()))
 }
 
 #[cfg(test)]

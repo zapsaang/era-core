@@ -23,3 +23,5 @@ Cargo.lock
 *.txt
 *.md
 !README.md
+
+*.prompt.md

@@ -23,7 +23,7 @@ pub struct CertificateMigration;
 
 impl CertificateMigration {
     /// Convert legacy (v0.1.x) Unix timestamps to new Timestamp format
-    /// 
+    ///
     /// # Arguments
     /// * `unix_timestamp` - Legacy Unix timestamp (seconds since epoch)
     ///
@@ -34,14 +34,12 @@ impl CertificateMigration {
     }
 
     /// Migrate a legacy certificate file to v0.2.0 format
-    pub fn migrate_certificate_file<P: AsRef<Path>>(
-        legacy_path: P,
-        new_path: P,
-    ) -> Result<()> {
+    pub fn migrate_certificate_file<P: AsRef<Path>>(legacy_path: P, new_path: P) -> Result<()> {
         let content = fs::read_to_string(&legacy_path)?;
 
-        let legacy: LegacyCertificate = bincode::deserialize(content.as_bytes())
-            .map_err(|e| era_common::EraError::Deserialization(e.to_string()))?;
+        let (legacy, _): (LegacyCertificate, usize) =
+            bincode::serde::decode_from_slice(content.as_bytes(), bincode::config::standard())
+                .map_err(|e| era_common::EraError::Deserialization(e.to_string()))?;
 
         let created_at = Self::migrate_timestamp(legacy.created_at)?;
         let expires_at = if let Some(ts) = legacy.expires_at {
@@ -64,10 +62,7 @@ impl CertificateMigration {
     }
 
     /// Batch migrate all certificates in a directory
-    pub fn migrate_directory<P: AsRef<Path>>(
-        legacy_dir: P,
-        new_dir: P,
-    ) -> Result<usize> {
+    pub fn migrate_directory<P: AsRef<Path>>(legacy_dir: P, new_dir: P) -> Result<usize> {
         let legacy_dir = legacy_dir.as_ref();
         let new_dir = new_dir.as_ref();
 

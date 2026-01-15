@@ -503,8 +503,8 @@ impl EraCertificate {
         file_data.push(KEY_FILE_VERSION);
 
         // 序列化证书数据
-        let cert_data =
-            bincode::serialize(self).map_err(|e| EraError::Serialization(e.to_string()))?;
+        let cert_data = bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
         file_data.extend_from_slice(&(cert_data.len() as u32).to_le_bytes());
         file_data.extend_from_slice(&cert_data);
 
@@ -541,8 +541,11 @@ impl EraCertificate {
             return Err(EraError::InvalidFormat("Certificate file truncated".into()));
         }
 
-        let cert: EraCertificate = bincode::deserialize(&file_data[9..9 + cert_len])
-            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        let (cert, _): (EraCertificate, usize) = bincode::serde::decode_from_slice(
+            &file_data[9..9 + cert_len],
+            bincode::config::standard(),
+        )
+        .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         Ok(cert)
     }

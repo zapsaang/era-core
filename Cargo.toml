@@ -36,7 +36,7 @@ tokio = { version = "1.35", features = ["full"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
+bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 
 # Crypto
 chacha20poly1305 = "0.10"
@@ -68,6 +68,12 @@ bytes = "1.5"
 
 # Hex encoding/decoding
 hex = "0.4"
+
+# Concurrency primitives (faster than std::sync)
+parking_lot = "0.12"
+
+# Content-defined chunking (FastCDC)
+fastcdc = "3.2"
 
 # PEM format support
 pem = "3.0"

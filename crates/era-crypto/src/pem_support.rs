@@ -237,108 +237,69 @@ fn decode_spki_public_key(der_bytes: &[u8]) -> Result<EraCertificate> {
     extract_public_key_from_spki(der_bytes)
 }
 
-/// 解码 X.509 证书 (兼容我们现有的 ERA 密钥类型)
+/// 解码 X.509 证书 (使用 x509-cert crate)
 fn decode_x509_certificate(der_bytes: &[u8]) -> Result<EraCertificate> {
-    // 简单的 X.509 DER 解析：查找公钥所在位置
-    // 我们支持的是标准 X.509 格式，使用二进制搜索方法
-    // 这是一个已知能工作的方法，避免 x509-parser API 复杂性
+    use der::Decode;
+    use x509_cert::Certificate;
 
-    let mut i = 0;
-    while i < der_bytes.len().saturating_sub(35) {
-        // 寻找公钥候选项：BIT STRING 后跟长度字节和 0x00（无未使用位）
-        if der_bytes[i] == 0x03 {
-            // 0x03 是 BIT STRING
-            if i + 1 >= der_bytes.len() {
-                i += 1;
-                continue;
-            }
+    // 使用 x509-cert crate 解析证书
+    let cert = Certificate::from_der(der_bytes).map_err(|e| {
+        EraError::InvalidFormat(format!("Failed to parse X.509 certificate: {}", e))
+    })?;
 
-            let len = der_bytes[i + 1] as usize;
+    // 从证书中提取 SubjectPublicKeyInfo
+    let spki = &cert.tbs_certificate.subject_public_key_info;
 
-            // 检查这是否可能是有效的公钥 (应该是 33 字节: 1 byte unused bits + 32 bytes key)
-            if len == KEY_LEN + 1 && i + 2 + len <= der_bytes.len() {
-                // 验证这是一个有效的公钥位置（在 SubjectPublicKeyInfo 附近）
-                // 检查前面是否有 SEQUENCE 和算法标识符
-                let mut found_before_sequence = false;
-                for j in (i.saturating_sub(50))..i {
-                    if j + 1 < der_bytes.len() && der_bytes[j] == 0x30 && der_bytes[j + 1] < 100 {
-                        found_before_sequence = true;
-                        break;
-                    }
-                }
+    // 提取公钥数据
+    let public_key_bytes = spki.subject_public_key.raw_bytes();
 
-                if found_before_sequence && der_bytes[i + 2] == 0x00 {
-                    // 这很可能是公钥
-                    let mut public_key = [0u8; KEY_LEN];
-                    public_key.copy_from_slice(&der_bytes[i + 3..i + 3 + KEY_LEN]);
-
-                    // 验证这不完全是零（无效密钥）
-                    if public_key.iter().any(|&b| b != 0) {
-                        return Ok(EraCertificate::from_public_key(&public_key));
-                    }
-                }
-            }
-        }
-        i += 1;
+    if public_key_bytes.len() != KEY_LEN {
+        return Err(EraError::InvalidKey(format!(
+            "Invalid public key length in X.509 certificate: expected {}, got {}",
+            KEY_LEN,
+            public_key_bytes.len()
+        )));
     }
 
-    Err(EraError::InvalidKey(
-        "Could not extract public key from X.509 certificate - no valid key found".into(),
-    ))
+    let mut public_key = [0u8; KEY_LEN];
+    public_key.copy_from_slice(public_key_bytes);
+
+    // 验证这不完全是零（无效密钥）
+    if public_key.iter().all(|&b| b == 0) {
+        return Err(EraError::InvalidKey("Public key is all zeros".into()));
+    }
+
+    Ok(EraCertificate::from_public_key(&public_key))
 }
 
 /// 编码 SPKI 格式的公钥 (使用 spki 标准库)
 fn encode_spki_public_key(public_key: &[u8; KEY_LEN]) -> Result<String> {
-    // 使用手动 DER 编码构建 SubjectPublicKeyInfo
-    // SubjectPublicKeyInfo ::= SEQUENCE {
-    //   algorithm AlgorithmIdentifier,
-    //   subjectPublicKey BIT STRING
-    // }
+    use der::Encode;
+    use spki::{AlgorithmIdentifierOwned, ObjectIdentifier, SubjectPublicKeyInfoOwned};
 
-    let mut der = Vec::new();
+    // X25519 OID: 1.3.101.110
+    const X25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.110");
 
-    // 算法标识符（X25519）
-    // AlgorithmIdentifier: SEQUENCE { OID for X25519, NULL }
-    // OID for X25519: 1.3.101.110 = 06 03 2b 65 6e
-    let algo_id = [
-        0x30, 0x05, // SEQUENCE, length 5
-        0x06, 0x03, 0x2b, 0x65, 0x6e, // OID 1.3.101.110
-    ];
-    der.extend_from_slice(&algo_id);
+    // 创建算法标识符
+    let algorithm = AlgorithmIdentifierOwned {
+        oid: X25519_OID,
+        parameters: None, // X25519 不需要参数
+    };
 
-    // 公钥（BIT STRING）
-    der.push(0x03); // BIT STRING tag
-    der.push((public_key.len() + 1) as u8); // 长度 + 1 (for unused bits byte)
-    der.push(0x00); // 未使用的位数
-    der.extend_from_slice(public_key);
+    // 创建 SubjectPublicKeyInfo
+    let spki = SubjectPublicKeyInfoOwned {
+        algorithm,
+        subject_public_key: der::asn1::BitString::new(0, public_key.to_vec())
+            .map_err(|e| EraError::Serialization(format!("Failed to create BitString: {}", e)))?,
+    };
 
-    // 包装在 SEQUENCE 中
-    let mut result = Vec::new();
-    result.push(0x30); // SEQUENCE tag
-
-    // 添加长度（使用 DER 长格式）
-    let len = der.len();
-    if len <= 127 {
-        result.push(len as u8);
-    } else {
-        // 长格式：0x80 | 字节数，然后是 BE 整数
-        let len_bytes = len.to_be_bytes();
-        let mut non_zero_start = 0;
-        for (i, &b) in len_bytes.iter().enumerate() {
-            if b != 0 {
-                non_zero_start = i;
-                break;
-            }
-        }
-        let len_bytes_trimmed = &len_bytes[non_zero_start..];
-        result.push(0x80 | (len_bytes_trimmed.len() as u8));
-        result.extend_from_slice(len_bytes_trimmed);
-    }
-
-    result.extend_from_slice(&der);
+    // 编码为 DER
+    let der_bytes = spki
+        .to_der()
+        .map_err(|e| EraError::Serialization(format!("Failed to encode SPKI to DER: {}", e)))?;
 
     // 编码为 PEM
-    let b64 = base64_encode(&result);
+    let b64 = base64_encode(&der_bytes);
     let mut pem_str = String::new();
     pem_str.push_str("-----BEGIN PUBLIC KEY-----\n");
 
@@ -355,9 +316,16 @@ fn encode_spki_public_key(public_key: &[u8; KEY_LEN]) -> Result<String> {
 
 /// 检查是否是加密的 PKCS#8
 fn is_encrypted_pkcs8(der_bytes: &[u8]) -> bool {
-    // EncryptedPrivateKeyInfo 以 SEQUENCE 开始，包含 encryptionAlgorithm
-    // 简单的检查：如果第二个元素是 SEQUENCE（算法），则可能是加密的
-    der_bytes.len() > 6 && der_bytes[0] == 0x30 && der_bytes[2] == 0x30
+    // EncryptedPrivateKeyInfo 是一个 SEQUENCE，其第一个元素是 AlgorithmIdentifier (也是 SEQUENCE)
+    // 普通 PKCS#8 PrivateKeyInfo 的第一个元素是 INTEGER (version)
+    // 使用 der crate 简单解析来区分
+    if der_bytes.len() < 4 {
+        return false;
+    }
+
+    // 检查结构：SEQUENCE { SEQUENCE ... } 表示加密的
+    // SEQUENCE { INTEGER ... } 表示未加密的
+    der_bytes[0] == 0x30 && der_bytes.len() > 2 && der_bytes[2] == 0x30
 }
 
 /// 从 PKCS#8 DER 中提取私钥 (使用 pkcs8 crate)
@@ -383,39 +351,32 @@ fn extract_private_key_from_pkcs8(der_bytes: &[u8]) -> Result<EraKeyPair> {
 
 /// 从 SPKI DER 中提取公钥 (使用 spki crate)
 fn extract_public_key_from_spki(der_bytes: &[u8]) -> Result<EraCertificate> {
-    // 使用简单的二进制搜索来提取公钥
-    // SubjectPublicKeyInfo 结构中，BIT STRING (tag 0x03) 包含公钥数据
+    use spki::SubjectPublicKeyInfoRef;
 
-    let mut i = 0;
-    while i < der_bytes.len().saturating_sub(1) {
-        if der_bytes[i] == 0x03 {
-            // 0x03 是 BIT STRING
-            if i + 2 >= der_bytes.len() {
-                break;
-            }
+    // 使用 spki crate 解析 SubjectPublicKeyInfo
+    let spki = SubjectPublicKeyInfoRef::try_from(der_bytes)
+        .map_err(|e| EraError::InvalidFormat(format!("Failed to parse SPKI: {}", e)))?;
 
-            let len = der_bytes[i + 1] as usize;
+    // 提取公钥数据（BIT STRING 的内容）
+    let public_key_bytes = spki.subject_public_key.raw_bytes();
 
-            // 公钥应该是 32 字节，加上 1 字节的"未使用位"标识符
-            if len == KEY_LEN + 1 && i + 3 + KEY_LEN <= der_bytes.len() {
-                // 检查"未使用位"字节
-                if der_bytes[i + 2] == 0x00 {
-                    let mut public_key = [0u8; KEY_LEN];
-                    public_key.copy_from_slice(&der_bytes[i + 3..i + 3 + KEY_LEN]);
-
-                    // 验证这不完全是零（无效密钥）
-                    if public_key.iter().any(|&b| b != 0) {
-                        return Ok(EraCertificate::from_public_key(&public_key));
-                    }
-                }
-            }
-        }
-        i += 1;
+    if public_key_bytes.len() != KEY_LEN {
+        return Err(EraError::InvalidKey(format!(
+            "Invalid public key length: expected {}, got {}",
+            KEY_LEN,
+            public_key_bytes.len()
+        )));
     }
 
-    Err(EraError::InvalidKey(
-        "Could not extract public key from SPKI".into(),
-    ))
+    let mut public_key = [0u8; KEY_LEN];
+    public_key.copy_from_slice(public_key_bytes);
+
+    // 验证这不完全是零（无效密钥）
+    if public_key.iter().all(|&b| b == 0) {
+        return Err(EraError::InvalidKey("Public key is all zeros".into()));
+    }
+
+    Ok(EraCertificate::from_public_key(&public_key))
 }
 
 #[cfg(test)]

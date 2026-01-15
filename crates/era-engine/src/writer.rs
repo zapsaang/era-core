@@ -344,12 +344,13 @@ impl ArchiveWriterBuilder {
             }
             (AuthMode::Certificate(_), Some(encap)) => {
                 // Certificate mode
-                let encap_bytes = bincode::serialize(encap).map_err(|e| {
-                    era_common::EraError::Serialization(format!(
-                        "Failed to serialize key encapsulation: {}",
-                        e
-                    ))
-                })?;
+                let encap_bytes = bincode::serde::encode_to_vec(encap, bincode::config::standard())
+                    .map_err(|e| {
+                        era_common::EraError::Serialization(format!(
+                            "Failed to serialize key encapsulation: {}",
+                            e
+                        ))
+                    })?;
                 SuperHeader::with_certificate(
                     archive_id,
                     *salt.as_bytes(),
@@ -360,12 +361,13 @@ impl ArchiveWriterBuilder {
             }
             (AuthMode::Hybrid { .. }, Some(encap)) => {
                 // Hybrid mode
-                let encap_bytes = bincode::serialize(encap).map_err(|e| {
-                    era_common::EraError::Serialization(format!(
-                        "Failed to serialize key encapsulation: {}",
-                        e
-                    ))
-                })?;
+                let encap_bytes = bincode::serde::encode_to_vec(encap, bincode::config::standard())
+                    .map_err(|e| {
+                        era_common::EraError::Serialization(format!(
+                            "Failed to serialize key encapsulation: {}",
+                            e
+                        ))
+                    })?;
                 SuperHeader::with_hybrid(
                     archive_id,
                     *salt.as_bytes(),
