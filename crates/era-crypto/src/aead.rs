@@ -4,14 +4,11 @@ use bytes::Bytes;
 use rand::RngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::aead_context::AeadContext;
+use crate::aead_context::{AeadContext, NONCE_SIZE};
 use crate::{DerivedKey, XChaCha20Poly1305Context};
 use era_common::{BlockId, EraError, Result};
 
-/// Size of the nonce in bytes (24 bytes for XChaCha20)
-pub const NONCE_SIZE: usize = 24;
-
-/// Size of the authentication tag in bytes
+/// Size of the authentication tag in bytes (XChaCha20-Poly1305)
 pub const TAG_SIZE: usize = 16;
 
 /// AEAD key wrapper (32 bytes)
@@ -82,14 +79,12 @@ impl AeadCipher {
 
     /// Encrypt with key and nonce (delegates to AeadContext trait)
     pub fn encrypt(&self, key: &AeadKey, nonce: &Nonce, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let context = XChaCha20Poly1305Context::new(&key.0)?;
-        context.encrypt(nonce.as_bytes(), &[], plaintext)
+        XChaCha20Poly1305Context::new(&key.0)?.encrypt(nonce.as_bytes(), &[], plaintext)
     }
 
     /// Decrypt with key and nonce (delegates to AeadContext trait)
     pub fn decrypt(&self, key: &AeadKey, nonce: &Nonce, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let context = XChaCha20Poly1305Context::new(&key.0)?;
-        context.decrypt(nonce.as_bytes(), &[], ciphertext)
+        XChaCha20Poly1305Context::new(&key.0)?.decrypt(nonce.as_bytes(), &[], ciphertext)
     }
 }
 
@@ -116,9 +111,9 @@ pub fn encrypt_with_context(
     block_id: BlockId,
     plaintext: &[u8],
 ) -> Result<Bytes> {
-    let context = XChaCha20Poly1305Context::from_derived_key(key)?;
-    let ciphertext = context.encrypt_with_context(nonce_context, block_id, plaintext)?;
-    Ok(Bytes::from(ciphertext))
+    XChaCha20Poly1305Context::from_derived_key(key)?
+        .encrypt_with_context(nonce_context, block_id, plaintext)
+        .map(Bytes::from)
 }
 
 /// Decrypt data using XChaCha20-Poly1305
@@ -128,9 +123,9 @@ pub fn decrypt_with_context(
     block_id: BlockId,
     ciphertext: &[u8],
 ) -> Result<Bytes> {
-    let context = XChaCha20Poly1305Context::from_derived_key(key)?;
-    let plaintext = context.decrypt_with_context(nonce_context, block_id, ciphertext)?;
-    Ok(Bytes::from(plaintext))
+    XChaCha20Poly1305Context::from_derived_key(key)?
+        .decrypt_with_context(nonce_context, block_id, ciphertext)
+        .map(Bytes::from)
 }
 
 /// Legacy encrypt function - DEPRECATED
@@ -164,14 +159,21 @@ mod tests {
     /// Test nonce context for consistent testing
     const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
 
+    fn test_key_with_salt(salt_byte: u8) -> DerivedKey {
+        derive_key(
+            b"test_password",
+            &Salt::from_bytes([salt_byte; 16]),
+            &KdfParams {
+                memory_cost: 1024,
+                time_cost: 1,
+                parallelism: 1,
+            },
+        )
+        .unwrap()
+    }
+
     fn test_key() -> DerivedKey {
-        let salt = Salt::from_bytes([0u8; 16]);
-        let params = KdfParams {
-            memory_cost: 1024,
-            time_cost: 1,
-            parallelism: 1,
-        };
-        derive_key(b"test_password", &salt, &params).unwrap()
+        test_key_with_salt(0)
     }
 
     #[test]
@@ -236,15 +238,7 @@ mod tests {
     #[test]
     fn test_wrong_key_fails() {
         let key1 = test_key();
-        let key2 = {
-            let salt = Salt::from_bytes([1u8; 16]);
-            let params = KdfParams {
-                memory_cost: 1024,
-                time_cost: 1,
-                parallelism: 1,
-            };
-            derive_key(b"different_password", &salt, &params).unwrap()
-        };
+        let key2 = test_key_with_salt(1);
 
         let block_id = BlockId::new(1);
         let plaintext = b"Secret data";

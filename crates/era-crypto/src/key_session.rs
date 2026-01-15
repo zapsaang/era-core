@@ -218,8 +218,13 @@ impl KeySessionBuilder {
 
         // 1. Calculate Verification Tag using HKDF
         let mut verification_tag = [0u8; 16];
-        derive_key_hkdf(mk_bytes, None, b"ERA_PASSWORD_VERIFICATION_v8.1", &mut verification_tag)
-            .expect("HKDF expand should not fail");
+        derive_key_hkdf(
+            mk_bytes,
+            None,
+            b"ERA_PASSWORD_VERIFICATION_v8.1",
+            &mut verification_tag,
+        )
+        .expect("HKDF expand should not fail");
 
         // 2. Derive Volume Keys using HKDF
         let mut info_buf = [0u8; VOLUME_KEY_DOMAIN.len() + 2];
@@ -345,8 +350,13 @@ impl KeySession {
         info[domain_len + 8..domain_len + 8 + 16].copy_from_slice(nonce_context);
 
         let mut okm = [0u8; 32];
-        derive_key_hkdf(volume_key.as_bytes(), None, &info[..domain_len + 8 + 16], &mut okm)
-            .expect("HKDF expand should not fail with valid parameters");
+        derive_key_hkdf(
+            volume_key.as_bytes(),
+            None,
+            &info[..domain_len + 8 + 16],
+            &mut okm,
+        )
+        .expect("HKDF expand should not fail with valid parameters");
 
         BlockKey::from_bytes(okm)
     }

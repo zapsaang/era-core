@@ -3,13 +3,14 @@
 //! This module provides a trait-based abstraction for AEAD ciphers,
 //! eliminating code duplication and enabling support for multiple algorithms.
 
-use era_common::{BlockId, EraError, Result};
 use crate::DerivedKey;
+use era_common::{BlockId, EraError, Result};
 
 /// Size of the nonce in bytes (24 bytes for XChaCha20)
 pub const NONCE_SIZE: usize = 24;
 
-/// Size of the authentication tag in bytes
+/// Size of the authentication tag in bytes (XChaCha20-Poly1305)
+#[allow(dead_code)]
 pub const TAG_SIZE: usize = 16;
 
 /// A unified interface for AEAD cipher operations
@@ -172,7 +173,10 @@ mod tests {
         let key = [0x42u8; 32];
         let _context = XChaCha20Poly1305Context::new(&key).unwrap();
 
-        assert_eq!(XChaCha20Poly1305Context::algorithm_name(), "XChaCha20-Poly1305");
+        assert_eq!(
+            XChaCha20Poly1305Context::algorithm_name(),
+            "XChaCha20-Poly1305"
+        );
         assert!(XChaCha20Poly1305Context::is_available());
     }
 
