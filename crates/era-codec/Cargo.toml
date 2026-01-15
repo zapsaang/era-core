@@ -13,6 +13,7 @@ zstd = { workspace = true }
 lz4_flex = { workspace = true }
 thiserror = { workspace = true }
 reed-solomon-simd = { workspace = true }
+garde = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

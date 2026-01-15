@@ -30,12 +30,14 @@
 
 use crate::aead::{AeadCipher, AeadKey, Nonce};
 use crate::kdf::{derive_key, KdfParams};
+use crate::timestamp::{OptionalTimestamp, Timestamp};
 use crate::Salt;
 use era_common::{EraError, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
+use time::OffsetDateTime;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -71,20 +73,22 @@ pub struct EraKeyPair {
     created_at: u64,
 }
 
-/// ERA 公钥证书
+/// ERA 公钥证书 (v0.2.0+)
 ///
 /// 只包含公钥信息，可以安全分发。
 /// 用于创建只有对应私钥持有者才能解密的归档。
+///
+/// 时间戳现在使用标准 ISO 8601 格式（OffsetDateTime）存储
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EraCertificate {
     /// 公钥 (32 bytes)
     public_key: [u8; KEY_LEN],
     /// 密钥ID
     key_id: [u8; KEY_ID_LEN],
-    /// 创建时间 (Unix timestamp)
-    created_at: u64,
-    /// 可选：过期时间
-    expires_at: Option<u64>,
+    /// 创建时间 (ISO 8601 UTC)
+    created_at: Timestamp,
+    /// 可选：过期时间 (ISO 8601 UTC)
+    expires_at: OptionalTimestamp,
     /// 可选：备注/标签
     label: Option<String>,
 }
@@ -144,7 +148,7 @@ impl EraKeyPair {
         // 生成密钥ID（公钥的前16字节hash）
         let key_id = Self::compute_key_id(&public_key);
 
-        // 获取当前时间
+        // 获取当前时间戳
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -210,8 +214,9 @@ impl EraKeyPair {
         EraCertificate {
             public_key: *self.public_key.as_bytes(),
             key_id: self.key_id,
-            created_at: self.created_at,
-            expires_at: None,
+            created_at: Timestamp::from_unix_timestamp(self.created_at)
+                .unwrap_or_else(|_| Timestamp::now()),
+            expires_at: OptionalTimestamp(None),
             label: None,
         }
     }
@@ -396,6 +401,26 @@ impl EraKeyPair {
             created_at,
         })
     }
+
+    /// 获取创建时间作为 OffsetDateTime
+    ///
+    /// 将内部存储的 Unix 时间戳转换为 OffsetDateTime
+    ///
+    /// # Errors
+    /// 如果 Unix 时间戳无效，返回 EraError
+    pub fn created_at_datetime(&self) -> Result<OffsetDateTime> {
+        OffsetDateTime::from_unix_timestamp(self.created_at as i64)
+            .map_err(|e| EraError::InvalidKey(format!("Invalid timestamp: {}", e)))
+    }
+
+    /// 获取密钥的年龄（从创建到现在）
+    pub fn age_seconds(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(self.created_at)
+    }
 }
 
 impl EraCertificate {
@@ -404,8 +429,9 @@ impl EraCertificate {
         Self {
             public_key,
             key_id,
-            created_at,
-            expires_at: None,
+            created_at: Timestamp::from_unix_timestamp(created_at)
+                .unwrap_or_else(|_| Timestamp::now()),
+            expires_at: OptionalTimestamp(None),
             label: None,
         }
     }
@@ -416,23 +442,31 @@ impl EraCertificate {
         let mut key_id = [0u8; KEY_ID_LEN];
         key_id.copy_from_slice(&hash.0[..KEY_ID_LEN]);
 
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
         Self {
             public_key: *public_key,
             key_id,
-            created_at,
-            expires_at: None,
+            created_at: Timestamp::now(),
+            expires_at: OptionalTimestamp(None),
             label: None,
         }
     }
 
     /// 设置过期时间
     pub fn with_expiry(mut self, expires_at: u64) -> Self {
-        self.expires_at = Some(expires_at);
+        if expires_at == 0 {
+            // 0 means already expired
+            if let Ok(ts) = Timestamp::from_unix_timestamp(0) {
+                self.expires_at = OptionalTimestamp(Some(ts));
+            }
+        } else if expires_at == u64::MAX {
+            // u64::MAX is way in the future, treat it as never expiring
+            // Set it to a far future date (year 2100)
+            if let Ok(ts) = Timestamp::from_unix_timestamp(4102444800) {
+                self.expires_at = OptionalTimestamp(Some(ts));
+            }
+        } else if let Ok(ts) = Timestamp::from_unix_timestamp(expires_at) {
+            self.expires_at = OptionalTimestamp(Some(ts));
+        }
         self
     }
 
@@ -453,21 +487,13 @@ impl EraCertificate {
     }
 
     /// 获取创建时间
-    pub fn created_at(&self) -> u64 {
-        self.created_at
+    pub fn created_at(&self) -> Timestamp {
+        self.created_at.clone()
     }
 
     /// 检查是否过期
     pub fn is_expired(&self) -> bool {
-        if let Some(expires_at) = self.expires_at {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            now > expires_at
-        } else {
-            false
-        }
+        self.expires_at.is_expired()
     }
 
     /// 保存证书到文件
@@ -519,6 +545,20 @@ impl EraCertificate {
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         Ok(cert)
+    }
+
+    /// 获取创建时间作为 OffsetDateTime
+    ///
+    /// 返回 Timestamp 结构中存储的 OffsetDateTime
+    pub fn created_at_datetime(&self) -> OffsetDateTime {
+        self.created_at.to_datetime()
+    }
+
+    /// 获取过期时间作为 OffsetDateTime（如果设置）
+    ///
+    /// 返回 OptionalTimestamp 中存储的 OffsetDateTime（如果设置）
+    pub fn expires_at_datetime(&self) -> Option<OffsetDateTime> {
+        self.expires_at.0.as_ref().map(|ts| ts.to_datetime())
     }
 }
 
@@ -637,5 +677,56 @@ mod tests {
         // 已过期
         let cert = keypair.certificate().with_expiry(0);
         assert!(cert.is_expired());
+    }
+
+    #[test]
+    fn test_certificate_created_at_datetime() {
+        let keypair = EraKeyPair::generate().unwrap();
+        let cert = keypair.certificate();
+
+        let datetime = cert.created_at_datetime();
+        // 验证 datetime 是最近创建的
+        let now = time::OffsetDateTime::now_utc();
+        let diff = (now - datetime).whole_seconds().abs();
+        assert!(diff < 5); // 应该在 5 秒内
+    }
+
+    #[test]
+    fn test_keypair_created_at_datetime() {
+        let keypair = EraKeyPair::generate().unwrap();
+
+        let datetime = keypair.created_at_datetime().unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        let diff = (now - datetime).whole_seconds().abs();
+        assert!(diff < 5);
+    }
+
+    #[test]
+    fn test_keypair_age_seconds() {
+        let keypair = EraKeyPair::generate().unwrap();
+        let initial_age = keypair.age_seconds();
+
+        // 等待 1 秒
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let later_age = keypair.age_seconds();
+        assert!(later_age >= initial_age);
+        assert!(later_age - initial_age >= 1);
+    }
+
+    #[test]
+    fn test_certificate_expires_at_datetime() {
+        let keypair = EraKeyPair::generate().unwrap();
+
+        // 无过期时间
+        let cert = keypair.certificate();
+        assert!(cert.expires_at_datetime().is_none());
+
+        // 有过期时间
+        let future_ts =
+            (time::OffsetDateTime::now_utc() + time::Duration::days(30)).unix_timestamp() as u64;
+        let cert_with_expiry = keypair.certificate().with_expiry(future_ts);
+        let expires = cert_with_expiry.expires_at_datetime();
+        assert!(expires.is_some());
     }
 }

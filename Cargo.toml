@@ -85,6 +85,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 anyhow = "1.0"
 
+# Time handling
+time = { version = "0.3", features = ["serde"] }
+
+# Data validation
+garde = { version = "0.4", features = ["derive"] }
+
+# Metrics and observability
+metrics = "0.21"
+
+# Configuration
+toml = "0.8"
+
 # Testing
 tempfile = "3.9"
 criterion = "0.5"

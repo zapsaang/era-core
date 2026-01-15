@@ -18,6 +18,8 @@ mod kdf;
 mod key;
 mod key_session;
 pub mod pem_support;
+pub mod timestamp;
+pub mod migration;
 mod secure_memory;
 mod security_check;
 

@@ -22,11 +22,16 @@ pub const DEFAULT_PARITY_SHARDS: usize = 2;
 pub const MAX_TOTAL_SHARDS: usize = 255;
 
 /// Configuration for Reed-Solomon erasure coding
+///
+/// Constraints:
+/// - data_shards: range 1-255
+/// - parity_shards: range 1-255
+/// - total shards must not exceed MAX_TOTAL_SHARDS (255)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErasureConfig {
-    /// Number of data shards
+    /// Number of data shards (1-255)
     pub data_shards: usize,
-    /// Number of parity shards
+    /// Number of parity shards (1-255)
     pub parity_shards: usize,
 }
 

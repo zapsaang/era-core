@@ -18,6 +18,7 @@
 mod block_iter;
 mod checkpoint;
 pub(crate) mod chunk_processor;
+pub mod metrics_collector;
 mod reader;
 mod recovery;
 mod repair;

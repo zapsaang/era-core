@@ -7,7 +7,9 @@
 mod local;
 mod memory;
 mod traits;
+pub mod config;
 
 pub use local::{LocalStorageBackend, LocalStorageReader, LocalStorageWriter};
 pub use memory::{MemoryStorageBackend, MemoryStorageReader, MemoryStorageWriter};
 pub use traits::{StorageBackend, StorageMetadata, StorageReader, StorageWriter};
+pub use config::{EraConfig, ArchiveConfig, KdfConfig};
