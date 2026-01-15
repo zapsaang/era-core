@@ -18,13 +18,17 @@
 //! +------------------+
 //! ```
 
+use bytemuck::{Pod, Zeroable};
 use std::io::{self, Cursor, Read, Write};
 
 const PACKED_MAGIC: &[u8; 4] = b"PACK";
 const PACKED_VERSION: u8 = 1;
 
 /// 打包的chunk头部
-#[derive(Debug, Clone)]
+///
+/// 使用 bytemuck 进行零拷贝序列化，确保跨平台二进制兼容性
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C, packed)]
 pub struct PackedHeader {
     pub magic: [u8; 4],
     pub version: u8,
@@ -42,57 +46,46 @@ impl PackedHeader {
         }
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(17);
-        buf.extend_from_slice(&self.magic);
-        buf.push(self.version);
-        buf.extend_from_slice(&self.entry_count.to_le_bytes());
-        buf.extend_from_slice(&self.total_data_size.to_le_bytes());
-        buf
+    /// 零拷贝序列化 - 直接返回结构体的字节表示
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
     }
 
-    pub fn deserialize(data: &[u8]) -> io::Result<Self> {
-        if data.len() < 17 {
+    /// 从字节切片反序列化
+    pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
+        if data.len() < std::mem::size_of::<Self>() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Packed header too short",
             ));
         }
 
-        let mut magic = [0u8; 4];
-        magic.copy_from_slice(&data[0..4]);
+        let header: Self = *bytemuck::try_from_bytes(&data[..std::mem::size_of::<Self>()])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-        if &magic != PACKED_MAGIC {
+        if &header.magic != PACKED_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Invalid packed magic: {:?}", magic),
+                format!("Invalid packed magic: {:?}", header.magic),
             ));
         }
 
-        let version = data[4];
-        if version != PACKED_VERSION {
+        if header.version != PACKED_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Unsupported packed version: {}", version),
+                format!("Unsupported packed version: {}", header.version),
             ));
         }
 
-        let entry_count = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
-        let total_data_size = u64::from_le_bytes([
-            data[9], data[10], data[11], data[12], data[13], data[14], data[15], data[16],
-        ]);
-
-        Ok(Self {
-            magic,
-            version,
-            entry_count,
-            total_data_size,
-        })
+        Ok(header)
     }
 }
 
 /// 单个文件在pack中的条目
-#[derive(Debug, Clone)]
+///
+/// 使用 bytemuck 进行零拷贝序列化
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C, packed)]
 pub struct PackedEntry {
     /// 在data section中的偏移
     pub offset: u64,
@@ -111,36 +104,23 @@ impl PackedEntry {
         }
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(48);
-        buf.extend_from_slice(&self.offset.to_le_bytes());
-        buf.extend_from_slice(&self.size.to_le_bytes());
-        buf.extend_from_slice(&self.checksum);
-        buf
+    /// 零拷贝序列化 - 直接返回结构体的字节表示
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
     }
 
-    pub fn deserialize(data: &[u8]) -> io::Result<Self> {
-        if data.len() < 48 {
+    /// 从字节切片反序列化
+    pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
+        if data.len() < std::mem::size_of::<Self>() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Packed entry too short",
             ));
         }
 
-        let offset = u64::from_le_bytes([
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-        ]);
-        let size = u64::from_le_bytes([
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-        ]);
-        let mut checksum = [0u8; 32];
-        checksum.copy_from_slice(&data[16..48]);
-
-        Ok(Self {
-            offset,
-            size,
-            checksum,
-        })
+        bytemuck::try_from_bytes(&data[..std::mem::size_of::<Self>()])
+            .map(|e| *e)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 
@@ -186,18 +166,18 @@ impl PackedChunk {
 
     /// 序列化整个packed chunk
     pub fn serialize(&self) -> io::Result<Vec<u8>> {
-        let header_size = 17;
-        let entries_size = self.entries.len() * 48;
+        let header_size = std::mem::size_of::<PackedHeader>();
+        let entries_size = self.entries.len() * std::mem::size_of::<PackedEntry>();
         let total_size = header_size + entries_size + self.data.len();
 
         let mut buf = Vec::with_capacity(total_size);
 
-        // 写入header
-        buf.write_all(&self.header.serialize())?;
+        // 写入header - 零拷贝
+        buf.write_all(self.header.as_bytes())?;
 
-        // 写入所有entries
+        // 写入所有entries - 零拷贝
         for entry in &self.entries {
-            buf.write_all(&entry.serialize())?;
+            buf.write_all(entry.as_bytes())?;
         }
 
         // 写入数据
@@ -211,20 +191,24 @@ impl PackedChunk {
         let mut cursor = Cursor::new(data);
 
         // 读取header
-        let mut header_bytes = [0u8; 17];
+        let mut header_bytes = [0u8; std::mem::size_of::<PackedHeader>()];
         cursor.read_exact(&mut header_bytes)?;
-        let header = PackedHeader::deserialize(&header_bytes)?;
+        let header = PackedHeader::from_bytes(&header_bytes)?;
+
+        // 复制 packed 字段值以避免未对齐访问
+        let entry_count = header.entry_count;
+        let total_data_size = header.total_data_size;
 
         // 读取entries
-        let mut entries = Vec::with_capacity(header.entry_count as usize);
-        for _ in 0..header.entry_count {
-            let mut entry_bytes = [0u8; 48];
+        let mut entries = Vec::with_capacity(entry_count as usize);
+        for _ in 0..entry_count {
+            let mut entry_bytes = [0u8; std::mem::size_of::<PackedEntry>()];
             cursor.read_exact(&mut entry_bytes)?;
-            entries.push(PackedEntry::deserialize(&entry_bytes)?);
+            entries.push(PackedEntry::from_bytes(&entry_bytes)?);
         }
 
         // 读取数据
-        let mut file_data = vec![0u8; header.total_data_size as usize];
+        let mut file_data = vec![0u8; total_data_size as usize];
         cursor.read_exact(&mut file_data)?;
 
         Ok(Self {
@@ -244,8 +228,11 @@ impl PackedChunk {
         }
 
         let entry = &self.entries[file_index];
-        let start = entry.offset as usize;
-        let end = start + entry.size as usize;
+        // 复制 packed 字段值以避免未对齐访问
+        let offset = entry.offset;
+        let size = entry.size;
+        let start = offset as usize;
+        let end = start + size as usize;
 
         if end > self.data.len() {
             return Err(io::Error::new(
@@ -275,6 +262,7 @@ impl PackedChunk {
 
     /// 获取总数据大小
     pub fn total_size(&self) -> u64 {
+        // 复制 packed 字段值以避免未对齐访问
         self.header.total_data_size
     }
 }
@@ -309,24 +297,34 @@ mod tests {
     #[test]
     fn test_packed_header_roundtrip() {
         let header = PackedHeader::new(10, 1024);
-        let serialized = header.serialize();
-        let deserialized = PackedHeader::deserialize(&serialized).unwrap();
+        let serialized = header.as_bytes();
+        let deserialized = PackedHeader::from_bytes(serialized).unwrap();
 
         assert_eq!(header.magic, deserialized.magic);
         assert_eq!(header.version, deserialized.version);
-        assert_eq!(header.entry_count, deserialized.entry_count);
-        assert_eq!(header.total_data_size, deserialized.total_data_size);
+        // 复制 packed 字段值以避免未对齐引用
+        let orig_entry_count = header.entry_count;
+        let orig_total_data_size = header.total_data_size;
+        let new_entry_count = deserialized.entry_count;
+        let new_total_data_size = deserialized.total_data_size;
+        assert_eq!(orig_entry_count, new_entry_count);
+        assert_eq!(orig_total_data_size, new_total_data_size);
     }
 
     #[test]
     fn test_packed_entry_roundtrip() {
         let checksum = blake3::hash(b"test data");
         let entry = PackedEntry::new(0, 100, *checksum.as_bytes());
-        let serialized = entry.serialize();
-        let deserialized = PackedEntry::deserialize(&serialized).unwrap();
+        let serialized = entry.as_bytes();
+        let deserialized = PackedEntry::from_bytes(serialized).unwrap();
 
-        assert_eq!(entry.offset, deserialized.offset);
-        assert_eq!(entry.size, deserialized.size);
+        // 复制 packed 字段值以避免未对齐引用
+        let orig_offset = entry.offset;
+        let orig_size = entry.size;
+        let new_offset = deserialized.offset;
+        let new_size = deserialized.size;
+        assert_eq!(orig_offset, new_offset);
+        assert_eq!(orig_size, new_size);
         assert_eq!(entry.checksum, deserialized.checksum);
     }
 
@@ -346,7 +344,11 @@ mod tests {
     #[test]
     fn test_pack_multiple_files() {
         let mut packed = PackedChunk::new();
-        let files = vec![b"file1".as_slice(), b"file2".as_slice(), b"file3".as_slice()];
+        let files = vec![
+            b"file1".as_slice(),
+            b"file2".as_slice(),
+            b"file3".as_slice(),
+        ];
 
         for file in &files {
             packed.add_file(file).unwrap();

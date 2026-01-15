@@ -1,20 +1,45 @@
 //! CLI command implementations
 
 use anyhow::{Context, Result};
+use dialoguer::{theme::ColorfulTheme, Password};
 use era_common::{ArchiveConfig, ErasureCodeConfig};
 use era_engine::{
     repair_archive, repair_archive_matrix, ArchiveReader, ArchiveWriter, ExtractOptions,
     RecoveryManager, RepairOptions,
 };
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, HumanDuration, ProgressBar, ProgressStyle};
 use std::path::Path;
+use std::time::Instant;
+use tracing::{error, info, warn};
 
-/// Get password from user, either from argument or by prompting
+/// Get password from user with a professional prompt
+///
+/// If password is provided via CLI argument, use it directly (for scripting).
+/// Otherwise, prompt the user with a styled password input.
 fn get_password(password: Option<&str>, prompt: &str) -> Result<String> {
     if let Some(p) = password {
         Ok(p.to_string())
     } else {
-        rpassword::prompt_password(prompt).context("Failed to read password")
+        Password::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt)
+            .interact()
+            .context("Failed to read password")
+    }
+}
+
+/// Get password with confirmation for new archives
+///
+/// This ensures users don't accidentally mistype their password when creating
+/// an archive. If password is provided via CLI, skip confirmation (for scripting).
+fn get_password_with_confirmation(password: Option<&str>) -> Result<String> {
+    if let Some(p) = password {
+        Ok(p.to_string())
+    } else {
+        Password::with_theme(&ColorfulTheme::default())
+            .with_prompt("Enter encryption password")
+            .with_confirmation("Confirm password", "Passwords do not match")
+            .interact()
+            .context("Failed to read password")
     }
 }
 
@@ -61,23 +86,13 @@ pub fn create(
     matrix_distribution: bool,
 ) -> Result<()> {
     // 加载公钥证书
-    println!("Loading certificate: {}", certificate_path.display());
+    info!("Loading certificate: {}", certificate_path.display());
     let certificate = era_crypto::load_public_key_from_pem(certificate_path)
         .map_err(|e| anyhow::anyhow!("Failed to load certificate: {}", e))?;
-    println!("✓ Certificate loaded successfully");
+    info!("✓ Certificate loaded successfully");
 
-    // If password provided via CLI, skip confirmation (for scripting)
-    let password = if let Some(p) = password {
-        p.to_string()
-    } else {
-        let pw = get_password(None, "Enter encryption password: ")?;
-        // Confirm password for new archives when entering interactively
-        let confirm = rpassword::prompt_password("Confirm password: ")?;
-        if pw != confirm {
-            anyhow::bail!("Passwords do not match");
-        }
-        pw
-    };
+    // Get password with confirmation for new archives
+    let password = get_password_with_confirmation(password)?;
 
     let mut config = ArchiveConfig::default();
     config.compression.level = compression_level;
@@ -96,7 +111,7 @@ pub fn create(
     // Enable erasure coding if configured
     if let Some(ec) = erasure_config {
         builder = builder.erasure_config(ec);
-        println!(
+        info!(
             "Erasure coding:   {}:{} ({}% overhead, can recover {} lost shards/block)",
             ec.data_shards,
             ec.parity_shards,
@@ -113,25 +128,28 @@ pub fn create(
             builder = builder
                 .volume_count(volumes)
                 .enable_matrix_distribution(true);
-            println!("Matrix distribution: enabled across {} volumes", volumes);
+            info!("Matrix distribution: enabled across {} volumes", volumes);
 
             if let Some(max_size) = max_volume_size {
                 builder = builder.max_volume_size(max_size);
-                println!("Max volume size: {} bytes", max_size);
+                info!("Max volume size: {} bytes", HumanBytes(max_size));
             }
         }
     }
 
     let mut writer = builder.build().context("Failed to create archive")?;
 
-    println!("Creating archive: {}", output.display());
+    info!("Creating archive: {}", output.display());
 
+    let start_time = Instant::now();
     let pb = ProgressBar::new(inputs.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg} (ETA: {eta})"
+            )
             .unwrap()
-            .progress_chars("#>-"),
+            .progress_chars("█▓▒░-"),
     );
 
     for input in inputs {
@@ -143,16 +161,19 @@ pub fn create(
         pb.inc(1);
     }
 
-    pb.finish_with_message("Packing complete");
+    pb.finish_with_message(format!(
+        "✓ Packing complete in {}",
+        HumanDuration(start_time.elapsed())
+    ));
 
     let stats = writer.finalize().context("Failed to finalize archive")?;
 
-    println!();
-    println!("Archive created successfully!");
-    println!("  Archive ID: {}", stats.archive_id);
-    println!("  Files:      {}", stats.total_files);
-    println!("  Total size: {} bytes", stats.total_size);
-    println!("  Blocks:     {}", stats.blocks_written);
+    info!("");
+    info!("Archive created successfully!");
+    info!("  Archive ID: {}", stats.archive_id);
+    info!("  Files:      {}", stats.total_files);
+    info!("  Total size: {}", HumanBytes(stats.total_size));
+    info!("  Blocks:     {}", stats.blocks_written);
 
     Ok(())
 }
@@ -161,23 +182,27 @@ pub fn create(
 pub fn extract(input: &Path, output: &Path, password: Option<&str>, force: bool) -> Result<()> {
     let password = get_password(password, "Enter decryption password: ")?;
 
-    println!("Opening archive: {}", input.display());
+    info!("Opening archive: {}", input.display());
 
     let mut reader = ArchiveReader::open(input, &password).context("Failed to open archive")?;
 
     let options = ExtractOptions::new(output).overwrite(force);
 
-    println!("Extracting to: {}", output.display());
+    info!("Extracting to: {}", output.display());
 
+    let start_time = Instant::now();
     let stats = reader
         .extract_all(&options)
         .context("Failed to extract archive")?;
 
-    println!();
-    println!("Extraction complete!");
-    println!("  Extracted: {} files", stats.extracted);
-    println!("  Skipped:   {} files", stats.skipped);
-    println!("  Written:   {} bytes", stats.bytes_written);
+    info!("");
+    info!(
+        "✓ Extraction complete in {}!",
+        HumanDuration(start_time.elapsed())
+    );
+    info!("  Extracted: {} files", stats.extracted);
+    info!("  Skipped:   {} files", stats.skipped);
+    info!("  Written:   {}", HumanBytes(stats.bytes_written));
 
     Ok(())
 }
@@ -191,28 +216,32 @@ pub fn list(archive: &Path, password: Option<&str>, long_format: bool) -> Result
     let files = reader.list_files().context("Failed to read catalog")?;
 
     if long_format {
-        println!("{:<12} {:<20} PATH", "SIZE", "HASH");
-        println!("{}", "-".repeat(60));
+        info!("{:<12} {:<20} PATH", "SIZE", "HASH");
+        info!("{}", "-".repeat(60));
         for entry in &files {
             let hash_str = entry
                 .content_hash
                 .map(|h| format!("{:.16}", h))
                 .unwrap_or_else(|| "-".to_string());
-            println!(
+            info!(
                 "{:<12} {:<20} {}",
-                entry.size,
+                HumanBytes(entry.size),
                 hash_str,
                 entry.path.display()
             );
         }
     } else {
         for entry in &files {
-            println!("{}", entry.path.display());
+            info!("{}", entry.path.display());
         }
     }
 
-    println!();
-    println!("Total: {} files", files.len());
+    info!("");
+    info!(
+        "Total: {} files ({} total)",
+        files.len(),
+        HumanBytes(files.iter().map(|e| e.size).sum())
+    );
 
     Ok(())
 }
@@ -231,35 +260,35 @@ pub fn info(archive: &Path, password: Option<&str>) -> Result<()> {
     let era_version_major = header.magic[3];
     let era_version_minor = header.magic[4];
 
-    println!("ERA Archive Information");
-    println!("=======================");
-    println!();
-    println!("Archive ID:      {}", header.archive_id);
-    println!("Volume ID:       {}", header.volume_id);
-    println!("Volume Sequence: {}", header.volume_sequence);
-    println!(
+    info!("ERA Archive Information");
+    info!("=======================");
+    info!("");
+    info!("Archive ID:      {}", header.archive_id);
+    info!("Volume ID:       {}", header.volume_id);
+    info!("Volume Sequence: {}", header.volume_sequence);
+    info!(
         "ERA Version:     {}.{}",
         era_version_major, era_version_minor
     );
-    println!();
-    println!("Configuration:");
-    println!(
-        "  Max Volume Size:    {} MB",
-        header.config.volume.max_size / (1024 * 1024)
+    info!("");
+    info!("Configuration:");
+    info!(
+        "  Max Volume Size:    {}",
+        HumanBytes(header.config.volume.max_size)
     );
-    println!("  Compression Level:  {}", header.config.compression.level);
-    println!(
+    info!("  Compression Level:  {}", header.config.compression.level);
+    info!(
         "  KDF Memory Cost:    {} KB",
         header.config.encryption.kdf_memory_cost
     );
-    println!(
+    info!(
         "  KDF Time Cost:      {}",
         header.config.encryption.kdf_time_cost
     );
-    println!();
-    println!("Contents:");
-    println!("  Total Files:  {}", catalog.file_count);
-    println!("  Total Size:   {} bytes", catalog.total_size);
+    info!("");
+    info!("Contents:");
+    info!("  Total Files:  {}", catalog.file_count);
+    info!("  Total Size:   {}", HumanBytes(catalog.total_size));
 
     Ok(())
 }
@@ -268,15 +297,16 @@ pub fn info(archive: &Path, password: Option<&str>) -> Result<()> {
 pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<()> {
     let password = get_password(password, "Enter decryption password: ")?;
 
-    println!("Verifying archive: {}", archive.display());
-    println!();
+    info!("Verifying archive: {}", archive.display());
+    info!("");
 
     let mut reader = ArchiveReader::open(archive, &password).context("Failed to open archive")?;
 
+    let start_time = Instant::now();
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
+            .template("{spinner:.green} [{elapsed_precise}] {msg}")
             .unwrap(),
     );
     pb.set_message("Scanning blocks...");
@@ -286,32 +316,36 @@ pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<(
 
     pb.finish_and_clear();
 
-    println!("Verification Results");
-    println!("====================");
-    println!();
-    println!("Blocks verified:    {}", stats.blocks_verified);
-    println!("Blocks failed:      {}", stats.blocks_failed);
-    println!("Files verified:     {}", stats.files_verified);
-    println!("Files incomplete:   {}", stats.files_incomplete);
-    println!("Bytes verified:     {}", stats.bytes_verified);
-    println!();
+    info!("Verification Results");
+    info!("====================");
+    info!("");
+    info!("Blocks verified:    {}", stats.blocks_verified);
+    info!("Blocks failed:      {}", stats.blocks_failed);
+    info!("Files verified:     {}", stats.files_verified);
+    info!("Files incomplete:   {}", stats.files_incomplete);
+    info!("Bytes verified:     {}", HumanBytes(stats.bytes_verified));
+    info!(
+        "Time taken:         {}",
+        HumanDuration(start_time.elapsed())
+    );
+    info!("");
 
     if stats.is_ok() {
-        println!("✅ Archive integrity verified successfully!");
+        info!("✅ Archive integrity verified successfully!");
         Ok(())
     } else {
-        println!("❌ Archive integrity check FAILED!");
-        println!();
-        println!("Errors found: {}", stats.errors.len());
+        error!("❌ Archive integrity check FAILED!");
+        error!("");
+        error!("Errors found: {}", stats.errors.len());
 
         if verbose {
-            println!();
-            println!("Error details:");
+            error!("");
+            error!("Error details:");
             for (i, error) in stats.errors.iter().enumerate() {
-                println!("  {}. {}", i + 1, error);
+                error!("  {}. {}", i + 1, error);
             }
         } else if !stats.errors.is_empty() {
-            println!("Use --verbose to see error details");
+            warn!("Use --verbose to see error details");
         }
 
         anyhow::bail!(
@@ -325,16 +359,16 @@ pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<(
 pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool) -> Result<()> {
     let password = get_password(password, "Enter decryption password: ")?;
 
-    println!("Analyzing archive: {}", archive.display());
-    println!();
+    info!("Analyzing archive: {}", archive.display());
+    info!("");
 
     // First, check recovery status
     let status = RecoveryManager::analyze(archive).context("Failed to analyze archive")?;
 
-    println!("Recovery Analysis");
-    println!("=================");
-    println!();
-    println!(
+    info!("Recovery Analysis");
+    info!("=================");
+    info!("");
+    info!(
         "Checkpoint exists:  {}",
         if status.checkpoint_exists {
             "Yes"
@@ -342,16 +376,16 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
             "No"
         }
     );
-    println!(
+    info!(
         "Archive exists:     {}",
         if status.archive_exists { "Yes" } else { "No" }
     );
-    println!(
+    info!(
         "Recovery needed:    {}",
         if status.recovery_needed { "Yes" } else { "No" }
     );
-    println!("Completed files:    {}", status.completed_files.len());
-    println!(
+    info!("Completed files:    {}", status.completed_files.len());
+    info!(
         "In-progress file:   {}",
         status
             .in_progress_file
@@ -359,19 +393,19 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "None".to_string())
     );
-    println!("Chunks written:     {}", status.chunks_written);
-    println!("Bytes written:      {}", status.bytes_written);
-    println!();
+    info!("Chunks written:     {}", status.chunks_written);
+    info!("Bytes written:      {}", status.bytes_written);
+    info!("");
 
     if !status.checkpoint_exists && !status.archive_exists {
-        println!("❌ No archive or checkpoint found. Nothing to repair.");
+        info!("❌ No archive or checkpoint found. Nothing to repair.");
         return Ok(());
     }
 
     if !status.recovery_needed {
         // Archive exists, let's verify it
-        println!("Archive appears complete. Running verification...");
-        println!();
+        info!("Archive appears complete. Running verification...");
+        info!("");
 
         let mut reader =
             ArchiveReader::open(archive, &password).context("Failed to open archive")?;
@@ -381,42 +415,42 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
         let erasure_enabled = header.config.erasure.is_some();
         if erasure_enabled {
             let erasure_config = header.config.erasure.as_ref().unwrap();
-            println!(
+            info!(
                 "Erasure coding:     Enabled ({}/{} data/parity shards)",
                 erasure_config.data_shards, erasure_config.parity_shards
             );
-            println!(
+            info!(
                 "                    Can recover from up to {} shard losses per block",
                 erasure_config.parity_shards
             );
-            println!();
+            info!("");
         } else {
-            println!("Erasure coding:     Disabled");
-            println!();
+            info!("Erasure coding:     Disabled");
+            info!("");
         }
 
         let verify_stats = reader.verify().context("Verification failed")?;
 
         if verify_stats.is_ok() {
-            println!("✅ Archive is intact. No repair needed.");
+            info!("✅ Archive is intact. No repair needed.");
             return Ok(());
         }
 
-        println!("❌ Archive has {} errors.", verify_stats.errors.len());
+        info!("❌ Archive has {} errors.", verify_stats.errors.len());
 
         if verbose {
-            println!();
-            println!("Errors found:");
+            info!("");
+            info!("Errors found:");
             for (i, error) in verify_stats.errors.iter().enumerate() {
-                println!("  {}. {}", i + 1, error);
+                info!("  {}. {}", i + 1, error);
             }
         }
 
         // Attempt actual repair for erasure-coded archives
-        println!();
+        info!("");
         if erasure_enabled {
-            println!("Attempting repair using Reed-Solomon erasure coding...");
-            println!();
+            info!("Attempting repair using Reed-Solomon erasure coding...");
+            info!("");
 
             // Create repair options
             let repair_options = RepairOptions {
@@ -431,7 +465,7 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
             let is_multi_volume = vol1_path.exists();
 
             let repair_result = if is_multi_volume {
-                println!("Detected multi-volume archive, using matrix-distributed repair...");
+                info!("Detected multi-volume archive, using matrix-distributed repair...");
                 repair_archive_matrix(archive, &password, repair_options)
             } else {
                 repair_archive(archive, &password, repair_options)
@@ -439,82 +473,82 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
 
             match repair_result {
                 Ok(repair_stats) => {
-                    println!();
-                    println!("Repair Results:");
-                    println!("===============");
-                    println!("Blocks scanned:       {}", repair_stats.blocks_scanned);
-                    println!(
+                    info!("");
+                    info!("Repair Results:");
+                    info!("===============");
+                    info!("Blocks scanned:       {}", repair_stats.blocks_scanned);
+                    info!(
                         "Blocks with damage:   {}",
                         repair_stats.blocks_with_corruption
                     );
-                    println!(
+                    info!(
                         "Corrupted shards:     {}",
                         repair_stats.corrupted_shards_found
                     );
-                    println!("Shards repaired:      {}", repair_stats.shards_repaired);
-                    println!(
+                    info!("Shards repaired:      {}", repair_stats.shards_repaired);
+                    info!(
                         "Unrecoverable blocks: {}",
                         repair_stats.unrecoverable_blocks
                     );
-                    println!();
+                    info!("");
 
                     if repair_stats.fully_repaired() {
                         if force {
-                            println!("✅ Archive successfully repaired!");
+                            info!("✅ Archive successfully repaired!");
                         } else {
-                            println!("✅ Repair is possible. Run with --force to apply repairs.");
+                            info!("✅ Repair is possible. Run with --force to apply repairs.");
                         }
                         return Ok(());
                     } else {
-                        println!(
+                        info!(
                             "⚠️  Partial repair: {} blocks could not be recovered.",
                             repair_stats.unrecoverable_blocks
                         );
                         if !repair_stats.errors.is_empty() && verbose {
-                            println!();
-                            println!("Unrecoverable errors:");
+                            info!("");
+                            info!("Unrecoverable errors:");
                             for (i, err) in repair_stats.errors.iter().enumerate() {
-                                println!("  {}. {}", i + 1, err);
+                                info!("  {}. {}", i + 1, err);
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    println!("❌ Repair failed: {}", e);
-                    println!();
-                    println!("To extract recoverable data, use: era extract --force <archive>");
+                    info!("❌ Repair failed: {}", e);
+                    info!("");
+                    info!("To extract recoverable data, use: era extract --force <archive>");
                 }
             }
         } else {
-            println!("Note: This archive was created without erasure coding.");
-            println!("Consider recreating with erasure coding for better protection:");
-            println!("  era create --erasure 4:2 <inputs> -o <output>.era");
-            println!();
-            println!("To extract what's possible, try: era extract --force <archive>");
+            info!("Note: This archive was created without erasure coding.");
+            info!("Consider recreating with erasure coding for better protection:");
+            info!("  era create --erasure 4:2 <inputs> -o <output>.era");
+            info!("");
+            info!("To extract what's possible, try: era extract --force <archive>");
         }
 
         anyhow::bail!("Archive has errors. Use 'era extract --force' to recover what's possible.");
     }
 
     // Recovery is needed - we have a checkpoint from interrupted creation
-    println!("Recovery checkpoint found from interrupted archive creation.");
-    println!();
+    info!("Recovery checkpoint found from interrupted archive creation.");
+    info!("");
 
     if !force {
-        println!("To resume the interrupted creation, re-run the original 'era create' command.");
-        println!("The archive writer will automatically detect and resume from the checkpoint.");
-        println!();
-        println!("To discard the checkpoint and start fresh, use --force flag.");
+        info!("To resume the interrupted creation, re-run the original 'era create' command.");
+        info!("The archive writer will automatically detect and resume from the checkpoint.");
+        info!("");
+        info!("To discard the checkpoint and start fresh, use --force flag.");
         return Ok(());
     }
 
     // Force flag: delete checkpoint and let user start fresh
-    println!("Discarding checkpoint due to --force flag...");
+    info!("Discarding checkpoint due to --force flag...");
 
     let manager = RecoveryManager::new(archive).context("Failed to load recovery state")?;
     manager.cleanup().context("Failed to clean up checkpoint")?;
 
-    println!("✅ Checkpoint discarded. You can now create a new archive.");
+    info!("✅ Checkpoint discarded. You can now create a new archive.");
 
     Ok(())
 }

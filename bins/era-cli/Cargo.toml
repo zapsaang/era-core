@@ -18,7 +18,7 @@ clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rpassword = "7.3"
+dialoguer = { workspace = true }
 indicatif = "0.17"
 
 [dev-dependencies]

@@ -20,7 +20,6 @@ use clap::{Parser, Subcommand};
 use era_crypto::disable_core_dumps;
 use std::path::PathBuf;
 use tracing::Level;
-use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
 #[command(name = "era")]
@@ -159,24 +158,30 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    if let Err(e) = disable_core_dumps() {
-        eprintln!("Warning：Cannot disable core dumps: {}", e);
-    } else {
-        println!("Core Dumps disabeld.");
-    }
+    // Initialize tracing subscriber first
     let cli = Cli::parse();
 
-    // Set up logging
+    // Configure structured logging with tracing
     let level = if cli.verbose {
         Level::DEBUG
     } else {
         Level::INFO
     };
-    FmtSubscriber::builder()
+
+    use tracing_subscriber::fmt::format::FmtSpan;
+    tracing_subscriber::fmt()
         .with_max_level(level)
         .with_target(false)
         .without_time()
+        .with_span_events(FmtSpan::NONE)
         .init();
+
+    // Disable core dumps for security
+    if let Err(e) = disable_core_dumps() {
+        tracing::warn!("Cannot disable core dumps: {}", e);
+    } else {
+        tracing::debug!("Core dumps disabled");
+    }
 
     match cli.command {
         Commands::Create {

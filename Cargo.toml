@@ -75,13 +75,17 @@ parking_lot = "0.12"
 # Content-defined chunking (FastCDC)
 fastcdc = "3.2"
 
+# Zero-copy serialization
+bytemuck = { version = "1.14", features = ["derive"] }
+
 # PEM format support
 pem = "3.0"
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
-indicatif = "0.17"
+indicatif = { version = "0.17", features = ["rayon"] }
 colored = "2.1"
+dialoguer = "0.11"
 
 # Logging
 tracing = "0.1"

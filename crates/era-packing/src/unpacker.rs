@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn test_corrupted_block_detection() {
         let key = test_key();
-        let compressor = Box::new(ZstdCompressor::default());
+        let compressor = crate::create_compressor();
         let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
@@ -179,8 +179,7 @@ mod tests {
         }
 
         // Unpack should fail due to authentication failure
-        let unpacker =
-            MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, Box::new(ZstdCompressor::default()));
+        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
         let result = unpacker.unpack(&encrypted);
 
         assert!(result.is_err(), "Tampered block should fail decryption");
@@ -189,7 +188,7 @@ mod tests {
     #[test]
     fn test_wrong_key_detection() {
         let key1 = test_key();
-        let compressor = Box::new(ZstdCompressor::default());
+        let compressor = crate::create_compressor();
         let builder = MacroBlockBuilder::new(key1.clone(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
@@ -217,7 +216,7 @@ mod tests {
     #[test]
     fn test_wrong_nonce_context_detection() {
         let key = test_key();
-        let compressor = Box::new(ZstdCompressor::default());
+        let compressor = crate::create_compressor();
         let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
@@ -228,8 +227,7 @@ mod tests {
 
         // Try to decrypt with a different nonce context
         let wrong_context = [99u8; 16];
-        let unpacker =
-            MacroBlockUnpacker::new(key, wrong_context, Box::new(ZstdCompressor::default()));
+        let unpacker = MacroBlockUnpacker::new(key, wrong_context, crate::create_compressor());
         let result = unpacker.unpack(&encrypted);
 
         assert!(
@@ -241,7 +239,7 @@ mod tests {
     #[test]
     fn test_truncated_block_detection() {
         let key = test_key();
-        let compressor = Box::new(ZstdCompressor::default());
+        let compressor = crate::create_compressor();
         let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
@@ -254,8 +252,7 @@ mod tests {
         let truncated = encrypted.data[..encrypted.data.len() / 2].to_vec();
         encrypted.data = Bytes::from(truncated);
 
-        let unpacker =
-            MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, Box::new(ZstdCompressor::default()));
+        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
         let result = unpacker.unpack(&encrypted);
 
         assert!(result.is_err(), "Truncated block should fail");
