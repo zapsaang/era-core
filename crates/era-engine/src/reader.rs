@@ -783,17 +783,8 @@ impl ArchiveReader {
             let unpacker = self.create_unpacker();
             let unpacked = unpacker.unpack(&encrypted_block)?;
 
-            // Extract all chunks from unpacked data using ChunkVec for stack allocation
-            let mut chunks = ChunkVec::new();
-            for entry in &unpacked.index.entries {
-                let start = entry.offset as usize;
-                let end = start + entry.length as usize;
-                if end > unpacked.data.len() {
-                    return Err(EraError::decompression("Chunk offset exceeds data size"));
-                }
-                chunks.push((entry.hash, unpacked.data.slice(start..end)));
-            }
-            Ok(chunks)
+            // Extract all chunks using consolidated helpers
+            era_packing::extract_all_chunks(&unpacked.index, &unpacked.data)
         }
     }
 
