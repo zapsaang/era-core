@@ -160,6 +160,75 @@ impl ErasureCoder {
         Ok(all_shards)
     }
 
+    /// Encode existing shards into parity shards
+    ///
+    /// The input `shards` will be treated as the data shards.
+    /// If fewer than `data_shards` are provided, they will be padded with zeros?
+    /// No, the caller should provide exactly `data_shards` or we should handle it.
+    /// For standard usage, we expect `data_shards` inputs.
+    ///
+    /// Returns a vector containing the original data shards (padded if necessary) followed by parity shards.
+    pub fn encode_shards(&self, shards: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
+        if shards.is_empty() {
+            return Err(EraError::InvalidConfig("Cannot encode empty shards".into()));
+        }
+        if shards.len() > self.config.data_shards {
+            return Err(EraError::InvalidConfig(format!(
+                "Too many shards: expected max {}, got {}",
+                self.config.data_shards,
+                shards.len()
+            )));
+        }
+
+        // 1. Determine shard size (max length of input shards, aligned to 2 bytes)
+        let max_len = shards.iter().map(|s| s.len()).max().unwrap_or(0);
+        // Round up to multiple of 2 (required by reed-solomon-simd)
+        let shard_size = if max_len == 0 { 2 } else { (max_len + 1) & !1 };
+
+        // 2. Prepare data shards (pad to consistent size)
+        let mut data_shards = Vec::with_capacity(self.config.data_shards);
+        for i in 0..self.config.data_shards {
+            let mut shard = if i < shards.len() {
+                shards[i].clone()
+            } else {
+                vec![0u8; shard_size] // Empty padding shard for missing slots
+            };
+
+            if shard.len() < shard_size {
+                shard.resize(shard_size, 0);
+            }
+            data_shards.push(shard);
+        }
+
+        // 3. Create encoder
+        let mut encoder = reed_solomon_simd::ReedSolomonEncoder::new(
+            self.config.data_shards,
+            self.config.parity_shards,
+            shard_size,
+        )
+        .map_err(|e| EraError::ErasureError(format!("Failed to create RS encoder: {}", e)))?;
+
+        // 4. Add shards
+        for shard in &data_shards {
+            encoder
+                .add_original_shard(shard)
+                .map_err(|e| EraError::ErasureError(format!("Failed to add shard: {}", e)))?;
+        }
+
+        // 5. Generate parity
+        let result = encoder
+            .encode()
+            .map_err(|e| EraError::ErasureError(format!("Encoding failed: {}", e)))?;
+
+        // 6. Collect result
+        let mut all_shards = data_shards;
+        for parity in result.recovery_iter() {
+            all_shards.push(parity.to_vec());
+        }
+
+        Ok(all_shards)
+    }
+
     /// Decode/recover data from available shards
     ///
     /// `shards` is a vector of Option<Vec<u8>>:

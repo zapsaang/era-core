@@ -25,6 +25,7 @@ mod packed_chunk;
 mod session_builder;
 mod session_erasure_builder;
 mod staging_pool;
+mod stripe;
 mod unpacker;
 
 #[cfg(test)]
@@ -40,4 +41,5 @@ pub use packed_chunk::{pack_files, unpack_file, PackedChunk, PackedEntry, Packed
 pub use session_builder::{SessionBlockBuilder, SessionBlockUnpacker};
 pub use session_erasure_builder::{SessionErasureBlockBuilder, SessionErasureBlockUnpacker};
 pub use staging_pool::{PackedBlock, StagingPool, StagingPoolStats};
+pub use stripe::{BlockMeta, Stripe, StripeBuffer};
 pub use unpacker::{MacroBlockUnpacker, UnpackedBlock};
