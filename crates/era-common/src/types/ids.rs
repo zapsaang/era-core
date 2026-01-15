@@ -103,17 +103,3 @@ impl std::fmt::Display for ChunkHash {
         write!(f, "{}", hex::encode(&self.0[..8]))
     }
 }
-
-// Simple hex encoding for display (avoiding extra dependency in MVP)
-mod hex {
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut result = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            result.push(HEX_CHARS[(b >> 4) as usize] as char);
-            result.push(HEX_CHARS[(b & 0x0f) as usize] as char);
-        }
-        result
-    }
-}

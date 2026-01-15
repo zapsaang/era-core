@@ -37,15 +37,6 @@ fn base64_encode(data: &[u8]) -> String {
     general_purpose::STANDARD.encode(data)
 }
 
-/// Base64 解码
-fn base64_decode(data: &str) -> Result<Vec<u8>> {
-    use base64::engine::general_purpose;
-    use base64::Engine;
-    general_purpose::STANDARD
-        .decode(data)
-        .map_err(|e| EraError::InvalidFormat(format!("Base64 decode error: {}", e)))
-}
-
 /// PEM 格式类型枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PemFormat {
@@ -157,36 +148,16 @@ pub fn export_public_key_as_pem(cert: &EraCertificate) -> Result<String> {
 
 /// 提取 PEM 文件中的所有 PEM 块
 fn extract_pem_blocks(content: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    // 使用 pem crate 解析 PEM 块
-    let mut blocks = Vec::new();
-    let mut lines = content.lines();
+    // 使用 pem crate 解析所有 PEM 块
+    use pem::parse_many;
 
-    while let Some(line) = lines.next() {
-        if line.starts_with("-----BEGIN ") && line.ends_with("-----") {
-            // 提取标签
-            // "-----BEGIN " 是 11 个字符，结尾的 "-----" 是 5 个字符
-            let label = &line[11..line.len() - 5];
+    let pem_blocks = parse_many(content)
+        .map_err(|e| EraError::InvalidFormat(format!("Failed to parse PEM: {}", e)))?;
 
-            let mut data = String::new();
-            while let Some(line) = lines.next() {
-                if line.starts_with("-----END ") {
-                    break;
-                }
-                data.push_str(line);
-            }
-
-            // Base64 解码
-            match base64_decode(&data) {
-                Ok(decoded) => blocks.push((label.to_string(), decoded)),
-                Err(e) => {
-                    return Err(EraError::InvalidFormat(format!(
-                        "Failed to decode PEM block {}: {}",
-                        label, e
-                    )))
-                }
-            }
-        }
-    }
+    let blocks: Vec<(String, Vec<u8>)> = pem_blocks
+        .into_iter()
+        .map(|block| (block.tag().to_string(), block.contents().to_vec()))
+        .collect();
 
     Ok(blocks)
 }

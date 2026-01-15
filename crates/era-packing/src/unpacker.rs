@@ -101,14 +101,13 @@ mod tests {
     use super::*;
     use crate::test_helpers::helpers::*;
     use crate::MacroBlockBuilder;
-    use era_codec::ZstdCompressor;
     use era_common::UniqueChunk;
     use era_crypto::{derive_key, KdfParams, Salt};
 
     #[test]
     fn test_pack_unpack_roundtrip() {
         let key = test_key();
-        let compressor = Box::new(ZstdCompressor::default());
+        let compressor = crate::create_compressor();
         let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
@@ -118,8 +117,7 @@ mod tests {
         let encrypted = builder.pack_single(chunk).unwrap();
 
         // Unpack with same nonce context
-        let unpacker =
-            MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, Box::new(ZstdCompressor::default()));
+        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
         let unpacked = unpacker.unpack(&encrypted).unwrap();
 
         assert_eq!(unpacked.chunk_count(), 1);
@@ -130,7 +128,7 @@ mod tests {
     #[test]
     fn test_extract_chunk_by_hash() {
         let key = test_key();
-        let compressor = Box::new(ZstdCompressor::default());
+        let compressor = crate::create_compressor();
         let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
 
         let data1 = vec![1u8; 256];
@@ -145,8 +143,7 @@ mod tests {
 
         let encrypted = builder.pack_chunks(chunks).unwrap();
 
-        let unpacker =
-            MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, Box::new(ZstdCompressor::default()));
+        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
 
         // Extract by hash
         let extracted1 = unpacker.extract_chunk(&encrypted, &hash1).unwrap().unwrap();
@@ -210,11 +207,8 @@ mod tests {
         };
         let key2 = derive_key(b"wrong_password", &salt2, &params).unwrap();
 
-        let unpacker = MacroBlockUnpacker::new(
-            key2,
-            TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
-        );
+        let unpacker =
+            MacroBlockUnpacker::new(key2, TEST_NONCE_CONTEXT, crate::create_compressor());
         let result = unpacker.unpack(&encrypted);
 
         assert!(result.is_err(), "Wrong key should fail decryption");

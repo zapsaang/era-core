@@ -240,7 +240,6 @@ mod tests {
     use super::*;
     use crate::test_helpers::helpers::*;
     use bytes::Bytes;
-    use era_codec::ZstdCompressor;
     use era_common::ChunkHash;
 
     #[test]
@@ -252,7 +251,7 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         );
 
         let original_data = vec![42u8; 1024];
@@ -266,7 +265,7 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         );
         let unpacked = unpacker.unpack(&encrypted).unwrap();
 
@@ -284,7 +283,7 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         );
 
         // Create two blocks with identical data
@@ -312,7 +311,7 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         );
 
         let data = vec![42u8; 256];
@@ -325,7 +324,7 @@ mod tests {
             &session,
             &wrong_volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         );
 
         // Decryption should fail with AEAD authentication error
@@ -359,7 +358,7 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         );
 
         let chunks = vec![
@@ -385,7 +384,7 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         );
         let unpacked = unpacker.unpack(&block).unwrap();
 
@@ -404,7 +403,7 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
-            Box::new(ZstdCompressor::default()),
+            crate::create_compressor(),
         )
         .with_starting_block_id(100);
 

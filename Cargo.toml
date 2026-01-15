@@ -66,6 +66,12 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # Bytes
 bytes = "1.5"
 
+# Hex encoding/decoding
+hex = "0.4"
+
+# PEM format support
+pem = "3.0"
+
 # CLI
 clap = { version = "4.4", features = ["derive"] }
 indicatif = "0.17"

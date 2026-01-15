@@ -12,6 +12,14 @@ use era_codec::Compressor;
 use era_common::{BlockChunkIndex, BlockId, EraError, Result};
 use era_crypto::DerivedKey;
 
+/// Create a default compressor instance (Zstd with default settings)
+///
+/// Consolidates the repeated pattern: `Box::new(ZstdCompressor::default())`
+pub fn create_compressor() -> Box<dyn Compressor> {
+    use era_codec::ZstdCompressor;
+    Box::new(ZstdCompressor::default())
+}
+
 /// Decrypt and decompress block data with unified error handling.
 ///
 /// This consolidates the repeated pattern:
@@ -136,9 +144,7 @@ mod tests {
         let hash1 = ChunkHash::from_bytes([1u8; 32]);
         let hash2 = ChunkHash::from_bytes([2u8; 32]);
 
-        let data = Bytes::from(vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-        ]);
+        let data = Bytes::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 
         let index = BlockChunkIndex {
             count: 2,
@@ -172,9 +178,7 @@ mod tests {
         let hash1 = ChunkHash::from_bytes([1u8; 32]);
         let hash2 = ChunkHash::from_bytes([2u8; 32]);
 
-        let data = Bytes::from(vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-        ]);
+        let data = Bytes::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 
         let index = BlockChunkIndex {
             count: 2,
