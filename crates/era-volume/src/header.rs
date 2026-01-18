@@ -328,6 +328,89 @@ impl SuperHeader {
     }
 }
 
+use era_common::proto;
+
+impl From<CryptoAnchor> for proto::CryptoAnchor {
+    fn from(anchor: CryptoAnchor) -> Self {
+        Self {
+            salt: anchor.salt.to_vec(),
+            password_verification_tag: anchor.password_verification_tag.to_vec(),
+            kdf_memory_cost: anchor.kdf_memory_cost,
+            kdf_time_cost: anchor.kdf_time_cost,
+            kdf_parallelism: anchor.kdf_parallelism,
+            auth_mode: match anchor.auth_mode {
+                AuthMode::Password => proto::crypto_anchor::AuthMode::Password.into(),
+                AuthMode::Certificate => proto::crypto_anchor::AuthMode::Certificate.into(),
+                AuthMode::Hybrid => proto::crypto_anchor::AuthMode::Hybrid.into(),
+            },
+            key_encapsulation: anchor.key_encapsulation,
+        }
+    }
+}
+
+impl From<proto::CryptoAnchor> for CryptoAnchor {
+    fn from(proto: proto::CryptoAnchor) -> Self {
+        let auth_mode = proto.auth_mode();
+        Self {
+            salt: proto.salt.try_into().unwrap_or([0u8; 16]),
+            password_verification_tag: proto
+                .password_verification_tag
+                .try_into()
+                .unwrap_or([0u8; 16]),
+            kdf_memory_cost: proto.kdf_memory_cost,
+            kdf_time_cost: proto.kdf_time_cost,
+            kdf_parallelism: proto.kdf_parallelism,
+            auth_mode: match auth_mode {
+                proto::crypto_anchor::AuthMode::Password => AuthMode::Password,
+                proto::crypto_anchor::AuthMode::Certificate => AuthMode::Certificate,
+                proto::crypto_anchor::AuthMode::Hybrid => AuthMode::Hybrid,
+            },
+            key_encapsulation: proto.key_encapsulation,
+        }
+    }
+}
+
+impl From<SuperHeader> for proto::SuperHeader {
+    fn from(header: SuperHeader) -> Self {
+        Self {
+            magic: header.magic.to_vec(),
+            version: header.version as u32,
+            volume_id: header.volume_id.0.as_bytes().to_vec(),
+            archive_id: header.archive_id.0.as_bytes().to_vec(),
+            volume_sequence: header.volume_sequence as u32,
+            total_volumes: header.total_volumes as u32,
+            creation_time: header.creation_time,
+            feature_flags: header.feature_flags,
+            crypto_anchor: Some(header.crypto_anchor.into()),
+            config: Some(header.config.into()),
+        }
+    }
+}
+
+impl From<proto::SuperHeader> for SuperHeader {
+    fn from(proto: proto::SuperHeader) -> Self {
+        Self {
+            magic: proto.magic.try_into().unwrap_or(MAGIC),
+            version: proto.version as u16,
+            volume_id: VolumeId(
+                uuid::Uuid::from_slice(&proto.volume_id).unwrap_or(uuid::Uuid::nil()),
+            ),
+            archive_id: ArchiveId(
+                uuid::Uuid::from_slice(&proto.archive_id).unwrap_or(uuid::Uuid::nil()),
+            ),
+            volume_sequence: proto.volume_sequence as u16,
+            total_volumes: proto.total_volumes as u16,
+            creation_time: proto.creation_time,
+            feature_flags: proto.feature_flags,
+            crypto_anchor: proto
+                .crypto_anchor
+                .map(Into::into)
+                .unwrap_or_else(|| CryptoAnchor::new([0; 16], [0; 16])),
+            config: proto.config.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,88 +541,5 @@ mod tests {
         let anchor2 = CryptoAnchor::new([1u8; 16], [0u8; 16]);
 
         assert_ne!(anchor1.salt, anchor2.salt);
-    }
-}
-
-use era_common::proto;
-
-impl From<CryptoAnchor> for proto::CryptoAnchor {
-    fn from(anchor: CryptoAnchor) -> Self {
-        Self {
-            salt: anchor.salt.to_vec(),
-            password_verification_tag: anchor.password_verification_tag.to_vec(),
-            kdf_memory_cost: anchor.kdf_memory_cost,
-            kdf_time_cost: anchor.kdf_time_cost,
-            kdf_parallelism: anchor.kdf_parallelism,
-            auth_mode: match anchor.auth_mode {
-                AuthMode::Password => proto::crypto_anchor::AuthMode::Password.into(),
-                AuthMode::Certificate => proto::crypto_anchor::AuthMode::Certificate.into(),
-                AuthMode::Hybrid => proto::crypto_anchor::AuthMode::Hybrid.into(),
-            },
-            key_encapsulation: anchor.key_encapsulation,
-        }
-    }
-}
-
-impl From<proto::CryptoAnchor> for CryptoAnchor {
-    fn from(proto: proto::CryptoAnchor) -> Self {
-        let auth_mode = proto.auth_mode();
-        Self {
-            salt: proto.salt.try_into().unwrap_or([0u8; 16]),
-            password_verification_tag: proto
-                .password_verification_tag
-                .try_into()
-                .unwrap_or([0u8; 16]),
-            kdf_memory_cost: proto.kdf_memory_cost,
-            kdf_time_cost: proto.kdf_time_cost,
-            kdf_parallelism: proto.kdf_parallelism,
-            auth_mode: match auth_mode {
-                proto::crypto_anchor::AuthMode::Password => AuthMode::Password,
-                proto::crypto_anchor::AuthMode::Certificate => AuthMode::Certificate,
-                proto::crypto_anchor::AuthMode::Hybrid => AuthMode::Hybrid,
-            },
-            key_encapsulation: proto.key_encapsulation,
-        }
-    }
-}
-
-impl From<SuperHeader> for proto::SuperHeader {
-    fn from(header: SuperHeader) -> Self {
-        Self {
-            magic: header.magic.to_vec(),
-            version: header.version as u32,
-            volume_id: header.volume_id.0.as_bytes().to_vec(),
-            archive_id: header.archive_id.0.as_bytes().to_vec(),
-            volume_sequence: header.volume_sequence as u32,
-            total_volumes: header.total_volumes as u32,
-            creation_time: header.creation_time,
-            feature_flags: header.feature_flags,
-            crypto_anchor: Some(header.crypto_anchor.into()),
-            config: Some(header.config.into()),
-        }
-    }
-}
-
-impl From<proto::SuperHeader> for SuperHeader {
-    fn from(proto: proto::SuperHeader) -> Self {
-        Self {
-            magic: proto.magic.try_into().unwrap_or(MAGIC),
-            version: proto.version as u16,
-            volume_id: VolumeId(
-                uuid::Uuid::from_slice(&proto.volume_id).unwrap_or(uuid::Uuid::nil()),
-            ),
-            archive_id: ArchiveId(
-                uuid::Uuid::from_slice(&proto.archive_id).unwrap_or(uuid::Uuid::nil()),
-            ),
-            volume_sequence: proto.volume_sequence as u16,
-            total_volumes: proto.total_volumes as u16,
-            creation_time: proto.creation_time,
-            feature_flags: proto.feature_flags,
-            crypto_anchor: proto
-                .crypto_anchor
-                .map(Into::into)
-                .unwrap_or_else(|| CryptoAnchor::new([0; 16], [0; 16])),
-            config: proto.config.map(Into::into).unwrap_or_default(),
-        }
     }
 }

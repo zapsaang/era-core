@@ -3,7 +3,8 @@
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Password};
 use era_common::{
-    ArchiveConfig, CompressionAlgorithm, ErasureCodeConfig, MatrixDistributionStrategy,
+    ArchiveConfig, CompressionAlgorithm, ErasureCodeConfig, MatrixDistributionConfig,
+    MatrixDistributionStrategy,
 };
 use era_engine::{
     repair_archive, repair_archive_matrix, ArchiveReader, ArchiveWriter, ExtractOptions,
@@ -75,25 +76,44 @@ fn parse_erasure_config(s: &str) -> Result<ErasureCodeConfig> {
     })
 }
 
+/// Parameters for creating a new ERA archive
+pub struct CreateArgs<'a> {
+    pub inputs: &'a [std::path::PathBuf],
+    pub output: &'a Path,
+    pub config_path: Option<&'a Path>,
+    pub certificate_path: Option<&'a Path>,
+    pub password: Option<&'a str>,
+    pub compression_level: Option<i32>,
+    pub no_compression: bool,
+    pub erasure: Option<&'a str>,
+    pub volume_count: Option<usize>,
+    pub max_volume_size: Option<u64>,
+    pub matrix_distribution: Option<bool>,
+    pub cdc_min: Option<usize>,
+    pub cdc_avg: Option<usize>,
+    pub cdc_max: Option<usize>,
+    pub packing_k: Option<usize>,
+}
+
 /// Create a new ERA archive
-#[allow(clippy::too_many_arguments)]
-pub fn create(
-    inputs: &[impl AsRef<Path>],
-    output: &Path,
-    config_path: Option<&Path>,
-    certificate_path: Option<&Path>,
-    password: Option<&str>,
-    compression_level: Option<i32>,
-    no_compression: bool,
-    erasure: Option<&str>,
-    volume_count: Option<usize>,
-    max_volume_size: Option<u64>,
-    matrix_distribution: Option<bool>,
-    cdc_min: Option<usize>,
-    cdc_avg: Option<usize>,
-    cdc_max: Option<usize>,
-    packing_k: Option<usize>,
-) -> Result<()> {
+pub fn create(args: CreateArgs<'_>) -> Result<()> {
+    let CreateArgs {
+        inputs,
+        output,
+        config_path,
+        certificate_path,
+        password,
+        compression_level,
+        no_compression,
+        erasure,
+        volume_count,
+        max_volume_size,
+        matrix_distribution,
+        cdc_min,
+        cdc_avg,
+        cdc_max,
+        packing_k,
+    } = args;
     // 1. Load Configuration
     // Priority: CLI > Config File > Defaults (Secure)
     let mut config = if let Some(path) = config_path {
@@ -104,13 +124,17 @@ pub fn create(
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?
     } else {
         // Apply "Secure Defaults" when starting from scratch
-        let mut cfg = ArchiveConfig::default();
-        cfg.erasure = Some(ErasureCodeConfig {
-            data_shards: 4,
-            parity_shards: 2,
-        });
-        cfg.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
-        cfg
+        ArchiveConfig {
+            erasure: Some(ErasureCodeConfig {
+                data_shards: 4,
+                parity_shards: 2,
+            }),
+            distribution: MatrixDistributionConfig {
+                strategy: MatrixDistributionStrategy::RotatingOffset,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     };
 
     // 2. Apply CLI Overrides
@@ -205,7 +229,7 @@ pub fn create(
         }
     }
 
-    // 加载公钥证书
+    // Load public certificate
     let certificate = if let Some(path) = certificate_path {
         info!("Loading certificate: {}", path.display());
         let cert = era_crypto::load_public_key_from_pem(path)
@@ -271,7 +295,7 @@ pub fn create(
     // The instructions said "Introduce walkdir crate".
     // Let's use walkdir::WalkDir
     for input in inputs {
-        let path = input.as_ref();
+        let path = input.as_path();
         if path.is_dir() {
             let base = path.parent().unwrap_or(path);
             for entry in walkdir::WalkDir::new(path)

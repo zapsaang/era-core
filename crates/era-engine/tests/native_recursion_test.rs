@@ -1,7 +1,5 @@
-use era_common::{ArchiveConfig, CompressionAlgorithm, CompressionConfig};
 use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use std::fs;
-use std::path::Path;
 use tempfile::TempDir;
 
 #[test]

@@ -1,10 +1,8 @@
 use bytes::Bytes;
 use era_common::{ArchiveConfig, ArchiveId, BlockId, EncryptedMacroBlock};
-use era_storage::{LocalStorageBackend, StorageBackend, StorageWriter};
+use era_storage::LocalStorageBackend;
 use era_volume::{MultiVolumeConfig, MultiVolumeWriter, SuperHeader};
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];

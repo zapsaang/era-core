@@ -59,7 +59,7 @@ impl ArchiveConfig {
 
         // Validate erasure coding
         if let Some(data) = self.erasure_data_shards {
-            if data < 1 || data > 255 {
+            if !(1..=255).contains(&data) {
                 return Err(EraError::InvalidConfig(format!(
                     "erasure_data_shards must be 1-255, got {}",
                     data
@@ -68,7 +68,7 @@ impl ArchiveConfig {
         }
 
         if let Some(parity) = self.erasure_parity_shards {
-            if parity < 1 || parity > 255 {
+            if !(1..=255).contains(&parity) {
                 return Err(EraError::InvalidConfig(format!(
                     "erasure_parity_shards must be 1-255, got {}",
                     parity
@@ -175,7 +175,7 @@ impl EraConfig {
     /// * If configuration is invalid
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let content = fs::read_to_string(&path)?;
+        let content = fs::read_to_string(path)?;
 
         let config: EraConfig = toml::from_str(&content)
             .map_err(|e| EraError::InvalidConfig(format!("Invalid TOML: {}", e)))?;

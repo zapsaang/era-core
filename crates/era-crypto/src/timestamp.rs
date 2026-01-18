@@ -94,7 +94,7 @@ impl std::fmt::Display for Timestamp {
 }
 
 /// Optional timestamp that can be None
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OptionalTimestamp(pub Option<Timestamp>);
 
 impl OptionalTimestamp {
@@ -134,12 +134,6 @@ impl OptionalTimestamp {
     /// Check if timestamp is present and valid (past + not expired)
     pub fn is_valid(&self) -> bool {
         !self.is_expired() && !self.is_not_yet_valid()
-    }
-}
-
-impl Default for OptionalTimestamp {
-    fn default() -> Self {
-        Self(None)
     }
 }
 

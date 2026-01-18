@@ -46,14 +46,12 @@ fn test_catalog_recovery_debug() {
     println!("\nFiles created:");
     let mut files = Vec::new();
     if let Ok(entries) = fs::read_dir(temp_dir.path()) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                let name = path.file_name().unwrap().to_string_lossy().to_string();
-                println!("  {} ({} bytes)", name, size);
-                files.push((name, size, path));
-            }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            println!("  {} ({} bytes)", name, size);
+            files.push((name, size, path));
         }
     }
 
@@ -69,11 +67,9 @@ fn test_catalog_recovery_debug() {
 
     println!("Remaining files:");
     if let Ok(entries) = fs::read_dir(temp_dir.path()) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                if entry.path().is_file() {
-                    println!("  {:?}", entry.path().file_name());
-                }
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                println!("  {:?}", entry.path().file_name());
             }
         }
     }

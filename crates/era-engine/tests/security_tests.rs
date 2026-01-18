@@ -1,7 +1,7 @@
 //! Security-focused tests for key isolation and memory protection
 //!
 //! These tests verify the security properties described in the
-//! "密码缓存安全与性能优化" design document.
+//! "Password Cache Security and Performance Optimization" design document.
 
 use bytes::Bytes;
 use era_codec::ZstdCompressor;

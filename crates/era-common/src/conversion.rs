@@ -152,8 +152,8 @@ impl From<ErasureBlockInfo> for proto::ErasureBlockInfo {
         Self {
             data_shards: info.data_shards as u32,
             parity_shards: info.parity_shards as u32,
-            shard_size: info.shard_size as u32,
-            original_len: info.original_len as u32,
+            shard_size: info.shard_size,
+            original_len: info.original_len,
         }
     }
 }
@@ -164,8 +164,8 @@ impl TryFrom<proto::ErasureBlockInfo> for ErasureBlockInfo {
         Ok(Self {
             data_shards: proto.data_shards as u8,
             parity_shards: proto.parity_shards as u8,
-            shard_size: proto.shard_size as u32,
-            original_len: proto.original_len as u32,
+            shard_size: proto.shard_size,
+            original_len: proto.original_len,
         })
     }
 }

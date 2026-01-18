@@ -6,11 +6,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use era_common::{BlockLocation, ChunkHash, VolumeId};
-use era_engine::chunk_index::{
-    create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex,
-};
+use era_engine::chunk_index::{ChunkIndex, MemoryChunkIndex};
 use std::sync::Arc;
-use tempfile::TempDir;
 
 /// Create a test BlockLocation
 fn test_location(slot: u32) -> BlockLocation {
@@ -242,7 +239,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
         let mut write_i = initial_size;
         let mut op = 0usize;
         b.iter(|| {
-            if op % 5 == 0 {
+            if op.is_multiple_of(5) {
                 // Write (20%)
                 let hash = hash_from_index(write_i);
                 let loc = test_location(write_i as u32);
@@ -278,7 +275,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
             let mut write_i = initial_size;
             let mut op = 0usize;
             b.iter(|| {
-                if op % 5 == 0 {
+                if op.is_multiple_of(5) {
                     // Write (20%)
                     let hash = hash_from_index(write_i);
                     let loc = test_location(write_i as u32);

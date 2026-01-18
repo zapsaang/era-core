@@ -1,3 +1,4 @@
+#![cfg(feature = "lsm")]
 //! Real-world performance tests with realistic random data
 //! Tests CDC chunking with incompressible data to measure actual block counts
 
@@ -10,15 +11,13 @@ use tempfile::TempDir;
 /// Create pseudorandom incompressible data
 fn create_random_data(size: usize) -> Vec<u8> {
     use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::hash::BuildHasher;
 
     let mut data = Vec::with_capacity(size);
     let hasher_builder = RandomState::new();
 
     for i in 0..(size / 8) {
-        let mut hasher = hasher_builder.build_hasher();
-        i.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = hasher_builder.hash_one(i);
         data.extend_from_slice(&hash.to_le_bytes());
     }
 

@@ -9,7 +9,10 @@
 //!
 //! Each block is decrypted with a unique key derived on-the-fly.
 
-use crate::block_iter::{BlockIterator, SessionBlockIterator, SessionErasureBlockIterator};
+use crate::block_iter::{
+    BlockIterator, SessionBlockIterator, SessionErasureBlockIterator,
+    SessionErasureBlockIteratorArgs,
+};
 pub use crate::chunk_processor::{ExtractStats, VerifyStats};
 use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
@@ -1119,16 +1122,18 @@ impl ArchiveReader {
             let dist_strategy = self.volume_readers[0].header().config.distribution.strategy;
 
             Box::new(SessionErasureBlockIterator::new(
-                &self.volume_readers,
-                &self.volume_indices,
-                self.volume_readers[0].header().total_volumes as usize,
-                &self.session,
-                &self.volume_key,
-                self.nonce_context,
-                self.create_compressor(),
-                config.data_shards,
-                config.parity_shards,
-                dist_strategy,
+                SessionErasureBlockIteratorArgs {
+                    volume_readers: &self.volume_readers,
+                    volume_indices: &self.volume_indices,
+                    original_volume_count: self.volume_readers[0].header().total_volumes.into(),
+                    session: &self.session,
+                    volume_key: &self.volume_key,
+                    nonce_context: self.nonce_context,
+                    compressor: self.create_compressor(),
+                    data_shards: config.data_shards,
+                    parity_shards: config.parity_shards,
+                    distribution_strategy: dist_strategy,
+                },
             ))
         } else {
             Box::new(SessionBlockIterator::new(
@@ -1169,16 +1174,18 @@ impl ArchiveReader {
             let dist_strategy = self.volume_readers[0].header().config.distribution.strategy;
 
             Box::new(SessionErasureBlockIterator::new(
-                &self.volume_readers,
-                &self.volume_indices,
-                self.volume_readers[0].header().total_volumes as usize,
-                &self.session,
-                &self.volume_key,
-                self.nonce_context,
-                self.create_compressor(),
-                config.data_shards,
-                config.parity_shards,
-                dist_strategy,
+                SessionErasureBlockIteratorArgs {
+                    volume_readers: &self.volume_readers,
+                    volume_indices: &self.volume_indices,
+                    original_volume_count: self.volume_readers[0].header().total_volumes.into(),
+                    session: &self.session,
+                    volume_key: &self.volume_key,
+                    nonce_context: self.nonce_context,
+                    compressor: self.create_compressor(),
+                    data_shards: config.data_shards,
+                    parity_shards: config.parity_shards,
+                    distribution_strategy: dist_strategy,
+                },
             ))
         } else {
             Box::new(SessionBlockIterator::new(

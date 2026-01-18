@@ -4,7 +4,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use era_common::{BlockLocation, ChunkHash, VolumeId};
-use era_index::{IndexConfig, LsmChunkIndex};
+use era_index::LsmChunkIndex;
 use rand::Rng;
 use std::time::Duration;
 use tempfile::TempDir;

@@ -41,7 +41,7 @@ fn test_matrix_distribution_algorithm_correctness() {
         .unwrap();
 
     // Create 3 files of different sizes to generate multiple blocks
-    let file_sizes = vec![
+    let file_sizes = [
         50 * 1024,  // 50KB - generates ~8-10KB per shard with 4+2
         100 * 1024, // 100KB - generates ~16-20KB per shard
         75 * 1024,  // 75KB - generates ~12-15KB per shard
@@ -121,16 +121,16 @@ fn test_matrix_vs_striped_fault_tolerance() {
         println!("  Block {}: {:?}", block_seq, shards_per_volume);
 
         // Track how many shards each volume has
-        for vol_idx in 0..volume_count {
+        for (vol_idx, loss_count) in matrix_losses_per_volume.iter_mut().enumerate() {
             if shards_per_volume[vol_idx].is_empty() {
-                matrix_losses_per_volume[vol_idx] += 1;
+                *loss_count += 1;
             }
         }
     }
 
     println!("\n  Impact if losing one volume:");
-    for vol_idx in 0..volume_count {
-        let shards_lost = 3 - matrix_losses_per_volume[vol_idx]; // 3 blocks
+    for (vol_idx, loss_count) in matrix_losses_per_volume.iter().enumerate() {
+        let shards_lost = 3 - *loss_count; // 3 blocks
         println!(
             "    Volume {}: ~{} shards lost per block",
             vol_idx, shards_lost

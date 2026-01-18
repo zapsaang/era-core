@@ -107,7 +107,7 @@ impl std::fmt::Display for ChunkHash {
 impl From<ChunkHash> for crate::proto::ChunkHash {
     fn from(value: ChunkHash) -> Self {
         Self {
-            hash: value.0.to_vec().into(),
+            hash: value.0.to_vec(),
         }
     }
 }

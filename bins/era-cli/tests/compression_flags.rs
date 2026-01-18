@@ -29,7 +29,9 @@ fn test_create_no_compression_flag() {
         .arg(input.to_str().unwrap())
         .assert()
         .success()
-        .stdout(predicate::str::contains("Compression: disabled (Store mode)"));
+        .stdout(predicate::str::contains(
+            "Compression: disabled (Store mode)",
+        ));
 }
 
 #[test]
@@ -53,5 +55,7 @@ fn test_create_level_zero() {
         .arg(input.to_str().unwrap())
         .assert()
         .success()
-        .stdout(predicate::str::contains("Compression: disabled (Store mode)"));
+        .stdout(predicate::str::contains(
+            "Compression: disabled (Store mode)",
+        ));
 }

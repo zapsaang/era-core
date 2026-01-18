@@ -223,7 +223,7 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
     /// # Arguments
     /// * `volume_readers` - Available volume readers
     /// * `volume_indices` - Original index of each volume in the multi-volume sequence
-    ///                      e.g., [0, 2] means volume 0 and volume 2 are present
+    ///   e.g., [0, 2] means volume 0 and volume 2 are present
     /// * `erasure_unpacker` - Unpacker for erasure-coded blocks  
     /// * `data_shards` - Number of data shards in erasure config
     /// * `parity_shards` - Number of parity shards in erasure config
@@ -634,6 +634,20 @@ pub struct SessionErasureBlockIterator<'a, R: era_storage::StorageReader> {
     pending_blocks: VecDeque<Result<DecodedBlock>>,
 }
 
+/// Arguments for creating a SessionErasureBlockIterator
+pub struct SessionErasureBlockIteratorArgs<'a, R: era_storage::StorageReader> {
+    pub volume_readers: &'a [VolumeReader<R>],
+    pub volume_indices: &'a [usize],
+    pub original_volume_count: usize,
+    pub session: &'a KeySession,
+    pub volume_key: &'a VolumeKey,
+    pub nonce_context: [u8; 16],
+    pub compressor: Box<dyn era_codec::Compressor>,
+    pub data_shards: u8,
+    pub parity_shards: u8,
+    pub distribution_strategy: MatrixDistributionStrategy,
+}
+
 impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
     /// Create a new session-based erasure block iterator.
     ///
@@ -646,18 +660,19 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
     /// * `compressor` - The compressor for decompression
     /// * `data_shards` - Number of data shards in erasure config
     /// * `parity_shards` - Number of parity shards in erasure config
-    pub fn new(
-        volume_readers: &'a [VolumeReader<R>],
-        volume_indices: &[usize],
-        original_volume_count: usize,
-        session: &'a KeySession,
-        volume_key: &'a VolumeKey,
-        nonce_context: [u8; 16],
-        compressor: Box<dyn era_codec::Compressor>,
-        data_shards: u8,
-        parity_shards: u8,
-        distribution_strategy: MatrixDistributionStrategy,
-    ) -> Self {
+    pub fn new(args: SessionErasureBlockIteratorArgs<'a, R>) -> Self {
+        let SessionErasureBlockIteratorArgs {
+            volume_readers,
+            volume_indices,
+            original_volume_count,
+            session,
+            volume_key,
+            nonce_context,
+            compressor,
+            data_shards,
+            parity_shards,
+            distribution_strategy,
+        } = args;
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
@@ -809,8 +824,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 };
 
                 let shard_len = shard_header.length as usize;
-                if shard_idx < data_shards {
-                    data_lengths[shard_idx] = Some(shard_header.length);
+                if let Some(slot) = data_lengths.get_mut(shard_idx) {
+                    *slot = Some(shard_header.length);
                 }
                 if shard_len > max_len {
                     max_len = shard_len;
@@ -857,7 +872,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             return None;
         }
 
-        let shard_size = if max_len % 2 == 0 {
+        let shard_size = if max_len.is_multiple_of(2) {
             max_len
         } else {
             max_len + 1

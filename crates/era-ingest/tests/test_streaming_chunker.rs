@@ -22,11 +22,11 @@ fn test_streaming_chunker_directly() {
 
     let reader = Cursor::new(data);
     let config = ChunkerConfig::default(); // 64KB avg
-    let mut streaming = StreamingChunker::new(reader, config);
+    let streaming = StreamingChunker::new(reader, config);
 
     let mut chunks = Vec::new();
     let mut count = 0;
-    while let Some(result) = streaming.next() {
+    for result in streaming {
         let chunk = result.unwrap();
         println!("  Chunk {}: {} bytes", count, chunk.data.len());
         chunks.push(chunk);

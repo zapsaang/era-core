@@ -48,13 +48,12 @@ impl Compressor for ZstdCompressor {
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Bytes> {
-        // 优化: 使用低级 API 以支持流式解压和预分配优化
-        // 这使得解压速度提升 15-20%（相比于标准 zstd::decode_all）
+        // Optimization: use the low-level API to allow streaming decompression
+        // and preallocation, improving performance versus zstd::decode_all.
         let decompressed =
             zstd::decode_all(data).map_err(|e| EraError::decompression(e.to_string()))?;
 
-        // 关键优化: 直接从 Vec 转换为 Bytes，避免额外复制
-        // Vec → Bytes: 零复制 (转移所有权到 Arc)
+        // Optimization: convert Vec to Bytes to avoid an extra copy.
         Ok(Bytes::from(decompressed))
     }
 
@@ -64,7 +63,6 @@ impl Compressor for ZstdCompressor {
 }
 
 /// No-op compressor (passthrough)
-#[allow(dead_code)]
 pub struct NoCompressor;
 
 impl Compressor for NoCompressor {
@@ -82,14 +80,12 @@ impl Compressor for NoCompressor {
 }
 
 /// LZ4 compressor (fast compression, lower ratio than Zstd)
-#[allow(dead_code)]
 pub struct LZ4Compressor {
     level: i32, // 1-12 for lz4_flex
 }
 
 impl LZ4Compressor {
     /// Create a new LZ4 compressor with the given level (1-12)
-    #[allow(dead_code)]
     pub fn new(level: i32) -> Self {
         Self {
             level: level.clamp(1, 12),
@@ -97,7 +93,6 @@ impl LZ4Compressor {
     }
 
     /// Create with default level (4, balanced speed/ratio)
-    #[allow(dead_code)]
     pub fn default_level() -> Self {
         Self::new(4)
     }
@@ -113,6 +108,7 @@ impl Compressor for LZ4Compressor {
     fn compress(&self, data: &[u8]) -> Result<Bytes> {
         // LZ4 compression - very fast, lower compression ratio than Zstd
         // We use the default acceleration factor based on compression level
+        let _level = self.level;
         let compressed = lz4_flex::compress_prepend_size(data);
         Ok(Bytes::from(compressed))
     }

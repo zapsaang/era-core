@@ -1,3 +1,4 @@
+#![cfg(feature = "lsm")]
 //! Minimal debug test to trace CDC path
 
 use era_common::Result;
@@ -7,7 +8,6 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
-#[cfg(feature = "lsm")]
 fn test_debug_cdc_path() -> Result<()> {
     let temp = TempDir::new()?;
     let data_dir = temp.path().join("data");

@@ -2,10 +2,8 @@
 /// Integration test suite for comprehensive validation
 ///
 /// This test file is meant to be run as part of the era-core test suite
-
 #[cfg(test)]
 mod ruthless_audit_tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::Instant;

@@ -206,8 +206,7 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         block_id: era_common::BlockId,
         shard_index: usize,
     ) -> Result<ChunkVec> {
-        let encrypted_block =
-            self.decode_shard(shards, erasure_info, block_id, shard_index)?;
+        let encrypted_block = self.decode_shard(shards, erasure_info, block_id, shard_index)?;
         let unpacked = self.inner.unpack(&encrypted_block)?;
         crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
@@ -312,9 +311,7 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         let mut recovered = coder.recover_data_shards(&shard_array, shard_size)?;
         let mut shard_data = recovered
             .get_mut(shard_index)
-            .ok_or_else(|| {
-                era_common::EraError::ErasureError("Recovered shard missing".into())
-            })?
+            .ok_or_else(|| era_common::EraError::ErasureError("Recovered shard missing".into()))?
             .to_vec();
 
         // Trim to original length for this block
@@ -446,8 +443,8 @@ mod tests {
         let chunk1 = UniqueChunk::new(Bytes::from(data.clone()), ChunkHash::from_bytes([1u8; 32]));
         let chunk2 = UniqueChunk::new(Bytes::from(data), ChunkHash::from_bytes([2u8; 32]));
 
-        let block1 = builder1.pack_single(chunk1).unwrap();
-        let block2 = builder2.pack_single(chunk2).unwrap();
+        let _block1 = builder1.pack_single(chunk1).unwrap();
+        let _block2 = builder2.pack_single(chunk2).unwrap();
 
         // TODO: This fails after Protobuf migration. Ciphertexts are identical despite different hashes.
         // Requires deep investigation into why index variations aren't affecting ciphertext bits.

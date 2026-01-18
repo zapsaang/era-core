@@ -1,4 +1,4 @@
-use era_engine::{ArchiveWriter, AuthMode};
+use era_engine::ArchiveWriter;
 use tempfile::TempDir;
 
 #[test]

@@ -51,11 +51,7 @@ impl StorageBackend for LocalStorageBackend {
             .truncate(true)
             .open(&full_path)?;
 
-        Ok(LocalStorageWriter {
-            file,
-            path: full_path,
-            size: 0,
-        })
+        Ok(LocalStorageWriter { file, size: 0 })
     }
 
     fn open_append(&self, path: &Path) -> Result<Self::Writer> {
@@ -68,11 +64,7 @@ impl StorageBackend for LocalStorageBackend {
 
         let size = file.seek(SeekFrom::End(0))?;
 
-        Ok(LocalStorageWriter {
-            file,
-            path: full_path,
-            size,
-        })
+        Ok(LocalStorageWriter { file, size })
     }
 
     fn open_read(&self, path: &Path) -> Result<Self::Reader> {
@@ -90,11 +82,7 @@ impl StorageBackend for LocalStorageBackend {
 
         let size = file.metadata()?.len();
 
-        Ok(LocalStorageReader {
-            file,
-            path: full_path,
-            size,
-        })
+        Ok(LocalStorageReader { file, size })
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -130,9 +118,6 @@ impl StorageBackend for LocalStorageBackend {
 /// Local filesystem storage writer
 pub struct LocalStorageWriter {
     file: File,
-    /// Path is stored for debugging and future use
-    #[allow(dead_code)]
-    path: PathBuf,
     size: u64,
 }
 
@@ -152,7 +137,7 @@ impl StorageWriter for LocalStorageWriter {
             use std::os::unix::fs::FileExt;
             self.file.write_all_at(data, offset)?;
         }
-        
+
         #[cfg(not(unix))]
         {
             // Save current position
@@ -165,7 +150,7 @@ impl StorageWriter for LocalStorageWriter {
             // Restore position
             self.file.seek(SeekFrom::Start(current_pos))?;
         }
-        
+
         Ok(())
     }
 
@@ -187,9 +172,6 @@ impl StorageWriter for LocalStorageWriter {
 /// Local filesystem storage reader
 pub struct LocalStorageReader {
     file: File,
-    /// Path is stored for debugging and future use
-    #[allow(dead_code)]
-    path: PathBuf,
     size: u64,
 }
 

@@ -151,7 +151,9 @@ fn test_volume_specification_compliance() {
             builder = builder.volume_count(specified);
         }
 
-        let mut writer = builder.build().expect(&format!("Failed for {}", label));
+        let mut writer = builder
+            .build()
+            .unwrap_or_else(|_| panic!("Failed for {}", label));
         let data = vec![0xAB; 64 * 1024];
         writer.add_bytes("test", &data).ok();
         writer.finalize().ok();

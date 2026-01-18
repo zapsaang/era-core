@@ -88,7 +88,7 @@ impl DirectoryScanner {
                 let entry = match entry {
                     Ok(e) => e,
                     Err(e) => {
-                        let io_err = std::io::Error::new(std::io::ErrorKind::Other, e);
+                        let io_err = std::io::Error::other(e);
                         return Some(Err(EraError::Io(io_err)));
                     }
                 };
@@ -145,8 +145,7 @@ impl DirectoryScanner {
     /// Create a FileEntry with full metadata
     fn create_file_entry(&self, path: &Path) -> Result<FileEntry> {
         // Basic metadata from FileEntry::from_path
-        let mut entry =
-            FileEntry::from_path(path, &self.options.root).map_err(|e| EraError::Io(e))?;
+        let mut entry = FileEntry::from_path(path, &self.options.root).map_err(EraError::Io)?;
 
         // Extract XAttrs if enabled
         if self.options.extract_xattrs {
@@ -174,10 +173,8 @@ impl DirectoryScanner {
             for name in iter {
                 if let Some(name_str) = name.to_str() {
                     // Filter system xattrs if needed?
-                    if let Ok(value) = xattr::get(path, name_str) {
-                        if let Some(val) = value {
-                            xattrs.insert(name_str.to_string(), val);
-                        }
+                    if let Ok(Some(val)) = xattr::get(path, name_str) {
+                        xattrs.insert(name_str.to_string(), val);
                     }
                 }
             }
@@ -409,11 +406,11 @@ mod scanner_tests {
         // if entry.path() == root ... I had a comment but no code to return None.
         // So root is included.
 
-        assert!(entries.iter().any(|e| e.path == PathBuf::from("file1.txt")));
-        assert!(entries.iter().any(|e| e.path == PathBuf::from("subdir")));
+        assert!(entries.iter().any(|e| e.path == Path::new("file1.txt")));
+        assert!(entries.iter().any(|e| e.path == Path::new("subdir")));
         assert!(entries
             .iter()
-            .any(|e| e.path == PathBuf::from("subdir/file2.txt")));
+            .any(|e| e.path == Path::new("subdir/file2.txt")));
         assert!(!entries
             .iter()
             .any(|e| e.path.to_string_lossy().ends_with("ignored.log")));

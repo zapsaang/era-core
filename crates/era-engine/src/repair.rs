@@ -277,7 +277,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
                     )));
                 }
             } else {
-                let shard_size = if max_len % 2 == 0 {
+                let shard_size = if max_len.is_multiple_of(2) {
                     max_len
                 } else {
                     max_len + 1
@@ -462,7 +462,7 @@ pub fn repair_archive_matrix(
     let first_reader = VolumeReader::open(&backend, Path::new(volume_filename))?;
     let archive_id = first_reader.header().archive_id;
     let header = first_reader.header().clone();
-    let total_volumes = first_reader.header().total_volumes as u16;
+    let total_volumes = first_reader.header().total_volumes;
 
     volume_sequences.push(0);
     volume_paths.push(path.to_path_buf());
@@ -739,7 +739,7 @@ pub fn repair_archive_matrix(
                     )));
                 }
             } else {
-                let shard_size = if max_len % 2 == 0 {
+                let shard_size = if max_len.is_multiple_of(2) {
                     max_len
                 } else {
                     max_len + 1

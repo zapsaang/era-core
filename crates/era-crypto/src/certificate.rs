@@ -1,30 +1,31 @@
-//! # ERA 证书密钥模块
+//! # ERA Certificate Key Module
 //!
-//! 提供基于X25519的密钥交换方案，作为Argon2密码派生的高性能替代。
+//! Provides an X25519-based key exchange flow as a high-performance alternative
+//! to Argon2 password-derived keys.
 //!
-//! ## 性能对比
+//! ## Performance Comparison
 //!
-//! | 方案 | 密钥派生时间 |
-//! |------|-------------|
+//! | Scheme | Key Derivation Time |
+//! |--------|---------------------|
 //! | Argon2 (64MB) | ~80ms |
 //! | Argon2 (256MB) | ~343ms |
 //! | X25519 | ~0.05ms |
 //!
-//! ## 使用方式
+//! ## Usage
 //!
 //! ```rust,ignore
 //! use era_crypto::certificate::{EraKeyPair, EraCertificate};
 //!
-//! // 生成密钥对
+//! // Generate a keypair
 //! let keypair = EraKeyPair::generate()?;
 //!
-//! // 导出公钥证书（可以分发）
+//! // Export the public certificate (safe to distribute)
 //! let cert = keypair.certificate();
 //!
-//! // 保存密钥对（加密存储）
+//! // Save the keypair (encrypted at rest)
 //! keypair.save_encrypted("my_key.era-key", "key_password")?;
 //!
-//! // 加载密钥对
+//! // Load the keypair
 //! let keypair = EraKeyPair::load_encrypted("my_key.era-key", "key_password")?;
 //! ```
 
@@ -42,59 +43,59 @@ use time::OffsetDateTime;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// 密钥ID长度 (16 bytes = 128 bits)
+/// Key ID length (16 bytes = 128 bits)
 pub const KEY_ID_LEN: usize = 16;
 
-/// X25519密钥长度
+/// X25519 key length
 pub const KEY_LEN: usize = 32;
 
-/// 密钥文件魔数
+/// Key file magic bytes
 const KEY_FILE_MAGIC: &[u8; 4] = b"ERAK";
 
-/// 证书文件魔数
+/// Certificate file magic bytes
 const CERT_FILE_MAGIC: &[u8; 4] = b"ERAC";
 
-/// 密钥文件版本
+/// Key file version
 const KEY_FILE_VERSION: u8 = 1;
 
-/// ERA 密钥对
+/// ERA keypair
 ///
-/// 包含私钥和公钥，用于创建和解密归档。
-/// 私钥使用安全内存保护，drop时自动清零。
+/// Holds the private and public key used to create and decrypt archives.
+/// The private key is protected in secure memory and zeroized on drop.
 #[derive(ZeroizeOnDrop)]
 pub struct EraKeyPair {
-    /// 私钥 (32 bytes)
+    /// Private key (32 bytes)
     #[zeroize(skip)] // StaticSecret has its own zeroize
     pub(crate) secret_key: StaticSecret,
-    /// 公钥 (32 bytes)
+    /// Public key (32 bytes)
     public_key: PublicKey,
-    /// 密钥ID (用于识别密钥)
+    /// Key ID (identifier)
     key_id: [u8; KEY_ID_LEN],
-    /// 创建时间 (Unix timestamp)
+    /// Creation time (Unix timestamp)
     created_at: u64,
 }
 
-/// ERA 公钥证书 (v0.2.0+)
+/// ERA public certificate (v0.2.0+)
 ///
-/// 只包含公钥信息，可以安全分发。
-/// 用于创建只有对应私钥持有者才能解密的归档。
+/// Contains only public key data and is safe to distribute. Used to create
+/// archives that only the corresponding private key holder can decrypt.
 ///
-/// 时间戳现在使用标准 ISO 8601 格式（OffsetDateTime）存储
+/// Timestamps are stored in ISO 8601 format (OffsetDateTime).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EraCertificate {
-    /// 公钥 (32 bytes)
+    /// Public key (32 bytes)
     public_key: [u8; KEY_LEN],
-    /// 密钥ID
+    /// Key ID
     key_id: [u8; KEY_ID_LEN],
-    /// 创建时间 (ISO 8601 UTC)
+    /// Creation time (ISO 8601 UTC)
     created_at: Timestamp,
-    /// 可选：过期时间 (ISO 8601 UTC)
+    /// Optional expiration time (ISO 8601 UTC)
     expires_at: OptionalTimestamp,
-    /// 可选：备注/标签
+    /// Optional label
     label: Option<String>,
 }
 
-/// 临时密钥对（用于ECDH）
+/// Ephemeral keypair (for ECDH)
 #[derive(ZeroizeOnDrop)]
 pub struct EphemeralKeyPair {
     #[zeroize(skip)]
@@ -102,12 +103,12 @@ pub struct EphemeralKeyPair {
     public: PublicKey,
 }
 
-/// 密钥封装结果
+/// Key encapsulation result
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct KeyEncapsulation {
-    /// 临时公钥（需要存储在归档中）
+    /// Ephemeral public key (stored in the archive)
     pub ephemeral_public: [u8; KEY_LEN],
-    /// 加密后的主密钥
+    /// Encrypted master key
     pub encrypted_master_key: Vec<u8>,
 }
 
@@ -132,19 +133,19 @@ impl KeyEncapsulation {
     }
 }
 
-/// 解封装的主密钥
+/// Decapsulated master key
 pub struct DecapsulatedKey {
-    /// 主密钥（32 bytes），内部使用Vec并在drop时清零
+    /// Master key (32 bytes), zeroized on drop
     master_key: Vec<u8>,
 }
 
 impl DecapsulatedKey {
-    /// 获取主密钥字节
+    /// Get master key bytes
     pub fn as_bytes(&self) -> &[u8] {
         &self.master_key
     }
 
-    /// 获取32字节数组
+    /// Get a 32-byte array copy
     pub fn to_array(&self) -> [u8; KEY_LEN] {
         let mut arr = [0u8; KEY_LEN];
         arr.copy_from_slice(&self.master_key);
@@ -159,18 +160,18 @@ impl Drop for DecapsulatedKey {
 }
 
 impl EraKeyPair {
-    /// 生成新的密钥对
+    /// Generate a new keypair
     pub fn generate() -> Result<Self> {
         let mut rng = rand::thread_rng();
 
-        // 生成X25519密钥对
+        // Generate X25519 keypair
         let secret_key = StaticSecret::random_from_rng(&mut rng);
         let public_key = PublicKey::from(&secret_key);
 
-        // 生成密钥ID（公钥的前16字节hash）
+        // Generate key ID (first 16 bytes of the public key hash)
         let key_id = Self::compute_key_id(&public_key);
 
-        // 获取当前时间戳
+        // Capture current timestamp
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -184,7 +185,7 @@ impl EraKeyPair {
         })
     }
 
-    /// 从原始字节创建密钥对
+    /// Create a keypair from raw bytes
     pub fn from_bytes(secret_bytes: &[u8; KEY_LEN]) -> Result<Self> {
         let secret_key = StaticSecret::from(*secret_bytes);
         let public_key = PublicKey::from(&secret_key);
@@ -203,7 +204,7 @@ impl EraKeyPair {
         })
     }
 
-    /// 计算密钥ID（公钥的BLAKE3 hash的前16字节）
+    /// Compute key ID (first 16 bytes of the public key BLAKE3 hash)
     fn compute_key_id(public_key: &PublicKey) -> [u8; KEY_ID_LEN] {
         let hash = crate::hash(public_key.as_bytes());
         let mut key_id = [0u8; KEY_ID_LEN];
@@ -211,27 +212,27 @@ impl EraKeyPair {
         key_id
     }
 
-    /// 获取密钥ID
+    /// Get key ID
     pub fn key_id(&self) -> &[u8; KEY_ID_LEN] {
         &self.key_id
     }
 
-    /// 获取公钥
+    /// Get public key
     pub fn public_key(&self) -> &PublicKey {
         &self.public_key
     }
 
-    /// 获取公钥字节
+    /// Get public key bytes
     pub fn public_key_bytes(&self) -> [u8; KEY_LEN] {
         *self.public_key.as_bytes()
     }
 
-    /// 获取创建时间
+    /// Get creation time
     pub fn created_at(&self) -> u64 {
         self.created_at
     }
 
-    /// 导出公钥证书
+    /// Export public certificate
     pub fn certificate(&self) -> EraCertificate {
         EraCertificate {
             public_key: *self.public_key.as_bytes(),
@@ -243,9 +244,10 @@ impl EraKeyPair {
         }
     }
 
-    /// 使用接收者公钥封装主密钥
+    /// Encapsulate the master key with the recipient's public key.
     ///
-    /// 生成临时密钥对，与接收者公钥进行ECDH，然后加密主密钥。
+    /// Generates an ephemeral keypair, performs ECDH with the recipient key,
+    /// then encrypts the master key.
     pub fn encapsulate_for(
         recipient: &EraCertificate,
         master_key: &[u8],
@@ -254,19 +256,19 @@ impl EraKeyPair {
             return Err(EraError::InvalidKey("Master key must be 32 bytes".into()));
         }
 
-        // 生成临时密钥对
+        // Generate ephemeral keypair
         let ephemeral = EphemeralKeyPair::generate();
 
-        // 与接收者公钥进行ECDH
+        // Perform ECDH with recipient public key
         let recipient_public = PublicKey::from(recipient.public_key);
         let shared_secret = ephemeral.secret.diffie_hellman(&recipient_public);
 
-        // 使用HKDF派生加密密钥
+        // Derive wrapping key via HKDF
         let wrap_key = Self::derive_wrap_key(shared_secret.as_bytes())?;
 
-        // 加密主密钥
+        // Encrypt master key
         let aead = AeadCipher::new();
-        let nonce = Nonce::zero(); // 因为wrap_key是一次性的，可以用零nonce
+        let nonce = Nonce::zero(); // One-time wrap key allows a zero nonce
         let encrypted = aead.encrypt(&wrap_key, &nonce, master_key)?;
 
         Ok(KeyEncapsulation {
@@ -275,20 +277,21 @@ impl EraKeyPair {
         })
     }
 
-    /// 解封装主密钥
+    /// Decapsulate the master key.
     ///
-    /// 使用私钥与临时公钥进行ECDH，然后解密主密钥。
+    /// Uses the private key and the ephemeral public key for ECDH, then
+    /// decrypts the master key.
     pub fn decapsulate(&self, encapsulation: &KeyEncapsulation) -> Result<DecapsulatedKey> {
-        // 恢复临时公钥
+        // Restore ephemeral public key
         let ephemeral_public = PublicKey::from(encapsulation.ephemeral_public);
 
-        // 进行ECDH
+        // Perform ECDH
         let shared_secret = self.secret_key.diffie_hellman(&ephemeral_public);
 
-        // 使用HKDF派生解密密钥
+        // Derive unwrapping key via HKDF
         let wrap_key = Self::derive_wrap_key(shared_secret.as_bytes())?;
 
-        // 解密主密钥
+        // Decrypt master key
         let aead = AeadCipher::new();
         let nonce = Nonce::zero();
         let mut decrypted = aead.decrypt(&wrap_key, &nonce, &encapsulation.encrypted_master_key)?;
@@ -305,7 +308,7 @@ impl EraKeyPair {
         })
     }
 
-    /// 使用HKDF派生密钥封装密钥
+    /// Derive the key wrapping key via HKDF
     fn derive_wrap_key(shared_secret: &[u8]) -> Result<AeadKey> {
         use hkdf::Hkdf;
         use sha2::Sha256;
@@ -318,24 +321,24 @@ impl EraKeyPair {
         Ok(AeadKey(okm))
     }
 
-    /// 保存密钥对到文件（加密存储）
+    /// Save the keypair to a file (encrypted at rest).
     ///
-    /// 使用Argon2派生加密密钥来保护私钥。
-    /// 这里Argon2的开销是可接受的，因为密钥文件只在初始化时加载一次。
+    /// Uses Argon2 to derive an encryption key to protect the private key.
+    /// The Argon2 cost is acceptable because the key file is loaded rarely.
     pub fn save_encrypted<P: AsRef<Path>>(&self, path: P, password: &str) -> Result<()> {
-        // 使用Argon2派生加密密钥（这里用较轻的参数，因为私钥本身是高熵的）
+        // Derive encryption key via Argon2 (lighter params since the private key is high entropy)
         let salt = Salt::generate();
-        let params = KdfParams::fast(); // 1MB内存，快速
+        let params = KdfParams::fast(); // 1MB memory, fast
         let encryption_key = derive_key(password.as_bytes(), &salt, &params)?;
 
-        // 加密私钥
+        // Encrypt private key
         let aead = AeadCipher::new();
         let nonce = Nonce::generate();
         let secret_bytes = self.secret_key.as_bytes();
         let encrypted_secret =
             aead.encrypt(&AeadKey(*encryption_key.as_bytes()), &nonce, secret_bytes)?;
 
-        // 构建文件内容
+        // Build file payload
         // Format: MAGIC(4) + VERSION(1) + SALT(16) + NONCE(24) + KEY_ID(16) + CREATED_AT(8) + ENCRYPTED_SECRET(32+16)
         let mut file_data = Vec::with_capacity(128);
         file_data.extend_from_slice(KEY_FILE_MAGIC);
@@ -346,20 +349,20 @@ impl EraKeyPair {
         file_data.extend_from_slice(&self.created_at.to_le_bytes());
         file_data.extend_from_slice(&encrypted_secret);
 
-        // 写入文件
+        // Write file
         let mut file = fs::File::create(path)?;
         file.write_all(&file_data)?;
 
         Ok(())
     }
 
-    /// 从加密文件加载密钥对
+    /// Load a keypair from an encrypted file
     pub fn load_encrypted<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
         let mut file = fs::File::open(path)?;
         let mut file_data = Vec::new();
         file.read_to_end(&mut file_data)?;
 
-        // 验证魔数和版本
+        // Validate magic and version
         // Format: MAGIC(4) + VERSION(1) + SALT(16) + NONCE(24) + KEY_ID(16) + CREATED_AT(8) + ENCRYPTED_SECRET
         // Minimum: 4+1+16+24+16+8+48 = 117 bytes
         if file_data.len() < 117 {
@@ -376,7 +379,7 @@ impl EraKeyPair {
             ));
         }
 
-        // 解析文件内容
+        // Parse file payload
         let salt_bytes: [u8; 16] = file_data[5..21]
             .try_into()
             .map_err(|_| EraError::InvalidFormat("Invalid salt length".into()))?;
@@ -387,11 +390,11 @@ impl EraKeyPair {
         let created_at = u64::from_le_bytes(file_data[61..69].try_into().unwrap());
         let encrypted_secret = &file_data[69..];
 
-        // 使用Argon2派生解密密钥
+        // Derive decryption key via Argon2
         let params = KdfParams::fast();
         let encryption_key = derive_key(password.as_bytes(), &salt, &params)?;
 
-        // 解密私钥
+        // Decrypt private key
         let aead = AeadCipher::new();
         let secret_bytes = aead.decrypt(
             &AeadKey(*encryption_key.as_bytes()),
@@ -410,7 +413,7 @@ impl EraKeyPair {
 
         let public_key = PublicKey::from(&secret_key);
 
-        // 验证key_id匹配
+        // Validate key_id match
         let computed_key_id = Self::compute_key_id(&public_key);
         if computed_key_id != key_id {
             return Err(EraError::InvalidKey("Key ID mismatch".into()));
@@ -424,18 +427,18 @@ impl EraKeyPair {
         })
     }
 
-    /// 获取创建时间作为 OffsetDateTime
+    /// Get creation time as OffsetDateTime.
     ///
-    /// 将内部存储的 Unix 时间戳转换为 OffsetDateTime
+    /// Converts the stored Unix timestamp to OffsetDateTime.
     ///
     /// # Errors
-    /// 如果 Unix 时间戳无效，返回 EraError
+    /// Returns `EraError` if the Unix timestamp is invalid.
     pub fn created_at_datetime(&self) -> Result<OffsetDateTime> {
         OffsetDateTime::from_unix_timestamp(self.created_at as i64)
             .map_err(|e| EraError::InvalidKey(format!("Invalid timestamp: {}", e)))
     }
 
-    /// 获取密钥的年龄（从创建到现在）
+    /// Get key age in seconds (creation to now)
     pub fn age_seconds(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -446,7 +449,7 @@ impl EraKeyPair {
 }
 
 impl EraCertificate {
-    /// 创建新证书
+    /// Create a new certificate
     pub fn new(public_key: [u8; KEY_LEN], key_id: [u8; KEY_ID_LEN], created_at: u64) -> Self {
         Self {
             public_key,
@@ -458,7 +461,7 @@ impl EraCertificate {
         }
     }
 
-    /// 从公钥字节创建
+    /// Create from public key bytes
     pub fn from_public_key(public_key: &[u8; KEY_LEN]) -> Self {
         let hash = crate::hash(public_key);
         let mut key_id = [0u8; KEY_ID_LEN];
@@ -473,7 +476,7 @@ impl EraCertificate {
         }
     }
 
-    /// 设置过期时间
+    /// Set expiration time
     pub fn with_expiry(mut self, expires_at: u64) -> Self {
         if expires_at == 0 {
             // 0 means already expired
@@ -492,33 +495,33 @@ impl EraCertificate {
         self
     }
 
-    /// 设置标签
+    /// Set label
     pub fn with_label(mut self, label: String) -> Self {
         self.label = Some(label);
         self
     }
 
-    /// 获取公钥
+    /// Get public key
     pub fn public_key(&self) -> &[u8; KEY_LEN] {
         &self.public_key
     }
 
-    /// 获取密钥ID
+    /// Get key ID
     pub fn key_id(&self) -> &[u8; KEY_ID_LEN] {
         &self.key_id
     }
 
-    /// 获取创建时间
+    /// Get creation time
     pub fn created_at(&self) -> Timestamp {
-        self.created_at.clone()
+        self.created_at
     }
 
-    /// 检查是否过期
+    /// Check whether expired
     pub fn is_expired(&self) -> bool {
         self.expires_at.is_expired()
     }
 
-    /// 保存证书到文件
+    /// Save certificate to file
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let mut file_data = Vec::with_capacity(128);
         file_data.extend_from_slice(CERT_FILE_MAGIC);
@@ -537,7 +540,7 @@ impl EraCertificate {
         Ok(())
     }
 
-    /// 从文件加载证书
+    /// Load certificate from file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut file = fs::File::open(path)?;
         let mut file_data = Vec::new();
@@ -566,7 +569,7 @@ impl EraCertificate {
 
         let proto: era_common::proto::EraCertificate =
             era_common::deserialize_proto(&file_data[9..9 + cert_len])?;
-        return Self::from_proto(proto);
+        Self::from_proto(proto)
     }
 
     pub fn to_proto(&self) -> era_common::proto::EraCertificate {
@@ -603,23 +606,23 @@ impl EraCertificate {
         })
     }
 
-    /// 获取创建时间作为 OffsetDateTime
+    /// Get creation time as OffsetDateTime.
     ///
-    /// 返回 Timestamp 结构中存储的 OffsetDateTime
+    /// Returns the OffsetDateTime stored in the Timestamp struct.
     pub fn created_at_datetime(&self) -> OffsetDateTime {
         self.created_at.to_datetime()
     }
 
-    /// 获取过期时间作为 OffsetDateTime（如果设置）
+    /// Get expiration time as OffsetDateTime (if set).
     ///
-    /// 返回 OptionalTimestamp 中存储的 OffsetDateTime（如果设置）
+    /// Returns the OffsetDateTime stored in OptionalTimestamp (if set).
     pub fn expires_at_datetime(&self) -> Option<OffsetDateTime> {
         self.expires_at.0.as_ref().map(|ts| ts.to_datetime())
     }
 }
 
 impl EphemeralKeyPair {
-    /// 生成新的临时密钥对
+    /// Generate a new ephemeral keypair
     pub fn generate() -> Self {
         let mut rng = rand::thread_rng();
         let secret = StaticSecret::random_from_rng(&mut rng);
@@ -631,7 +634,7 @@ impl EphemeralKeyPair {
 impl std::fmt::Debug for EraKeyPair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EraKeyPair")
-            .field("key_id", &hex::encode(&self.key_id))
+            .field("key_id", &hex::encode(self.key_id))
             .field("public_key", &hex::encode(self.public_key.as_bytes()))
             .field("created_at", &self.created_at)
             .finish()
@@ -665,14 +668,14 @@ mod tests {
         let recipient = EraKeyPair::generate().unwrap();
         let cert = recipient.certificate();
 
-        // 要封装的主密钥
+        // Master key to encapsulate
         let mut master_key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut master_key);
 
-        // 封装
+        // Encapsulate
         let encapsulation = EraKeyPair::encapsulate_for(&cert, &master_key).unwrap();
 
-        // 解封装
+        // Decapsulate
         let decapsulated = recipient.decapsulate(&encapsulation).unwrap();
 
         assert_eq!(decapsulated.master_key.as_slice(), &master_key);
@@ -726,11 +729,11 @@ mod tests {
     fn test_certificate_expiry() {
         let keypair = EraKeyPair::generate().unwrap();
 
-        // 未过期
+        // Not expired
         let cert = keypair.certificate().with_expiry(u64::MAX);
         assert!(!cert.is_expired());
 
-        // 已过期
+        // Expired
         let cert = keypair.certificate().with_expiry(0);
         assert!(cert.is_expired());
     }
@@ -741,10 +744,10 @@ mod tests {
         let cert = keypair.certificate();
 
         let datetime = cert.created_at_datetime();
-        // 验证 datetime 是最近创建的
+        // Validate the datetime is recent
         let now = time::OffsetDateTime::now_utc();
         let diff = (now - datetime).whole_seconds().abs();
-        assert!(diff < 5); // 应该在 5 秒内
+        assert!(diff < 5); // Should be within 5 seconds
     }
 
     #[test]
@@ -762,7 +765,7 @@ mod tests {
         let keypair = EraKeyPair::generate().unwrap();
         let initial_age = keypair.age_seconds();
 
-        // 等待 1 秒
+        // Wait 1 second
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         let later_age = keypair.age_seconds();
@@ -774,11 +777,11 @@ mod tests {
     fn test_certificate_expires_at_datetime() {
         let keypair = EraKeyPair::generate().unwrap();
 
-        // 无过期时间
+        // No expiration
         let cert = keypair.certificate();
         assert!(cert.expires_at_datetime().is_none());
 
-        // 有过期时间
+        // With expiration
         let future_ts =
             (time::OffsetDateTime::now_utc() + time::Duration::days(30)).unix_timestamp() as u64;
         let cert_with_expiry = keypair.certificate().with_expiry(future_ts);

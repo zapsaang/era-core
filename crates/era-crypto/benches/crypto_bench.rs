@@ -164,12 +164,12 @@ fn bench_key_exchange_vs_argon2(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("key_derivation_comparison");
 
-    // 准备 X25519 测试数据
+    // Prepare X25519 test data
     let recipient = EraKeyPair::generate().unwrap();
     let cert = recipient.certificate();
     let master_key = [42u8; 32];
 
-    // 准备 Argon2 测试数据
+    // Prepare Argon2 test data
     let salt = Salt::from_bytes([0u8; 16]);
 
     // Argon2 fast (1MB)
@@ -186,12 +186,12 @@ fn bench_key_exchange_vs_argon2(c: &mut Criterion) {
         parallelism: 1,
     };
 
-    // X25519 密钥封装 (全流程)
+    // X25519 key encapsulation (full flow)
     group.bench_function("x25519_encapsulate", |b| {
         b.iter(|| EraKeyPair::encapsulate_for(black_box(&cert), black_box(&master_key)).unwrap())
     });
 
-    // X25519 密钥解封装
+    // X25519 key decapsulation
     let encapsulation = EraKeyPair::encapsulate_for(&cert, &master_key).unwrap();
     group.bench_function("x25519_decapsulate", |b| {
         b.iter(|| recipient.decapsulate(black_box(&encapsulation)).unwrap())

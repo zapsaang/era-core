@@ -8,6 +8,7 @@ authors.workspace = true
 
 [features]
 default = []
+lsm = []
 
 [dependencies]
 era-common = { workspace = true }
@@ -42,10 +43,6 @@ name = "engine_bench"
 harness = false
 
 [[bench]]
-name = "p1_comprehensive_bench"
-harness = false
-
-[[bench]]
 name = "e2e_performance_bench"
 harness = false
 
@@ -59,9 +56,6 @@ harness = false
 
 [[bench]]
 name = "small_file_packing_bench"
-harness = false
-[[bench]]
-name = "p17_final_bench"
 harness = false
 
 [[bench]]

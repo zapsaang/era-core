@@ -128,29 +128,6 @@ pub fn decrypt_with_context(
         .map(Bytes::from)
 }
 
-/// Legacy encrypt function - DEPRECATED
-///
-/// This function is kept for backward compatibility but should not be used
-/// for new code. Use `encrypt_with_context` instead.
-#[deprecated(
-    since = "0.2.0",
-    note = "Use encrypt_with_context instead for nonce safety"
-)]
-pub fn encrypt(key: &DerivedKey, block_id: BlockId, plaintext: &[u8]) -> Result<Bytes> {
-    // Use zero context for backward compatibility
-    // This is NOT secure for production use across multiple archives!
-    encrypt_with_context(key, &[0u8; 16], block_id, plaintext)
-}
-
-/// Legacy decrypt function - DEPRECATED
-#[deprecated(
-    since = "0.2.0",
-    note = "Use decrypt_with_context instead for nonce safety"
-)]
-pub fn decrypt(key: &DerivedKey, block_id: BlockId, ciphertext: &[u8]) -> Result<Bytes> {
-    decrypt_with_context(key, &[0u8; 16], block_id, ciphertext)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

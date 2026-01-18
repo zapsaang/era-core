@@ -38,7 +38,7 @@ fn test_storage_pwrite_concurrency() {
 
             // Write to a specific quadrant: i * 1024
             let offset = (i * 1024) as u64;
-            let data = vec![(i as u8 + 1); 1024]; // Fill with 1, 2, 3, 4
+            let data = vec![i as u8 + 1; 1024]; // Fill with 1, 2, 3, 4
 
             // Use write_at
             writer.write_at(offset, &data).unwrap();

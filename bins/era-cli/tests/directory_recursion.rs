@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
@@ -21,7 +21,7 @@ fn test_directory_recursion() -> anyhow::Result<()> {
     fs::create_dir(source_dir.join("subdir"))?;
     fs::write(source_dir.join("subdir").join("file2.txt"), "content2")?;
 
-    let mut cmd = Command::cargo_bin("era")?;
+    let mut cmd = cargo_bin_cmd!("era");
 
     // Attempt to archive the directory
     cmd.arg("create")
@@ -40,7 +40,7 @@ fn test_directory_recursion() -> anyhow::Result<()> {
     let extract_dir = root.join("restored");
     fs::create_dir(&extract_dir)?;
 
-    let mut extract_cmd = Command::cargo_bin("era")?;
+    let mut extract_cmd = cargo_bin_cmd!("era");
     extract_cmd
         .arg("extract")
         .arg("-o")

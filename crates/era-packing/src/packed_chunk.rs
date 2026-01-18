@@ -1,8 +1,8 @@
-//! # Packed Chunk - 小文件打包支持
+//! # Packed Chunk - Small File Packing
 //!
-//! 将多个小文件打包到单个chunk中，以减少加密和KDF开销。
+//! Pack multiple small files into a single chunk to reduce encryption and KDF overhead.
 //!
-//! ## 格式设计
+//! ## Format Layout
 //!
 //! ```text
 //! +------------------+
@@ -24,9 +24,9 @@ use std::io::{self, Cursor, Read, Write};
 const PACKED_MAGIC: &[u8; 4] = b"PACK";
 const PACKED_VERSION: u8 = 1;
 
-/// 打包的chunk头部
+/// Packed chunk header
 ///
-/// 使用 bytemuck 进行零拷贝序列化，确保跨平台二进制兼容性
+/// Uses bytemuck for zero-copy serialization and cross-platform compatibility.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]
 pub struct PackedHeader {
@@ -46,12 +46,12 @@ impl PackedHeader {
         }
     }
 
-    /// 零拷贝序列化 - 直接返回结构体的字节表示
+    /// Zero-copy serialization: returns the raw byte view
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
     }
 
-    /// 从字节切片反序列化
+    /// Deserialize from a byte slice
     pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
         if data.len() < std::mem::size_of::<Self>() {
             return Err(io::Error::new(
@@ -81,15 +81,15 @@ impl PackedHeader {
     }
 }
 
-/// 单个文件在pack中的条目
+/// Single file entry inside a packed chunk
 ///
-/// 使用 bytemuck 进行零拷贝序列化
+/// Uses bytemuck for zero-copy serialization.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C, packed)]
 pub struct PackedEntry {
-    /// 在data section中的偏移
+    /// Offset in the data section
     pub offset: u64,
-    /// 文件大小
+    /// File size
     pub size: u64,
     /// BLAKE3 checksum
     pub checksum: [u8; 32],
@@ -104,12 +104,12 @@ impl PackedEntry {
         }
     }
 
-    /// 零拷贝序列化 - 直接返回结构体的字节表示
+    /// Zero-copy serialization: returns the raw byte view
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
     }
 
-    /// 从字节切片反序列化
+    /// Deserialize from a byte slice
     pub fn from_bytes(data: &[u8]) -> io::Result<Self> {
         if data.len() < std::mem::size_of::<Self>() {
             return Err(io::Error::new(
@@ -119,12 +119,12 @@ impl PackedEntry {
         }
 
         bytemuck::try_from_bytes(&data[..std::mem::size_of::<Self>()])
-            .map(|e| *e)
+            .copied()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 
-/// 打包的chunk
+/// Packed chunk
 #[derive(Debug)]
 pub struct PackedChunk {
     header: PackedHeader,
@@ -133,7 +133,7 @@ pub struct PackedChunk {
 }
 
 impl PackedChunk {
-    /// 创建新的空packed chunk
+    /// Create a new empty packed chunk
     pub fn new() -> Self {
         Self {
             header: PackedHeader::new(0, 0),
@@ -142,29 +142,29 @@ impl PackedChunk {
         }
     }
 
-    /// 添加一个文件到pack中
+    /// Add a file to the pack
     pub fn add_file(&mut self, file_data: &[u8]) -> io::Result<()> {
         let offset = self.data.len() as u64;
         let size = file_data.len() as u64;
 
-        // 计算BLAKE3校验和
+        // Compute BLAKE3 checksum
         let checksum = blake3::hash(file_data);
 
-        // 添加条目
+        // Add entry
         self.entries
             .push(PackedEntry::new(offset, size, *checksum.as_bytes()));
 
-        // 添加数据
+        // Append data
         self.data.extend_from_slice(file_data);
 
-        // 更新头部
+        // Update header
         self.header.entry_count = self.entries.len() as u32;
         self.header.total_data_size = self.data.len() as u64;
 
         Ok(())
     }
 
-    /// 序列化整个packed chunk
+    /// Serialize the entire packed chunk
     pub fn serialize(&self) -> io::Result<Vec<u8>> {
         let header_size = std::mem::size_of::<PackedHeader>();
         let entries_size = self.entries.len() * std::mem::size_of::<PackedEntry>();
@@ -172,34 +172,34 @@ impl PackedChunk {
 
         let mut buf = Vec::with_capacity(total_size);
 
-        // 写入header - 零拷贝
+        // Write header (zero-copy)
         buf.write_all(self.header.as_bytes())?;
 
-        // 写入所有entries - 零拷贝
+        // Write all entries (zero-copy)
         for entry in &self.entries {
             buf.write_all(entry.as_bytes())?;
         }
 
-        // 写入数据
+        // Write data
         buf.write_all(&self.data)?;
 
         Ok(buf)
     }
 
-    /// 反序列化packed chunk
+    /// Deserialize a packed chunk
     pub fn deserialize(data: &[u8]) -> io::Result<Self> {
         let mut cursor = Cursor::new(data);
 
-        // 读取header
+        // Read header
         let mut header_bytes = [0u8; std::mem::size_of::<PackedHeader>()];
         cursor.read_exact(&mut header_bytes)?;
         let header = PackedHeader::from_bytes(&header_bytes)?;
 
-        // 复制 packed 字段值以避免未对齐访问
+        // Copy packed fields to avoid unaligned access
         let entry_count = header.entry_count;
         let total_data_size = header.total_data_size;
 
-        // 读取entries
+        // Read entries
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {
             let mut entry_bytes = [0u8; std::mem::size_of::<PackedEntry>()];
@@ -207,7 +207,7 @@ impl PackedChunk {
             entries.push(PackedEntry::from_bytes(&entry_bytes)?);
         }
 
-        // 读取数据
+        // Read data
         let mut file_data = vec![0u8; total_data_size as usize];
         cursor.read_exact(&mut file_data)?;
 
@@ -218,7 +218,7 @@ impl PackedChunk {
         })
     }
 
-    /// 提取特定文件的数据
+    /// Extract data for a specific file
     pub fn extract_file(&self, file_index: usize) -> io::Result<Vec<u8>> {
         if file_index >= self.entries.len() {
             return Err(io::Error::new(
@@ -228,7 +228,7 @@ impl PackedChunk {
         }
 
         let entry = &self.entries[file_index];
-        // 复制 packed 字段值以避免未对齐访问
+        // Copy packed fields to avoid unaligned access
         let offset = entry.offset;
         let size = entry.size;
         let start = offset as usize;
@@ -243,7 +243,7 @@ impl PackedChunk {
 
         let file_data = self.data[start..end].to_vec();
 
-        // 验证校验和
+        // Verify checksum
         let checksum = blake3::hash(&file_data);
         if checksum.as_bytes() != &entry.checksum {
             return Err(io::Error::new(
@@ -255,14 +255,14 @@ impl PackedChunk {
         Ok(file_data)
     }
 
-    /// 获取文件数量
+    /// Get file count
     pub fn file_count(&self) -> usize {
         self.entries.len()
     }
 
-    /// 获取总数据大小
+    /// Get total data size
     pub fn total_size(&self) -> u64 {
-        // 复制 packed 字段值以避免未对齐访问
+        // Copy packed fields to avoid unaligned access
         self.header.total_data_size
     }
 }
@@ -273,7 +273,7 @@ impl Default for PackedChunk {
     }
 }
 
-/// 便捷函数：打包多个文件
+/// Convenience: pack multiple files
 pub fn pack_files(files: &[&[u8]]) -> io::Result<Vec<u8>> {
     let mut packed = PackedChunk::new();
 
@@ -284,7 +284,7 @@ pub fn pack_files(files: &[&[u8]]) -> io::Result<Vec<u8>> {
     packed.serialize()
 }
 
-/// 便捷函数：从packed data中提取特定文件
+/// Convenience: extract a file from packed data
 pub fn unpack_file(packed_data: &[u8], file_index: usize) -> io::Result<Vec<u8>> {
     let packed = PackedChunk::deserialize(packed_data)?;
     packed.extract_file(file_index)
@@ -302,7 +302,7 @@ mod tests {
 
         assert_eq!(header.magic, deserialized.magic);
         assert_eq!(header.version, deserialized.version);
-        // 复制 packed 字段值以避免未对齐引用
+        // Copy packed fields to avoid unaligned access
         let orig_entry_count = header.entry_count;
         let orig_total_data_size = header.total_data_size;
         let new_entry_count = deserialized.entry_count;
@@ -318,7 +318,7 @@ mod tests {
         let serialized = entry.as_bytes();
         let deserialized = PackedEntry::from_bytes(serialized).unwrap();
 
-        // 复制 packed 字段值以避免未对齐引用
+        // Copy packed fields to avoid unaligned access
         let orig_offset = entry.offset;
         let orig_size = entry.size;
         let new_offset = deserialized.offset;
@@ -399,7 +399,7 @@ mod tests {
 
         let mut serialized = packed.serialize().unwrap();
 
-        // 篡改数据
+        // Tamper with data
         let data_offset = 17 + 48; // header + entry
         serialized[data_offset] ^= 0xFF;
 

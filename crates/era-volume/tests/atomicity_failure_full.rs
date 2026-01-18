@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use era_common::{ArchiveConfig, ArchiveId, BlockId, EncryptedMacroBlock, Result, ShardHeader};
-use era_storage::{LocalStorageBackend, StorageBackend, StorageMetadata, StorageReader};
+use era_common::{ArchiveConfig, ArchiveId, BlockId, EncryptedMacroBlock, Result};
+use era_storage::{LocalStorageBackend, StorageBackend, StorageMetadata};
 use era_volume::{MultiVolumeConfig, MultiVolumeWriter, SuperHeader, VolumeReader};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

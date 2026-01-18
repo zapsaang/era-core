@@ -128,19 +128,7 @@ pub fn extract_all_chunks(index: &BlockChunkIndex, data: &Bytes) -> Result<era_c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use era_codec::ZstdCompressor;
-    use era_common::{ChunkHash, ChunkIndexEntry, UniqueChunk};
-    use era_crypto::{derive_key, KdfParams, Salt};
-
-    fn create_test_key() -> DerivedKey {
-        let salt = Salt::from_bytes([0u8; 16]);
-        let params = KdfParams {
-            memory_cost: 1024,
-            time_cost: 1,
-            parallelism: 1,
-        };
-        derive_key(b"test", &salt, &params).unwrap()
-    }
+    use era_common::{ChunkHash, ChunkIndexEntry};
 
     #[test]
     fn test_extract_chunk_by_hash() {

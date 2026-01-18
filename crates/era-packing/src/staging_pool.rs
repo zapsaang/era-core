@@ -64,9 +64,6 @@ struct BinState {
     chunks: Vec<UniqueChunk>,
     /// Current total size of chunks in this bin
     current_size: usize,
-    /// Unique identifier for this bin (used for debugging/tracking)
-    #[allow(dead_code)]
-    id: usize,
 }
 
 /// A packed group of chunks ready to be written as a MacroBlock
@@ -95,10 +92,9 @@ impl StagingPool {
         assert!(target_size > 0, "target_size must be positive");
 
         let bins = (0..k)
-            .map(|id| BinState {
+            .map(|_| BinState {
                 chunks: Vec::new(),
                 current_size: 0,
-                id,
             })
             .collect();
 
@@ -444,7 +440,7 @@ mod tests {
         let mut pool = StagingPool::new(4, 4000);
 
         // Simulate a workload with varying chunk sizes
-        let sizes = vec![512, 1024, 256, 2048, 128, 800, 1500, 300];
+        let sizes = [512, 1024, 256, 2048, 128, 800, 1500, 300];
 
         for (i, &size) in sizes.iter().enumerate() {
             let _ = pool.push(make_chunk(size, i as u8));

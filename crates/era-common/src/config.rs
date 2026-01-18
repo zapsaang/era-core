@@ -139,9 +139,9 @@ pub struct ChunkingConfig {
 impl Default for ChunkingConfig {
     fn default() -> Self {
         Self {
-            min_size: 4 * 1024,      // 4 KB
-            avg_size: 64 * 1024,     // 64 KB
-            max_size: 256 * 1024,    // 256 KB
+            min_size: 4 * 1024,   // 4 KB
+            avg_size: 64 * 1024,  // 64 KB
+            max_size: 256 * 1024, // 256 KB
         }
     }
 }
@@ -160,8 +160,8 @@ pub struct PackingConfig {
 impl Default for PackingConfig {
     fn default() -> Self {
         Self {
-            k_factor: 8,            // Balanced default
-            flush_threshold: 95,    // Flush at 95% full
+            k_factor: 8,         // Balanced default
+            flush_threshold: 95, // Flush at 95% full
         }
     }
 }

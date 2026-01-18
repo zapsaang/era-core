@@ -45,12 +45,10 @@ fn test_simple_multivolume_read() {
     // Check created files
     println!("\nFiles created:");
     if let Ok(entries) = fs::read_dir(temp_dir.path()) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                println!("  {:?} ({} bytes)", path.file_name(), size);
-            }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            println!("  {:?} ({} bytes)", path.file_name(), size);
         }
     }
 
@@ -77,12 +75,10 @@ fn test_simple_multivolume_read() {
     // List remaining files
     println!("  Remaining files:");
     if let Ok(entries) = fs::read_dir(temp_dir.path()) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.is_file() {
-                    println!("    {:?}", path.file_name());
-                }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                println!("    {:?}", path.file_name());
             }
         }
     }

@@ -36,10 +36,7 @@ fn test_end_to_end_directory_scanning() {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let has_xattr_support = {
         let xattr_path = root.join("src/main.rs");
-        match xattr::set(&xattr_path, "user.era_test", b"test_value") {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        xattr::set(&xattr_path, "user.era_test", b"test_value").is_ok()
     };
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

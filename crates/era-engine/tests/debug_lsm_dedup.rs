@@ -1,3 +1,4 @@
+#![cfg(feature = "lsm")]
 //! Simple debug test to verify LSM index dedup
 
 use era_common::Result;
@@ -7,7 +8,6 @@ use std::io::Write;
 use tempfile::TempDir;
 
 #[test]
-#[cfg(feature = "lsm")]
 fn test_simple_lsm_dedup_debug() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let index_path = temp_dir.path().join("debug_index");
@@ -41,15 +41,13 @@ fn test_simple_lsm_dedup_debug() -> Result<()> {
     if index_path.exists() {
         let entries: Vec<_> = fs::read_dir(&index_path)?.collect();
         println!("  Index directory exists with {} entries", entries.len());
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let meta = entry.metadata()?;
-                println!(
-                    "    {}: {} bytes",
-                    entry.file_name().to_string_lossy(),
-                    meta.len()
-                );
-            }
+        for entry in entries.into_iter().flatten() {
+            let meta = entry.metadata()?;
+            println!(
+                "    {}: {} bytes",
+                entry.file_name().to_string_lossy(),
+                meta.len()
+            );
         }
     } else {
         println!("  ❌ Index directory NOT created!");

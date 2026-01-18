@@ -118,19 +118,21 @@ impl<const N: usize> SecureBuffer<N> {
         Ok(Self { data, is_locked })
     }
 
-    /// Get a reference to the buffer contents
-    pub fn as_ref(&self) -> &[u8; N] {
-        &self.data
-    }
-
-    /// Get a mutable reference to the buffer contents
-    pub fn as_mut(&mut self) -> &mut [u8; N] {
-        &mut self.data
-    }
-
     /// Check if memory is locked (protected from swapping)
     pub fn is_locked(&self) -> bool {
         self.is_locked
+    }
+}
+
+impl<const N: usize> AsRef<[u8; N]> for SecureBuffer<N> {
+    fn as_ref(&self) -> &[u8; N] {
+        &self.data
+    }
+}
+
+impl<const N: usize> AsMut<[u8; N]> for SecureBuffer<N> {
+    fn as_mut(&mut self) -> &mut [u8; N] {
+        &mut self.data
     }
 }
 

@@ -665,7 +665,7 @@ fn test_matrix_distribution_large_archive() {
         let filename = format!("file_{:02}.bin", idx);
         let extracted_path = extract_dir.join(&filename);
         let extracted_data =
-            fs::read(&extracted_path).expect(&format!("Failed to read {}", filename));
+            fs::read(&extracted_path).unwrap_or_else(|_| panic!("Failed to read {}", filename));
         assert_eq!(
             &extracted_data, original,
             "File {} content mismatch",

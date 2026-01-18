@@ -1,5 +1,5 @@
-//! 深层问题诊断：为什么会PANIC?
-//! 重点: 找出容错能力的实际限制
+//! Deep root-cause diagnosis: why does it panic?
+//! Focus: determine the real limits of fault tolerance.
 
 use era_common::{ArchiveConfig, CompressionAlgorithm, CompressionConfig, ErasureCodeConfig};
 use era_engine::{ArchiveReader, ArchiveWriterBuilder};
@@ -28,7 +28,7 @@ fn test_panic_root_cause_analysis() {
         ..Default::default()
     };
 
-    println!("创建4-volume archive...");
+    println!("Creating 4-volume archive...");
     let mut writer = ArchiveWriterBuilder::new(&base_path)
         .config(config)
         .enable_erasure(true)
@@ -42,12 +42,12 @@ fn test_panic_root_cause_analysis() {
     writer.add_bytes("test.bin", &data).expect("Failed");
     writer.finalize().expect("Failed");
 
-    println!("✓ 创建完成\n");
+    println!("✓ Created\n");
 
     // Test progressively losing more volumes
     for volumes_to_lose in 1..4 {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("失去 {} 个volumes", volumes_to_lose);
+        println!("Losing {} volumes", volumes_to_lose);
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         let test_dir = TempDir::new().unwrap();
@@ -86,15 +86,15 @@ fn test_panic_root_cause_analysis() {
         }
 
         // List remaining
-        println!("保留的volumes:");
+        println!("Remaining volumes:");
         let remaining_files = fs::read_dir(test_dir.path())
             .ok()
-            .and_then(|entries| {
+            .map(|entries| {
                 let files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                Some(files.len())
+                files.len()
             })
             .unwrap_or(0);
-        println!("  {} 个volume文件\n", remaining_files);
+        println!("  {} volume files\n", remaining_files);
 
         // Try to open and read
         let mut found_openable = false;
@@ -113,11 +113,11 @@ fn test_panic_root_cause_analysis() {
             }
 
             found_openable = true;
-            println!("尝试从 volume {} 打开...", i);
+            println!("Attempting to open from volume {}...", i);
 
             match ArchiveReader::open(&test_path, "") {
                 Ok(mut reader) => {
-                    println!("  ✓ 成功打开");
+                    println!("  ✓ Opened successfully");
 
                     // Try to extract
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -128,65 +128,65 @@ fn test_panic_root_cause_analysis() {
 
                     match result {
                         Ok(Ok(_)) => {
-                            println!("  ✅ 成功提取");
+                            println!("  ✅ Extracted successfully");
                         }
                         Ok(Err(e)) => {
-                            println!("  ❌ 提取失败: {}", e);
+                            println!("  ❌ Extraction failed: {}", e);
                         }
                         Err(_) => {
                             println!("  💥 PANIC during extraction");
-                            println!("     问题: reader.rs:68 尝试访问空buffer的字节");
+                            println!("     Issue: reader.rs:68 tried to index an empty buffer");
                             println!(
-                                "     原因: 当volumes足够少时，某些block的offset指向已删除的volume"
+                                "     Cause: with too few volumes, some block offsets point to deleted volumes"
                             );
-                            println!("     后果: 读取失败导致空数据，然后crash");
+                            println!("     Effect: read failure produced empty data, then crash");
                         }
                     }
                     break;
                 }
                 Err(e) => {
-                    println!("  ❌ 打开失败: {}", e);
+                    println!("  ❌ Failed to open: {}", e);
                 }
             }
         }
 
         if !found_openable {
-            println!("❌ 无法打开任何volume!");
+            println!("❌ Unable to open any volume!");
         }
         println!();
     }
 
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("问题诊断总结:");
+    println!("Root-cause summary:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    println!("1. 当volumes足够少时，某些shards所在的volume被删除");
-    println!("2. Reader尝试读取不存在的offset");
-    println!("3. read_at返回0字节");
-    println!("4. reader.rs:68 尝试 len_bytes[0] -> PANIC");
-    println!("\n解决方案:");
-    println!("  A. 在reader.rs中添加error handling而不是panic");
-    println!("  B. 在block_iter中处理missing shards");
-    println!("  C. 限制可用volumes的最小数量");
+    println!("1. With too few volumes, some shard volumes are deleted");
+    println!("2. Reader attempts to read missing offsets");
+    println!("3. read_at returns 0 bytes");
+    println!("4. reader.rs:68 tries len_bytes[0] -> PANIC");
+    println!("\nMitigations:");
+    println!("  A. Add error handling in reader.rs instead of panicking");
+    println!("  B. Handle missing shards in block_iter");
+    println!("  C. Enforce a minimum number of available volumes");
 }
 
 #[test]
 fn test_volume_requirements_strict() {
     println!("\n=== STRICT VOLUME REQUIREMENTS ===\n");
 
-    let erasure = ErasureCodeConfig {
+    let _erasure = ErasureCodeConfig {
         data_shards: 4,
         parity_shards: 2,
     };
 
     println!("Erasure Config: 4 data + 2 parity = 6 total shards\n");
-    println!("严格的容错要求分析:\n");
+    println!("Strict fault-tolerance requirements analysis:\n");
 
     // For 4+2, with different volume counts
     let scenarios = vec![
-        (3, "最小viable (parity+1)"),
-        (4, "次优配置"),
-        (5, "接近最优"),
-        (6, "完美最优"),
+        (3, "minimal viable (parity+1)"),
+        (4, "suboptimal"),
+        (5, "near optimal"),
+        (6, "optimal"),
     ];
 
     for (vol_count, label) in scenarios {
@@ -194,32 +194,32 @@ fn test_volume_requirements_strict() {
         println!("{} volumes - {}", vol_count, label);
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-        // 分析shard分布
+        // Analyze shard distribution
         let mut vol_shards = vec![Vec::new(); vol_count];
         for shard_idx in 0..6 {
             let vol_idx = shard_idx % vol_count; // Simplified, actual is: (shard_idx + block_seq) % vol_count
             vol_shards[vol_idx].push(shard_idx);
         }
 
-        println!("每个volume的shards:");
+        println!("Shards per volume:");
         for (v_idx, shards) in vol_shards.iter().enumerate() {
             println!("  Volume {}: {:?}", v_idx, shards);
         }
 
-        // 计算可以失去的volumes
+        // Compute tolerable volume losses
         let max_tolerable = if vol_count == 6 {
             2 // Can lose 2
         } else {
             1 // Can only lose 1 safely
         };
 
-        println!("✓ 可以容忍丢失 {} 个volume", max_tolerable);
+        println!("✓ Can tolerate losing {} volume(s)", max_tolerable);
         println!();
     }
 
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("\n严格建议:");
-    println!("  ✓ 对于4+2 erasure,应该使用 6 个volumes (= total_shards)");
-    println!("  ⚠️ 最小viable (3) 只是理论, 实际容错能力仅1");
-    println!("  ❌ 不应该宣传可以容忍2个volumes丢失,除非用6+ volumes");
+    println!("\nStrict recommendations:");
+    println!("  ✓ For 4+2 erasure, use 6 volumes (= total_shards)");
+    println!("  ⚠️ Minimal viable (3) is theoretical; real tolerance is only 1");
+    println!("  ❌ Do not claim 2-volume tolerance unless using 6+ volumes");
 }

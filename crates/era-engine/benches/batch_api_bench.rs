@@ -5,10 +5,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_engine::ArchiveWriterBuilder;
 use std::fs;
-use std::sync::atomic::{AtomicU32, Ordering};
 use tempfile::TempDir;
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Create test files with specified sizes
 fn create_test_files(

@@ -113,10 +113,8 @@ fn test_precise_fault_tolerance_limits() {
             if volumes_to_lose == 1 {
                 println!("  Files in test dir before read:");
                 if let Ok(entries) = fs::read_dir(test_dir.path()) {
-                    for entry in entries {
-                        if let Ok(entry) = entry {
-                            println!("    {:?}", entry.path().file_name());
-                        }
+                    for entry in entries.flatten() {
+                        println!("    {:?}", entry.path().file_name());
                     }
                 }
             }

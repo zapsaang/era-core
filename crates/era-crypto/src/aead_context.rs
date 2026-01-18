@@ -9,10 +9,6 @@ use era_common::{BlockId, EraError, Result};
 /// Size of the nonce in bytes (24 bytes for XChaCha20)
 pub const NONCE_SIZE: usize = 24;
 
-/// Size of the authentication tag in bytes (XChaCha20-Poly1305)
-#[allow(dead_code)]
-pub const TAG_SIZE: usize = 16;
-
 /// A unified interface for AEAD cipher operations
 pub trait AeadContext {
     /// Encrypt plaintext with optional authenticated data

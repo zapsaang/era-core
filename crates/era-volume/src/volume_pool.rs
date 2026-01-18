@@ -8,7 +8,7 @@ use era_common::{
     compute_shard_crc, ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig,
     MatrixShardEntry, Result, ShardHeader, VolumeId,
 };
-use era_storage::{StorageBackend, StorageWriter};
+use era_storage::StorageBackend;
 use std::path::{Path, PathBuf};
 
 use crate::footer::FOOTER_SIZE;
@@ -174,9 +174,9 @@ impl<B: StorageBackend> VolumePool<B> {
         self.sequences.clear();
 
         // 3. Create new set of volumes
-        for i in 0..volume_count {
+        for &sequence in old_sequences.iter().take(volume_count) {
             // Next sequence: previous + volume_count
-            let next_sequence = old_sequences[i] + volume_count as u16;
+            let next_sequence = sequence + volume_count as u16;
 
             let mut header = self.template_header.clone();
             header.volume_sequence = next_sequence;

@@ -125,10 +125,7 @@ fn bench_extract_production_kdf(c: &mut Criterion) {
 
     c.bench_function("extract_1mb_production_kdf", |b| {
         b.iter_with_setup(
-            || {
-                let extract_dir = TempDir::new().unwrap();
-                extract_dir
-            },
+            || TempDir::new().unwrap(),
             |extract_dir| {
                 let mut reader = ArchiveReader::open(&archive_path, "benchmark_password").unwrap();
 

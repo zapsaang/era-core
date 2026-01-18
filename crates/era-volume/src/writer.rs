@@ -91,7 +91,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
     pub fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
         if let Some(max_size) = self.max_size {
             // Fixed Size Mode: Update footer at fixed location
-            
+
             // 1. Ensure padding
             self.pad_to_size(max_size)?;
 
@@ -106,7 +106,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 self.position,
                 self.block_count,
                 self.sequence,
-                0, 0, 0,
+                0,
+                0,
+                0,
                 self.last_checkpoint_offset,
             );
 
@@ -120,35 +122,37 @@ impl<W: StorageWriter> VolumeWriter<W> {
         } else {
             // Dynamic/Store Mode: Append floating footer (inline checkpoint)
             // This enables "Journaling" where we have a stream of [Data...][Footer][Data...][Footer]
-            
+
             // 1. Sync data
             self.writer.sync()?;
-            
+
             // 2. Update state
             self.set_last_checkpoint(checkpoint_offset);
-            
+
             // 3. Construct footer pointing to current data end
             let footer = crate::Footer::with_catalog(
                 self.position,
                 self.block_count,
                 self.sequence,
-                0, 0, 0,
+                0,
+                0,
+                0,
                 self.last_checkpoint_offset,
             );
-            
+
             let footer_bytes = footer.to_bytes()?;
-            
+
             // 4. Append footer
             let offset = self.writer.append(&footer_bytes)?;
             self.writer.sync()?;
-            
+
             // 5. Advance position (Footer is now part of the stream)
             // Note: This means subsequent blocks will be shifted.
             // The Reader must be able to handle scanning or use the Index which we aren't persisting here yet.
             // But for "Atomic Checkpoint" of the *Stream*, this is correct.
             self.position += footer_bytes.len() as u64;
-            
-            // Update last_checkpoint to point to this footer? 
+
+            // Update last_checkpoint to point to this footer?
             // The previous logic `self.set_last_checkpoint(checkpoint_offset)` sets the `last_checkpoint_offset` field *inside* the footer.
             // But `self.last_checkpoint_offset` struct field tracks the *location of the footer itself* for the *next* footer to reference?
             // Yes, usually a linked list.
@@ -157,7 +161,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         Ok(())
     }
-    
+
     fn write_floating_checkpoint_internal(&mut self, offset: u64) {
         self.last_checkpoint_offset = offset;
         self.sequence += 1;
@@ -190,8 +194,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         if let Some(max_size) = self.max_size {
             let footer_size = crate::footer::FOOTER_SIZE as u64;
             if offset + total_len + footer_size > max_size {
-                return Err(era_common::EraError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(era_common::EraError::Io(std::io::Error::other(
                     "Volume full",
                 )));
             }

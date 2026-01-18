@@ -148,7 +148,7 @@ impl Footer {
 
     /// Serialize the footer to bytes
     pub fn to_bytes(&self) -> Result<[u8; FOOTER_SIZE]> {
-        let mut proto = self.to_proto();
+        let proto = self.to_proto();
         // Since update_checksum uses empty checksum, we must ensure self.checksum is set before calling to_proto
         // But to_bytes is supposedly called on a valid valid Footer.
         // Wait, update_checksum sets self.checksum. to_proto reads it.
@@ -160,14 +160,11 @@ impl Footer {
         // Length of length prefix = 4 bytes.
         let payload_len = data.len();
         if payload_len + 4 > FOOTER_SIZE {
-            return Err(EraError::Serialization(
-                format!(
-                    "Footer serialization too large: {} bytes > {}",
-                    payload_len + 4,
-                    FOOTER_SIZE
-                )
-                .into(),
-            ));
+            return Err(EraError::Serialization(format!(
+                "Footer serialization too large: {} bytes > {}",
+                payload_len + 4,
+                FOOTER_SIZE
+            )));
         }
 
         let mut result = [0u8; FOOTER_SIZE];

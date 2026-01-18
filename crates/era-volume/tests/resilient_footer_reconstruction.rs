@@ -1,5 +1,5 @@
 use era_common::{ArchiveConfig, ArchiveId, ErasureCodeConfig, Result};
-use era_storage::{LocalStorageBackend, StorageBackend, StorageWriter};
+use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumeReader, VolumeWriter};
 use std::path::Path;
 use tempfile::TempDir;
@@ -13,11 +13,13 @@ fn test_resilient_footer_open_with_erasure() -> Result<()> {
     let path = Path::new("test_resilient.era");
 
     // 1. Create a volume configuration WITH erasure coding
-    let mut config = ArchiveConfig::default();
-    config.erasure = Some(ErasureCodeConfig {
-        data_shards: 4,
-        parity_shards: 2,
-    });
+    let config = ArchiveConfig {
+        erasure: Some(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        }),
+        ..Default::default()
+    };
 
     let header = SuperHeader::new(ArchiveId::new(), [0u8; 16], TEST_VERIFICATION_TAG, config);
 

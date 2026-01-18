@@ -1,7 +1,9 @@
-//! 集成测试和性能测试：k-Bounded Best-Fit装箱算法真实效果验证
+//! Integration and performance tests: validate real-world effectiveness of
+//! the k-Bounded Best-Fit packing algorithm.
 //!
-//! 这些测试收集真实数据，对比旧/新装箱策略的效果
-//! 测试场景基于真实的数据特征，不基于文档假设
+//! These tests collect realistic data to compare the legacy vs new packing
+//! strategies. Scenarios are based on actual data characteristics rather than
+//! document assumptions.
 
 #[cfg(test)]
 mod tests {
@@ -14,8 +16,8 @@ mod tests {
         UniqueChunk::new(Bytes::from(vec![id; size]), ChunkHash::from_bytes([id; 32]))
     }
 
-    // ========== 旧策略模拟 ==========
-    /// 模拟旧的"简单填充"装箱策略
+    // ========== Legacy strategy simulation ==========
+    /// Simulate the legacy "simple fill" packing strategy
     struct SimplePacking {
         target_size: usize,
         current_block_chunks: Vec<UniqueChunk>,
@@ -39,15 +41,15 @@ mod tests {
             let chunk_size = chunk.data.len();
             self.total_chunks_added += 1;
 
-            // 超大chunk单独成块
+            // Oversized chunk gets its own block
             if chunk_size >= self.target_size {
                 self.blocks.push(vec![chunk]);
                 return;
             }
 
-            // 检查是否需要刷新
+            // Check whether a flush is needed
             if self.current_block_size + chunk_size > self.target_size {
-                // 刷新当前块
+                // Flush current block
                 if !self.current_block_chunks.is_empty() {
                     self.blocks
                         .push(std::mem::take(&mut self.current_block_chunks));
@@ -55,7 +57,7 @@ mod tests {
                 }
             }
 
-            // 添加到当前块
+            // Add to current block
             self.current_block_chunks.push(chunk);
             self.current_block_size += chunk_size;
         }
@@ -70,13 +72,11 @@ mod tests {
 
         fn stats(&self) -> PackingStats {
             let mut total_size = 0;
-            let mut total_chunks = 0;
             let mut block_utilizations = Vec::new();
 
             for block in &self.blocks {
                 let block_size: usize = block.iter().map(|c| c.data.len()).sum();
                 total_size += block_size;
-                total_chunks += block.len();
 
                 let utilization = (block_size as f64 / self.target_size as f64) * 100.0;
                 block_utilizations.push(utilization);
@@ -92,8 +92,6 @@ mod tests {
 
             PackingStats {
                 block_count: self.blocks.len(),
-                total_size,
-                total_chunks,
                 avg_utilization_percent: avg_utilization,
                 total_wasted_bytes: total_wasted,
                 waste_percent: (total_wasted as f64
@@ -106,10 +104,6 @@ mod tests {
     #[derive(Debug, Clone)]
     struct PackingStats {
         block_count: usize,
-        #[allow(dead_code)]
-        total_size: usize,
-        #[allow(dead_code)]
-        total_chunks: usize,
         avg_utilization_percent: f64,
         total_wasted_bytes: usize,
         waste_percent: f64,
@@ -118,8 +112,6 @@ mod tests {
     impl PackingStats {
         fn compare_with(&self, other: &PackingStats) -> ComparisonResult {
             ComparisonResult {
-                block_reduction: (self.block_count as i32 - other.block_count as i32)
-                    / self.block_count.max(1) as i32,
                 block_reduction_count: self.block_count - other.block_count,
                 waste_reduction_bytes: self.total_wasted_bytes - other.total_wasted_bytes,
                 waste_reduction_percent: self.waste_percent - other.waste_percent,
@@ -131,15 +123,13 @@ mod tests {
 
     #[derive(Debug)]
     struct ComparisonResult {
-        #[allow(dead_code)]
-        block_reduction: i32,
         block_reduction_count: usize,
         waste_reduction_bytes: usize,
         waste_reduction_percent: f64,
         utilization_improvement: f64,
     }
 
-    // ========== 场景1: 小文件混合（Git仓库） ==========
+    // ========== Scenario 1: mixed small files (Git repo) ==========
     #[test]
     fn test_scenario_small_files_git_repo() {
         println!("\n=== 场景1: 小文件混合（类似Git仓库） ===");
@@ -147,16 +137,16 @@ mod tests {
         let target_size = 4 * 1024 * 1024; // 4MB
         let mut chunks = Vec::new();
 
-        // 生成典型的Git仓库chunk分布 - 所有chunk都远小于target_size
-        // 配置文件 (< 1KB)
+        // Generate a typical Git-repo chunk distribution (all chunks << target_size)
+        // Config files (< 1KB)
         for i in 0..200 {
             chunks.push(make_chunk(256 + (i % 512), (i % 256) as u8));
         }
-        // 源代码 (1KB - 50KB)
+        // Source code (1KB - 50KB)
         for i in 200..600 {
             chunks.push(make_chunk(1024 + ((i * 7) % 49152), (i % 256) as u8));
         }
-        // 小二进制 (50KB - 200KB)
+        // Small binaries (50KB - 200KB)
         for i in 600..800 {
             chunks.push(make_chunk(
                 50 * 1024 + ((i * 11) % 150 * 1024),
@@ -170,7 +160,7 @@ mod tests {
             chunks.iter().map(|c| c.data.len()).sum::<usize>() as f64 / 1024.0 / 1024.0
         );
 
-        // 旧策略
+        // Legacy strategy
         let mut simple = SimplePacking::new(target_size);
         for chunk in chunks.iter() {
             simple.add_chunk(chunk.clone());
@@ -178,7 +168,7 @@ mod tests {
         simple.finalize();
         let simple_stats = simple.stats();
 
-        // 新策略
+        // New strategy
         let mut pool = StagingPool::new(8, target_size);
         let mut best_fit_blocks = Vec::new();
         for chunk in chunks.iter() {
@@ -192,8 +182,6 @@ mod tests {
 
         let best_fit_stats = PackingStats {
             block_count: best_fit_blocks.len(),
-            total_size: best_fit_blocks.iter().map(|b| b.total_size).sum(),
-            total_chunks: best_fit_blocks.iter().map(|b| b.chunks.len()).sum(),
             avg_utilization_percent: best_fit_blocks
                 .iter()
                 .map(|b| (b.total_size as f64 / target_size as f64) * 100.0)
@@ -243,14 +231,14 @@ mod tests {
         );
         println!("  填充率提升: {:.2}%", comp.utilization_improvement);
 
-        // 在这个场景中，新策略至少不会更差
+        // In this scenario, the new strategy should be no worse
         assert!(
             best_fit_stats.avg_utilization_percent >= simple_stats.avg_utilization_percent * 0.99,
             "新策略应该有相同或更好的填充率"
         );
     }
 
-    // ========== 场景2: 均匀大小 ==========
+    // ========== Scenario 2: uniform sizes ==========
     #[test]
     fn test_scenario_uniform_sizes() {
         println!("\n=== 场景2: 均匀大小chunk ==========");
@@ -270,7 +258,7 @@ mod tests {
             (chunk_size * chunk_count) as f64 / 1024.0 / 1024.0
         );
 
-        // 旧策略
+        // Legacy strategy
         let mut simple = SimplePacking::new(target_size);
         for chunk in chunks.iter() {
             simple.add_chunk(chunk.clone());
@@ -278,7 +266,7 @@ mod tests {
         simple.finalize();
         let simple_stats = simple.stats();
 
-        // 新策略
+        // New strategy
         let mut pool = StagingPool::new(8, target_size);
         let mut best_fit_blocks = Vec::new();
         for chunk in chunks.iter() {
@@ -292,8 +280,6 @@ mod tests {
 
         let best_fit_stats = PackingStats {
             block_count: best_fit_blocks.len(),
-            total_size: best_fit_blocks.iter().map(|b| b.total_size).sum(),
-            total_chunks: best_fit_blocks.iter().map(|b| b.chunks.len()).sum(),
             avg_utilization_percent: best_fit_blocks
                 .iter()
                 .map(|b| (b.total_size as f64 / target_size as f64) * 100.0)
@@ -344,7 +330,7 @@ mod tests {
         println!("  填充率提升: {:.2}%", comp.utilization_improvement);
     }
 
-    // ========== 场景3: 极端混合（大文件+很多小文件） ==========
+    // ========== Scenario 3: extreme mix (large + many small files) ==========
     #[test]
     fn test_scenario_extreme_mix() {
         println!("\n=== 场景3: 极端混合（大文件+很多小文件） ==========");
@@ -352,16 +338,16 @@ mod tests {
         let target_size = 4 * 1024 * 1024;
         let mut chunks = Vec::new();
 
-        // 1个2MB文件
+        // One 2MB file
         chunks.push(make_chunk(2 * 1024 * 1024, 1));
 
-        // 10000个小文件 (512 - 8KB)
+        // 10,000 small files (512B - 8KB)
         for i in 0..10000 {
             let size = 512 + (i % 8192);
             chunks.push(make_chunk(size, (i % 256) as u8));
         }
 
-        // 5个100KB文件
+        // Five 100KB files
         for i in 0..5 {
             chunks.push(make_chunk(100 * 1024, (i + 10) as u8));
         }
@@ -372,7 +358,7 @@ mod tests {
             chunks.iter().map(|c| c.data.len()).sum::<usize>() as f64 / 1024.0 / 1024.0
         );
 
-        // 旧策略
+        // Legacy strategy
         let start = Instant::now();
         let mut simple = SimplePacking::new(target_size);
         for chunk in chunks.iter() {
@@ -382,7 +368,7 @@ mod tests {
         let simple_time = start.elapsed();
         let simple_stats = simple.stats();
 
-        // 新策略
+        // New strategy
         let start = Instant::now();
         let mut pool = StagingPool::new(8, target_size);
         let mut best_fit_blocks = Vec::new();
@@ -398,8 +384,6 @@ mod tests {
 
         let best_fit_stats = PackingStats {
             block_count: best_fit_blocks.len(),
-            total_size: best_fit_blocks.iter().map(|b| b.total_size).sum(),
-            total_chunks: best_fit_blocks.iter().map(|b| b.chunks.len()).sum(),
             avg_utilization_percent: best_fit_blocks
                 .iter()
                 .map(|b| (b.total_size as f64 / target_size as f64) * 100.0)
@@ -457,7 +441,7 @@ mod tests {
         );
     }
 
-    // ========== 场景4: k值的影响测试 ==========
+    // ========== Scenario 4: impact of k ==========
     #[test]
     fn test_k_value_impact() {
         println!("\n=== 场景4: k值对装箱效果的影响 ==========");
@@ -465,7 +449,7 @@ mod tests {
         let target_size = 4 * 1024 * 1024;
         let mut chunks = Vec::new();
 
-        // 生成1000个chunk，大小1KB-100KB
+        // Generate 1,000 chunks sized 1KB-100KB
         for i in 0..1000 {
             let size = 1024 + (i % 99 * 1024);
             chunks.push(make_chunk(size, (i % 256) as u8));
@@ -510,7 +494,7 @@ mod tests {
         }
     }
 
-    // ========== 场景5: 不同阈值的影响 ==========
+    // ========== Scenario 5: impact of flush threshold ==========
     #[test]
     fn test_flush_threshold_impact() {
         println!("\n=== 场景5: 刷新阈值对效果的影响 ==========");
@@ -518,7 +502,7 @@ mod tests {
         let target_size = 4 * 1024 * 1024;
         let mut chunks = Vec::new();
 
-        // 生成500个chunk，大小100KB-500KB
+        // Generate 500 chunks sized 100KB-500KB
         for i in 0..500 {
             let size = 100 * 1024 + (i % 400 * 1024);
             chunks.push(make_chunk(size, (i % 256) as u8));
@@ -563,7 +547,7 @@ mod tests {
         }
     }
 
-    // ========== 综合性能测试 ==========
+    // ========== Combined performance test ==========
     #[test]
     fn test_comprehensive_performance() {
         println!("\n=== 综合性能测试 ==========");
@@ -572,17 +556,17 @@ mod tests {
             (
                 "小文件",
                 vec![
-                    (1024, 100),      // 100个1KB文件
-                    (10 * 1024, 50),  // 50个10KB文件
-                    (100 * 1024, 10), // 10个100KB文件
+                    (1024, 100),      // 100 x 1KB files
+                    (10 * 1024, 50),  // 50 x 10KB files
+                    (100 * 1024, 10), // 10 x 100KB files
                 ],
             ),
             (
                 "中等文件",
                 vec![
-                    (500 * 1024, 100),     // 100个500KB文件
-                    (1 * 1024 * 1024, 50), // 50个1MB文件
-                    (2 * 1024 * 1024, 20), // 20个2MB文件
+                    (500 * 1024, 100),     // 100 x 500KB files
+                    (1024 * 1024, 50),     // 50 x 1MB files
+                    (2 * 1024 * 1024, 20), // 20 x 2MB files
                 ],
             ),
         ];
@@ -608,7 +592,7 @@ mod tests {
                 total_size as f64 / 1024.0 / 1024.0
             );
 
-            // 旧策略
+            // Legacy strategy
             let mut simple = SimplePacking::new(target_size);
             for chunk in chunks.iter() {
                 simple.add_chunk(chunk.clone());
@@ -616,7 +600,7 @@ mod tests {
             simple.finalize();
             let simple_stats = simple.stats();
 
-            // 新策略
+            // New strategy
             let mut pool = StagingPool::new(8, target_size);
             let mut best_fit_blocks = Vec::new();
             for chunk in chunks.iter() {
@@ -630,15 +614,13 @@ mod tests {
 
             let best_fit_stats = PackingStats {
                 block_count: best_fit_blocks.len(),
-                total_size: best_fit_blocks.iter().map(|b| b.total_size).sum(),
-                total_chunks: best_fit_blocks.iter().map(|b| b.chunks.len()).sum(),
                 avg_utilization_percent: best_fit_blocks
                     .iter()
                     .map(|b| (b.total_size as f64 / target_size as f64) * 100.0)
                     .sum::<f64>()
                     / best_fit_blocks.len().max(1) as f64,
                 total_wasted_bytes: {
-                    if best_fit_blocks.len() > 0 {
+                    if !best_fit_blocks.is_empty() {
                         best_fit_blocks.len() * target_size
                             - best_fit_blocks.iter().map(|b| b.total_size).sum::<usize>()
                     } else {
@@ -646,7 +628,7 @@ mod tests {
                     }
                 },
                 waste_percent: {
-                    if best_fit_blocks.len() > 0 {
+                    if !best_fit_blocks.is_empty() {
                         let wasted = best_fit_blocks.len() * target_size
                             - best_fit_blocks.iter().map(|b| b.total_size).sum::<usize>();
                         (wasted as f64 / (best_fit_blocks.len() * target_size) as f64) * 100.0

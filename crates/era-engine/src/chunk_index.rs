@@ -157,18 +157,13 @@ impl ChunkIndex for era_index::LsmChunkIndex {
 }
 
 /// Chunk index backend selection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum ChunkIndexBackend {
     /// In-memory HashMap (legacy, not recommended for production)
+    #[default]
     Memory,
     /// LSM-Tree with RocksDB (recommended)
     Lsm { path: std::path::PathBuf },
-}
-
-impl Default for ChunkIndexBackend {
-    fn default() -> Self {
-        Self::Memory
-    }
 }
 
 /// Create a chunk index with the specified backend.

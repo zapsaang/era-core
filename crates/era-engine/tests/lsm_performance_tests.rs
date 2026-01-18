@@ -7,7 +7,9 @@
 //! - Storage cost savings
 
 use era_common::Result;
-use era_engine::{ArchiveReader, ArchiveWriter};
+#[cfg(feature = "lsm")]
+use era_engine::ArchiveReader;
+use era_engine::ArchiveWriter;
 use std::fs;
 use std::io::Write;
 use tempfile::TempDir;
@@ -34,17 +36,6 @@ fn create_file_with_size(
     }
     file.flush().unwrap();
     path
-}
-
-/// Helper to modify a file at specific offset
-#[allow(dead_code)]
-fn modify_file_at(path: &std::path::Path, offset: u64, data: &[u8]) -> Result<()> {
-    use std::io::{Seek, SeekFrom};
-    let mut file = fs::OpenOptions::new().write(true).open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    file.write_all(data)?;
-    file.flush()?;
-    Ok(())
 }
 
 /// Test 1: Incremental Backup Dedup Ratio
@@ -99,8 +90,8 @@ fn test_incremental_dedup_scenario() -> Result<()> {
             .build()?;
 
         // Add 8 old files (should be fully deduped)
-        for i in 0..8 {
-            writer.add_file(&monday_files[i])?;
+        for file in monday_files.iter().take(8) {
+            writer.add_file(file)?;
         }
 
         // Add 2 new files
@@ -362,8 +353,8 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .with_lsm_index(&index_path)
             .build()?;
 
-        for i in 0..10 {
-            writer.add_file(&file_pool[i])?;
+        for file in file_pool.iter().take(10) {
+            writer.add_file(file)?;
         }
 
         let stats = writer.finalize()?;
@@ -384,8 +375,8 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .with_lsm_index(&index_path)
             .build()?;
 
-        for i in 3..13 {
-            writer.add_file(&file_pool[i])?;
+        for file in file_pool.iter().take(13).skip(3) {
+            writer.add_file(file)?;
         }
 
         let stats = writer.finalize()?;
@@ -408,8 +399,8 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .with_lsm_index(&index_path)
             .build()?;
 
-        for i in 6..16 {
-            writer.add_file(&file_pool[i])?;
+        for file in file_pool.iter().take(16).skip(6) {
+            writer.add_file(file)?;
         }
 
         let stats = writer.finalize()?;
@@ -432,8 +423,8 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .with_lsm_index(&index_path)
             .build()?;
 
-        for i in 2..12 {
-            writer.add_file(&file_pool[i])?;
+        for file in file_pool.iter().take(12).skip(2) {
+            writer.add_file(file)?;
         }
 
         let stats = writer.finalize()?;

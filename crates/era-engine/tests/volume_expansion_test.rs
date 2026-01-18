@@ -1,6 +1,5 @@
 use era_common::{ErasureCodeConfig, Result};
-use era_engine::{ArchiveWriter, AuthMode};
-use std::path::PathBuf;
+use era_engine::ArchiveWriter;
 use tempfile::tempdir;
 
 #[test]
@@ -34,9 +33,9 @@ fn test_volume_expansion_matrix_mode() -> Result<()> {
     // Simple LCG PRNG to avoid external deps if rand not available or inconvenient
     let mut data = vec![0u8; data_size];
     let mut state: u32 = 12345;
-    for i in 0..data_size {
+    for item in data.iter_mut() {
         state = state.wrapping_mul(1103515245).wrapping_add(12345);
-        data[i] = (state >> 16) as u8;
+        *item = (state >> 16) as u8;
     }
 
     // This should fail currently
@@ -48,7 +47,7 @@ fn test_volume_expansion_matrix_mode() -> Result<()> {
         }
     }
 
-    let stats = writer.finalize()?;
+    let _stats = writer.finalize()?;
 
     // If we reach here, check we have more than 6 volumes created
     // The filenames would be archive.era, archive.era.001 ... archive.era.005 (set 1)
