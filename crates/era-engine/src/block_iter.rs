@@ -240,8 +240,12 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
         for reader in volume_readers {
             let (start, end) = reader.data_region();
             let footer = reader.footer();
-            let limit = if footer.has_catalog_location() {
-                footer.catalog_offset
+            let limit = if let Some(f) = footer {
+                if f.has_catalog_location() {
+                    f.catalog_offset
+                } else {
+                    end
+                }
             } else {
                 end
             };
@@ -659,8 +663,12 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
         for reader in volume_readers {
             let (start, end) = reader.data_region();
             let footer = reader.footer();
-            let limit = if footer.has_catalog_location() {
-                footer.catalog_offset
+            let limit = if let Some(f) = footer {
+                if f.has_catalog_location() {
+                    f.catalog_offset
+                } else {
+                    end
+                }
             } else {
                 end
             };

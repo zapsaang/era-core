@@ -15,6 +15,12 @@ pub struct ArchiveConfig {
     pub volume: VolumeConfig,
     /// Block configuration
     pub block: BlockConfig,
+    /// Chunking configuration (CDC)
+    #[serde(default)]
+    pub chunking: ChunkingConfig,
+    /// Packing configuration (k-Bounded Best-Fit)
+    #[serde(default)]
+    pub packing: PackingConfig,
     /// Erasure coding configuration (None = disabled)
     pub erasure: Option<ErasureCodeConfig>,
     /// Matrix distribution configuration
@@ -115,6 +121,47 @@ impl Default for BlockConfig {
     fn default() -> Self {
         Self {
             target_size: 4 * 1024 * 1024, // 4MB
+        }
+    }
+}
+
+/// Chunking configuration for FastCDC
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkingConfig {
+    /// Minimum chunk size in bytes
+    pub min_size: usize,
+    /// Average chunk size in bytes
+    pub avg_size: usize,
+    /// Maximum chunk size in bytes
+    pub max_size: usize,
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            min_size: 4 * 1024,      // 4 KB
+            avg_size: 64 * 1024,     // 64 KB
+            max_size: 256 * 1024,    // 256 KB
+        }
+    }
+}
+
+/// Packing configuration for k-Bounded Best-Fit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackingConfig {
+    /// Number of active bins (k-factor)
+    /// Higher k = better packing efficiency, higher memory usage
+    pub k_factor: usize,
+    /// Flush threshold percentage (0-100)
+    /// When a bin reaches this fill level, it's flushed to disk
+    pub flush_threshold: usize,
+}
+
+impl Default for PackingConfig {
+    fn default() -> Self {
+        Self {
+            k_factor: 8,            // Balanced default
+            flush_threshold: 95,    // Flush at 95% full
         }
     }
 }

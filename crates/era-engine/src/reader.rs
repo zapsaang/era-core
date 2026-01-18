@@ -650,15 +650,16 @@ impl ArchiveReader {
         // Find the first volume that has a valid catalog
         let mut catalog_reader_idx = None;
         for (i, reader) in self.volume_readers.iter().enumerate() {
-            let footer = reader.footer();
-            if footer.has_catalog_location() && reader.block_count() > 0 {
-                catalog_reader_idx = Some(i);
-                debug!(
-                    "Found catalog in volume {} (sequence {})",
-                    i,
-                    reader.header().volume_sequence
-                );
-                break;
+            if let Some(footer) = reader.footer() {
+                if footer.has_catalog_location() && reader.block_count() > 0 {
+                    catalog_reader_idx = Some(i);
+                    debug!(
+                        "Found catalog in volume {} (sequence {})",
+                        i,
+                        reader.header().volume_sequence
+                    );
+                    break;
+                }
             }
         }
 
@@ -668,7 +669,7 @@ impl ArchiveReader {
         })?;
 
         let reader = &self.volume_readers[reader_idx];
-        let footer = reader.footer();
+        let footer = reader.footer().expect("Catalog volume must have valid footer");
 
         let catalog_location = BlockLocation {
             volume_id: reader.header().volume_id,

@@ -89,46 +89,78 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Commit a checkpoint by updating the footer atomically
     pub fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
-        let max_size = self.max_size.ok_or_else(|| {
-            era_common::EraError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Cannot commit checkpoint without max_size (requires fixed footer location)",
-            ))
-        })?;
+        if let Some(max_size) = self.max_size {
+            // Fixed Size Mode: Update footer at fixed location
+            
+            // 1. Ensure padding
+            self.pad_to_size(max_size)?;
 
-        // 1. Ensure padding to max_size (Traffic Analysis Defense)
-        self.pad_to_size(max_size)?;
+            // 2. Sync data
+            self.writer.sync()?;
 
-        // 2. Ensure all data is on disk
-        self.writer.sync()?;
+            // 3. Update state
+            self.set_last_checkpoint(checkpoint_offset);
 
-        // 3. Update internal state
-        self.set_last_checkpoint(checkpoint_offset);
+            // 4. Construct footer
+            let footer = crate::Footer::with_catalog(
+                self.position,
+                self.block_count,
+                self.sequence,
+                0, 0, 0,
+                self.last_checkpoint_offset,
+            );
 
-        // 4. Construct new footer
-        // Note: Checkpoints utilize the fixed footer location at max_size - FOOTER_SIZE
-        // The data_end_offset points to current valid data
-        let footer = crate::Footer::with_catalog(
-            self.position,
-            self.block_count,
-            self.sequence,
-            0,
-            0,
-            0,
-            self.last_checkpoint_offset,
-        );
+            let footer_bytes = footer.to_bytes()?;
 
-        let footer_bytes = footer.to_bytes()?;
-
-        // 5. Overwrite Footer at fixed end
-        use crate::footer::FOOTER_SIZE;
-        let footer_offset = max_size - FOOTER_SIZE as u64;
-        self.writer.write_at(footer_offset, &footer_bytes)?;
-
-        // 6. Sync footer
-        self.writer.sync()?;
+            // 5. Overwrite
+            use crate::footer::FOOTER_SIZE;
+            let footer_offset = max_size - FOOTER_SIZE as u64;
+            self.writer.write_at(footer_offset, &footer_bytes)?;
+            self.writer.sync()?;
+        } else {
+            // Dynamic/Store Mode: Append floating footer (inline checkpoint)
+            // This enables "Journaling" where we have a stream of [Data...][Footer][Data...][Footer]
+            
+            // 1. Sync data
+            self.writer.sync()?;
+            
+            // 2. Update state
+            self.set_last_checkpoint(checkpoint_offset);
+            
+            // 3. Construct footer pointing to current data end
+            let footer = crate::Footer::with_catalog(
+                self.position,
+                self.block_count,
+                self.sequence,
+                0, 0, 0,
+                self.last_checkpoint_offset,
+            );
+            
+            let footer_bytes = footer.to_bytes()?;
+            
+            // 4. Append footer
+            let offset = self.writer.append(&footer_bytes)?;
+            self.writer.sync()?;
+            
+            // 5. Advance position (Footer is now part of the stream)
+            // Note: This means subsequent blocks will be shifted.
+            // The Reader must be able to handle scanning or use the Index which we aren't persisting here yet.
+            // But for "Atomic Checkpoint" of the *Stream*, this is correct.
+            self.position += footer_bytes.len() as u64;
+            
+            // Update last_checkpoint to point to this footer? 
+            // The previous logic `self.set_last_checkpoint(checkpoint_offset)` sets the `last_checkpoint_offset` field *inside* the footer.
+            // But `self.last_checkpoint_offset` struct field tracks the *location of the footer itself* for the *next* footer to reference?
+            // Yes, usually a linked list.
+            self.write_floating_checkpoint_internal(offset);
+        }
 
         Ok(())
+    }
+    
+    fn write_floating_checkpoint_internal(&mut self, offset: u64) {
+        self.last_checkpoint_offset = offset;
+        self.sequence += 1;
     }
 
     /// Get the volume ID

@@ -2,7 +2,9 @@
 
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Password};
-use era_common::{ArchiveConfig, ErasureCodeConfig};
+use era_common::{
+    ArchiveConfig, CompressionAlgorithm, ErasureCodeConfig, MatrixDistributionStrategy,
+};
 use era_engine::{
     repair_archive, repair_archive_matrix, ArchiveReader, ArchiveWriter, ExtractOptions,
     RecoveryManager, RepairOptions,
@@ -74,17 +76,96 @@ fn parse_erasure_config(s: &str) -> Result<ErasureCodeConfig> {
 }
 
 /// Create a new ERA archive
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     inputs: &[impl AsRef<Path>],
     output: &Path,
+    config_path: Option<&Path>,
     certificate_path: Option<&Path>,
     password: Option<&str>,
-    compression_level: i32,
+    compression_level: Option<i32>,
+    no_compression: bool,
     erasure: Option<&str>,
     volume_count: Option<usize>,
     max_volume_size: Option<u64>,
-    matrix_distribution: bool,
+    matrix_distribution: Option<bool>,
+    cdc_min: Option<usize>,
+    cdc_avg: Option<usize>,
+    cdc_max: Option<usize>,
+    packing_k: Option<usize>,
 ) -> Result<()> {
+    // 1. Load Configuration
+    // Priority: CLI > Config File > Defaults (Secure)
+    let mut config = if let Some(path) = config_path {
+        info!("Loading configuration from: {}", path.display());
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?
+    } else {
+        // Apply "Secure Defaults" when starting from scratch
+        let mut cfg = ArchiveConfig::default();
+        cfg.erasure = Some(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        });
+        cfg.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
+        cfg
+    };
+
+    // 2. Apply CLI Overrides
+
+    // Compression
+    if no_compression {
+        config.compression.algorithm = CompressionAlgorithm::None;
+        config.compression.level = 0;
+        info!("Compression: disabled (Store mode)");
+    } else if let Some(level) = compression_level {
+        if level == 0 {
+            config.compression.algorithm = CompressionAlgorithm::None;
+            config.compression.level = 0;
+            info!("Compression: disabled (Store mode)");
+        } else {
+            config.compression.level = level;
+        }
+    }
+
+    // Erasure Coding
+    if let Some(erasure_str) = erasure {
+        if erasure_str.eq_ignore_ascii_case("none") {
+            config.erasure = None;
+            info!("Erasure coding: disabled by CLI");
+        } else {
+            config.erasure = Some(parse_erasure_config(erasure_str)?);
+        }
+    }
+
+    // Geek Parameters
+    if let Some(val) = cdc_min {
+        config.chunking.min_size = val;
+    }
+    if let Some(val) = cdc_avg {
+        config.chunking.avg_size = val;
+    }
+    if let Some(val) = cdc_max {
+        config.chunking.max_size = val;
+    }
+    if let Some(val) = packing_k {
+        config.packing.k_factor = val;
+    }
+
+    // Volume & Distribution
+    if let Some(val) = max_volume_size {
+        config.volume.max_size = val;
+    }
+    if let Some(val) = matrix_distribution {
+        config.distribution.strategy = if val {
+            MatrixDistributionStrategy::RotatingOffset
+        } else {
+            MatrixDistributionStrategy::Striped
+        };
+    }
+
     // 加载公钥证书
     let certificate = if let Some(path) = certificate_path {
         info!("Loading certificate: {}", path.display());
@@ -104,26 +185,18 @@ pub fn create(
         get_password_with_confirmation(password)?
     };
 
-    let mut config = ArchiveConfig::default();
-    config.compression.level = compression_level;
-
-    // Parse erasure config if provided
-    let erasure_config = match erasure {
-        Some(s) => Some(parse_erasure_config(s)?),
-        None => None,
-    };
-
     let mut builder = ArchiveWriter::builder(output)
         .password(&password)
-        .config(config);
+        .config(config.clone()); // Use our resolved config
 
     if let Some(cert) = certificate {
         builder = builder.certificate(cert);
     }
 
-    // Enable erasure coding if configured
-    if let Some(ec) = erasure_config {
-        builder = builder.erasure_config(ec);
+    // Handle Volume Count Override for Matrix
+    // The builder will use config.erasure and config.distribution
+    // But we might need to set explicit volume count if provided
+    if let Some(ec) = &config.erasure {
         info!(
             "Erasure coding:   {}:{} ({}% overhead, can recover {} lost shards/block)",
             ec.data_shards,
@@ -132,8 +205,7 @@ pub fn create(
             ec.parity_shards
         );
 
-        // Enable matrix distribution for better fault tolerance
-        if matrix_distribution {
+        if config.distribution.strategy == MatrixDistributionStrategy::RotatingOffset {
             let volumes = volume_count.unwrap_or_else(|| {
                 // Default to total_shards for optimal distribution
                 (ec.data_shards + ec.parity_shards) as usize
@@ -141,13 +213,11 @@ pub fn create(
             builder = builder
                 .volume_count(volumes)
                 .enable_matrix_distribution(true);
-            info!("Matrix distribution: enabled across {} volumes", volumes);
+        } else if let Some(v) = volume_count {
+            builder = builder.volume_count(v);
         }
-
-        if let Some(max_size) = max_volume_size {
-            builder = builder.max_volume_size(max_size);
-            info!("Max volume size: {} bytes", HumanBytes(max_size));
-        }
+    } else if let Some(v) = volume_count {
+        builder = builder.volume_count(v);
     }
 
     let mut writer = builder.build().context("Failed to create archive")?;

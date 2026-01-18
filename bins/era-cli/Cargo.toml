@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dialoguer = { workspace = true }
 indicatif = "0.17"
 walkdir = "2.5.0"
+toml.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"

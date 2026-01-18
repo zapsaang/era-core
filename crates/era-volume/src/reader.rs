@@ -18,7 +18,7 @@ pub struct VolumeReader<R: StorageReader> {
     /// Volume header
     header: SuperHeader,
     /// Volume footer
-    footer: Footer,
+    footer: Option<Footer>,
 }
 
 impl<R: StorageReader> VolumeReader<R> {
@@ -27,7 +27,7 @@ impl<R: StorageReader> VolumeReader<R> {
         let reader = backend.open_read(path)?;
         let size = reader.size();
 
-        if size < (HEADER_SIZE + FOOTER_SIZE) as u64 {
+        if size < HEADER_SIZE as u64 {
             return Err(EraError::CorruptedHeader("Volume too small".to_string()));
         }
 
@@ -35,10 +35,84 @@ impl<R: StorageReader> VolumeReader<R> {
         let header_bytes = reader.read_at(0, HEADER_SIZE)?;
         let header = SuperHeader::from_bytes(&header_bytes)?;
 
-        // Read footer (from the end of the file)
-        let footer_offset = size - FOOTER_SIZE as u64;
-        let footer_bytes = reader.read_at(footer_offset, FOOTER_SIZE)?;
-        let footer = Footer::from_bytes(&footer_bytes)?;
+        // Check if erasure coding is likely enabled
+        let erasure_enabled = header.config.erasure.is_some();
+
+        // 1. Try to read standard footer (from the end of the file)
+        let mut footer = None;
+        if size >= (HEADER_SIZE + FOOTER_SIZE) as u64 {
+            let footer_offset = size - FOOTER_SIZE as u64;
+            if let Ok(bytes) = reader.read_at(footer_offset, FOOTER_SIZE) {
+                if let Ok(f) = Footer::from_bytes(&bytes) {
+                    footer = Some(f);
+                }
+            }
+        }
+
+        // 2. If standard footer missing, try Floating Footer Recovery (Reverse Scan)
+        if footer.is_none() {
+            // Scan the last 1MB (or full file if smaller) for footer magic
+            // Pattern: 0x0A (Field 1) 0x04 (Len) "ERAF"
+            let scan_size = 1024 * 1024; // 1MB scan window
+            let start_offset = if size > scan_size {
+                size - scan_size
+            } else {
+                HEADER_SIZE as u64
+            };
+            let scan_len = (size - start_offset) as usize;
+
+            if scan_len > 6 {
+                if let Ok(data) = reader.read_at(start_offset, scan_len) {
+                    // Search backwards
+                    // Pattern: [0x0A, 0x04, 'E', 'R', 'A', 'F']
+                    let pattern = [0x0A, 0x04, 0x45, 0x52, 0x41, 0x46];
+
+                    // We iterate backwards to find the *last* valid footer
+                    for i in (0..data.len() - 5).rev() {
+                        if data[i..i + 6] == pattern {
+                            // Possible match found at offset `start_offset + i`
+                            // This corresponds to the `magic` field in Proto.
+                            // The Footer struct (with length prefix) starts 6 bytes before?
+                            // No, format is [u32 len] [proto bytes].
+                            // The `magic` is the first field of proto bytes.
+                            // So `len` is 4 bytes before proto bytes.
+                            // If `data[i]` is start of magic (0x0A), then proto starts at `i`.
+                            // So Footer starts at `i - 4`.
+
+                            if i < 4 {
+                                continue;
+                            } // Can't be valid if no space for length
+
+                            let candidate_start = i - 4;
+                            // Check if we have enough bytes for full footer reading (128 bytes)
+                            // Even if we don't have 128 bytes in `data`, the file might have it?
+                            // But we are scanning `data`.
+                            // Let's rely on `read_at` from disk to be safe, or use `data` if it contains it.
+
+                            let footer_file_offset = start_offset + candidate_start as u64;
+
+                            // Try to read footer from this offset
+                            if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE) {
+                                if let Ok(f) = Footer::from_bytes(&bytes) {
+                                    tracing::warn!(
+                                        "Recovered floating footer at offset {}",
+                                        footer_file_offset
+                                    );
+                                    footer = Some(f);
+                                    break; // Found the last valid footer
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if footer.is_none() && !erasure_enabled {
+            return Err(EraError::CorruptedHeader(
+                "Volume too small for footer and no floating footer found".to_string(),
+            ));
+        }
 
         Ok(Self {
             reader,
@@ -53,13 +127,13 @@ impl<R: StorageReader> VolumeReader<R> {
     }
 
     /// Get the volume footer
-    pub fn footer(&self) -> &Footer {
-        &self.footer
+    pub fn footer(&self) -> Option<&Footer> {
+        self.footer.as_ref()
     }
 
     /// Get the number of blocks in this volume
     pub fn block_count(&self) -> u32 {
-        self.footer.block_count
+        self.footer.as_ref().map(|f| f.block_count).unwrap_or(0)
     }
 
     /// Read a block at the given location
@@ -132,7 +206,11 @@ impl<R: StorageReader> VolumeReader<R> {
     /// Get the data region (after header, before footer)
     pub fn data_region(&self) -> (u64, u64) {
         let start = HEADER_SIZE as u64;
-        let end = self.footer.data_end_offset;
+        let end = self
+            .footer
+            .as_ref()
+            .map(|f| f.data_end_offset)
+            .unwrap_or(self.reader.size());
         (start, end)
     }
 }

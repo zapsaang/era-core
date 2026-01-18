@@ -46,6 +46,11 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
 
+        /// Configuration file path (TOML)
+        /// Overrides defaults, but is overridden by CLI flags
+        #[arg(short = 'C', long)]
+        config: Option<PathBuf>,
+
         /// Public key certificate (PEM format, optional for password mode)
         /// Use era-keygen to generate a keypair and certificate
         #[arg(short, long)]
@@ -55,13 +60,18 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Compression level (1-22, default: 3)
-        #[arg(short = 'l', long, default_value = "3")]
-        level: i32,
+        /// Compression level (1-22, default: 3). Set to 0 to disable compression.
+        #[arg(short = 'l', long)]
+        level: Option<i32>,
+
+        /// Disable compression entirely (Store mode).
+        /// Equivalent to --level 0
+        #[arg(long, conflicts_with = "level")]
+        no_compression: bool,
 
         /// Enable erasure coding for data redundancy (format: data:parity, e.g., "4:2")
-        /// With 4:2, data is split into 4 shards + 2 parity shards (50% overhead),
-        /// allowing recovery from any 2 lost shards per block.
+        /// If not specified, defaults to "4:2" for maximum safety.
+        /// Use "none" to disable (NOT RECOMMENDED).
         #[arg(short = 'e', long)]
         erasure: Option<String>,
 
@@ -77,8 +87,26 @@ enum Commands {
 
         /// Enable true matrix distribution of erasure shards across volumes
         /// This ensures each volume contains different shards for better fault tolerance
+        /// Defaults to TRUE if erasure is enabled.
         #[arg(long)]
-        matrix_distribution: bool,
+        matrix_distribution: Option<bool>,
+
+        // --- GEEK PARAMETERS ---
+        /// [Geek] CDC minimum chunk size (bytes)
+        #[arg(long, help_heading = "Geek Parameters")]
+        cdc_min: Option<usize>,
+
+        /// [Geek] CDC average chunk size (bytes)
+        #[arg(long, help_heading = "Geek Parameters")]
+        cdc_avg: Option<usize>,
+
+        /// [Geek] CDC maximum chunk size (bytes)
+        #[arg(long, help_heading = "Geek Parameters")]
+        cdc_max: Option<usize>,
+
+        /// [Geek] Packing k-factor (buffer slots)
+        #[arg(long, help_heading = "Geek Parameters")]
+        packing_k: Option<usize>,
     },
 
     /// Extract files from an ERA archive
@@ -195,23 +223,35 @@ fn main() -> anyhow::Result<()> {
         Commands::Create {
             input,
             output,
+            config,
             certificate,
             password,
             level,
+            no_compression,
             erasure,
             volumes,
             max_volume_size,
             matrix_distribution,
+            cdc_min,
+            cdc_avg,
+            cdc_max,
+            packing_k,
         } => commands::create(
             &input,
             &output,
+            config.as_deref(),
             certificate.as_deref(),
             password.as_deref(),
             level,
+            no_compression,
             erasure.as_deref(),
             volumes,
             max_volume_size,
             matrix_distribution,
+            cdc_min,
+            cdc_avg,
+            cdc_max,
+            packing_k,
         ),
 
         Commands::Extract {

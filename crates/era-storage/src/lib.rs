@@ -6,7 +6,7 @@
 
 pub mod config;
 mod local;
-mod memory;
+pub mod memory;
 mod traits;
 
 pub use config::{ArchiveConfig, EraConfig, KdfConfig};

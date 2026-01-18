@@ -145,15 +145,27 @@ impl StorageWriter for LocalStorageWriter {
     }
 
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        // Save current position
-        let current_pos = self.file.stream_position()?;
+        // Use pwrite (FileExt) on Unix systems for atomic-like positional writes
+        // without disturbing the file pointer or requiring seek/write/seek dance.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.file.write_all_at(data, offset)?;
+        }
+        
+        #[cfg(not(unix))]
+        {
+            // Save current position
+            let current_pos = self.file.stream_position()?;
 
-        // Write at offset
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(data)?;
+            // Write at offset
+            self.file.seek(SeekFrom::Start(offset))?;
+            self.file.write_all(data)?;
 
-        // Restore position
-        self.file.seek(SeekFrom::Start(current_pos))?;
+            // Restore position
+            self.file.seek(SeekFrom::Start(current_pos))?;
+        }
+        
         Ok(())
     }
 

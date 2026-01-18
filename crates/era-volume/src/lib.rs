@@ -4,14 +4,14 @@
 //!
 //! This crate provides the L1 (Volume Management) layer implementation.
 
-mod footer;
-mod header;
+pub mod footer;
+pub mod header;
 mod multi_volume;
 mod reader;
 mod volume_pool;
 mod writer;
 
-pub use footer::{Footer, FOOTER_SIZE};
+pub use footer::{Footer, FOOTER_MAGIC, FOOTER_SIZE};
 pub use header::{AuthMode, CryptoAnchor, SuperHeader, HEADER_SIZE};
 pub use multi_volume::{
     MultiVolumeConfig, MultiVolumeReader, MultiVolumeStats, MultiVolumeWriter,

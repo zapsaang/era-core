@@ -1,8 +1,8 @@
 use crate::proto;
 use crate::{
-    ArchiveConfig, BlockConfig, CompressionAlgorithm, CompressionConfig, EncryptionAlgorithm,
-    EncryptionConfig, ErasureCodeConfig, MatrixDistributionConfig, MatrixDistributionStrategy,
-    VolumeConfig,
+    ArchiveConfig, BlockConfig, ChunkingConfig, CompressionAlgorithm, CompressionConfig,
+    EncryptionAlgorithm, EncryptionConfig, ErasureCodeConfig, MatrixDistributionConfig,
+    MatrixDistributionStrategy, PackingConfig, VolumeConfig,
 };
 
 impl From<ArchiveConfig> for proto::ArchiveConfig {
@@ -14,6 +14,8 @@ impl From<ArchiveConfig> for proto::ArchiveConfig {
             block: Some(config.block.into()),
             erasure: config.erasure.map(|e| e.into()),
             distribution: Some(config.distribution.into()),
+            chunking: Some(config.chunking.into()),
+            packing: Some(config.packing.into()),
         }
     }
 }
@@ -27,6 +29,8 @@ impl From<proto::ArchiveConfig> for ArchiveConfig {
             block: proto.block.map(Into::into).unwrap_or_default(),
             erasure: proto.erasure.map(Into::into),
             distribution: proto.distribution.map(Into::into).unwrap_or_default(),
+            chunking: proto.chunking.map(Into::into).unwrap_or_default(),
+            packing: proto.packing.map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -285,6 +289,44 @@ impl From<proto::MatrixDistributionConfig> for MatrixDistributionConfig {
                 }
             },
             ..Default::default()
+        }
+    }
+}
+
+impl From<ChunkingConfig> for proto::ChunkingConfig {
+    fn from(config: ChunkingConfig) -> Self {
+        Self {
+            min_size: config.min_size as u32,
+            avg_size: config.avg_size as u32,
+            max_size: config.max_size as u32,
+        }
+    }
+}
+
+impl From<proto::ChunkingConfig> for ChunkingConfig {
+    fn from(proto: proto::ChunkingConfig) -> Self {
+        Self {
+            min_size: proto.min_size as usize,
+            avg_size: proto.avg_size as usize,
+            max_size: proto.max_size as usize,
+        }
+    }
+}
+
+impl From<PackingConfig> for proto::PackingConfig {
+    fn from(config: PackingConfig) -> Self {
+        Self {
+            k_factor: config.k_factor as u32,
+            flush_threshold: config.flush_threshold as u32,
+        }
+    }
+}
+
+impl From<proto::PackingConfig> for PackingConfig {
+    fn from(proto: proto::PackingConfig) -> Self {
+        Self {
+            k_factor: proto.k_factor as usize,
+            flush_threshold: proto.flush_threshold as usize,
         }
     }
 }

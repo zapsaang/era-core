@@ -144,9 +144,8 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
     let mut stats = RepairStats::default();
     let total_shards = erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
 
-    let (data_start, _) = volume_reader.data_region();
-    let footer = volume_reader.footer();
-    let erasure_data_end = footer.catalog_offset;
+    let (data_start, data_end) = volume_reader.data_region();
+    let erasure_data_end = volume_reader.footer().map(|f| f.catalog_offset).unwrap_or(data_end);
 
     let mut offset = data_start;
     let mut block_index = 0u32;
@@ -564,9 +563,10 @@ pub fn repair_archive_matrix(
 
     // Scan blocks using matrix distribution pattern
     // We need to iterate through block sequences and collect shards from each volume
-    let (data_start, _) = volume_readers[0].data_region();
-    let footer = volume_readers[0].footer();
-    let erasure_data_end = footer.catalog_offset;
+    let (data_start, data_end) = volume_readers[0].data_region();
+    let erasure_data_end = volume_readers[0].footer()
+        .map(|f| f.catalog_offset)
+        .unwrap_or(data_end);
 
     // Track offsets for each volume
     let mut volume_offsets: Vec<u64> = volume_readers.iter().map(|r| r.data_region().0).collect();
