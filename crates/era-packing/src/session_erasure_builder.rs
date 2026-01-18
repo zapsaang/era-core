@@ -198,6 +198,27 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
 
+    /// Decode shards with resilience to corruption - attempts AEAD recovery
+    /// before failing. This is the bulletproof variant for production use.
+    ///
+    /// # Algorithm
+    /// 1. Try direct decryption (fast path for uncorrupted blocks)
+    /// 2. If AEAD fails, identify corrupted shards
+    /// 3. Reconstruct from healthy shards + parity
+    /// 4. Retry decryption on reconstructed block
+    /// 5. If all attempts fail, return detailed diagnostic error
+    pub fn decode_and_extract_all_resilient(
+        &self,
+        shards: Vec<(usize, bytes::Bytes)>,
+        erasure_info: &era_common::ErasureBlockInfo,
+        block_id: era_common::BlockId,
+    ) -> Result<(ChunkVec, Vec<usize>)> {
+        use crate::resilient_aead::ResilientBlockUnpacker;
+
+        let resilient = ResilientBlockUnpacker::new(&self.inner);
+        resilient.unpack_resilient(shards, erasure_info, block_id)
+    }
+
     /// Decode shards for a specific data shard index (virtual striping).
     pub fn decode_and_extract_all_for_shard(
         &self,
