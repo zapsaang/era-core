@@ -5,12 +5,12 @@ use crate::entry::FileEntry;
 use bytes::Bytes;
 use era_common::{ChunkHash, EraError, Result, UniqueChunk};
 use glob::Pattern;
+use ignore::WalkBuilder;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 // use tracing::{debug, warn};
-use walkdir::WalkDir;
 
 /// Threshold for using CDC chunking (files larger than this use chunking)
 const CDC_THRESHOLD: u64 = 256 * 1024; // 256KB
@@ -78,16 +78,19 @@ impl DirectoryScanner {
 
     /// Scan the directory tree and return an iterator of file entries
     pub fn scan(&self) -> impl Iterator<Item = Result<FileEntry>> + '_ {
-        WalkDir::new(&self.options.root)
-            .into_iter()
-            .filter_entry(move |_| {
-                // We can implement early filtering of directories here if needed
-                true
-            })
+        WalkBuilder::new(&self.options.root)
+            .standard_filters(true)
+            .add_custom_ignore_filename(".gitignore")
+            .add_custom_ignore_filename(".ignore")
+            .add_custom_ignore_filename(".eraignore")
+            .build()
             .filter_map(move |entry| {
                 let entry = match entry {
                     Ok(e) => e,
-                    Err(e) => return Some(Err(EraError::Io(e.into()))),
+                    Err(e) => {
+                        let io_err = std::io::Error::new(std::io::ErrorKind::Other, e);
+                        return Some(Err(EraError::Io(io_err)));
+                    }
                 };
 
                 // Skip root directory itself if desired, or include it?

@@ -321,6 +321,112 @@ impl ErasureCoder {
 
         Ok(output)
     }
+
+    /// Recover all data shards (padded) from available shards.
+    ///
+    /// This is used for virtual striping, where each data shard is a full block
+    /// and shards on disk may be unpadded. The caller provides the intended
+    /// `shard_size` (padded size) to normalize all shards before decoding.
+    pub fn recover_data_shards(
+        &self,
+        shards: &[Option<Vec<u8>>],
+        shard_size: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        if shards.len() != self.config.total_shards() {
+            return Err(EraError::InvalidConfig(format!(
+                "Expected {} shards, got {}",
+                self.config.total_shards(),
+                shards.len()
+            )));
+        }
+
+        let available_count = shards.iter().filter(|s| s.is_some()).count();
+        if available_count < self.config.data_shards {
+            return Err(EraError::ErasureError(format!(
+                "Not enough shards for recovery: have {}, need {}",
+                available_count, self.config.data_shards
+            )));
+        }
+
+        // Normalize shard lengths to shard_size for RS decoding
+        let mut normalized: Vec<Option<Vec<u8>>> = Vec::with_capacity(shards.len());
+        for shard in shards {
+            let padded = shard.as_ref().map(|data| {
+                if data.len() > shard_size {
+                    // Reject oversized shards to avoid silent truncation
+                    return Err(EraError::ErasureError(format!(
+                        "Shard length {} exceeds shard_size {}",
+                        data.len(),
+                        shard_size
+                    )));
+                }
+                let mut out = data.clone();
+                if out.len() < shard_size {
+                    out.resize(shard_size, 0);
+                }
+                Ok(out)
+            });
+
+            match padded {
+                Some(Ok(p)) => normalized.push(Some(p)),
+                Some(Err(e)) => return Err(e),
+                None => normalized.push(None),
+            }
+        }
+
+        // If all data shards are present, return them directly (padded)
+        let all_data_present = normalized[..self.config.data_shards]
+            .iter()
+            .all(|s| s.is_some());
+        if all_data_present {
+            return Ok(normalized[..self.config.data_shards]
+                .iter()
+                .map(|s| s.as_ref().unwrap().clone())
+                .collect());
+        }
+
+        // Decode missing shards
+        let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(
+            self.config.data_shards,
+            self.config.parity_shards,
+            shard_size,
+        )
+        .map_err(|e| EraError::ErasureError(format!("Failed to create RS decoder: {}", e)))?;
+
+        for (i, shard) in normalized.iter().enumerate() {
+            if let Some(data) = shard {
+                if i < self.config.data_shards {
+                    decoder.add_original_shard(i, data).map_err(|e| {
+                        EraError::ErasureError(format!("Failed to add original shard: {}", e))
+                    })?;
+                } else {
+                    decoder
+                        .add_recovery_shard(i - self.config.data_shards, data)
+                        .map_err(|e| {
+                            EraError::ErasureError(format!("Failed to add recovery shard: {}", e))
+                        })?;
+                }
+            }
+        }
+
+        let result = decoder
+            .decode()
+            .map_err(|e| EraError::ErasureError(format!("Decoding failed: {}", e)))?;
+
+        let mut recovered = Vec::with_capacity(self.config.data_shards);
+        for (i, shard) in normalized[..self.config.data_shards].iter().enumerate() {
+            let shard_data = if let Some(data) = shard {
+                data.as_slice()
+            } else {
+                result.restored_original(i).ok_or_else(|| {
+                    EraError::ErasureError(format!("Failed to restore shard {}", i))
+                })?
+            };
+            recovered.push(shard_data.to_vec());
+        }
+
+        Ok(recovered)
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +567,30 @@ mod tests {
 
         let recovered = coder.decode(&shard_options, original.len()).unwrap();
         assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn test_recover_data_shards_from_partial() {
+        let config = ErasureConfig::new(4, 2).unwrap();
+        let coder = ErasureCoder::new(config).unwrap();
+
+        let shards = vec![vec![1u8; 10], vec![2u8; 12], vec![3u8; 8], vec![4u8; 11]];
+
+        let all_shards = coder.encode_shards(&shards).unwrap();
+        let shard_size = all_shards[0].len();
+
+        let mut shard_options: Vec<Option<Vec<u8>>> =
+            all_shards.iter().map(|s| Some(s.clone())).collect();
+
+        // Lose a data shard (index 2)
+        shard_options[2] = None;
+
+        let recovered = coder
+            .recover_data_shards(&shard_options, shard_size)
+            .unwrap();
+
+        assert_eq!(recovered.len(), 4);
+        assert_eq!(recovered[2], all_shards[2]);
     }
 
     #[test]

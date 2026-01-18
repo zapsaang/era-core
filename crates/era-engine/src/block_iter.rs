@@ -14,15 +14,15 @@
 //! key for all blocks and are kept for backward compatibility.
 
 use bytes::Bytes;
+use era_codec::{ErasureCoder, ErasureConfig};
 use era_common::{
     BlockId, BlockLocation, ChunkVec, EraError, ErasureBlockInfo, MatrixDistributionStrategy,
     Result, ShardHeader,
 };
 use era_crypto::{KeySession, VolumeKey};
-use era_packing::{
-    ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker, SessionErasureBlockUnpacker,
-};
+use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker};
 use era_volume::VolumeReader;
+use std::collections::VecDeque;
 
 /// Result of reading and decoding a block
 #[derive(Debug)]
@@ -626,12 +626,12 @@ pub struct SessionErasureBlockIterator<'a, R: era_storage::StorageReader> {
     block_index: u32,
     /// Current stripe index (Virtual Striping)
     current_stripe_index: usize,
-    /// Current shard index within stripe (0..k+m)
-    current_shard_index: usize,
     /// Matrix distribution strategy
     distribution_strategy: MatrixDistributionStrategy,
     /// Iteration statistics
     stats: BlockIterStats,
+    /// Pending decoded blocks from the current stripe
+    pending_blocks: VecDeque<Result<DecodedBlock>>,
 }
 
 impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
@@ -649,6 +649,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
     pub fn new(
         volume_readers: &'a [VolumeReader<R>],
         volume_indices: &[usize],
+        original_volume_count: usize,
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
@@ -679,7 +680,8 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
         let total_shards = data_shards as usize + parity_shards as usize;
 
         // Build reverse map: original_vol_index -> position in volume_readers
-        let original_volume_count = volume_indices.iter().copied().max().unwrap_or(0) + 1;
+        let inferred_volume_count = volume_indices.iter().copied().max().unwrap_or(0) + 1;
+        let original_volume_count = original_volume_count.max(inferred_volume_count).max(1);
         let mut vol_index_map = vec![None; original_volume_count];
         for (reader_idx, &orig_idx) in volume_indices.iter().enumerate() {
             if orig_idx < original_volume_count {
@@ -701,160 +703,337 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             data_ends,
             block_index: 0,
             current_stripe_index: 0,
-            current_shard_index: 0,
             distribution_strategy,
             stats: BlockIterStats::default(),
+            pending_blocks: VecDeque::new(),
         }
     }
 }
 
 impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIterator<'a, R> {
     fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
-        let stripe_size = self.total_shards;
+        if let Some(result) = self.pending_blocks.pop_front() {
+            return Some(result);
+        }
 
-        loop {
-            // Determine logical volume index based on strategy
+        let stripe_size = self.total_shards;
+        let data_shards = self.data_shards as usize;
+        let parity_shards = self.parity_shards as usize;
+
+        let mut available_shards: Vec<(usize, Bytes)> = Vec::with_capacity(stripe_size);
+        let mut data_lengths: Vec<Option<u32>> = vec![None; data_shards];
+        let mut max_len: usize = 0;
+        let mut stripe_lengths: Option<Vec<u32>> = None;
+        let header_prefix_len = data_shards * 4;
+
+        for shard_idx in 0..stripe_size {
             let vol_idx = self.distribution_strategy.calculate_volume(
-                self.current_shard_index,
+                shard_idx,
                 self.current_stripe_index as u64,
                 self.original_volume_count,
             );
 
-            // Map to actual reader
             let reader_idx_opt = self.vol_index_map.get(vol_idx).copied().flatten();
-            let is_data_shard = self.current_shard_index < self.data_shards as usize;
-
             if let Some(idx) = reader_idx_opt {
                 let reader = &self.volume_readers[idx];
 
-                // Check if reader has reached EOF
                 if self.current_offsets[idx] >= self.data_ends[idx] {
-                    // Check EOF at expected stream end?
-                    if self.current_shard_index == 0 && idx == 0 {
-                        // Simple heuristic
+                    if shard_idx == 0 {
                         return None;
                     }
-                    // If we are deep in a stripe, it is unexpected
-                    return Some(Err(EraError::ErasureError(
+                    self.pending_blocks.push_back(Err(EraError::ErasureError(
                         "Unexpected EOF while reading stripe".into(),
                     )));
+                    return self.pending_blocks.pop_front();
                 }
 
-                // Read Block Length
-                let len_bytes = match reader.read_raw(self.current_offsets[idx], 4) {
-                    Ok(b) if b.len() == 4 => b,
-                    Ok(_) => {
-                        return Some(Err(EraError::ErasureError("Truncated block header".into())))
-                    }
-                    Err(e) => return Some(Err(e)),
-                };
-                let block_size =
-                    u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
-
-                // Validate size
-                if block_size == 0 || block_size > MAX_BLOCK_SIZE {
-                    self.stats.blocks_failed += 1;
-                    return Some(Err(EraError::CorruptedHeader(format!(
-                        "Invalid block size: {}",
-                        block_size
-                    ))));
-                }
-
-                if is_data_shard {
-                    // Decode Data Block
-                    let location = BlockLocation {
-                        volume_id: reader.header().volume_id,
-                        slot_index: self.block_index,
-                        physical_offset: self.current_offsets[idx],
-                        encrypted_size: block_size,
-                        erasure_info: None,
-                        shard_offsets: None,
-                        shard_volumes: None,
-                    };
-
-                    // Advance offset (Length + Data)
-                    self.current_offsets[idx] += ShardHeader::SIZE as u64 + block_size as u64;
-
-                    // Read and decrypt
-                    match reader.read_block(&location) {
-                        Ok(encrypted_block) => {
-                            match self.unpacker.extract_all_chunks(&encrypted_block) {
-                                Ok(chunks) => {
-                                    self.stats.blocks_read += 1;
-                                    let result = DecodedBlock {
-                                        block_index: self.block_index,
-                                        chunks,
-                                        corrupted_shards: 0,
-                                    };
-
-                                    // Advance State
-                                    self.block_index += 1;
-                                    self.current_shard_index += 1;
-                                    if self.current_shard_index >= stripe_size {
-                                        self.current_shard_index = 0;
-                                        self.current_stripe_index += 1;
-                                    }
-
-                                    return Some(Ok(result));
-                                }
-                                Err(e) => {
-                                    self.stats.blocks_failed += 1;
-                                    return Some(Err(e));
-                                }
+                let prefix_bytes =
+                    match reader.read_raw(self.current_offsets[idx], header_prefix_len) {
+                        Ok(bytes) if bytes.len() == header_prefix_len => bytes,
+                        Ok(_) => {
+                            if shard_idx == 0 {
+                                return None;
                             }
+                            self.current_offsets[idx] = self.data_ends[idx];
+                            continue;
                         }
                         Err(e) => {
-                            self.stats.blocks_failed += 1;
-                            return Some(Err(e));
+                            if shard_idx == 0 {
+                                return None;
+                            }
+                            self.current_offsets[idx] = self.data_ends[idx];
+                            self.pending_blocks.push_back(Err(e));
+                            return self.pending_blocks.pop_front();
                         }
-                    }
-                } else {
-                    // Skip Parity Block
-                    self.current_offsets[idx] += ShardHeader::SIZE as u64 + block_size as u64;
+                    };
 
-                    // Advance State (Loop continues)
-                    self.current_shard_index += 1;
-                    if self.current_shard_index >= stripe_size {
-                        self.current_shard_index = 0;
-                        self.current_stripe_index += 1;
+                if stripe_lengths.is_none() {
+                    let mut lengths = Vec::with_capacity(data_shards);
+                    for chunk in prefix_bytes.chunks_exact(4) {
+                        lengths.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
                     }
-                    continue;
+                    stripe_lengths = Some(lengths);
                 }
-            } else {
-                // Volume Missing
-                if is_data_shard {
-                    // Critical Error: Data shard missing and recovery not implemented in this iterator
-                    return Some(Err(EraError::ErasureError(format!(
-                        "Missing volume {} for data block {}",
-                        vol_idx, self.block_index
-                    ))));
-                } else {
-                    // Missing Parity Shard - Ignore and continue
-                    self.current_shard_index += 1;
-                    if self.current_shard_index >= stripe_size {
-                        self.current_shard_index = 0;
-                        self.current_stripe_index += 1;
+
+                let header_bytes = match reader.read_raw(
+                    self.current_offsets[idx] + header_prefix_len as u64,
+                    ShardHeader::SIZE,
+                ) {
+                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                    Ok(_) => {
+                        if shard_idx == 0 {
+                            return None;
+                        }
+                        self.current_offsets[idx] = self.data_ends[idx];
+                        continue;
                     }
-                    continue;
+                    Err(e) => {
+                        if shard_idx == 0 {
+                            return None;
+                        }
+                        self.current_offsets[idx] = self.data_ends[idx];
+                        self.pending_blocks.push_back(Err(e));
+                        return self.pending_blocks.pop_front();
+                    }
+                };
+
+                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
+                    Some(h) => h,
+                    None => {
+                        if shard_idx == 0 {
+                            return None;
+                        }
+                        self.current_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                };
+
+                let shard_len = shard_header.length as usize;
+                if shard_idx < data_shards {
+                    data_lengths[shard_idx] = Some(shard_header.length);
+                }
+                if shard_len > max_len {
+                    max_len = shard_len;
+                }
+
+                let shard_data = match reader.read_raw(
+                    self.current_offsets[idx] + header_prefix_len as u64 + ShardHeader::SIZE as u64,
+                    shard_len,
+                ) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        self.current_offsets[idx] +=
+                            header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+                        continue;
+                    }
+                };
+
+                if shard_header.verify(&shard_data) {
+                    available_shards.push((shard_idx, shard_data));
+                } else {
+                    self.stats.corrupted_shards += 1;
+                }
+
+                self.current_offsets[idx] +=
+                    header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+            }
+        }
+
+        if let Some(lengths) = stripe_lengths {
+            if let Some(stripe_max) = lengths.iter().copied().max() {
+                if stripe_max as usize > max_len {
+                    max_len = stripe_max as usize;
+                }
+            }
+
+            for (idx, len) in lengths.into_iter().enumerate().take(data_shards) {
+                if data_lengths[idx].is_none() && len > 0 {
+                    data_lengths[idx] = Some(len);
                 }
             }
         }
+
+        if max_len == 0 {
+            return None;
+        }
+
+        let shard_size = if max_len % 2 == 0 {
+            max_len
+        } else {
+            max_len + 1
+        };
+        let total_shards = data_shards + parity_shards;
+        let mut shard_array: Vec<Option<Vec<u8>>> = vec![None; total_shards];
+        for (idx, data) in available_shards.iter() {
+            shard_array[*idx] = Some(data.to_vec());
+        }
+
+        let coder = match ErasureConfig::new(data_shards, parity_shards).and_then(ErasureCoder::new)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                self.pending_blocks.push_back(Err(e));
+                return self.pending_blocks.pop_front();
+            }
+        };
+
+        let recovered = match coder.recover_data_shards(&shard_array, shard_size) {
+            Ok(data) => data,
+            Err(e) => {
+                let msg = e.to_string();
+                for _ in 0..data_shards {
+                    self.pending_blocks
+                        .push_back(Err(EraError::ErasureError(msg.clone())));
+                    self.stats.blocks_failed += 1;
+                    self.block_index += 1;
+                }
+                self.current_stripe_index += 1;
+                return self.pending_blocks.pop_front();
+            }
+        };
+
+        for (i, shard_data) in recovered.into_iter().enumerate().take(data_shards) {
+            let block_index = (self.current_stripe_index * data_shards + i) as u32;
+            let mut candidate_lengths: Vec<usize> = Vec::new();
+
+            let mut trimmed_len = shard_data.len();
+
+            if let Some(len) = data_lengths[i] {
+                candidate_lengths.push(len as usize);
+            } else {
+                for len in data_lengths.iter().flatten() {
+                    candidate_lengths.push(*len as usize);
+                }
+
+                while trimmed_len > 0 && shard_data[trimmed_len - 1] == 0 {
+                    trimmed_len -= 1;
+                }
+                if trimmed_len > 0 {
+                    candidate_lengths.push(trimmed_len);
+                }
+
+                if shard_size > 0 && shard_size <= shard_data.len() {
+                    candidate_lengths.push(shard_size);
+                }
+            }
+
+            candidate_lengths.sort_unstable_by(|a, b| b.cmp(a));
+            candidate_lengths.dedup();
+
+            let mut decoded = None;
+            let mut last_err = None;
+
+            for original_len in candidate_lengths.iter().copied() {
+                if original_len == 0 || original_len > shard_data.len() {
+                    continue;
+                }
+
+                let mut data = shard_data.clone();
+                data.truncate(original_len);
+
+                if data.iter().all(|&b| b == 0) {
+                    decoded = Some(ChunkVec::new());
+                    break;
+                }
+
+                let encrypted_block = era_common::EncryptedMacroBlock {
+                    block_id: BlockId::new(block_index as u64),
+                    data: Bytes::from(data),
+                    original_size: original_len as u32,
+                    compressed_size: original_len as u32,
+                    chunk_count: 0,
+                };
+
+                match self.unpacker.extract_all_chunks(&encrypted_block) {
+                    Ok(chunks) => {
+                        decoded = Some(chunks);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                    }
+                }
+            }
+
+            if decoded.is_none() && data_lengths[i].is_none() && trimmed_len < shard_size {
+                let padding = shard_size.saturating_sub(trimmed_len);
+                let max_attempts = 8192usize;
+                let step = if padding > max_attempts {
+                    (padding / max_attempts).max(1)
+                } else {
+                    1
+                };
+
+                let mut probe_len = shard_size;
+                while probe_len >= trimmed_len {
+                    if !candidate_lengths.contains(&probe_len)
+                        && probe_len <= shard_data.len()
+                        && probe_len > 0
+                    {
+                        let mut data = shard_data.clone();
+                        data.truncate(probe_len);
+
+                        if data.iter().all(|&b| b == 0) {
+                            decoded = Some(ChunkVec::new());
+                            break;
+                        }
+
+                        let encrypted_block = era_common::EncryptedMacroBlock {
+                            block_id: BlockId::new(block_index as u64),
+                            data: Bytes::from(data),
+                            original_size: probe_len as u32,
+                            compressed_size: probe_len as u32,
+                            chunk_count: 0,
+                        };
+
+                        match self.unpacker.extract_all_chunks(&encrypted_block) {
+                            Ok(chunks) => {
+                                decoded = Some(chunks);
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = Some(e);
+                            }
+                        }
+                    }
+
+                    if probe_len < step {
+                        break;
+                    }
+                    probe_len = probe_len.saturating_sub(step);
+                }
+            }
+
+            match decoded {
+                Some(chunks) => {
+                    self.stats.blocks_read += 1;
+                    self.pending_blocks.push_back(Ok(DecodedBlock {
+                        block_index,
+                        chunks,
+                        corrupted_shards: 0,
+                    }));
+                }
+                None => {
+                    self.stats.blocks_failed += 1;
+                    self.pending_blocks
+                        .push_back(Err(last_err.unwrap_or_else(|| {
+                            EraError::ErasureError("Missing data shard length".into())
+                        })));
+                }
+            }
+
+            self.block_index += 1;
+        }
+
+        self.current_stripe_index += 1;
+        self.pending_blocks.pop_front()
     }
 
     fn has_more(&self) -> bool {
-        // If any reader has data?
-        // Check reader for NEXT shard
-        let vol_idx = if self.original_volume_count > 1 {
-            (self.current_stripe_index + self.current_shard_index) % self.original_volume_count
-        } else {
-            0
-        };
-        if let Some(reader_idx) = self.vol_index_map.get(vol_idx).copied().flatten() {
-            self.current_offsets[reader_idx] < self.data_ends[reader_idx]
-        } else {
-            // If volume missing, maybe?
-            false
-        }
+        self.current_offsets
+            .iter()
+            .zip(self.data_ends.iter())
+            .any(|(offset, end)| offset < end)
     }
 
     fn stats(&self) -> &BlockIterStats {

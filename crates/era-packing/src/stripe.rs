@@ -25,6 +25,8 @@ pub struct Stripe {
     pub block_meta: Vec<BlockMeta>,
     /// The generated parity shards
     pub parity_shards: Vec<Vec<u8>>,
+    /// Padded shard size used for erasure coding
+    pub shard_size: u32,
     /// The erasure code configuration used
     pub config: ErasureCodeConfig,
 }
@@ -75,6 +77,7 @@ impl StripeBuffer {
                 data_blocks: Vec::new(),
                 block_meta: Vec::new(),
                 parity_shards: Vec::new(),
+                shard_size: 0,
                 config: self.config,
             });
         }
@@ -95,6 +98,8 @@ impl StripeBuffer {
         // Note: encode_shards returns (padded_data_shards + parity_shards)
         let all_shards = coder.encode_shards(&shards)?;
 
+        let shard_size = all_shards.first().map(|s| s.len() as u32).unwrap_or(0);
+
         // Extract parity shards (they are at the end)
         let parity_count = self.config.parity_shards as usize;
         let total_count = all_shards.len();
@@ -104,6 +109,7 @@ impl StripeBuffer {
             data_blocks: blocks,
             block_meta: meta,
             parity_shards,
+            shard_size,
             config: self.config,
         })
     }

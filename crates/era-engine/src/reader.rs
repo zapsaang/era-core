@@ -669,7 +669,9 @@ impl ArchiveReader {
         })?;
 
         let reader = &self.volume_readers[reader_idx];
-        let footer = reader.footer().expect("Catalog volume must have valid footer");
+        let footer = reader
+            .footer()
+            .expect("Catalog volume must have valid footer");
 
         let catalog_location = BlockLocation {
             volume_id: reader.header().volume_id,
@@ -725,14 +727,13 @@ impl ArchiveReader {
     pub fn read_and_extract_chunks(&self, location: &BlockLocation) -> Result<ChunkVec> {
         if let Some(ref erasure_info) = location.erasure_info {
             // Erasure-coded block: read shards from multiple volumes
-            let num_readers = self.volume_readers.len();
             let total_shards =
                 erasure_info.data_shards as usize + erasure_info.parity_shards as usize;
 
             let mut available_shards = Vec::with_capacity(total_shards);
 
             // Check shard offsets
-            let shard_offsets = location.shard_offsets.as_ref().ok_or_else(|| {
+            let _shard_offsets = location.shard_offsets.as_ref().ok_or_else(|| {
                 EraError::IntegrityError("Missing shard offsets for erasure block".into())
             })?;
 
@@ -817,7 +818,12 @@ impl ArchiveReader {
             let block_id = BlockId::new(location.slot_index as u64);
             // Create temporary session-based erasure unpacker
             let erasure_unpacker = self.create_erasure_unpacker();
-            erasure_unpacker.decode_and_extract_all(available_shards, erasure_info, block_id)
+            erasure_unpacker.decode_and_extract_all_for_shard(
+                available_shards,
+                erasure_info,
+                block_id,
+                my_shard_idx,
+            )
         } else {
             // Standard block: read and unpack directly with session-based unpacker
             let encrypted_block = self.volume_readers[0].read_block(location)?;
@@ -1115,6 +1121,7 @@ impl ArchiveReader {
             Box::new(SessionErasureBlockIterator::new(
                 &self.volume_readers,
                 &self.volume_indices,
+                self.volume_readers[0].header().total_volumes as usize,
                 &self.session,
                 &self.volume_key,
                 self.nonce_context,
@@ -1164,6 +1171,7 @@ impl ArchiveReader {
             Box::new(SessionErasureBlockIterator::new(
                 &self.volume_readers,
                 &self.volume_indices,
+                self.volume_readers[0].header().total_volumes as usize,
                 &self.session,
                 &self.volume_key,
                 self.nonce_context,

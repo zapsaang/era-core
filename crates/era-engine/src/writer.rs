@@ -15,18 +15,17 @@
 //! - **Certificate mode**: X25519 key exchange (~0.05ms overhead, ~1000x faster)
 
 use bytes::Bytes;
-use era_codec::{Compressor, NoCompressor, ZstdCompressor};
+use era_codec::{Compressor, ErasureCoder, ErasureConfig, NoCompressor, ZstdCompressor};
 use era_common::{
-    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, CompressionAlgorithm, ErasureBlockInfo,
-    ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig, MatrixDistributionStrategy,
-    Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, CompressionAlgorithm, EncryptedMacroBlock,
+    ErasureBlockInfo, ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionStrategy, Result,
+    UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{
-    BlockMeta, PackedBlock, PackedChunk, SessionBlockBuilder, SessionErasureBlockBuilder,
-    StagingPool, Stripe, StripeBuffer,
+    BlockMeta, PackedBlock, PackedChunk, SessionBlockBuilder, StagingPool, Stripe, StripeBuffer,
 };
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumePool, VolumePoolConfig, VolumeWriter};
@@ -69,6 +68,21 @@ impl Default for AuthMode {
     }
 }
 
+fn chunker_config_from_archive(config: &ArchiveConfig) -> Result<ChunkerConfig> {
+    let chunking = &config.chunking;
+    if chunking.min_size > chunking.avg_size || chunking.avg_size > chunking.max_size {
+        return Err(era_common::EraError::InvalidFormat(
+            "chunking sizes must satisfy min <= avg <= max".into(),
+        ));
+    }
+
+    Ok(ChunkerConfig::new(
+        chunking.min_size,
+        chunking.avg_size,
+        chunking.max_size,
+    ))
+}
+
 /// Builder for creating an ArchiveWriter
 pub struct ArchiveWriterBuilder {
     output_path: PathBuf,
@@ -101,7 +115,7 @@ impl ArchiveWriterBuilder {
     /// Create a new builder with the output path
     pub fn new(output_path: impl Into<PathBuf>) -> Self {
         let output_path = output_path.into();
-        
+
         // Mandatory Default: LSM Index
         // We derive a sensible default path for the index: .<filename>.idx
         // This ensures every archive has a persistent index by default.
@@ -109,7 +123,7 @@ impl ArchiveWriterBuilder {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "archive".to_string());
-            
+
         let index_path = output_path
             .parent()
             .unwrap_or(Path::new("."))
@@ -201,6 +215,7 @@ impl ArchiveWriterBuilder {
     /// Set the archive configuration
     pub fn config(mut self, config: ArchiveConfig) -> Self {
         self.config = config;
+        self.chunker_config = None;
         self
     }
 
@@ -212,6 +227,11 @@ impl ArchiveWriterBuilder {
 
     /// Set custom CDC configuration
     pub fn chunker_config(mut self, config: ChunkerConfig) -> Self {
+        self.config.chunking = era_common::ChunkingConfig {
+            min_size: config.min_size,
+            avg_size: config.avg_size,
+            max_size: config.max_size,
+        };
         self.chunker_config = Some(config);
         self.enable_cdc = true;
         self
@@ -552,15 +572,20 @@ impl ArchiveWriterBuilder {
         let nonce_context = *salt.as_bytes();
 
         // Configure file reader with CDC if enabled
-        let (file_reader, max_chunk_size) = if self.enable_cdc {
-            let chunker_config = self.chunker_config.unwrap_or_default();
-            let max_chunk = chunker_config.max_size;
-            (
-                FileReader::with_cdc().with_chunker_config(chunker_config),
-                max_chunk,
-            )
+        let chunker_config = if self.enable_cdc {
+            let config = match self.chunker_config {
+                Some(cfg) => cfg,
+                None => chunker_config_from_archive(&config)?,
+            };
+            Some(config)
         } else {
-            (FileReader::new(), 0)
+            None
+        };
+
+        let file_reader = if let Some(cfg) = chunker_config.clone() {
+            FileReader::with_cdc().with_chunker_config(cfg)
+        } else {
+            FileReader::new()
         };
 
         // Set up checkpoint manager if enabled
@@ -618,6 +643,31 @@ impl ArchiveWriterBuilder {
             }
         }
 
+        let mut target_block_size = if let Some(target) = self.target_block_size {
+            target
+        } else if self.enable_cdc && self.enable_erasure {
+            chunker_config
+                .as_ref()
+                .map(|cfg| cfg.max_size)
+                .unwrap_or(4 * 1024 * 1024)
+        } else {
+            // Default to 4MB MacroBlocks as per Whitepaper, regardless of CDC.
+            // StagingPool will aggregate small CDC chunks into these 4MB blocks.
+            4 * 1024 * 1024
+        };
+
+        if let Some(max_volume_size) = self.max_volume_size {
+            if self.enable_erasure {
+                let prefix_len = self.erasure_config.data_shards as usize * 4;
+                let reserved =
+                    era_volume::FOOTER_SIZE + 4096 + era_common::ShardHeader::SIZE + prefix_len;
+                if max_volume_size as usize > reserved {
+                    let max_block = max_volume_size as usize - reserved;
+                    target_block_size = target_block_size.min(max_block);
+                }
+            }
+        }
+
         Ok(ArchiveWriter {
             archive_id,
             output_path: self.output_path,
@@ -643,25 +693,10 @@ impl ArchiveWriterBuilder {
                 None
             },
             // Initialize k-Bounded Best-Fit staging pool
-            // MANDATORY: k=16 as per ERA v8.1 Implementation Engineering Whitepaper
-            // This ensures optimal packing density even with high entropy data.
-            staging_pool: StagingPool::new(
-                16, // k bins for Best-Fit algorithm (Mandatory Default)
-                if let Some(target) = self.target_block_size {
-                    target
-                } else {
-                    // Default to 4MB MacroBlocks as per Whitepaper, regardless of CDC.
-                    // StagingPool will aggregate small CDC chunks into these 4MB blocks.
-                    4 * 1024 * 1024 
-                },
-            )
-            .with_flush_threshold(95), // Flush at 95% capacity for optimal space utilization
+            staging_pool: StagingPool::new(config.packing.k_factor, target_block_size)
+                .with_flush_threshold(config.packing.flush_threshold),
             // CRITICAL: Set target_block_size matching StagingPool
-            target_block_size: if let Some(target) = self.target_block_size {
-                target
-            } else {
-                4 * 1024 * 1024
-            },
+            target_block_size,
             checkpoint_manager,
             next_block_id: AtomicU64::new(0),
             enable_matrix_distribution: self.enable_matrix_distribution,
@@ -740,6 +775,7 @@ pub struct ArchiveWriter {
     /// This dramatically improves space utilization from ~55% to ~95%
     staging_pool: StagingPool,
     /// Target block size for batching (default 4MB)
+    #[allow(dead_code)]
     target_block_size: usize,
 
     /// Virtual stripping buffer for erasure coding
@@ -753,6 +789,7 @@ pub struct ArchiveWriter {
     next_block_id: AtomicU64,
 
     /// Whether matrix distribution is enabled
+    #[allow(dead_code)]
     enable_matrix_distribution: bool,
 
     // Small file packing
@@ -1026,7 +1063,7 @@ impl ArchiveWriter {
         // Implementation Reform: k-Bounded Best-Fit is MANDATORY for all modes.
         // We use the staging pool to aggregate small CDC chunks into 4MB MacroBlocks.
         // This is critical for L3 Smart Packing as per ERA v8.1 architecture.
-        
+
         // Use k-Bounded Best-Fit staging pool
         // The pool will automatically handle oversized chunks and optimal bin selection
         if let Some(packed) = self.staging_pool.push(chunk) {
@@ -1223,7 +1260,7 @@ impl ArchiveWriter {
             // Write standard blocks via VolumePool
             let (entry, volume_id) =
                 self.volume_pool
-                    .write_shard(0, &encrypted_block.data, false, 0)?;
+                    .write_shard(0, &encrypted_block.data, false, 0, None)?;
             let location = BlockLocation {
                 volume_id,
                 slot_index: encrypted_block.block_id.0 as u32,
@@ -1262,27 +1299,14 @@ impl ArchiveWriter {
         // 1. Write Data Blocks (and padding)
         let data_shards_count = stripe.config.data_shards as usize;
         let mut data_info = Vec::with_capacity(data_shards_count);
+        let mut stripe_lengths: Vec<u32> = vec![0; data_shards_count];
+        let mut padding_blocks: Vec<Option<EncryptedMacroBlock>> = vec![None; data_shards_count];
 
         for i in 0..data_shards_count {
             if i < stripe.data_blocks.len() {
-                let block = &stripe.data_blocks[i];
-                let (entry, volume_id) = self.volume_pool.write_shard(i, &block.data, false, 0)?;
-
-                let loc = BlockLocation {
-                    volume_id,
-                    slot_index: block.block_id.0 as u32,
-                    physical_offset: entry.physical_offset,
-                    encrypted_size: entry.shard_size,
-                    erasure_info: None,
-                    shard_offsets: None,
-                    shard_volumes: None,
-                };
-                locations.push(loc);
-                data_info.push((entry.volume_sequence, entry.physical_offset));
+                stripe_lengths[i] = stripe.data_blocks[i].data.len() as u32;
             } else {
-                // Write Padding Block (Empty Encrypted Block)
-                // We must write a valid encrypted block so the reader can decrypt it
-                // (processing it as an empty block) without error.
+                // Prepare Padding Block (Empty Encrypted Block)
                 let compressor = self.create_compressor();
                 let block_id = self.next_block_id();
 
@@ -1295,10 +1319,67 @@ impl ArchiveWriter {
                 .with_starting_block_id(block_id);
 
                 let encrypted_block = builder.pack_chunks(vec![])?;
+                stripe_lengths[i] = encrypted_block.data.len() as u32;
+                padding_blocks[i] = Some(encrypted_block);
+            }
+        }
 
-                let (entry, _) =
-                    self.volume_pool
-                        .write_shard(i, &encrypted_block.data, false, 0)?;
+        // Compute parity shards based on actual data blocks + padding blocks
+        let mut shard_inputs: Vec<Vec<u8>> = Vec::with_capacity(data_shards_count);
+        for i in 0..data_shards_count {
+            if i < stripe.data_blocks.len() {
+                shard_inputs.push(stripe.data_blocks[i].data.to_vec());
+            } else {
+                let padding_block = padding_blocks[i]
+                    .as_ref()
+                    .expect("Padding block should be prepared");
+                shard_inputs.push(padding_block.data.to_vec());
+            }
+        }
+
+        let coder = ErasureCoder::new(ErasureConfig::new(
+            data_shards_count,
+            stripe.config.parity_shards as usize,
+        )?)?;
+        let all_shards = coder.encode_shards(&shard_inputs)?;
+        let parity_start = data_shards_count;
+        let parity_shards = all_shards[parity_start..].to_vec();
+
+        for i in 0..data_shards_count {
+            if i < stripe.data_blocks.len() {
+                let block = &stripe.data_blocks[i];
+                stripe_lengths[i] = block.data.len() as u32;
+                let (entry, volume_id) = self.volume_pool.write_shard(
+                    i,
+                    &block.data,
+                    false,
+                    0,
+                    Some(&stripe_lengths),
+                )?;
+
+                let loc = BlockLocation {
+                    volume_id,
+                    slot_index: block.block_id.0 as u32,
+                    physical_offset: entry.physical_offset,
+                    encrypted_size: block.data.len() as u32,
+                    erasure_info: None,
+                    shard_offsets: None,
+                    shard_volumes: None,
+                };
+                locations.push(loc);
+                data_info.push((entry.volume_sequence, entry.physical_offset));
+            } else {
+                let encrypted_block = padding_blocks[i]
+                    .take()
+                    .expect("Padding block should be prepared");
+
+                let (entry, _) = self.volume_pool.write_shard(
+                    i,
+                    &encrypted_block.data,
+                    false,
+                    0,
+                    Some(&stripe_lengths),
+                )?;
                 data_info.push((entry.volume_sequence, entry.physical_offset));
                 // Note: We don't add to `locations` as it's not a real content block,
                 // but we write it to disk to maintain stripe alignment.
@@ -1312,12 +1393,19 @@ impl ArchiveWriter {
         // parity to be at index 2, not index 1. Index 1 is implicitly zero/padding.
         let data_count = stripe.config.data_shards as usize;
 
-        for (i, shard) in stripe.parity_shards.iter().enumerate() {
-            let (entry, _) = self
-                .volume_pool
-                .write_shard(data_count + i, shard, false, 0)?;
+        for (i, shard) in parity_shards.iter().enumerate() {
+            let (entry, _) = self.volume_pool.write_shard(
+                data_count + i,
+                shard,
+                false,
+                0,
+                Some(&stripe_lengths),
+            )?;
             parity_locations.push((entry.volume_sequence, entry.physical_offset));
         }
+
+        // Advance block sequence for matrix distribution
+        self.volume_pool.advance_block_sequence();
 
         // 3. Update Index for Data Blocks with Stripe Information
         for (i, meta) in stripe.block_meta.iter().enumerate() {
@@ -1332,12 +1420,11 @@ impl ArchiveWriter {
             let mut shard_offsets = Vec::new();
             let mut shard_volumes = Vec::new();
 
-            // Add all data block locations (except self, usually)
-            // But for full stripe recovery info, we store others.
-            for (j, data_loc) in locations.iter().enumerate() {
+            // Add all data shard locations (including padding shards), excluding self
+            for (j, (sequence, offset)) in data_info.iter().enumerate() {
                 if i != j {
-                    shard_offsets.push(data_info[j].1); // physical_offset
-                    shard_volumes.push(data_info[j].0); // volume_sequence
+                    shard_offsets.push(*offset); // physical_offset
+                    shard_volumes.push(*sequence); // volume_sequence
                 }
             }
 
@@ -1350,7 +1437,7 @@ impl ArchiveWriter {
             loc.erasure_info = Some(ErasureBlockInfo {
                 data_shards: stripe.config.data_shards as u8,
                 parity_shards: stripe.config.parity_shards as u8,
-                shard_size: loc.encrypted_size,
+                shard_size: stripe.shard_size,
                 original_len: loc.encrypted_size,
             });
 
@@ -1372,6 +1459,28 @@ impl ArchiveWriter {
     /// Add a file from memory
     pub fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
         info!("Adding in-memory file: {} ({} bytes)", name, data.len());
+
+        if data.len() > self.target_block_size {
+            let mut chunk_refs = Vec::new();
+            let mut offset = 0u64;
+
+            for chunk in data.chunks(self.target_block_size) {
+                let hash = era_crypto::hash(chunk);
+
+                if !self.chunk_index.contains(&hash)? {
+                    let chunk = UniqueChunk::new(Bytes::copy_from_slice(chunk), hash);
+                    self.add_to_pending(chunk)?;
+                }
+
+                chunk_refs.push(ChunkRef::new(hash, offset, chunk.len() as u32));
+                offset += chunk.len() as u64;
+            }
+
+            let entry =
+                FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(chunk_refs);
+            self.catalog.add(entry);
+            return Ok(());
+        }
 
         let hash = era_crypto::hash(data);
 
@@ -1489,10 +1598,8 @@ impl ArchiveWriter {
             catalog_locations.len()
         );
 
-        // Finalize the pool
-        let first_catalog = catalog_locations.first().cloned().unwrap_or((0, 0, 0));
-        let pool_stats =
-            pool.finalize_with_catalog(first_catalog.0, first_catalog.1, first_catalog.2)?;
+        // Finalize the pool with per-volume catalog offsets
+        let pool_stats = pool.finalize_with_catalogs(&catalog_locations)?;
 
         info!(
             "VolumePool finalized: {} volumes, {} total bytes, {} blocks",
@@ -1588,6 +1695,57 @@ mod tests {
         let stats = writer.finalize().unwrap();
         assert_eq!(stats.total_files, 1);
         assert!(stats.blocks_written >= 2); // data + catalog
+    }
+
+    #[test]
+    fn test_builder_uses_archive_chunking_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("chunk_cfg.era");
+
+        let mut config = ArchiveConfig::default();
+        config.chunking.min_size = 2 * 1024;
+        config.chunking.avg_size = 8 * 1024;
+        config.chunking.max_size = 16 * 1024;
+
+        let writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config)
+            .enable_cdc(true)
+            .build()
+            .unwrap();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let data = vec![0xAB; 300 * 1024];
+        temp_file.write_all(&data).unwrap();
+        temp_file.flush().unwrap();
+
+        let chunks = writer
+            .file_reader
+            .read_file_chunked(temp_file.path())
+            .unwrap();
+
+        assert!(!chunks.is_empty());
+        for chunk in chunks {
+            assert!(chunk.data.len() <= 16 * 1024);
+        }
+    }
+
+    #[test]
+    fn test_builder_uses_packing_k_factor() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("packing_k.era");
+
+        let mut config = ArchiveConfig::default();
+        config.packing.k_factor = 3;
+        config.packing.flush_threshold = 90;
+
+        let writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config)
+            .build()
+            .unwrap();
+
+        assert_eq!(writer.staging_pool.bin_count(), 3);
     }
 
     #[test]
@@ -1767,6 +1925,7 @@ pub mod generic {
         /// Set the archive configuration
         pub fn config(mut self, config: ArchiveConfig) -> Self {
             self.config = config;
+            self.chunker_config = None;
             self
         }
 
@@ -1778,6 +1937,11 @@ pub mod generic {
 
         /// Set custom CDC configuration
         pub fn chunker_config(mut self, config: ChunkerConfig) -> Self {
+            self.config.chunking = era_common::ChunkingConfig {
+                min_size: config.min_size,
+                avg_size: config.avg_size,
+                max_size: config.max_size,
+            };
             self.chunker_config = Some(config);
             self.enable_cdc = true;
             self
@@ -1825,7 +1989,10 @@ pub mod generic {
 
             // Configure file reader
             let file_reader = if self.enable_cdc {
-                let chunker_config = self.chunker_config.unwrap_or_default();
+                let chunker_config = match self.chunker_config {
+                    Some(cfg) => cfg,
+                    None => chunker_config_from_archive(&self.config)?,
+                };
                 FileReader::with_cdc().with_chunker_config(chunker_config)
             } else {
                 FileReader::new()
@@ -1842,7 +2009,8 @@ pub mod generic {
                 chunk_index: Arc::new(MemoryChunkIndex::new()),
                 file_reader,
                 enable_cdc: self.enable_cdc,
-                staging_pool: StagingPool::new(8, 4 * 1024 * 1024).with_flush_threshold(95),
+                staging_pool: StagingPool::new(self.config.packing.k_factor, 4 * 1024 * 1024)
+                    .with_flush_threshold(self.config.packing.flush_threshold),
                 target_block_size: 4 * 1024 * 1024,
                 next_block_id: AtomicU64::new(0),
             })
@@ -1875,6 +2043,7 @@ pub mod generic {
         enable_cdc: bool,
         /// k-Bounded Best-Fit staging pool for optimal packing
         staging_pool: StagingPool,
+        #[allow(dead_code)]
         target_block_size: usize,
         /// Block ID counter for per-block key derivation
         next_block_id: AtomicU64,

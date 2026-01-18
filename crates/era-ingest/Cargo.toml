@@ -11,6 +11,7 @@ era-common = { workspace = true }
 era-crypto = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
+ignore = "0.4"
 
 
 thiserror = { workspace = true }

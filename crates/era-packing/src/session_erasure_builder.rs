@@ -198,6 +198,20 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
 
+    /// Decode shards for a specific data shard index (virtual striping).
+    pub fn decode_and_extract_all_for_shard(
+        &self,
+        shards: Vec<(usize, bytes::Bytes)>,
+        erasure_info: &era_common::ErasureBlockInfo,
+        block_id: era_common::BlockId,
+        shard_index: usize,
+    ) -> Result<ChunkVec> {
+        let encrypted_block =
+            self.decode_shard(shards, erasure_info, block_id, shard_index)?;
+        let unpacked = self.inner.unpack(&encrypted_block)?;
+        crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
+    }
+
     /// Decode shards and extract a specific chunk by hash.
     pub fn decode_and_extract_chunk(
         &self,
@@ -256,6 +270,62 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
             original_size: original_len as u32,
             compressed_size: original_len as u32,
             chunk_count: 0, // Unknown until unpacked
+        })
+    }
+
+    /// Decode available shards into the encrypted block for a specific shard index.
+    ///
+    /// This is used for virtual striping where each data shard is a full block.
+    pub fn decode_shard(
+        &self,
+        shards: Vec<(usize, bytes::Bytes)>,
+        erasure_info: &era_common::ErasureBlockInfo,
+        block_id: era_common::BlockId,
+        shard_index: usize,
+    ) -> Result<era_common::EncryptedMacroBlock> {
+        let data_shards = erasure_info.data_shards as usize;
+        let parity_shards = erasure_info.parity_shards as usize;
+        let total_shards = data_shards + parity_shards;
+        let shard_size = erasure_info.shard_size as usize;
+        let original_len = erasure_info.original_len as usize;
+
+        if shard_index >= data_shards {
+            return Err(era_common::EraError::ErasureError(format!(
+                "Shard index {} out of range for data_shards {}",
+                shard_index, data_shards
+            )));
+        }
+
+        // Create erasure coder
+        let config = ErasureConfig::new(data_shards, parity_shards)?;
+        let coder = ErasureCoder::new(config)?;
+
+        // Build shard array with None for missing shards
+        let mut shard_array: Vec<Option<Vec<u8>>> = vec![None; total_shards];
+        for (idx, data) in shards {
+            if idx < total_shards {
+                shard_array[idx] = Some(data.to_vec());
+            }
+        }
+
+        // Decode all data shards (padded)
+        let mut recovered = coder.recover_data_shards(&shard_array, shard_size)?;
+        let mut shard_data = recovered
+            .get_mut(shard_index)
+            .ok_or_else(|| {
+                era_common::EraError::ErasureError("Recovered shard missing".into())
+            })?
+            .to_vec();
+
+        // Trim to original length for this block
+        shard_data.truncate(original_len);
+
+        Ok(era_common::EncryptedMacroBlock {
+            block_id,
+            data: bytes::Bytes::from(shard_data),
+            original_size: original_len as u32,
+            compressed_size: original_len as u32,
+            chunk_count: 0,
         })
     }
 

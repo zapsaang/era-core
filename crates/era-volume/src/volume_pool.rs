@@ -216,6 +216,12 @@ impl<B: StorageBackend> VolumePool<B> {
         self.block_sequence
     }
 
+    /// Advance the block sequence after completing a full stripe.
+    pub fn advance_block_sequence(&mut self) {
+        self.block_sequence += 1;
+        self.stats.total_blocks_written += 1;
+    }
+
     /// Get the archive ID from the template header.
     pub fn archive_id(&self) -> era_common::ArchiveId {
         self.template_header.archive_id
@@ -288,13 +294,20 @@ impl<B: StorageBackend> VolumePool<B> {
         shard_data: &[u8],
         include_original_len_header: bool,
         original_len: u32,
+        stripe_lengths: Option<&[u32]>,
     ) -> Result<(MatrixShardEntry, VolumeId)> {
         let preferred_slot = self.shard_volume_slot(shard_idx);
 
+        // Validate shard size against max volume constraints
+        self.validate_shard_size(shard_data.len() as u64)?;
+
         // Check if the volume can fit this shard
         let shard_size = shard_data.len() as u64;
+        let length_prefix_size = stripe_lengths
+            .map(|lens| lens.len() as u64 * 4)
+            .unwrap_or(0);
         let header_size = if include_original_len_header { 4 } else { 0 };
-        let total_size = header_size + ShardHeader::SIZE as u64 + shard_size;
+        let total_size = length_prefix_size + header_size + ShardHeader::SIZE as u64 + shard_size;
 
         // Try preferred slot first, then find any available volume
         let slot = if self.volume_can_fit(preferred_slot, total_size) {
@@ -325,6 +338,13 @@ impl<B: StorageBackend> VolumePool<B> {
         let writer = &mut self.writers[slot];
         let volume_sequence = self.sequences[slot];
         let volume_id = writer.volume_id();
+
+        // Write stripe data lengths header if provided
+        if let Some(lengths) = stripe_lengths {
+            for len in lengths {
+                writer.write_raw(&len.to_le_bytes())?;
+            }
+        }
 
         // Write original length header if needed
         if include_original_len_header {
@@ -384,7 +404,8 @@ impl<B: StorageBackend> VolumePool<B> {
             let slot = self.shard_volume_slot(shard_idx);
             let need_header = !volumes_with_header.contains(&slot);
 
-            let (entry, _) = self.write_shard(shard_idx, shard_data, need_header, original_len)?;
+            let (entry, _) =
+                self.write_shard(shard_idx, shard_data, need_header, original_len, None)?;
             location.add_shard(entry);
 
             if need_header {
@@ -418,6 +439,32 @@ impl<B: StorageBackend> VolumePool<B> {
             let sequence = self.sequences[i];
             stats.volume_sizes.push((sequence, size));
             writer.finalize_with_catalog(catalog_offset, catalog_size, catalog_block_id)?;
+        }
+
+        Ok(stats)
+    }
+
+    /// Finalize all volumes with per-volume catalog information.
+    pub fn finalize_with_catalogs(
+        mut self,
+        catalog_locations: &[(u64, u32, u32)],
+    ) -> Result<VolumePoolStats> {
+        if catalog_locations.len() != self.writers.len() {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "catalog_locations length {} does not match volume count {}",
+                catalog_locations.len(),
+                self.writers.len()
+            )));
+        }
+
+        let mut stats = self.stats.clone();
+
+        for (i, writer) in self.writers.drain(..).enumerate() {
+            let size = writer.current_size();
+            let sequence = self.sequences[i];
+            stats.volume_sizes.push((sequence, size));
+            let (offset, size_u32, block_id) = catalog_locations[i];
+            writer.finalize_with_catalog(offset, size_u32, block_id)?;
         }
 
         Ok(stats)

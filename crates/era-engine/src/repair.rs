@@ -17,11 +17,8 @@
 
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
-use era_common::{
-    compute_shard_crc, BlockId, EraError, ErasureBlockInfo, ErasureCodeConfig, Result, ShardHeader,
-};
+use era_common::{compute_shard_crc, EraError, ErasureCodeConfig, Result, ShardHeader};
 use era_crypto::{KdfParams, KeySession, Salt};
-use era_packing::SessionErasureBlockUnpacker;
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use std::collections::HashMap;
@@ -100,6 +97,11 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
         EraError::ErasureError("Archive does not use erasure coding - repair not available".into())
     })?;
 
+    // If the archive is multi-volume, use matrix-aware repair
+    if header.total_volumes > 1 {
+        return repair_archive_matrix(path, password, options);
+    }
+
     info!(
         "Erasure config: {}/{} data/parity shards",
         erasure_config.data_shards, erasure_config.parity_shards
@@ -119,15 +121,9 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
         return Err(EraError::InvalidKey("Incorrect password".to_string()));
     }
 
-    // Derive volume key for volume 0
-    let volume_key = session.derive_volume_key(0);
-
-    // Create session-based unpacker for RS decoding with per-block key derivation
-    let nonce_context = header.crypto_anchor.salt;
-    let compressor: Box<dyn era_codec::Compressor> =
+    // Create compressor (kept for future decode-based validation if needed)
+    let _compressor: Box<dyn era_codec::Compressor> =
         Box::new(ZstdCompressor::new(header.config.compression.level));
-    let erasure_unpacker =
-        SessionErasureBlockUnpacker::new(&session, &volume_key, nonce_context, compressor);
 
     // Create backup if requested
     if options.create_backup && !options.dry_run {
@@ -145,43 +141,53 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
     let total_shards = erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
 
     let (data_start, data_end) = volume_reader.data_region();
-    let erasure_data_end = volume_reader.footer().map(|f| f.catalog_offset).unwrap_or(data_end);
+    let erasure_data_end = volume_reader
+        .footer()
+        .map(|f| f.catalog_offset)
+        .unwrap_or(data_end);
 
     let mut offset = data_start;
     let mut block_index = 0u32;
+    let header_prefix_len = erasure_config.data_shards as usize * 4;
 
     // Collect repair operations first (to do them in a batch)
     let mut repairs: Vec<ShardRepair> = Vec::new();
 
-    while offset < erasure_data_end {
-        // Read erasure block header
-        let header_bytes = match volume_reader.read_raw(offset, 4) {
-            Ok(bytes) if bytes.len() == 4 => bytes,
-            _ => break,
-        };
-        let original_len = u32::from_le_bytes([
-            header_bytes[0],
-            header_bytes[1],
-            header_bytes[2],
-            header_bytes[3],
-        ]);
-
-        let _block_header_offset = offset;
-        offset += 4;
-
-        // Track shard info for this block
+    'stripe_loop: while offset < erasure_data_end {
         let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(total_shards);
         let mut shard_offsets: Vec<u64> = Vec::with_capacity(total_shards);
         let mut corrupted_indices: Vec<usize> = Vec::new();
-        let mut first_shard_size = 0u32;
+        let mut data_lengths: Vec<Option<u32>> = vec![None; erasure_config.data_shards as usize];
+        let mut max_len: usize = 0;
+        let mut stripe_lengths: Option<Vec<u32>> = None;
 
-        // Read all shards
         for shard_idx in 0..total_shards {
             let shard_header_offset = offset;
 
-            let header_bytes = match volume_reader.read_raw(offset, ShardHeader::SIZE) {
+            let prefix_bytes = match volume_reader.read_raw(offset, header_prefix_len) {
+                Ok(bytes) if bytes.len() == header_prefix_len => bytes,
+                _ => {
+                    // End of data region
+                    break 'stripe_loop;
+                }
+            };
+
+            if stripe_lengths.is_none() {
+                let mut lengths = Vec::with_capacity(erasure_config.data_shards as usize);
+                for chunk in prefix_bytes.chunks_exact(4) {
+                    lengths.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+                stripe_lengths = Some(lengths);
+            }
+
+            let header_bytes = match volume_reader
+                .read_raw(offset + header_prefix_len as u64, ShardHeader::SIZE)
+            {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
-                _ => break,
+                _ => {
+                    // End of data region
+                    break 'stripe_loop;
+                }
             };
 
             let shard_header = match ShardHeader::from_bytes(&header_bytes) {
@@ -192,19 +198,25 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
                         block_index, shard_idx
                     );
                     corrupted_indices.push(shard_idx);
-                    break;
+                    break 'stripe_loop;
                 }
             };
+
             let shard_len = shard_header.length as usize;
-
-            if first_shard_size == 0 {
-                first_shard_size = shard_header.length;
-            }
-
             shard_offsets.push(shard_header_offset);
 
-            // Read shard data
-            match volume_reader.read_raw(offset + ShardHeader::SIZE as u64, shard_len) {
+            if shard_idx < data_lengths.len() {
+                data_lengths[shard_idx] = Some(shard_header.length);
+            }
+
+            if shard_len > max_len {
+                max_len = shard_len;
+            }
+
+            match volume_reader.read_raw(
+                offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
+                shard_len,
+            ) {
                 Ok(shard_data) => {
                     if shard_header.verify(&shard_data) {
                         shards.push((shard_idx, shard_data));
@@ -223,18 +235,30 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
                 }
             }
 
-            offset += ShardHeader::SIZE as u64 + shard_len as u64;
+            offset += header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+        }
+
+        if let Some(lengths) = stripe_lengths {
+            if let Some(stripe_max) = lengths.iter().copied().max() {
+                if stripe_max as usize > max_len {
+                    max_len = stripe_max as usize;
+                }
+            }
+
+            for (idx, len) in lengths.into_iter().enumerate() {
+                if idx < data_lengths.len() && data_lengths[idx].is_none() && len > 0 {
+                    data_lengths[idx] = Some(len);
+                }
+            }
         }
 
         stats.blocks_scanned += 1;
 
-        // If we have corrupted shards, try to repair
         if !corrupted_indices.is_empty() {
             stats.blocks_with_corruption += 1;
 
             let min_shards = erasure_config.data_shards as usize;
             if shards.len() < min_shards {
-                // Too many shards lost
                 stats.unrecoverable_blocks += 1;
                 let msg = format!(
                     "Block {}: only {}/{} shards intact, need {} for recovery",
@@ -253,68 +277,42 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
                     )));
                 }
             } else {
-                // We can recover! Use RS to get the original data
-                let erasure_info = ErasureBlockInfo {
-                    data_shards: erasure_config.data_shards,
-                    parity_shards: erasure_config.parity_shards,
-                    shard_size: first_shard_size,
-                    original_len,
+                let shard_size = if max_len % 2 == 0 {
+                    max_len
+                } else {
+                    max_len + 1
                 };
 
-                let block_id = BlockId::new(block_index as u64);
+                let repaired = repair_shards_rs(
+                    &shards,
+                    &corrupted_indices,
+                    &data_lengths,
+                    &erasure_config,
+                    shard_size,
+                );
 
-                // Decode to get original data
-                match erasure_unpacker.decode_and_extract_all(
-                    shards.clone(),
-                    &erasure_info,
-                    block_id,
-                ) {
-                    Ok(_chunks) => {
-                        // Successfully decoded! Now re-encode to get repaired shards
-                        // Note: We need access to the packer to re-encode
-                        // For now, we'll use a simpler approach: reconstruct shards from RS
-
-                        let repaired = repair_shards_rs(
-                            &shards,
-                            &corrupted_indices,
-                            &erasure_config,
-                            first_shard_size as usize,
-                            original_len,
-                        );
-
-                        match repaired {
-                            Ok(repaired_shards) => {
-                                for (shard_idx, shard_data) in repaired_shards {
-                                    let shard_offset = shard_offsets.get(shard_idx).copied();
-                                    if let Some(off) = shard_offset {
-                                        repairs.push(ShardRepair {
-                                            offset: off,
-                                            shard_idx,
-                                            data: shard_data,
-                                        });
-                                        stats.shards_repaired += 1;
-                                    }
-                                }
-                                info!(
-                                    "Block {}: recovered {} corrupted shards",
-                                    block_index,
-                                    corrupted_indices.len()
-                                );
-                            }
-                            Err(e) => {
-                                stats.unrecoverable_blocks += 1;
-                                let msg = format!(
-                                    "Block {}: RS reconstruction failed: {}",
-                                    block_index, e
-                                );
-                                warn!("{}", msg);
-                                stats.errors.push(msg);
+                match repaired {
+                    Ok(repaired_shards) => {
+                        for (shard_idx, shard_data) in repaired_shards {
+                            let shard_offset = shard_offsets.get(shard_idx).copied();
+                            if let Some(off) = shard_offset {
+                                repairs.push(ShardRepair {
+                                    offset: off,
+                                    shard_idx,
+                                    data: shard_data,
+                                });
+                                stats.shards_repaired += 1;
                             }
                         }
+                        info!(
+                            "Block {}: recovered {} corrupted shards",
+                            block_index,
+                            corrupted_indices.len()
+                        );
                     }
                     Err(e) => {
                         stats.unrecoverable_blocks += 1;
-                        let msg = format!("Block {}: decode failed: {}", block_index, e);
+                        let msg = format!("Block {}: RS reconstruction failed: {}", block_index, e);
                         warn!("{}", msg);
                         stats.errors.push(msg);
                     }
@@ -358,44 +356,46 @@ struct ShardRepair {
 fn repair_shards_rs(
     available_shards: &[(usize, Bytes)],
     corrupted_indices: &[usize],
+    data_lengths: &[Option<u32>],
     config: &ErasureCodeConfig,
-    _shard_size: usize,
-    original_len: u32,
+    shard_size: usize,
 ) -> Result<Vec<(usize, Bytes)>> {
-    let total_shards = config.data_shards as usize + config.parity_shards as usize;
+    let data_shards = config.data_shards as usize;
+    let parity_shards = config.parity_shards as usize;
+    let total_shards = data_shards + parity_shards;
 
-    // Create erasure coder
-    let erasure_config =
-        ErasureConfig::new(config.data_shards as usize, config.parity_shards as usize)?;
+    let erasure_config = ErasureConfig::new(data_shards, parity_shards)?;
     let coder = ErasureCoder::new(erasure_config)?;
 
-    // Build shard array with None for missing shards
     let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
     for (idx, data) in available_shards {
         shards[*idx] = Some(data.to_vec());
     }
 
-    // For reconstruction, we need to first decode the original data,
-    // then re-encode to get all shards including the corrupted ones.
-    // Use the exact original length from the block header for accurate reconstruction.
+    // Recover all data shards (padded)
+    let recovered_data = coder.recover_data_shards(&shards, shard_size)?;
 
-    // Decode to get original data using the exact original length
-    let original_data = coder.decode(&shards, original_len as usize)?;
+    // Re-encode to get parity shards
+    let all_shards = coder.encode_shards(&recovered_data)?;
 
-    // Re-encode to get all shards
-    let mut all_shards = coder.encode(&original_data)?;
-
-    // Collect repaired shards for corrupted indices
     let mut repaired = Vec::new();
     for &idx in corrupted_indices {
-        if idx < all_shards.len() {
-            repaired.push((idx, Bytes::from(std::mem::take(&mut all_shards[idx]))));
-        } else {
+        if idx >= total_shards {
             return Err(EraError::ErasureError(format!(
                 "Shard index {} out of range",
                 idx
             )));
         }
+
+        let mut data = all_shards[idx].clone();
+        if idx < data_shards {
+            let original_len = data_lengths.get(idx).and_then(|v| *v).ok_or_else(|| {
+                EraError::ErasureError("Missing original length for data shard".into())
+            })? as usize;
+            data.truncate(original_len);
+        }
+
+        repaired.push((idx, Bytes::from(data)));
     }
 
     Ok(repaired)
@@ -535,12 +535,8 @@ pub fn repair_archive_matrix(
         return Err(EraError::InvalidKey("Incorrect password".to_string()));
     }
 
-    let volume_key = session.derive_volume_key(0);
-    let nonce_context = header.crypto_anchor.salt;
-    let compressor: Box<dyn era_codec::Compressor> =
+    let _compressor: Box<dyn era_codec::Compressor> =
         Box::new(ZstdCompressor::new(header.config.compression.level));
-    let erasure_unpacker =
-        SessionErasureBlockUnpacker::new(&session, &volume_key, nonce_context, compressor);
 
     // Create backups if requested
     if options.create_backup && !options.dry_run {
@@ -563,111 +559,163 @@ pub fn repair_archive_matrix(
 
     // Scan blocks using matrix distribution pattern
     // We need to iterate through block sequences and collect shards from each volume
-    let (data_start, data_end) = volume_readers[0].data_region();
-    let erasure_data_end = volume_readers[0].footer()
-        .map(|f| f.catalog_offset)
-        .unwrap_or(data_end);
-
     // Track offsets for each volume
     let mut volume_offsets: Vec<u64> = volume_readers.iter().map(|r| r.data_region().0).collect();
 
     let mut block_sequence: u64 = 0;
+    let distribution_strategy = header.config.distribution.strategy;
+    let total_volumes = header.total_volumes as usize;
 
-    // We iterate by scanning volume 0 for block headers (original_len markers)
-    let mut primary_offset = data_start;
+    // Map volume sequence -> reader index
+    let mut vol_index_map = vec![None; total_volumes.max(1)];
+    for (reader_idx, seq) in volume_sequences.iter().enumerate() {
+        let seq_idx = *seq as usize;
+        if seq_idx < vol_index_map.len() {
+            vol_index_map[seq_idx] = Some(reader_idx);
+        }
+    }
 
-    while primary_offset < erasure_data_end {
-        // Read block header from primary volume
-        let header_bytes = match volume_readers[0].read_raw(primary_offset, 4) {
-            Ok(bytes) if bytes.len() == 4 => bytes,
-            _ => break,
-        };
-        let original_len = u32::from_le_bytes([
-            header_bytes[0],
-            header_bytes[1],
-            header_bytes[2],
-            header_bytes[3],
-        ]);
+    let data_ends: Vec<u64> = volume_readers
+        .iter()
+        .map(|reader| {
+            let (_, end) = reader.data_region();
+            reader.footer().map(|f| f.catalog_offset).unwrap_or(end)
+        })
+        .collect();
 
-        // Collect shards from all volumes for this block
+    let header_prefix_len = erasure_config.data_shards as usize * 4;
+
+    'stripe_loop: loop {
         let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(total_shards);
-        let mut shard_locations: Vec<(usize, usize, u64)> = Vec::new(); // (shard_idx, vol_idx, offset)
+        let mut shard_locations: Vec<(usize, usize, u64)> = Vec::new(); // (shard_idx, reader_idx, offset)
         let mut corrupted_indices: Vec<usize> = Vec::new();
-        let mut first_shard_size = 0u32;
+        let mut data_lengths: Vec<Option<u32>> = vec![None; erasure_config.data_shards as usize];
+        let mut max_len: usize = 0;
+        let mut any_shard_read = false;
+        let mut stripe_lengths: Option<Vec<u32>> = None;
 
         for shard_idx in 0..total_shards {
-            // Calculate which volume this shard is on using matrix distribution
-            let vol_idx = (shard_idx + block_sequence as usize) % volume_count;
+            let vol_idx = distribution_strategy.calculate_volume(
+                shard_idx,
+                block_sequence,
+                total_volumes.max(1),
+            );
 
-            // For shard 0 of this volume in this block, we already read the header
-            // For other shards, we need to track their positions
-            let shard_offset = if shard_idx == 0 {
-                primary_offset + 4 // Skip the 4-byte original_len header
-            } else {
-                volume_offsets[vol_idx]
-            };
+            let reader_idx_opt = vol_index_map.get(vol_idx).copied().flatten();
+            if let Some(reader_idx) = reader_idx_opt {
+                let reader = &volume_readers[reader_idx];
+                let shard_offset = volume_offsets[reader_idx];
 
-            let shard_header_offset = shard_offset;
+                if shard_offset >= data_ends[reader_idx] {
+                    if shard_idx == 0 {
+                        break 'stripe_loop;
+                    }
+                    corrupted_indices.push(shard_idx);
+                    stats.corrupted_shards_found += 1;
+                    continue;
+                }
 
-            // Read shard header
-            let header_bytes =
-                match volume_readers[vol_idx].read_raw(shard_offset, ShardHeader::SIZE) {
-                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                let prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len) {
+                    Ok(bytes) if bytes.len() == header_prefix_len => bytes,
                     _ => {
+                        if shard_idx == 0 {
+                            break 'stripe_loop;
+                        }
                         corrupted_indices.push(shard_idx);
                         stats.corrupted_shards_found += 1;
                         continue;
                     }
                 };
 
-            let shard_header = match ShardHeader::from_bytes(&header_bytes) {
-                Some(h) => h,
-                None => {
-                    corrupted_indices.push(shard_idx);
-                    stats.corrupted_shards_found += 1;
-                    continue;
+                if stripe_lengths.is_none() {
+                    let mut lengths = Vec::with_capacity(erasure_config.data_shards as usize);
+                    for chunk in prefix_bytes.chunks_exact(4) {
+                        lengths.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                    }
+                    stripe_lengths = Some(lengths);
                 }
-            };
 
-            let shard_len = shard_header.length as usize;
-            if first_shard_size == 0 {
-                first_shard_size = shard_header.length;
-            }
-
-            // Read shard data
-            match volume_readers[vol_idx]
-                .read_raw(shard_offset + ShardHeader::SIZE as u64, shard_len)
-            {
-                Ok(shard_data) => {
-                    if shard_header.verify(&shard_data) {
-                        shards.push((shard_idx, shard_data));
-                        shard_locations.push((shard_idx, vol_idx, shard_header_offset));
-                    } else {
-                        debug!(
-                            "Block {}: shard {} CRC mismatch on volume {}",
-                            block_sequence, shard_idx, vol_idx
-                        );
+                let header_bytes = match reader
+                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE)
+                {
+                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                    _ => {
+                        if shard_idx == 0 {
+                            break 'stripe_loop;
+                        }
                         corrupted_indices.push(shard_idx);
-                        shard_locations.push((shard_idx, vol_idx, shard_header_offset));
+                        stats.corrupted_shards_found += 1;
+                        continue;
+                    }
+                };
+
+                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
+                    Some(h) => h,
+                    None => {
+                        corrupted_indices.push(shard_idx);
+                        stats.corrupted_shards_found += 1;
+                        continue;
+                    }
+                };
+
+                let shard_len = shard_header.length as usize;
+                if shard_idx < data_lengths.len() {
+                    data_lengths[shard_idx] = Some(shard_header.length);
+                }
+                if shard_len > max_len {
+                    max_len = shard_len;
+                }
+
+                any_shard_read = true;
+                match reader.read_raw(
+                    shard_offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
+                    shard_len,
+                ) {
+                    Ok(shard_data) => {
+                        if shard_header.verify(&shard_data) {
+                            shards.push((shard_idx, shard_data));
+                            shard_locations.push((shard_idx, reader_idx, shard_offset));
+                        } else {
+                            corrupted_indices.push(shard_idx);
+                            shard_locations.push((shard_idx, reader_idx, shard_offset));
+                            stats.corrupted_shards_found += 1;
+                        }
+                    }
+                    Err(_) => {
+                        corrupted_indices.push(shard_idx);
                         stats.corrupted_shards_found += 1;
                     }
                 }
-                Err(_) => {
-                    corrupted_indices.push(shard_idx);
-                    stats.corrupted_shards_found += 1;
-                }
-            }
 
-            // Update volume offset for next shard from this volume
-            volume_offsets[vol_idx] = shard_offset + ShardHeader::SIZE as u64 + shard_len as u64;
+                volume_offsets[reader_idx] = shard_offset
+                    + header_prefix_len as u64
+                    + ShardHeader::SIZE as u64
+                    + shard_len as u64;
+            } else {
+                corrupted_indices.push(shard_idx);
+                stats.corrupted_shards_found += 1;
+            }
         }
 
-        // Update primary offset (volume 0)
-        primary_offset = volume_offsets[0];
+        if let Some(lengths) = stripe_lengths {
+            if let Some(stripe_max) = lengths.iter().copied().max() {
+                if stripe_max as usize > max_len {
+                    max_len = stripe_max as usize;
+                }
+            }
+            for (idx, len) in lengths.into_iter().enumerate() {
+                if idx < data_lengths.len() && data_lengths[idx].is_none() && len > 0 {
+                    data_lengths[idx] = Some(len);
+                }
+            }
+        }
+
+        if !any_shard_read {
+            break;
+        }
 
         stats.blocks_scanned += 1;
 
-        // Attempt repair if needed
         if !corrupted_indices.is_empty() {
             stats.blocks_with_corruption += 1;
 
@@ -691,64 +739,45 @@ pub fn repair_archive_matrix(
                     )));
                 }
             } else {
-                // Attempt RS repair
-                let erasure_info = ErasureBlockInfo {
-                    data_shards: erasure_config.data_shards,
-                    parity_shards: erasure_config.parity_shards,
-                    shard_size: first_shard_size,
-                    original_len,
+                let shard_size = if max_len % 2 == 0 {
+                    max_len
+                } else {
+                    max_len + 1
                 };
 
-                let block_id = BlockId::new(block_sequence);
-
-                match erasure_unpacker.decode_and_extract_all(
-                    shards.clone(),
-                    &erasure_info,
-                    block_id,
+                match repair_shards_rs(
+                    &shards,
+                    &corrupted_indices,
+                    &data_lengths,
+                    &erasure_config,
+                    shard_size,
                 ) {
-                    Ok(_) => {
-                        // Decode successful, now reconstruct corrupted shards
-                        match repair_shards_rs(
-                            &shards,
-                            &corrupted_indices,
-                            &erasure_config,
-                            first_shard_size as usize,
-                            original_len,
-                        ) {
-                            Ok(repaired_shards) => {
-                                for (shard_idx, shard_data) in repaired_shards {
-                                    // Find the location for this shard
-                                    if let Some(&(_, vol_idx, offset)) =
-                                        shard_locations.iter().find(|(idx, _, _)| *idx == shard_idx)
-                                    {
-                                        all_repairs.entry(vol_idx).or_default().push(ShardRepair {
-                                            offset,
-                                            shard_idx,
-                                            data: shard_data,
-                                        });
-                                        stats.shards_repaired += 1;
-                                    }
-                                }
-                                info!(
-                                    "Block {}: recovered {} shards",
-                                    block_sequence,
-                                    corrupted_indices.len()
-                                );
-                            }
-                            Err(e) => {
-                                stats.unrecoverable_blocks += 1;
-                                let msg = format!(
-                                    "Block {}: RS reconstruction failed: {}",
-                                    block_sequence, e
-                                );
-                                warn!("{}", msg);
-                                stats.errors.push(msg);
+                    Ok(repaired_shards) => {
+                        for (shard_idx, shard_data) in repaired_shards {
+                            if let Some(&(_, reader_idx, offset)) =
+                                shard_locations.iter().find(|(idx, _, _)| *idx == shard_idx)
+                            {
+                                all_repairs
+                                    .entry(reader_idx)
+                                    .or_default()
+                                    .push(ShardRepair {
+                                        offset,
+                                        shard_idx,
+                                        data: shard_data,
+                                    });
+                                stats.shards_repaired += 1;
                             }
                         }
+                        info!(
+                            "Block {}: recovered {} shards",
+                            block_sequence,
+                            corrupted_indices.len()
+                        );
                     }
                     Err(e) => {
                         stats.unrecoverable_blocks += 1;
-                        let msg = format!("Block {}: decode failed: {}", block_sequence, e);
+                        let msg =
+                            format!("Block {}: RS reconstruction failed: {}", block_sequence, e);
                         warn!("{}", msg);
                         stats.errors.push(msg);
                     }

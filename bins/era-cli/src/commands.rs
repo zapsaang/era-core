@@ -10,7 +10,7 @@ use era_engine::{
     RecoveryManager, RepairOptions,
 };
 use indicatif::{HumanBytes, HumanDuration, ProgressBar, ProgressStyle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info, warn};
 
@@ -121,6 +121,9 @@ pub fn create(
         config.compression.level = 0;
         info!("Compression: disabled (Store mode)");
     } else if let Some(level) = compression_level {
+        if !(0..=22).contains(&level) {
+            anyhow::bail!("Compression level must be between 0 and 22");
+        }
         if level == 0 {
             config.compression.algorithm = CompressionAlgorithm::None;
             config.compression.level = 0;
@@ -164,6 +167,42 @@ pub fn create(
         } else {
             MatrixDistributionStrategy::Striped
         };
+    }
+
+    // Validate CDC bounds
+    let min_size = config.chunking.min_size;
+    let avg_size = config.chunking.avg_size;
+    let max_size = config.chunking.max_size;
+    if min_size == 0 || avg_size == 0 || max_size == 0 {
+        anyhow::bail!("CDC sizes must be > 0");
+    }
+    if min_size > avg_size || avg_size > max_size {
+        anyhow::bail!(
+            "CDC sizes must satisfy min <= avg <= max (got {}, {}, {})",
+            min_size,
+            avg_size,
+            max_size
+        );
+    }
+
+    // Validate erasure + distribution combinations
+    if config.erasure.is_none() {
+        if matches!(matrix_distribution, Some(true)) {
+            anyhow::bail!("Matrix distribution requires erasure coding");
+        }
+    } else if let Some(ec) = &config.erasure {
+        if config.distribution.strategy == MatrixDistributionStrategy::RotatingOffset {
+            let required = (ec.data_shards + ec.parity_shards) as usize;
+            if let Some(v) = volume_count {
+                if v < required {
+                    anyhow::bail!(
+                        "Volume count ({}) must be >= total shards ({}) for matrix distribution",
+                        v,
+                        required
+                    );
+                }
+            }
+        }
     }
 
     // 加载公钥证书
@@ -226,7 +265,7 @@ pub fn create(
 
     let start_time = Instant::now();
     // Pre-scan files to update the progress bar length
-    let mut files_to_process = Vec::new();
+    let mut files_to_process: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     // Use ignore::WalkBuilder (implied standard, but user asked for walkdir explicitly or implies standard recursion)
     // The instructions said "Introduce walkdir crate".
@@ -234,16 +273,25 @@ pub fn create(
     for input in inputs {
         let path = input.as_ref();
         if path.is_dir() {
+            let base = path.parent().unwrap_or(path);
             for entry in walkdir::WalkDir::new(path)
                 .into_iter()
                 .filter_map(|e| e.ok())
             {
                 if entry.file_type().is_file() {
-                    files_to_process.push(entry.path().to_path_buf());
+                    let disk_path = entry.path().to_path_buf();
+                    let stored_path = entry
+                        .path()
+                        .strip_prefix(base)
+                        .unwrap_or(entry.path())
+                        .to_path_buf();
+                    files_to_process.push((disk_path, stored_path));
                 }
             }
         } else {
-            files_to_process.push(path.to_path_buf());
+            let base = path.parent().unwrap_or(path);
+            let stored_path = path.strip_prefix(base).unwrap_or(path).to_path_buf();
+            files_to_process.push((path.to_path_buf(), stored_path));
         }
     }
 
@@ -257,11 +305,11 @@ pub fn create(
             .progress_chars("█▓▒░-"),
     );
 
-    for path in files_to_process {
-        pb.set_message(format!("{}", path.display()));
+    for (disk_path, stored_path) in files_to_process {
+        pb.set_message(format!("{}", disk_path.display()));
         writer
-            .add_file(&path)
-            .with_context(|| format!("Failed to add file: {}", path.display()))?;
+            .add_file_with_path(&disk_path, &stored_path)
+            .with_context(|| format!("Failed to add file: {}", disk_path.display()))?;
         pb.inc(1);
     }
 

@@ -836,7 +836,11 @@ fn test_single_volume_no_erasure() {
     let era_files: Vec<_> = fs::read_dir(temp_dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains(".era"))
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy().to_string();
+            name.starts_with("single.era") && !name.ends_with(".idx")
+        })
         .collect();
 
     assert_eq!(era_files.len(), 1, "Should only have 1 volume file");
