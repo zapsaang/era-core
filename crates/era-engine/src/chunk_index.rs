@@ -122,43 +122,37 @@ impl ChunkIndex for MemoryChunkIndex {
     }
 }
 
-#[cfg(feature = "lsm")]
-mod lsm_impl {
-    use super::*;
-    use era_index::LsmChunkIndex;
+impl ChunkIndex for era_index::LsmChunkIndex {
+    fn contains(&self, hash: &ChunkHash) -> EraResult<bool> {
+        self.contains(hash).map_err(Into::into)
+    }
 
-    impl ChunkIndex for LsmChunkIndex {
-        fn contains(&self, hash: &ChunkHash) -> EraResult<bool> {
-            self.contains(hash).map_err(Into::into)
-        }
+    fn get(&self, hash: &ChunkHash) -> EraResult<Option<BlockLocation>> {
+        self.get(hash).map_err(Into::into)
+    }
 
-        fn get(&self, hash: &ChunkHash) -> EraResult<Option<BlockLocation>> {
-            self.get(hash).map_err(Into::into)
-        }
+    fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
+        era_index::LsmChunkIndex::put(self, hash, location).map_err(Into::into)
+    }
 
-        fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
-            LsmChunkIndex::put(self, hash, location).map_err(Into::into)
-        }
+    fn delete(&self, hash: &ChunkHash) -> EraResult<()> {
+        era_index::LsmChunkIndex::delete(self, hash).map_err(Into::into)
+    }
 
-        fn delete(&self, hash: &ChunkHash) -> EraResult<()> {
-            LsmChunkIndex::delete(self, hash).map_err(Into::into)
-        }
+    fn len(&self) -> usize {
+        era_index::LsmChunkIndex::len(self) as usize
+    }
 
-        fn len(&self) -> usize {
-            LsmChunkIndex::len(self) as usize
-        }
+    fn flush(&self) -> EraResult<()> {
+        era_index::LsmChunkIndex::flush(self).map_err(Into::into)
+    }
 
-        fn flush(&self) -> EraResult<()> {
-            LsmChunkIndex::flush(self).map_err(Into::into)
-        }
+    fn start_batch(&self) {
+        era_index::LsmChunkIndex::start_batch(self);
+    }
 
-        fn start_batch(&self) {
-            LsmChunkIndex::start_batch(self);
-        }
-
-        fn commit_batch(&self) -> EraResult<()> {
-            LsmChunkIndex::commit_batch(self).map_err(Into::into)
-        }
+    fn commit_batch(&self) -> EraResult<()> {
+        era_index::LsmChunkIndex::commit_batch(self).map_err(Into::into)
     }
 }
 
@@ -168,7 +162,6 @@ pub enum ChunkIndexBackend {
     /// In-memory HashMap (legacy, not recommended for production)
     Memory,
     /// LSM-Tree with RocksDB (recommended)
-    #[cfg(feature = "lsm")]
     Lsm { path: std::path::PathBuf },
 }
 
@@ -182,7 +175,6 @@ impl Default for ChunkIndexBackend {
 pub fn create_chunk_index(backend: ChunkIndexBackend) -> EraResult<Arc<dyn ChunkIndex>> {
     match backend {
         ChunkIndexBackend::Memory => Ok(Arc::new(MemoryChunkIndex::new())),
-        #[cfg(feature = "lsm")]
         ChunkIndexBackend::Lsm { path } => {
             let index = era_index::LsmChunkIndex::open(path)
                 .map_err(|e| era_common::EraError::IndexError(e.to_string()))?;

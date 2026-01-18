@@ -11,8 +11,8 @@
 //!
 //! 1. If chunk >= target_size: pack it alone immediately
 //! 2. Otherwise: find the bin with minimum remaining space that can fit the chunk (Best-Fit)
-//! 3. If no bin fits: use the emptiest bin
-//! 4. When a bin reaches 95% capacity: flush it to storage
+//! 3. If no bin fits: flush the fullest bin (evict) and use the free slot
+//! 4. When a bin reaches flush threshold (e.g. 95%): flush it to storage
 //!
 //! ## Performance Impact
 //!
@@ -133,7 +133,7 @@ impl StagingPool {
     ///
     /// 1. If chunk_size >= target_size: pack it alone (special case)
     /// 2. Find the bin with minimum remaining space that can still fit the chunk (Best-Fit)
-    /// 3. If no bin can fit it: use the emptiest bin
+    /// 3. If no bin can fit it: flush the fullest bin (eviction) and use the slot
     /// 4. If the chosen bin exceeds flush threshold after adding: flush it
     pub fn push(&mut self, chunk: UniqueChunk) -> Option<PackedBlock> {
         let chunk_size = chunk.data.len();
@@ -157,50 +157,68 @@ impl StagingPool {
             .min_by_key(|(_, bin)| self.target_size - bin.current_size - chunk_size)
             .map(|(idx, _)| idx);
 
-        let chosen_bin_idx = if let Some(idx) = best_fit_bin {
+        if let Some(idx) = best_fit_bin {
             // Found a bin that fits
             trace!(
                 "Best-Fit: chose bin {} with {} bytes free",
                 idx,
                 self.target_size - self.bins[idx].current_size
             );
-            idx
+
+            // Add chunk to the chosen bin
+            let bin = &mut self.bins[idx];
+            bin.chunks.push(chunk);
+            bin.current_size += chunk_size;
+
+            // Check if we should flush this bin
+            let flush_threshold = (self.target_size * self.flush_threshold_percent) / 100;
+            if bin.current_size >= flush_threshold {
+                trace!(
+                    "Bin {} reached {}% capacity ({}/{}), flushing",
+                    idx,
+                    self.flush_threshold_percent,
+                    bin.current_size,
+                    self.target_size
+                );
+                Some(self.flush_bin(idx))
+            } else {
+                None
+            }
         } else {
-            // No bin can fit the chunk, use the emptiest one
-            let emptiest_idx = self
+            // No bin can fit the chunk without overflowing target_size.
+            // TRUE k-Bounded Best-Fit Strategy:
+            // Find the fullest bin (best candidate for a "complete" block), flush it,
+            // and use the cleared space for the new chunk.
+
+            // Note: best_fit_bin checks ALL bins. If we are here, it means even empty bins
+            // couldn't fit it (which implies chunk >= target, but that's handled by pack_single).
+            // OR, more likely, we have NO empty bins and all partial bins are too full.
+
+            let fullest_idx = self
                 .bins
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, bin)| bin.current_size)
+                .max_by_key(|(_, bin)| bin.current_size)
                 .map(|(idx, _)| idx)
                 .unwrap(); // Safe: bins is never empty
 
             trace!(
-                "No fit found, using emptiest bin {} with {} bytes",
-                emptiest_idx,
-                self.bins[emptiest_idx].current_size
+                "No fit found. Strategy: Evict Fullest. Flushing bin {} (size {}) to make room.",
+                fullest_idx,
+                self.bins[fullest_idx].current_size
             );
-            emptiest_idx
-        };
 
-        // Add chunk to the chosen bin
-        let bin = &mut self.bins[chosen_bin_idx];
-        bin.chunks.push(chunk);
-        bin.current_size += chunk_size;
+            // 1. Flush the fullest bin (preserving the block to return)
+            let flushed_block = self.flush_bin(fullest_idx);
 
-        // Check if we should flush this bin
-        let flush_threshold = (self.target_size * self.flush_threshold_percent) / 100;
-        if bin.current_size >= flush_threshold {
-            trace!(
-                "Bin {} reached {}% capacity ({}/{}), flushing",
-                chosen_bin_idx,
-                self.flush_threshold_percent,
-                bin.current_size,
-                self.target_size
-            );
-            Some(self.flush_bin(chosen_bin_idx))
-        } else {
-            None
+            // 2. Put the new chunk into the now-empty bin
+            // Note: flush_bin cleared the bin but kept the struct
+            let bin = &mut self.bins[fullest_idx];
+            bin.chunks.push(chunk);
+            bin.current_size = chunk_size;
+
+            // 3. Return the flushed block
+            Some(flushed_block)
         }
     }
 
@@ -370,22 +388,40 @@ mod tests {
     }
 
     #[test]
-    fn test_use_emptiest_when_no_fit() {
-        let mut pool = StagingPool::new(2, 1000);
+    fn test_strategy_evict_fullest_when_no_fit() {
+        // Target: 100 bytes. k=2.
+        // We use flush threshold 100% to control flushing behavior strictly via push logic
+        let mut pool = StagingPool::new(2, 100).with_flush_threshold(100);
 
-        // Fill both bins close to capacity
-        pool.push(make_chunk(950, 1)); // bin0
-        pool.push(make_chunk(900, 2)); // bin1
+        // Fill Bin 0 to 90
+        pool.push(make_chunk(90, 1));
 
-        // Try to add 200-byte chunk - neither fits, should use emptiest (bin1 after it flushes)
-        // Actually, both are nearly full, so let's be more careful
-        let mut pool2 = StagingPool::new(2, 1000);
-        pool2.push(make_chunk(980, 1)); // bin0 nearly full
-        pool2.push(make_chunk(700, 2)); // bin1 has more space
+        // Fill Bin 1 to 95
+        pool.push(make_chunk(95, 2));
 
-        // Add 350-byte chunk - doesn't fit in bin0, should go to bin1
-        pool2.push(make_chunk(350, 3));
-        // bin1 should have both chunks (if it didn't flush)
+        // State: One bin 90, one bin 95.
+        // Push 20.
+        // Fits in 90? No (110). Fits in 95? No (115).
+        // Best-Fit fails.
+        // Strategy: Evict Fullest (Bin with 95).
+
+        let res = pool.push(make_chunk(20, 3));
+
+        assert!(res.is_some(), "Should have flushed a block to make room");
+        let block = res.unwrap();
+
+        // Verify we flushed the fullest (95), not the emptiest (90)
+        assert_eq!(
+            block.total_size, 95,
+            "Should verify we flushed the fullest bin (95)"
+        );
+
+        // Verify leftover state
+        // We initially had 90 and 95. We flushed 95. We added 20.
+        // Remaining should be 90 + 20 = 110 total buffered.
+        let stats = pool.stats();
+        assert_eq!(stats.total_buffered_size, 90 + 20);
+        assert_eq!(stats.non_empty_bins, 2);
     }
 
     #[test]

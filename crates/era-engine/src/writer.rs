@@ -100,11 +100,26 @@ pub struct ArchiveWriterBuilder {
 impl ArchiveWriterBuilder {
     /// Create a new builder with the output path
     pub fn new(output_path: impl Into<PathBuf>) -> Self {
+        let output_path = output_path.into();
+        
+        // Mandatory Default: LSM Index
+        // We derive a sensible default path for the index: .<filename>.idx
+        // This ensures every archive has a persistent index by default.
+        let file_name = output_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "archive".to_string());
+            
+        let index_path = output_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(format!(".{}.idx", file_name));
+
         Self {
-            output_path: output_path.into(),
+            output_path,
             auth_mode: AuthMode::default(),
             config: ArchiveConfig::default(),
-            enable_cdc: false,
+            enable_cdc: true, // MANDATORY DEFAULT: CDC enabled for k-Bounded Best-Fit
             chunker_config: None,
             enable_checkpoint: false,
             recovery_options: RecoveryOptions::default(),
@@ -113,25 +128,23 @@ impl ArchiveWriterBuilder {
             volume_count: 1,
             enable_matrix_distribution: false,
             max_volume_size: None,
-            index_backend: ChunkIndexBackend::default(),
+            index_backend: ChunkIndexBackend::Lsm { path: index_path }, // MANDATORY DEFAULT
             target_block_size: None,
         }
     }
 
     /// Set the chunk index backend.
     ///
-    /// **Memory** (default): In-memory HashMap, no persistence, not recommended for production.
-    /// **Lsm**: RocksDB-based LSM-Tree, persistent, supports incremental backups.
+    /// **Lsm** (default): RocksDB-based LSM-Tree, persistent, supports incremental backups.
+    /// **Memory**: In-memory HashMap, no persistence, not recommended for production.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // For production: use LSM-Tree backend
+    /// // For production: use LSM-Tree backend (default)
     /// let writer = ArchiveWriterBuilder::new("archive.era")
     ///     .password("secret")
-    ///     .index_backend(ChunkIndexBackend::Lsm {
-    ///         path: "/data/era-index".into()
-    ///     })
+    ///     // .index_backend(...) // No need to set, LSM is default
     ///     .build()?;
     /// ```
     pub fn index_backend(mut self, backend: ChunkIndexBackend) -> Self {
@@ -145,7 +158,6 @@ impl ArchiveWriterBuilder {
     /// - Incremental backups
     /// - Large-scale data (>100GB)
     /// - Memory-constrained environments
-    #[cfg(feature = "lsm")]
     pub fn with_lsm_index(mut self, path: impl Into<PathBuf>) -> Self {
         self.index_backend = ChunkIndexBackend::Lsm { path: path.into() };
         self
@@ -631,26 +643,24 @@ impl ArchiveWriterBuilder {
                 None
             },
             // Initialize k-Bounded Best-Fit staging pool
-            // k=8 provides excellent balance between memory usage and packing efficiency
+            // MANDATORY: k=16 as per ERA v8.1 Implementation Engineering Whitepaper
+            // This ensures optimal packing density even with high entropy data.
             staging_pool: StagingPool::new(
-                8, // k bins for Best-Fit algorithm
+                16, // k bins for Best-Fit algorithm (Mandatory Default)
                 if let Some(target) = self.target_block_size {
                     target
-                } else if self.enable_cdc {
-                    max_chunk_size
                 } else {
-                    4 * 1024 * 1024 // 4MB for non-CDC mode
+                    // Default to 4MB MacroBlocks as per Whitepaper, regardless of CDC.
+                    // StagingPool will aggregate small CDC chunks into these 4MB blocks.
+                    4 * 1024 * 1024 
                 },
             )
             .with_flush_threshold(95), // Flush at 95% capacity for optimal space utilization
-            // CRITICAL: When CDC is enabled, set target_block_size to max_chunk_size
-            // to prevent packing multiple CDC chunks into one block (defeats dedup!)
+            // CRITICAL: Set target_block_size matching StagingPool
             target_block_size: if let Some(target) = self.target_block_size {
                 target
-            } else if self.enable_cdc {
-                max_chunk_size
             } else {
-                4 * 1024 * 1024 // 4MB for non-CDC mode
+                4 * 1024 * 1024
             },
             checkpoint_manager,
             next_block_id: AtomicU64::new(0),
@@ -937,10 +947,6 @@ impl ArchiveWriter {
             }
         }
 
-        // Flush any accumulated chunks immediately
-        // This ensures batched files are written together in fewer blocks
-        self.flush_pending()?;
-
         debug!("Batch of {} files processed", paths.len());
         Ok(())
     }
@@ -1017,15 +1023,11 @@ impl ArchiveWriter {
     /// This method intelligently places chunks into bins for optimal packing.
     /// The staging pool will automatically flush bins when they reach 95% capacity.
     fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
-        // When CDC is enabled, each chunk becomes its own block (no packing)
-        // This enables fine-grained deduplication!
-        if self.enable_cdc {
-            // Pack this chunk alone to preserve deduplication granularity
-            self.process_packed_block(vec![chunk], Vec::new())?;
-            return Ok(());
-        }
-
-        // For non-CDC mode: use k-Bounded Best-Fit staging pool
+        // Implementation Reform: k-Bounded Best-Fit is MANDATORY for all modes.
+        // We use the staging pool to aggregate small CDC chunks into 4MB MacroBlocks.
+        // This is critical for L3 Smart Packing as per ERA v8.1 architecture.
+        
+        // Use k-Bounded Best-Fit staging pool
         // The pool will automatically handle oversized chunks and optimal bin selection
         if let Some(packed) = self.staging_pool.push(chunk) {
             // A bin reached flush threshold - write it

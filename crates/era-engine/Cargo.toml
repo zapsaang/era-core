@@ -8,7 +8,6 @@ authors.workspace = true
 
 [features]
 default = []
-lsm = ["dep:era-index"]
 
 [dependencies]
 era-common = { workspace = true }
@@ -18,7 +17,7 @@ era-storage = { workspace = true }
 era-volume = { workspace = true }
 era-packing = { workspace = true }
 era-ingest = { workspace = true }
-era-index = { workspace = true, optional = true }
+era-index = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
