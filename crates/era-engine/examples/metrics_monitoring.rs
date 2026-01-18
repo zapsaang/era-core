@@ -3,7 +3,7 @@
 //! Run this with:
 //! `cargo run --example metrics_monitoring --release`
 
-use era_engine::metrics_collector::{OperationTimer, record_bytes_processed, record_operation};
+use era_engine::metrics_collector::{record_bytes_processed, record_operation, OperationTimer};
 use std::thread;
 use std::time::Duration;
 

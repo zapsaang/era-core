@@ -103,3 +103,27 @@ impl std::fmt::Display for ChunkHash {
         write!(f, "{}", hex::encode(&self.0[..8]))
     }
 }
+
+impl From<ChunkHash> for crate::proto::ChunkHash {
+    fn from(value: ChunkHash) -> Self {
+        Self {
+            hash: value.0.to_vec().into(),
+        }
+    }
+}
+
+impl TryFrom<crate::proto::ChunkHash> for ChunkHash {
+    type Error = crate::EraError;
+
+    fn try_from(value: crate::proto::ChunkHash) -> Result<Self, Self::Error> {
+        if value.hash.len() != 32 {
+            return Err(crate::EraError::Deserialization(format!(
+                "Invalid chunk hash length: expected 32, got {}",
+                value.hash.len()
+            )));
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&value.hash);
+        Ok(Self(bytes))
+    }
+}

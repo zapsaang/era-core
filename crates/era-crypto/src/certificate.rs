@@ -32,6 +32,7 @@ use crate::aead::{AeadCipher, AeadKey, Nonce};
 use crate::kdf::{derive_key, KdfParams};
 use crate::timestamp::{OptionalTimestamp, Timestamp};
 use crate::Salt;
+use era_common::proto::KeyEncapsulation as ProtoKeyEncapsulation;
 use era_common::{EraError, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -108,6 +109,27 @@ pub struct KeyEncapsulation {
     pub ephemeral_public: [u8; KEY_LEN],
     /// 加密后的主密钥
     pub encrypted_master_key: Vec<u8>,
+}
+
+impl KeyEncapsulation {
+    pub fn to_proto(&self) -> ProtoKeyEncapsulation {
+        ProtoKeyEncapsulation {
+            ephemeral_public: self.ephemeral_public.to_vec(),
+            encrypted_master_key: self.encrypted_master_key.clone(),
+        }
+    }
+
+    pub fn from_proto(proto: ProtoKeyEncapsulation) -> Result<Self> {
+        let ephemeral_public = proto
+            .ephemeral_public
+            .try_into()
+            .map_err(|_| EraError::InvalidKey("Invalid ephemeral public key length".into()))?;
+
+        Ok(Self {
+            ephemeral_public,
+            encrypted_master_key: proto.encrypted_master_key,
+        })
+    }
 }
 
 /// 解封装的主密钥
@@ -502,9 +524,10 @@ impl EraCertificate {
         file_data.extend_from_slice(CERT_FILE_MAGIC);
         file_data.push(KEY_FILE_VERSION);
 
-        // 序列化证书数据
-        let cert_data = bincode::serde::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Serialize with Protobuf
+        let proto = self.to_proto();
+        let cert_data = era_common::serialize_proto(&proto)?;
+
         file_data.extend_from_slice(&(cert_data.len() as u32).to_le_bytes());
         file_data.extend_from_slice(&cert_data);
 
@@ -541,13 +564,43 @@ impl EraCertificate {
             return Err(EraError::InvalidFormat("Certificate file truncated".into()));
         }
 
-        let (cert, _): (EraCertificate, usize) = bincode::serde::decode_from_slice(
-            &file_data[9..9 + cert_len],
-            bincode::config::standard(),
-        )
-        .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        let proto: era_common::proto::EraCertificate =
+            era_common::deserialize_proto(&file_data[9..9 + cert_len])?;
+        return Self::from_proto(proto);
+    }
 
-        Ok(cert)
+    pub fn to_proto(&self) -> era_common::proto::EraCertificate {
+        era_common::proto::EraCertificate {
+            public_key: self.public_key.to_vec(),
+            key_id: self.key_id.to_vec(),
+            created_at: self.created_at.to_unix_timestamp() as i64,
+            expires_at: self.expires_at.0.map(|t| t.to_unix_timestamp() as i64),
+            label: self.label.clone(),
+        }
+    }
+
+    pub fn from_proto(proto: era_common::proto::EraCertificate) -> Result<Self> {
+        let created_at = Timestamp::from_unix_timestamp(proto.created_at as u64)?;
+        let expires_at = match proto.expires_at {
+            Some(ts) => OptionalTimestamp(Some(Timestamp::from_unix_timestamp(ts as u64)?)),
+            None => OptionalTimestamp(None),
+        };
+        let public_key: [u8; KEY_LEN] = proto
+            .public_key
+            .try_into()
+            .map_err(|_| EraError::Deserialization("Invalid public key length".into()))?;
+        let key_id: [u8; KEY_ID_LEN] = proto
+            .key_id
+            .try_into()
+            .map_err(|_| EraError::Deserialization("Invalid key ID length".into()))?;
+
+        Ok(Self {
+            public_key,
+            key_id,
+            created_at,
+            expires_at,
+            label: proto.label,
+        })
     }
 
     /// 获取创建时间作为 OffsetDateTime

@@ -162,7 +162,7 @@ fn test_matrix_distribution_multiple_blocks() {
 }
 
 /// Test fixed-size volume with auto-expansion
-/// 
+///
 /// This test verifies that when volumes fill up, new volumes are created.
 /// Note: Currently, the shard size must be smaller than max_volume_size.
 #[test]
@@ -370,7 +370,8 @@ fn test_matrix_distribution_fault_tolerance() {
             match reader.extract_all(&options) {
                 Ok(_) => {
                     let extracted_path = extract_dir.join("fault_test.bin");
-                    let extracted_data = fs::read(&extracted_path).expect("Failed to read extracted file");
+                    let extracted_data =
+                        fs::read(&extracted_path).expect("Failed to read extracted file");
                     assert_eq!(extracted_data, data, "Extracted data mismatch");
                     println!("✅ Successfully recovered data with 2 missing volumes!");
                 }
@@ -382,7 +383,10 @@ fn test_matrix_distribution_fault_tolerance() {
         }
         Err(e) => {
             // Reader may fail to open if it can't handle missing volumes
-            println!("⚠️ Reader failed to open (expected if graceful degradation not implemented): {}", e);
+            println!(
+                "⚠️ Reader failed to open (expected if graceful degradation not implemented): {}",
+                e
+            );
         }
     }
 }
@@ -424,18 +428,22 @@ fn test_shard_size_validation() {
     let data = vec![0u8; 200 * 1024]; // 200KB - will generate ~100KB shards
     println!("Adding {} bytes of data", data.len());
     let add_result = writer.add_bytes("test.bin", &data);
-    
+
     // Check add_bytes result first
     if let Err(e) = add_result {
         println!("add_bytes failed: {}", e);
         let error_msg = format!("{}", e);
         assert!(
-            error_msg.contains("exceeds") || error_msg.contains("full") || error_msg.contains("size") || error_msg.contains("maximum"),
-            "Error should mention size issue: {}", error_msg
+            error_msg.contains("exceeds")
+                || error_msg.contains("full")
+                || error_msg.contains("size")
+                || error_msg.contains("maximum"),
+            "Error should mention size issue: {}",
+            error_msg
         );
         return;
     }
-    
+
     // If add_bytes succeeded, try to finalize - this should fail
     println!("add_bytes succeeded, trying finalize...");
     let result = writer.finalize();
@@ -450,7 +458,11 @@ fn test_shard_size_validation() {
                 if entry.path().to_string_lossy().contains("size_test") {
                     count += 1;
                     let size = entry.metadata().unwrap().len();
-                    println!("Created: {:?}, size: {} bytes", entry.path().file_name(), size);
+                    println!(
+                        "Created: {:?}, size: {} bytes",
+                        entry.path().file_name(),
+                        size
+                    );
                 }
             }
             println!("Unexpectedly succeeded! Created {} volumes", count);
@@ -459,14 +471,21 @@ fn test_shard_size_validation() {
     }
 
     // Should fail with a clear error
-    assert!(result.is_err(), "Should fail when shard size exceeds volume capacity");
+    assert!(
+        result.is_err(),
+        "Should fail when shard size exceeds volume capacity"
+    );
 
     if let Err(e) = result {
         let error_msg = format!("{}", e);
         println!("Got expected error: {}", error_msg);
         assert!(
-            error_msg.contains("exceeds") || error_msg.contains("full") || error_msg.contains("size") || error_msg.contains("maximum"),
-            "Error should mention size issue: {}", error_msg
+            error_msg.contains("exceeds")
+                || error_msg.contains("full")
+                || error_msg.contains("size")
+                || error_msg.contains("maximum"),
+            "Error should mention size issue: {}",
+            error_msg
         );
     }
 }
@@ -560,10 +579,7 @@ fn test_matrix_distribution_repair_workflow() {
                     let extracted_path = extract_dir.join("repair_test.bin");
                     let extracted_data =
                         fs::read(&extracted_path).expect("Failed to read extracted file");
-                    assert_eq!(
-                        extracted_data, data,
-                        "Extracted data should match original"
-                    );
+                    assert_eq!(extracted_data, data, "Extracted data should match original");
                     println!("✅ Archive verified after repair!");
                 }
                 Err(e) => {
@@ -648,7 +664,8 @@ fn test_matrix_distribution_large_archive() {
     for (idx, original) in all_data.iter().enumerate() {
         let filename = format!("file_{:02}.bin", idx);
         let extracted_path = extract_dir.join(&filename);
-        let extracted_data = fs::read(&extracted_path).expect(&format!("Failed to read {}", filename));
+        let extracted_data =
+            fs::read(&extracted_path).expect(&format!("Failed to read {}", filename));
         assert_eq!(
             &extracted_data, original,
             "File {} content mismatch",

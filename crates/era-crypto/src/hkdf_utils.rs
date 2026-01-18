@@ -3,9 +3,9 @@
 //! This module standardizes all key derivation operations using
 //! HKDF with SHA256, eliminating duplicated code across the codebase.
 
+use era_common::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
-use era_common::Result;
 
 /// Derive a key using HKDF-SHA256
 ///
@@ -31,11 +31,7 @@ pub fn derive_key_hkdf(
 }
 
 /// Derive a 32-byte key using HKDF-SHA256 (common case)
-pub fn derive_key_hkdf_32(
-    ikm: &[u8],
-    salt: Option<&[u8]>,
-    info: &[u8],
-) -> Result<[u8; 32]> {
+pub fn derive_key_hkdf_32(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> Result<[u8; 32]> {
     let mut key = [0u8; 32];
     derive_key_hkdf(ikm, salt, info, &mut key)?;
     Ok(key)

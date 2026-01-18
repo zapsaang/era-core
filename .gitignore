@@ -25,3 +25,4 @@ Cargo.lock
 !README.md
 
 bench_data/
+test_shell/

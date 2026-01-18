@@ -60,8 +60,11 @@ pub fn decrypt_and_decompress(
         return Err(EraError::decompression("Index length exceeds block size"));
     }
 
-    // Parse index
-    let index: BlockChunkIndex = era_common::deserialize(&decompressed[4..4 + index_len])?;
+    // Parse index (Protobuf)
+    let index_bytes = &decompressed[4..4 + index_len];
+    let proto_index: era_common::proto::BlockChunkIndex =
+        era_common::deserialize_proto(index_bytes)?;
+    let index: BlockChunkIndex = proto_index.try_into()?;
     let data_start = 4 + index_len;
 
     // Extract data (zero-copy slice)

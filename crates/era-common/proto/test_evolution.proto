@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package era.test;
+
+message ItemV1 {
+  string name = 1;
+  uint32 id = 2;
+}
+
+message ItemV2 {
+  string name = 1;
+  uint32 id = 2;
+  string new_field = 3;
+}

@@ -39,7 +39,7 @@ pub use block_iter::{
     SessionErasureBlockIterator, StandardBlockIterator,
 };
 pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_VERSION};
-pub use chunk_index::{ChunkIndex, ChunkIndexBackend, MemoryChunkIndex, create_chunk_index};
+pub use chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex};
 // Re-export KeySession for convenient access
 pub use era_crypto::KeySession;
 // Re-export certificate types for convenient access

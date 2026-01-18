@@ -9,7 +9,6 @@ authors.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-bincode = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -17,3 +16,7 @@ tracing = { workspace = true }
 crc32fast = { workspace = true }
 smallvec = { workspace = true }
 hex = { workspace = true }
+prost = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.14.3"

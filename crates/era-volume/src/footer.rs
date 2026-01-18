@@ -1,8 +1,8 @@
 //! Volume footer structure.
 
+use era_common::proto::Footer as ProtoFooter;
 use era_common::{EraError, Result};
-use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
+use prost::Message;
 
 /// Magic bytes for footer: "ERAF"
 pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
@@ -17,7 +17,7 @@ pub const FOOTER_VERSION: u16 = 3;
 ///
 /// The footer is designed to be exactly 128 bytes to fit within a single
 /// disk sector, ensuring atomic writes on most storage devices.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Footer {
     /// Magic bytes: "ERAF"
     pub magic: [u8; 4],
@@ -41,9 +41,6 @@ pub struct Footer {
     pub last_checkpoint_offset: u64,
     /// Blake3 checksum of the footer (excluding this field)
     pub checksum: [u8; 32],
-    /// Reserved for future use (reduced from 48 to 36 bytes)
-    #[serde(with = "BigArray")]
-    pub _reserved: [u8; 36],
 }
 
 impl Footer {
@@ -74,7 +71,6 @@ impl Footer {
             catalog_block_id,
             last_checkpoint_offset,
             checksum: [0u8; 32],
-            _reserved: [0u8; 36],
         };
 
         footer.update_checksum();
@@ -86,14 +82,50 @@ impl Footer {
         self.catalog_offset > 0 && self.catalog_size > 0
     }
 
+    fn to_proto(&self) -> ProtoFooter {
+        ProtoFooter {
+            magic: self.magic.to_vec(),
+            version: self.version as u32,
+            flags: self.flags as u32,
+            data_end_offset: self.data_end_offset,
+            block_count: self.block_count,
+            sequence_number: self.sequence_number,
+            catalog_offset: self.catalog_offset,
+            catalog_size: self.catalog_size,
+            catalog_block_id: self.catalog_block_id,
+            last_checkpoint_offset: self.last_checkpoint_offset,
+            checksum: self.checksum.to_vec(),
+        }
+    }
+
+    fn from_proto(proto: ProtoFooter) -> Result<Self> {
+        let magic: [u8; 4] = proto.magic.try_into().unwrap_or(FOOTER_MAGIC);
+        let checksum: [u8; 32] = proto.checksum.try_into().unwrap_or([0u8; 32]);
+
+        Ok(Self {
+            magic,
+            version: proto.version as u16,
+            flags: proto.flags as u16,
+            data_end_offset: proto.data_end_offset,
+            block_count: proto.block_count,
+            sequence_number: proto.sequence_number,
+            catalog_offset: proto.catalog_offset,
+            catalog_size: proto.catalog_size,
+            catalog_block_id: proto.catalog_block_id,
+            last_checkpoint_offset: proto.last_checkpoint_offset,
+            checksum,
+        })
+    }
+
     /// Update the checksum field
     fn update_checksum(&mut self) {
-        // Zero out checksum before calculating
+        // Zero out checksum for calculation
         self.checksum = [0u8; 32];
+        let mut proto = self.to_proto();
+        // Ensure proto checksum is empty for calculation
+        proto.checksum = Vec::new();
 
-        // Serialize without checksum
-        // Note: This serialization should never fail for a valid Footer struct
-        let data = era_common::serialize(self).expect("Footer serialization should never fail");
+        let data = proto.encode_to_vec();
 
         // Calculate Blake3 hash
         let hash = blake3::hash(&data);
@@ -102,31 +134,47 @@ impl Footer {
 
     /// Verify the checksum
     pub fn verify_checksum(&self) -> bool {
-        let mut copy = self.clone();
-        let expected = copy.checksum;
-        copy.checksum = [0u8; 32];
+        let mut proto = self.to_proto();
+        let expected = proto.checksum.clone();
 
-        // Note: This serialization should never fail for a valid Footer struct
-        let Ok(data) = era_common::serialize(&copy) else {
-            return false; // If we can't serialize, checksum is invalid
-        };
+        // Zero out checksum for recalculation
+        proto.checksum = Vec::new();
+
+        let data = proto.encode_to_vec();
         let hash = blake3::hash(&data);
 
-        hash.as_bytes() == &expected
+        hash.as_bytes().as_slice() == expected.as_slice()
     }
 
     /// Serialize the footer to bytes
     pub fn to_bytes(&self) -> Result<[u8; FOOTER_SIZE]> {
-        let data = era_common::serialize(self)?;
+        let mut proto = self.to_proto();
+        // Since update_checksum uses empty checksum, we must ensure self.checksum is set before calling to_proto
+        // But to_bytes is supposedly called on a valid valid Footer.
+        // Wait, update_checksum sets self.checksum. to_proto reads it.
+        // So proto.checksum will be set.
 
-        if data.len() > FOOTER_SIZE {
+        let data = proto.encode_to_vec();
+
+        // Format: [u32 len] [protobuf bytes] [padding]
+        // Length of length prefix = 4 bytes.
+        let payload_len = data.len();
+        if payload_len + 4 > FOOTER_SIZE {
             return Err(EraError::Serialization(
-                "Footer serialization too large".into(),
+                format!(
+                    "Footer serialization too large: {} bytes > {}",
+                    payload_len + 4,
+                    FOOTER_SIZE
+                )
+                .into(),
             ));
         }
 
         let mut result = [0u8; FOOTER_SIZE];
-        result[..data.len()].copy_from_slice(&data);
+        // Write length
+        result[0..4].copy_from_slice(&(payload_len as u32).to_le_bytes());
+        // Write data
+        result[4..4 + payload_len].copy_from_slice(&data);
 
         Ok(result)
     }
@@ -137,7 +185,23 @@ impl Footer {
             return Err(EraError::CorruptedFooter("Footer too small".to_string()));
         }
 
-        let footer: Self = era_common::deserialize(&data[..FOOTER_SIZE])?;
+        // Read length
+        let len_bytes: [u8; 4] = data[0..4].try_into().unwrap();
+        let payload_len = u32::from_le_bytes(len_bytes) as usize;
+
+        if payload_len + 4 > FOOTER_SIZE {
+            return Err(EraError::CorruptedFooter(format!(
+                "Invalid footer length: {}",
+                payload_len
+            )));
+        }
+
+        let proto_data = &data[4..4 + payload_len];
+        let proto = ProtoFooter::decode(proto_data).map_err(|e| {
+            EraError::Deserialization(format!("Failed to decode footer proto: {}", e))
+        })?;
+
+        let footer = Self::from_proto(proto)?;
 
         // Validate magic
         if footer.magic != FOOTER_MAGIC {

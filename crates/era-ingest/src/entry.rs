@@ -1,6 +1,11 @@
 //! File entry metadata.
 
+use era_common::proto::{
+    file_entry::FileType as ProtoFileType, Catalog as ProtoCatalog, ChunkRef as ProtoChunkRef,
+    FileEntry as ProtoFileEntry, PackedChunkInfo as ProtoPackedChunkInfo,
+};
 use era_common::ChunkHash;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -16,6 +21,26 @@ pub enum FileType {
     Symlink,
 }
 
+impl From<FileType> for ProtoFileType {
+    fn from(t: FileType) -> Self {
+        match t {
+            FileType::File => ProtoFileType::File,
+            FileType::Directory => ProtoFileType::Directory,
+            FileType::Symlink => ProtoFileType::Symlink,
+        }
+    }
+}
+
+impl From<ProtoFileType> for FileType {
+    fn from(t: ProtoFileType) -> Self {
+        match t {
+            ProtoFileType::File => FileType::File,
+            ProtoFileType::Directory => FileType::Directory,
+            ProtoFileType::Symlink => FileType::Symlink,
+        }
+    }
+}
+
 /// A chunk reference with offset information for multi-chunk files
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkRef {
@@ -28,6 +53,39 @@ pub struct ChunkRef {
     /// Packed chunk metadata (if this chunk contains multiple small files)
     #[serde(default)]
     pub packed_info: Option<PackedChunkInfo>,
+}
+
+impl From<&ChunkRef> for ProtoChunkRef {
+    fn from(c: &ChunkRef) -> Self {
+        Self {
+            hash: Some(c.hash.into()),
+            offset: c.offset,
+            length: c.length,
+            packed_info: c.packed_info.as_ref().map(|p| ProtoPackedChunkInfo {
+                file_index: p.file_index as u32,
+                total_files: p.total_files as u32,
+            }),
+        }
+    }
+}
+
+impl TryFrom<ProtoChunkRef> for ChunkRef {
+    type Error = era_common::EraError;
+
+    fn try_from(p: ProtoChunkRef) -> Result<Self, Self::Error> {
+        Ok(Self {
+            hash: p
+                .hash
+                .ok_or_else(|| era_common::EraError::Deserialization("Missing chunk hash".into()))?
+                .try_into()?,
+            offset: p.offset,
+            length: p.length,
+            packed_info: p.packed_info.map(|i| PackedChunkInfo {
+                file_index: i.file_index as usize,
+                total_files: i.total_files as usize,
+            }),
+        })
+    }
 }
 
 /// Information for packed chunks (multiple small files in one chunk)
@@ -102,6 +160,9 @@ pub struct FileEntry {
     /// Extended attributes
     #[serde(default)]
     pub xattrs: BTreeMap<String, Vec<u8>>,
+    /// Access Control List (Platform specific)
+    #[serde(default)]
+    pub acl: Option<Vec<u8>>,
     /// Hash of the file content (for single-chunk files only)
     /// Deprecated: Use `chunks` for new archives
     pub content_hash: Option<ChunkHash>,
@@ -174,6 +235,7 @@ impl FileEntry {
             uid,
             gid,
             xattrs: BTreeMap::new(),
+            acl: None,
             content_hash: None,
             chunks: Vec::new(),
         })
@@ -191,6 +253,7 @@ impl FileEntry {
             uid: None,
             gid: None,
             xattrs: BTreeMap::new(),
+            acl: None,
             content_hash: None,
             chunks: Vec::new(),
         }
@@ -234,6 +297,59 @@ impl FileEntry {
     /// Check if this is a directory
     pub fn is_dir(&self) -> bool {
         self.file_type == FileType::Directory
+    }
+}
+
+impl From<&FileEntry> for ProtoFileEntry {
+    fn from(e: &FileEntry) -> Self {
+        Self {
+            path: e.path.to_string_lossy().into_owned(),
+            file_type: ProtoFileType::from(e.file_type) as i32,
+            size: e.size,
+            permissions: e.permissions,
+            mtime: e.mtime,
+            symlink_target: e
+                .symlink_target
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            uid: e.uid,
+            gid: e.gid,
+            xattrs: e
+                .xattrs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            acl: e.acl.clone(),
+            content_hash: e.content_hash.map(|h| h.into()),
+            chunks: e.chunks.iter().map(|c| c.into()).collect(),
+        }
+    }
+}
+
+impl TryFrom<ProtoFileEntry> for FileEntry {
+    type Error = era_common::EraError;
+
+    fn try_from(p: ProtoFileEntry) -> Result<Self, Self::Error> {
+        Ok(Self {
+            path: PathBuf::from(p.path),
+            file_type: ProtoFileType::try_from(p.file_type)
+                .map(FileType::from)
+                .map_err(|_| era_common::EraError::Deserialization("Invalid file type".into()))?,
+            size: p.size,
+            permissions: p.permissions,
+            mtime: p.mtime,
+            symlink_target: p.symlink_target.map(PathBuf::from),
+            uid: p.uid,
+            gid: p.gid,
+            xattrs: p.xattrs.into_iter().collect(),
+            acl: p.acl,
+            content_hash: p.content_hash.map(|h| h.try_into()).transpose()?,
+            chunks: p
+                .chunks
+                .into_iter()
+                .map(|c| c.try_into())
+                .collect::<Result<_, _>>()?,
+        })
     }
 }
 
@@ -288,14 +404,46 @@ impl Catalog {
 
     /// Serialize the catalog to bytes
     pub fn to_bytes(&self) -> era_common::Result<Vec<u8>> {
-        era_common::serialize(self)
+        let proto: ProtoCatalog = self.into();
+        Ok(proto.encode_to_vec())
     }
 
     /// Deserialize a catalog from bytes
     ///
     /// Uses safe deserialization with size limits to prevent DoS attacks.
     pub fn from_bytes(data: &[u8]) -> era_common::Result<Self> {
-        era_common::deserialize(data)
+        let proto = ProtoCatalog::decode(data).map_err(|e| {
+            era_common::EraError::Deserialization(format!("Failed to decode catalog: {}", e))
+        })?;
+        proto.try_into()
+    }
+}
+
+impl From<&Catalog> for ProtoCatalog {
+    fn from(c: &Catalog) -> Self {
+        Self {
+            entries: c.entries.iter().map(|e| e.into()).collect(),
+            total_size: c.total_size,
+            file_count: c.file_count,
+            dir_count: c.dir_count,
+        }
+    }
+}
+
+impl TryFrom<ProtoCatalog> for Catalog {
+    type Error = era_common::EraError;
+
+    fn try_from(p: ProtoCatalog) -> Result<Self, Self::Error> {
+        Ok(Self {
+            entries: p
+                .entries
+                .into_iter()
+                .map(|e| e.try_into())
+                .collect::<Result<_, _>>()?,
+            total_size: p.total_size,
+            file_count: p.file_count,
+            dir_count: p.dir_count,
+        })
     }
 }
 

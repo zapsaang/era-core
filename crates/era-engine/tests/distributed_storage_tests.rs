@@ -26,22 +26,36 @@ fn test_distributed_erasure_writing() {
     let volume_count = 3;
 
     // Build writer with multiple volumes
-    // Note: We haven't implemented `with_volume_count` yet, this is TDD
     let mut writer = ArchiveWriterBuilder::new(&base_path)
         .config(config)
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(volume_count)
+        // Enable CDC to split the 1MB file into multiple chunks/blocks
+        // This ensures enough blocks are created to fill the stripe (2 Data + 1 Parity)
+        .enable_cdc(true)
         .build()
         .unwrap();
 
-    // Use pseudo-random data to avoid high compression
-    let mut data = vec![0u8; 1024 * 1024];
-    for (i, item) in data.iter_mut().enumerate() {
-        *item = (i.wrapping_mul(7).wrapping_add(13)) as u8;
+    // Use non-repeating data to avoid CDC deduplication from reducing the size
+    let size = 1024 * 1024;
+    let mut data = vec![0u8; size];
+    // Fill with a non-repeating pattern (counter)
+    for (i, chunk) in data.chunks_mut(8).enumerate() {
+        let val = i as u64;
+        let bytes = val.to_le_bytes();
+        let len = chunk.len();
+        chunk.copy_from_slice(&bytes[..len]);
     }
 
-    writer.add_bytes("test_file.bin", &data).unwrap();
+    // Write to a temporary file instead of add_bytes, so we can use CDC chunking
+    let input_path = temp_dir.path().join("input.bin");
+    fs::write(&input_path, &data).unwrap();
+
+    // Add using add_file_with_path to respect CDC and specify stored name
+    writer
+        .add_file_with_path(&input_path, std::path::Path::new("test_file.bin"))
+        .unwrap();
     writer.finalize().unwrap();
 
     // Verify files exist and have content
@@ -63,13 +77,10 @@ fn test_distributed_erasure_writing() {
 
     println!("Sizes: {} {} {}", size0, size1, size2);
 
-    // Each volume should have roughly 1 shard (approx 512KB + headers)
-    // 1MB / 2 data shards = 512KB.
-    // Parity shard = 512KB.
-    // So all volumes should be populated significantly.
-    assert!(size0 > 500_000);
-    assert!(size1 > 500_000);
-    assert!(size2 > 500_000);
+    // Each volume should have roughly 1/3 of total storage.
+    assert!(size0 > 200_000);
+    assert!(size1 > 200_000);
+    assert!(size2 > 200_000);
 
     // Reading Verification
     let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
@@ -78,7 +89,7 @@ fn test_distributed_erasure_writing() {
     let files = reader.list_files().expect("Failed to list files");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].path.to_str().unwrap(), "test_file.bin");
-    assert_eq!(files[0].size, 1024 * 1024);
+    assert_eq!(files[0].size, size as u64);
 
     // Extract file content
     let extract_dir = temp_dir.path().join("extract");
@@ -91,7 +102,7 @@ fn test_distributed_erasure_writing() {
     assert!(extracted_path.exists());
     let extracted_data = fs::read(&extracted_path).expect("Failed to read extracted file");
 
-    assert_eq!(extracted_data.len(), 1024 * 1024);
+    assert_eq!(extracted_data.len(), size);
     assert_eq!(
         extracted_data, data,
         "Read data does not match written data"

@@ -19,8 +19,8 @@ fn main() {
 }
 
 fn test_x25519() {
-    use x25519_dalek::{EphemeralSecret, PublicKey};
     use rand::rngs::OsRng;
+    use x25519_dalek::{EphemeralSecret, PublicKey};
 
     let iterations = 10000;
 
@@ -44,11 +44,14 @@ fn test_x25519() {
     println!("X25519 密钥交换:");
     println!("  {} 次迭代: {:?}", iterations, elapsed);
     println!("  单次操作: {:?}", per_op);
-    println!("  吞吐量: {:.0} ops/sec", iterations as f64 / elapsed.as_secs_f64());
+    println!(
+        "  吞吐量: {:.0} ops/sec",
+        iterations as f64 / elapsed.as_secs_f64()
+    );
 }
 
 fn test_argon2() {
-    use argon2::{Argon2, Algorithm, Version, Params};
+    use argon2::{Algorithm, Argon2, Params, Version};
 
     let password = b"test_password_123";
     let salt = [0u8; 16];
@@ -62,7 +65,9 @@ fn test_argon2() {
         let iterations = 100;
         let start = Instant::now();
         for _ in 0..iterations {
-            argon2.hash_password_into(password, &salt, &mut output).unwrap();
+            argon2
+                .hash_password_into(password, &salt, &mut output)
+                .unwrap();
         }
         let elapsed = start.elapsed();
 
@@ -80,7 +85,9 @@ fn test_argon2() {
         let iterations = 10;
         let start = Instant::now();
         for _ in 0..iterations {
-            argon2.hash_password_into(password, &salt, &mut output).unwrap();
+            argon2
+                .hash_password_into(password, &salt, &mut output)
+                .unwrap();
         }
         let elapsed = start.elapsed();
 
@@ -98,7 +105,9 @@ fn test_argon2() {
         let iterations = 3;
         let start = Instant::now();
         for _ in 0..iterations {
-            argon2.hash_password_into(password, &salt, &mut output).unwrap();
+            argon2
+                .hash_password_into(password, &salt, &mut output)
+                .unwrap();
         }
         let elapsed = start.elapsed();
 

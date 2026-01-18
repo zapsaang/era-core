@@ -34,7 +34,7 @@ impl IndexMetrics {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Record a get operation
     pub fn record_get(&self, found: bool) {
         self.gets.fetch_add(1, Ordering::Relaxed);
@@ -44,18 +44,19 @@ impl IndexMetrics {
             self.get_misses.fetch_add(1, Ordering::Relaxed);
         }
     }
-    
+
     /// Record a put operation
     pub fn record_put(&self, bytes: usize) {
         self.puts.fetch_add(1, Ordering::Relaxed);
-        self.bytes_written.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.bytes_written
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
-    
+
     /// Record a delete operation
     pub fn record_delete(&self) {
         self.deletes.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Record bloom filter result
     pub fn record_bloom(&self, positive: bool, actually_exists: bool) {
         if positive {
@@ -65,7 +66,7 @@ impl IndexMetrics {
             }
         }
     }
-    
+
     /// Get bloom filter false positive rate
     pub fn bloom_false_positive_rate(&self) -> f64 {
         let positives = self.bloom_positives.load(Ordering::Relaxed);
@@ -76,7 +77,7 @@ impl IndexMetrics {
         let false_positives = positives.saturating_sub(true_positives);
         false_positives as f64 / positives as f64
     }
-    
+
     /// Get cache hit rate
     pub fn hit_rate(&self) -> f64 {
         let hits = self.get_hits.load(Ordering::Relaxed);
@@ -86,7 +87,7 @@ impl IndexMetrics {
         }
         hits as f64 / total as f64
     }
-    
+
     /// Get a snapshot of current metrics
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -103,7 +104,7 @@ impl IndexMetrics {
             bloom_false_positive_rate: self.bloom_false_positive_rate(),
         }
     }
-    
+
     /// Reset all metrics to zero
     pub fn reset(&self) {
         self.gets.store(0, Ordering::Relaxed);

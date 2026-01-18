@@ -14,6 +14,7 @@ pub use crate::chunk_processor::{ExtractStats, VerifyStats};
 use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
+use era_common::proto::KeyEncapsulation as ProtoKeyEncapsulation;
 use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result};
 use era_crypto::certificate::{EraKeyPair, KeyEncapsulation};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
@@ -21,6 +22,7 @@ use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{AuthMode, SuperHeader, VolumeReader};
+use prost::Message;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -445,13 +447,10 @@ impl ArchiveReader {
             .clone();
 
         // Deserialize key encapsulation
-        let (encapsulation, _): (KeyEncapsulation, usize) = bincode::serde::decode_from_slice(
-            &encap_bytes,
-            bincode::config::standard(),
-        )
-        .map_err(|e| {
-            EraError::InvalidFormat(format!("Failed to deserialize key encapsulation: {}", e))
+        let proto = ProtoKeyEncapsulation::decode(&*encap_bytes).map_err(|e| {
+            EraError::InvalidFormat(format!("Failed to decode key encapsulation proto: {}", e))
         })?;
+        let encapsulation = KeyEncapsulation::from_proto(proto)?;
 
         // Decapsulate to get master key
         let decapsulated = keypair.decapsulate(&encapsulation)?;
@@ -737,42 +736,79 @@ impl ArchiveReader {
             })?;
 
             // Determine volume index for each shard
-            // Matrix distribution: use shard_volumes if available
-            // Legacy distribution: use shard_idx % num_readers
-            let get_volume_idx = |shard_idx: usize| -> usize {
-                if let Some(ref volumes) = location.shard_volumes {
-                    // Matrix distribution: use stored volume sequence
-                    if shard_idx < volumes.len() {
-                        (volumes[shard_idx] as usize) % num_readers
-                    } else {
-                        // Fallback for safety
-                        shard_idx % num_readers
+            // We need to map shard_idx -> volume_reader index
+
+            // 1. Identify which shard *this* block is (my_shard_idx)
+            let my_shard_idx = (location.slot_index as usize) % (erasure_info.data_shards as usize);
+
+            let get_reader_index = |shard_idx: usize| -> Option<usize> {
+                if shard_idx == my_shard_idx {
+                    // This is the current block's volume.
+                    // We need to find the reader that matches location.volume_id
+                    // iterating explicitly is safest because volume_readers might not be sorted/complete
+                    for (i, r) in self.volume_readers.iter().enumerate() {
+                        if r.header().volume_id == location.volume_id {
+                            return Some(i);
+                        }
                     }
+                    None
                 } else {
-                    // Legacy round-robin distribution
-                    shard_idx % num_readers
+                    // It's a neighbor shard.
+                    // shard_volumes contains sequences for ALL OTHER shards in order.
+                    // We map shard_idx -> index in shard_volumes
+                    let vec_idx = if shard_idx < my_shard_idx {
+                        shard_idx
+                    } else {
+                        shard_idx - 1
+                    };
+
+                    if let Some(ref volumes) = location.shard_volumes {
+                        if let Some(&seq) = volumes.get(vec_idx) {
+                            // Find reader with this sequence
+                            for (i, r) in self.volume_readers.iter().enumerate() {
+                                if r.header().volume_sequence as usize == seq as usize {
+                                    return Some(i);
+                                }
+                            }
+                        }
+                    }
+                    // Fallback or legacy (not supported here fully, but...)
+                    None
                 }
             };
 
-            // Read Shard 0 (Header + Data)
-            // Note: physical_offset points to 4-byte original_len header
-            let vol_idx_0 = get_volume_idx(0);
-            if vol_idx_0 < num_readers {
-                if let Ok(shard) = self.read_shard(
-                    &self.volume_readers[vol_idx_0],
-                    location.physical_offset + 4,
-                ) {
-                    available_shards.push((0, shard));
-                }
-            }
+            // Read shards
+            for shard_idx in 0..total_shards {
+                if let Some(vol_idx) = get_reader_index(shard_idx) {
+                    let offset = if shard_idx == my_shard_idx {
+                        location.physical_offset
+                    } else {
+                        let vec_idx = if shard_idx < my_shard_idx {
+                            shard_idx
+                        } else {
+                            shard_idx - 1
+                        };
+                        if let Some(ref offsets) = location.shard_offsets {
+                            if let Some(&off) = offsets.get(vec_idx) {
+                                off
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    };
 
-            // Read other shards (1..N)
-            for (i, &offset) in shard_offsets.iter().enumerate() {
-                let shard_idx = i + 1;
-                let vol_idx = get_volume_idx(shard_idx);
-                if vol_idx < num_readers {
-                    if let Ok(shard) = self.read_shard(&self.volume_readers[vol_idx], offset) {
-                        available_shards.push((shard_idx, shard));
+                    // Debug info
+                    // println!("Reading shard {} (my={}) from vol_idx {} offset {}", shard_idx, my_shard_idx, vol_idx, offset);
+
+                    match self.read_shard(&self.volume_readers[vol_idx], offset) {
+                        Ok(shard) => {
+                            available_shards.push((shard_idx, shard));
+                        }
+                        Err(_e) => {
+                            // println!("Failed to read shard {}: {}", shard_idx, e);
+                        }
                     }
                 }
             }
@@ -1041,6 +1077,9 @@ impl ArchiveReader {
                 stats.files_incomplete,
                 stats.errors.len()
             );
+            for err in &stats.errors {
+                println!("Verify Error: {}", err);
+            }
         }
 
         Ok(stats)
@@ -1069,6 +1108,9 @@ impl ArchiveReader {
 
         // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
+            // Read distribution config from header
+            let dist_strategy = self.volume_readers[0].header().config.distribution.strategy;
+
             Box::new(SessionErasureBlockIterator::new(
                 &self.volume_readers,
                 &self.volume_indices,
@@ -1078,6 +1120,7 @@ impl ArchiveReader {
                 self.create_compressor(),
                 config.data_shards,
                 config.parity_shards,
+                dist_strategy,
             ))
         } else {
             Box::new(SessionBlockIterator::new(
@@ -1114,6 +1157,9 @@ impl ArchiveReader {
 
         // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
+            // Read distribution config from header
+            let dist_strategy = self.volume_readers[0].header().config.distribution.strategy;
+
             Box::new(SessionErasureBlockIterator::new(
                 &self.volume_readers,
                 &self.volume_indices,
@@ -1123,6 +1169,7 @@ impl ArchiveReader {
                 self.create_compressor(),
                 config.data_shards,
                 config.parity_shards,
+                dist_strategy,
             ))
         } else {
             Box::new(SessionBlockIterator::new(

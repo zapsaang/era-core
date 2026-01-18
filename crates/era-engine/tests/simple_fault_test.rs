@@ -8,7 +8,7 @@ use tempfile::TempDir;
 #[test]
 fn test_simple_multivolume_read() {
     println!("\n=== SIMPLE MULTIVOLUME READ TEST ===\n");
-    
+
     let erasure_config = ErasureCodeConfig {
         data_shards: 4,
         parity_shards: 2,
@@ -37,7 +37,9 @@ fn test_simple_multivolume_read() {
         .expect("Failed to create writer");
 
     let data = vec![0xAB; 256 * 1024]; // 256KB
-    writer.add_bytes("test.bin", &data).expect("Failed to add file");
+    writer
+        .add_bytes("test.bin", &data)
+        .expect("Failed to add file");
     writer.finalize().expect("Failed to finalize");
 
     // Check created files
@@ -57,7 +59,9 @@ fn test_simple_multivolume_read() {
     match ArchiveReader::open(&base_path, "") {
         Ok(mut reader) => {
             println!("✅ Successfully opened archive with 3 volumes");
-            match reader.extract_all(&era_engine::ExtractOptions::new(temp_dir.path().join("extract1"))) {
+            match reader.extract_all(&era_engine::ExtractOptions::new(
+                temp_dir.path().join("extract1"),
+            )) {
                 Ok(_) => println!("✅ Successfully extracted with 3 volumes"),
                 Err(e) => println!("❌ Failed to extract: {}", e),
             }
@@ -69,7 +73,7 @@ fn test_simple_multivolume_read() {
     println!("\nTest 2: Reading with 2 volumes (delete volume 0)");
     let vol0_path = temp_dir.path().join("archive.era");
     fs::remove_file(&vol0_path).expect("Failed to delete volume 0");
-    
+
     // List remaining files
     println!("  Remaining files:");
     if let Ok(entries) = fs::read_dir(temp_dir.path()) {
@@ -88,7 +92,9 @@ fn test_simple_multivolume_read() {
     match ArchiveReader::open(&vol1_path, "") {
         Ok(mut reader) => {
             println!("✅ Successfully opened archive with 2 volumes");
-            match reader.extract_all(&era_engine::ExtractOptions::new(temp_dir.path().join("extract2"))) {
+            match reader.extract_all(&era_engine::ExtractOptions::new(
+                temp_dir.path().join("extract2"),
+            )) {
                 Ok(_) => println!("✅ Successfully extracted with 2 volumes"),
                 Err(e) => println!("❌ Failed to extract: {}", e),
             }

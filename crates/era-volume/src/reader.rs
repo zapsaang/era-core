@@ -1,7 +1,9 @@
 //! Volume reader for reading from volumes.
 
 use bytes::Bytes;
-use era_common::{BlockId, BlockLocation, EncryptedMacroBlock, EraError, ErasureBlockInfo, Result};
+use era_common::{
+    BlockId, BlockLocation, EncryptedMacroBlock, EraError, ErasureBlockInfo, Result, ShardHeader,
+};
 use era_storage::{StorageBackend, StorageReader};
 use std::path::Path;
 
@@ -62,23 +64,16 @@ impl<R: StorageReader> VolumeReader<R> {
 
     /// Read a block at the given location
     pub fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
-        // Read length prefix
-        let len_bytes = self.reader.read_at(location.physical_offset, 4)?;
-        
-        // Validate we have enough bytes for the length prefix
-        if len_bytes.len() < 4 {
-            return Err(EraError::CorruptedHeader(format!(
-                "Block at offset {} has insufficient data: expected 4 bytes for length, got {}",
-                location.physical_offset,
-                len_bytes.len()
-            )));
-        }
-        
-        let len =
-            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+        // Unified format: [ShardHeader][Data]
+        // Skip ShardHeader to get to data
+        let header_size = ShardHeader::SIZE as u64;
+        let offset = location.physical_offset + header_size;
+        let len = location.encrypted_size as usize;
 
         // Read block data
-        let data = self.reader.read_at(location.physical_offset + 4, len)?;
+        let data = self.reader.read_at(offset, len)?;
+
+        // Optional: We could verify ShardHeader here for extra integrity
 
         Ok(EncryptedMacroBlock {
             block_id: BlockId::new(location.slot_index as u64),

@@ -36,7 +36,7 @@ fn test_virtual_striping_end_to_end() {
     // Write 5 chunks of 800 bytes each.
     // 800 bytes < 1024, but each write might become a chunk.
     // Since we disabled CDC in builder (default), but we didn't enable CDC.
-    // Actually, `add_bytes` creates a chunk. 
+    // Actually, `add_bytes` creates a chunk.
     // `process_packed_block` will pack them.
     // Staging Pool k=8.
     // If we write 1 file of 800 bytes -> Bin Best Fit.
@@ -47,11 +47,11 @@ fn test_virtual_striping_end_to_end() {
     // File 1: 1024 bytes -> Block 1.
     // File 2: 1024 bytes -> Block 2.
     // Stripe 1 (Block 1, Block 2) fits K=2. Should flush -> Writes Block 1, Block 2, Parity 1.
-    
+
     // File 3: 1024 bytes -> Block 3.
     // File 4: 1024 bytes -> Block 4.
     // Stripe 2 (Block 3, Block 4) fits K=2. Should flush -> Writes Block 3, Block 4, Parity 2.
-    
+
     // File 5: 1024 bytes -> Block 5.
     // Finalize -> Stripe 3 (Block 5, Padding, Parity 3).
 
@@ -64,16 +64,19 @@ fn test_virtual_striping_end_to_end() {
     }
 
     let stats = writer.finalize().unwrap();
-    
+
     assert_eq!(stats.total_files, 5);
-    
+
     // 2. Verify physical file structure (Basic Check)
     // We expect 5 Data Blocks + 3 Parity Blocks = 8 "Physical Blocks" written to volume.
     // Each block approx 1024 + overhead.
     let file_len = fs::metadata(&archive_path).unwrap().len();
     println!("Archive size: {} bytes", file_len);
     // 8 * 1024 = 8192. Plus headers.
-    assert!(file_len > 8000, "File too small, implies data missing or not written");
+    assert!(
+        file_len > 8000,
+        "File too small, implies data missing or not written"
+    );
 
     // 3. Read and Extract
     let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
@@ -82,17 +85,17 @@ fn test_virtual_striping_end_to_end() {
 
     let extract_dir = temp_dir.path().join("extracted");
     let options = ExtractOptions::new(&extract_dir);
-    
+
     // This expects the Reader to handle the Virtual Striping layout correctly
     // i.e., skip parity blocks and read data blocks.
     let extract_stats = reader.extract_all(&options).expect("Extraction failed");
-    
+
     assert_eq!(extract_stats.extracted, 5);
 
     // Verify content
     for i in 1..=5 {
         let name = format!("file_{}.bin", i);
         let extracted = fs::read(extract_dir.join(name)).unwrap();
-        assert_eq!(extracted, expected_data[i-1]);
+        assert_eq!(extracted, expected_data[i - 1]);
     }
 }

@@ -8,7 +8,7 @@ use tempfile::TempDir;
 #[test]
 fn test_catalog_recovery_debug() {
     println!("\n=== CATALOG RECOVERY DEBUG ===\n");
-    
+
     let erasure_config = ErasureCodeConfig {
         data_shards: 4,
         parity_shards: 2,
@@ -37,7 +37,9 @@ fn test_catalog_recovery_debug() {
         .expect("Failed to create writer");
 
     let data = vec![0xAB; 256 * 1024]; // 256KB
-    writer.add_bytes("test.bin", &data).expect("Failed to add file");
+    writer
+        .add_bytes("test.bin", &data)
+        .expect("Failed to add file");
     writer.finalize().expect("Failed to finalize");
 
     // Check file sizes and structure
@@ -78,7 +80,7 @@ fn test_catalog_recovery_debug() {
 
     println!("\nAttempting to open with archive.era (volume 0)");
     let vol0_path = temp_dir.path().join("archive.era");
-    
+
     match ArchiveReader::open(&vol0_path, "") {
         Ok(mut reader) => {
             println!("✅ Successfully opened");
@@ -95,7 +97,7 @@ fn test_catalog_recovery_debug() {
 
     println!("\nAttempting to open with archive.era.003 (volume 3)");
     let vol3_path = temp_dir.path().join("archive.era.003");
-    
+
     match ArchiveReader::open(&vol3_path, "") {
         Ok(mut reader) => {
             println!("✅ Successfully opened");

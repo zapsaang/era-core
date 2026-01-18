@@ -6,7 +6,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use era_common::{BlockLocation, ChunkHash, VolumeId};
-use era_engine::chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex};
+use era_engine::chunk_index::{
+    create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex,
+};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -32,7 +34,7 @@ fn hash_from_index(i: usize) -> ChunkHash {
 /// Benchmark single put operations
 fn bench_put_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("put_single");
-    
+
     // Memory backend
     group.bench_function("memory", |b| {
         let index = Arc::new(MemoryChunkIndex::new());
@@ -50,7 +52,7 @@ fn bench_put_single(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench_put_single");
         let index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-        
+
         group.bench_function("lsm", |b| {
             let mut i = 0usize;
             b.iter(|| {
@@ -61,14 +63,14 @@ fn bench_put_single(c: &mut Criterion) {
             });
         });
     }
-    
+
     group.finish();
 }
 
 /// Benchmark batch put operations
 fn bench_put_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("put_batch");
-    
+
     for batch_size in [100, 1000, 10000].iter() {
         // Memory backend
         group.bench_with_input(
@@ -97,7 +99,7 @@ fn bench_put_batch(c: &mut Criterion) {
                         let temp_dir = TempDir::new().unwrap();
                         let path = temp_dir.path().join("bench");
                         let index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-                        
+
                         index.start_batch();
                         for i in 0..size {
                             let hash = hash_from_index(i);
@@ -111,16 +113,16 @@ fn bench_put_batch(c: &mut Criterion) {
             );
         }
     }
-    
+
     group.finish();
 }
 
 /// Benchmark contains (lookup) operations on pre-populated index
 fn bench_contains(c: &mut Criterion) {
     let mut group = c.benchmark_group("contains");
-    
+
     let populate_size = 100_000;
-    
+
     // Prepare memory index
     let memory_index = Arc::new(MemoryChunkIndex::new());
     for i in 0..populate_size {
@@ -128,7 +130,7 @@ fn bench_contains(c: &mut Criterion) {
         let loc = test_location(i as u32);
         memory_index.put(hash, loc).unwrap();
     }
-    
+
     group.bench_function("memory", |b| {
         let mut i = 0usize;
         b.iter(|| {
@@ -144,7 +146,7 @@ fn bench_contains(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench_contains");
         let lsm_index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-        
+
         lsm_index.start_batch();
         for i in 0..populate_size {
             let hash = hash_from_index(i);
@@ -153,7 +155,7 @@ fn bench_contains(c: &mut Criterion) {
         }
         lsm_index.commit_batch().unwrap();
         lsm_index.flush().unwrap();
-        
+
         group.bench_function("lsm", |b| {
             let mut i = 0usize;
             b.iter(|| {
@@ -164,16 +166,16 @@ fn bench_contains(c: &mut Criterion) {
             });
         });
     }
-    
+
     group.finish();
 }
 
 /// Benchmark get operations
 fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
-    
+
     let populate_size = 100_000;
-    
+
     // Prepare memory index
     let memory_index = Arc::new(MemoryChunkIndex::new());
     for i in 0..populate_size {
@@ -181,7 +183,7 @@ fn bench_get(c: &mut Criterion) {
         let loc = test_location(i as u32);
         memory_index.put(hash, loc).unwrap();
     }
-    
+
     group.bench_function("memory", |b| {
         let mut i = 0usize;
         b.iter(|| {
@@ -197,7 +199,7 @@ fn bench_get(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench_get");
         let lsm_index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-        
+
         lsm_index.start_batch();
         for i in 0..populate_size {
             let hash = hash_from_index(i);
@@ -206,7 +208,7 @@ fn bench_get(c: &mut Criterion) {
         }
         lsm_index.commit_batch().unwrap();
         lsm_index.flush().unwrap();
-        
+
         group.bench_function("lsm", |b| {
             let mut i = 0usize;
             b.iter(|| {
@@ -217,16 +219,16 @@ fn bench_get(c: &mut Criterion) {
             });
         });
     }
-    
+
     group.finish();
 }
 
 /// Benchmark mixed read/write workload (80% reads, 20% writes)
 fn bench_mixed_workload(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_workload");
-    
+
     let initial_size = 10_000;
-    
+
     // Prepare memory index
     let memory_index = Arc::new(MemoryChunkIndex::new());
     for i in 0..initial_size {
@@ -234,7 +236,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
         let loc = test_location(i as u32);
         memory_index.put(hash, loc).unwrap();
     }
-    
+
     group.bench_function("memory", |b| {
         let mut read_i = 0usize;
         let mut write_i = initial_size;
@@ -261,7 +263,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("bench_mixed");
         let lsm_index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-        
+
         lsm_index.start_batch();
         for i in 0..initial_size {
             let hash = hash_from_index(i);
@@ -270,7 +272,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
         }
         lsm_index.commit_batch().unwrap();
         lsm_index.flush().unwrap();
-        
+
         group.bench_function("lsm", |b| {
             let mut read_i = 0usize;
             let mut write_i = initial_size;
@@ -292,7 +294,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
             });
         });
     }
-    
+
     group.finish();
 }
 

@@ -31,10 +31,10 @@ fn random_hash() -> ChunkHash {
 fn bench_put(c: &mut Criterion) {
     let tmp = TempDir::new().unwrap();
     let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-    
+
     let mut group = c.benchmark_group("put");
     group.throughput(Throughput::Elements(1));
-    
+
     let mut slot = 0u32;
     group.bench_function("single_put", |b| {
         b.iter(|| {
@@ -44,18 +44,18 @@ fn bench_put(c: &mut Criterion) {
             index.put(hash, location).unwrap();
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_batch_put(c: &mut Criterion) {
     let tmp = TempDir::new().unwrap();
     let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-    
+
     let batch_sizes = [100, 1000, 10000];
-    
+
     let mut group = c.benchmark_group("batch_put");
-    
+
     for &size in &batch_sizes {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_function(format!("batch_{}", size), |b| {
@@ -72,14 +72,14 @@ fn bench_batch_put(c: &mut Criterion) {
             });
         });
     }
-    
+
     group.finish();
 }
 
 fn bench_get(c: &mut Criterion) {
     let tmp = TempDir::new().unwrap();
     let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-    
+
     // Pre-populate with 100K entries
     let mut hashes = Vec::with_capacity(100_000);
     index.start_batch();
@@ -90,10 +90,10 @@ fn bench_get(c: &mut Criterion) {
     }
     index.commit_batch().unwrap();
     index.flush().unwrap();
-    
+
     let mut group = c.benchmark_group("get");
     group.throughput(Throughput::Elements(1));
-    
+
     let mut idx = 0usize;
     group.bench_function("hit", |b| {
         b.iter(|| {
@@ -102,21 +102,21 @@ fn bench_get(c: &mut Criterion) {
             black_box(index.get(hash).unwrap())
         });
     });
-    
+
     group.bench_function("miss", |b| {
         b.iter(|| {
             let hash = random_hash();
             black_box(index.get(&hash).unwrap())
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_contains(c: &mut Criterion) {
     let tmp = TempDir::new().unwrap();
     let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-    
+
     // Pre-populate with 100K entries
     let mut hashes = Vec::with_capacity(100_000);
     index.start_batch();
@@ -127,10 +127,10 @@ fn bench_contains(c: &mut Criterion) {
     }
     index.commit_batch().unwrap();
     index.flush().unwrap();
-    
+
     let mut group = c.benchmark_group("contains");
     group.throughput(Throughput::Elements(1));
-    
+
     let mut idx = 0usize;
     group.bench_function("hit_bloom_filter", |b| {
         b.iter(|| {
@@ -139,14 +139,14 @@ fn bench_contains(c: &mut Criterion) {
             black_box(index.contains(hash).unwrap())
         });
     });
-    
+
     group.bench_function("miss_bloom_filter", |b| {
         b.iter(|| {
             let hash = random_hash();
             black_box(index.contains(&hash).unwrap())
         });
     });
-    
+
     group.finish();
 }
 
@@ -154,11 +154,11 @@ fn bench_persistence(c: &mut Criterion) {
     let mut group = c.benchmark_group("persistence");
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(20);
-    
+
     group.bench_function("reopen_100k", |b| {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("index");
-        
+
         // Create index with 100K entries
         {
             let index = LsmChunkIndex::open(&path).unwrap();
@@ -170,13 +170,13 @@ fn bench_persistence(c: &mut Criterion) {
             index.commit_batch().unwrap();
             index.flush().unwrap();
         }
-        
+
         b.iter(|| {
             let index = LsmChunkIndex::open(&path).unwrap();
             black_box(index.len())
         });
     });
-    
+
     group.finish();
 }
 

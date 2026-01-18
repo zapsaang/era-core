@@ -87,7 +87,7 @@ fn test_persistence_across_sessions() {
     let path = tmp.path().join("index");
 
     let mut hashes = Vec::new();
-    
+
     // Helper to generate unique hash from u32
     fn make_hash(i: u32) -> ChunkHash {
         let mut bytes = [0u8; 32];

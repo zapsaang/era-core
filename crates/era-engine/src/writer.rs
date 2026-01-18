@@ -18,7 +18,8 @@ use bytes::Bytes;
 use era_codec::{Compressor, NoCompressor, ZstdCompressor};
 use era_common::{
     ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, CompressionAlgorithm, ErasureBlockInfo,
-    ErasureCodeConfig, MatrixBlockLocation, Result, UniqueChunk,
+    ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig, MatrixDistributionStrategy,
+    Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
@@ -29,11 +30,13 @@ use era_packing::{
 };
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumePool, VolumePoolConfig, VolumeWriter};
+use prost::Message;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+use walkdir::WalkDir;
 
 use crate::checkpoint::CheckpointManager;
 use crate::chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex};
@@ -382,6 +385,21 @@ impl ArchiveWriterBuilder {
             config.erasure = Some(self.erasure_config);
         }
 
+        // Set distribution strategy in config, to match VolumePool behavior
+        if self.enable_matrix_distribution {
+            config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
+
+            // Calculate optimal volume counts if needed
+            if self.enable_erasure {
+                let erasure = self.erasure_config;
+                let total_shards = (erasure.data_shards + erasure.parity_shards) as usize;
+                config.distribution.min_volumes = (erasure.parity_shards as usize + 1).max(2);
+                config.distribution.target_volumes = total_shards;
+            }
+        } else {
+            config.distribution.strategy = MatrixDistributionStrategy::Striped;
+        }
+
         // Create volume header based on authentication mode
         let header = match (&self.auth_mode, &key_encapsulation) {
             (AuthMode::Password(_), None) => {
@@ -397,13 +415,7 @@ impl ArchiveWriterBuilder {
             }
             (AuthMode::Certificate(_), Some(encap)) => {
                 // Certificate mode
-                let encap_bytes = bincode::serde::encode_to_vec(encap, bincode::config::standard())
-                    .map_err(|e| {
-                        era_common::EraError::Serialization(format!(
-                            "Failed to serialize key encapsulation: {}",
-                            e
-                        ))
-                    })?;
+                let encap_bytes = encap.to_proto().encode_to_vec();
                 SuperHeader::with_certificate(
                     archive_id,
                     *salt.as_bytes(),
@@ -414,13 +426,7 @@ impl ArchiveWriterBuilder {
             }
             (AuthMode::Hybrid { .. }, Some(encap)) => {
                 // Hybrid mode
-                let encap_bytes = bincode::serde::encode_to_vec(encap, bincode::config::standard())
-                    .map_err(|e| {
-                        era_common::EraError::Serialization(format!(
-                            "Failed to serialize key encapsulation: {}",
-                            e
-                        ))
-                    })?;
+                let encap_bytes = encap.to_proto().encode_to_vec();
                 SuperHeader::with_hybrid(
                     archive_id,
                     *salt.as_bytes(),
@@ -493,55 +499,42 @@ impl ArchiveWriterBuilder {
             self.volume_count
         };
 
-        // Create either VolumePool (for matrix distribution) or legacy volume_writers
-        let (volume_writers, volume_pool) =
-            if self.enable_matrix_distribution && self.enable_erasure {
-                // Create VolumePool for matrix distribution
-                let base_path = self
-                    .output_path
-                    .parent()
-                    .map(|p| p.join(base_filename))
-                    .unwrap_or_else(|| PathBuf::from(base_filename));
+        // Unified Volume Management
+        let base_path = self
+            .output_path
+            .parent()
+            .map(|p| p.join(base_filename))
+            .unwrap_or_else(|| PathBuf::from(base_filename));
 
-                let pool_config = VolumePoolConfig::new(&base_path, volume_count)
-                    .for_erasure(self.erasure_config);
+        let mut pool_config = VolumePoolConfig::new(&base_path, volume_count);
 
-                let pool_config = if let Some(max_size) = self.max_volume_size {
-                    pool_config.with_max_size(max_size)
-                } else {
-                    pool_config
-                };
+        if self.enable_erasure {
+            pool_config = pool_config.for_erasure(self.erasure_config);
+        }
 
-                let pool = VolumePool::create(&backend, pool_config, header.clone())?;
+        if let Some(max_size) = self.max_volume_size {
+            pool_config = pool_config.with_max_size(max_size);
+        }
 
-                info!(
-                    "Created VolumePool with {} volumes for matrix distribution",
-                    pool.volume_count()
-                );
+        // Apply correct distribution strategy
+        if !self.enable_matrix_distribution {
+            // Force Striped (Legacy) behavior
+            let mut dist_config = pool_config.distribution.clone();
+            dist_config.strategy = MatrixDistributionStrategy::Striped;
+            pool_config = pool_config.with_distribution(dist_config);
+        }
 
-                (Vec::new(), Some(pool))
+        let volume_pool = VolumePool::create(backend.clone(), pool_config, header.clone())?;
+
+        info!(
+            "Created VolumePool with {} volumes (Strategy: {:?})",
+            volume_pool.volume_count(),
+            if self.enable_matrix_distribution {
+                "Matrix"
             } else {
-                // Legacy mode: create individual volume writers
-                let mut volume_writers = Vec::with_capacity(volume_count);
-                for i in 0..volume_count {
-                    let volume_path = if i == 0 {
-                        PathBuf::from(base_filename)
-                    } else {
-                        let p = PathBuf::from(base_filename);
-                        let mut file_name = p.as_os_str().to_os_string();
-                        file_name.push(format!(".{:03}", i));
-                        PathBuf::from(file_name)
-                    };
-
-                    let mut vol_header = header.clone();
-                    vol_header.volume_sequence = i as u16;
-                    vol_header.total_volumes = volume_count as u16;
-
-                    let writer = VolumeWriter::create(&backend, &volume_path, vol_header)?;
-                    volume_writers.push(writer);
-                }
-                (volume_writers, None)
-            };
+                "Striped"
+            }
+        );
 
         // Store nonce context (salt) for block encryption
         let nonce_context = *salt.as_bytes();
@@ -625,7 +618,6 @@ impl ArchiveWriterBuilder {
             } else {
                 None
             },
-            volume_writers,
             volume_pool,
             catalog: Catalog::new(),
             chunk_index,
@@ -709,10 +701,8 @@ pub struct ArchiveWriter {
     /// Erasure coding configuration (if enabled)
     erasure_config: Option<ErasureCodeConfig>,
 
-    // Writers - use either legacy volume_writers or new volume_pool
-    volume_writers: Vec<VolumeWriter<era_storage::LocalStorageWriter>>,
-    /// Volume pool for matrix distribution (when enabled)
-    volume_pool: Option<VolumePool<era_storage::LocalStorageWriter>>,
+    /// Volume pool for managing archive volumes
+    volume_pool: VolumePool<era_storage::LocalStorageBackend>,
 
     // Certificate mode: key encapsulation data
     /// Encrypted master key for certificate mode (None for password mode)
@@ -803,29 +793,52 @@ impl ArchiveWriter {
     }
 
     /// Add a file to the archive
+    /// Add a directory or file recursively.
     ///
-    /// Small files (< 16KB by default) are automatically buffered and packed together
-    /// for better performance. If CDC is enabled, large files are automatically split
-    /// into chunks.
-    pub fn add_file(&mut self, path: &Path) -> Result<()> {
-        info!("Adding file: {}", path.display());
+    /// If `path` is a directory and `recursive` is true, all contents are added.
+    /// Directory structure is preserved.
+    pub fn add_path(&mut self, path: &Path, recursive: bool) -> Result<()> {
+        if path.is_dir() {
+            if !recursive {
+                return Err(era_common::EraError::Io(std::io::Error::new(
+                    std::io::ErrorKind::IsADirectory,
+                    format!("{} is a directory (use recursive=true)", path.display()),
+                )));
+            }
 
-        let metadata = std::fs::metadata(path)?;
+            for entry in WalkDir::new(path) {
+                let entry = entry.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                if entry.file_type().is_file() {
+                    self.add_file_with_path(entry.path(), entry.path())?;
+                }
+            }
+        } else {
+            self.add_file_with_path(path, path)?;
+        }
+        Ok(())
+    }
+
+    /// Add a file with a specific stored path
+    pub fn add_file_with_path(&mut self, disk_path: &Path, stored_path: &Path) -> Result<()> {
+        info!(
+            "Adding file: {} as {}",
+            disk_path.display(),
+            stored_path.display()
+        );
+
+        let metadata = std::fs::metadata(disk_path)?;
         let file_size = metadata.len();
 
-        let relative_path = path
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
+        let relative_path = stored_path.to_path_buf();
 
         // Small file path: buffer for packing (but not empty files)
         if file_size > 0 && file_size < self.small_file_threshold {
             debug!(
                 "Buffering small file: {} ({} bytes)",
-                path.display(),
+                disk_path.display(),
                 file_size
             );
-            let data = std::fs::read(path)?;
+            let data = std::fs::read(disk_path)?;
             let hash = blake3::hash(&data);
             let chunk_hash = ChunkHash(*hash.as_bytes());
 
@@ -847,11 +860,25 @@ impl ArchiveWriter {
         // Large file path: process immediately
         if self.enable_cdc {
             // Use CDC chunking for large files
-            self.add_file_chunked(path, relative_path)
+            self.add_file_chunked(disk_path, relative_path)
         } else {
             // Legacy: single chunk per file
-            self.add_file_single(path, relative_path)
+            self.add_file_single(disk_path, relative_path)
         }
+    }
+
+    /// Add a single file (legacy compatibility: flattens path)
+    ///
+    /// Small files (< 16KB by default) are automatically buffered and packed together
+    /// for better performance. If CDC is enabled, large files are automatically split
+    /// into chunks.
+    pub fn add_file(&mut self, path: &Path) -> Result<()> {
+        let relative_path = path
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf());
+
+        self.add_file_with_path(path, &relative_path)
     }
 
     /// Add multiple files to the archive in a batch operation
@@ -1191,8 +1218,19 @@ impl ArchiveWriter {
             }
         } else {
             // Non-erasure path (Direct Write)
-            // Write standard blocks to primary volume (0) - simple linear write
-            let location = self.volume_writers[0].write_block(&encrypted_block)?;
+            // Write standard blocks via VolumePool
+            let (entry, volume_id) =
+                self.volume_pool
+                    .write_shard(0, &encrypted_block.data, false, 0)?;
+            let location = BlockLocation {
+                volume_id,
+                slot_index: encrypted_block.block_id.0 as u32,
+                physical_offset: entry.physical_offset,
+                encrypted_size: entry.shard_size,
+                erasure_info: None,
+                shard_offsets: None,
+                shard_volumes: None,
+            };
 
             // Update index
             for hash in hashes {
@@ -1210,33 +1248,73 @@ impl ArchiveWriter {
         // Write Data Blocks first
         let mut locations = Vec::new();
         // Use round-robin if multiple volumes available, else Volume 0
-        let volume_count = self.volume_writers.len();
+        let volume_count = self.volume_pool.volume_count();
 
-        // 1. Write Data Blocks
-        for (i, block) in stripe.data_blocks.iter().enumerate() {
-            let vol_idx = i % volume_count;
+        if volume_count == 0 {
+            return Err(era_common::EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "No volume writers available",
+            )));
+        }
 
-            // In matrix distribution, we want blocks to be distributed
-            // Even if we don't fully implement MatrixBlockLocation yet,
-            // we can distribute physically.
+        // 1. Write Data Blocks (and padding)
+        let data_shards_count = stripe.config.data_shards as usize;
+        let mut data_info = Vec::with_capacity(data_shards_count);
 
-            let loc = self.volume_writers[vol_idx].write_block(block)?;
-            locations.push(loc);
+        for i in 0..data_shards_count {
+            if i < stripe.data_blocks.len() {
+                let block = &stripe.data_blocks[i];
+                let (entry, volume_id) = self.volume_pool.write_shard(i, &block.data, false, 0)?;
+
+                let loc = BlockLocation {
+                    volume_id,
+                    slot_index: block.block_id.0 as u32,
+                    physical_offset: entry.physical_offset,
+                    encrypted_size: entry.shard_size,
+                    erasure_info: None,
+                    shard_offsets: None,
+                    shard_volumes: None,
+                };
+                locations.push(loc);
+                data_info.push((entry.volume_sequence, entry.physical_offset));
+            } else {
+                // Write Padding Block (Empty Encrypted Block)
+                // We must write a valid encrypted block so the reader can decrypt it
+                // (processing it as an empty block) without error.
+                let compressor = self.create_compressor();
+                let block_id = self.next_block_id();
+
+                let builder = SessionBlockBuilder::new(
+                    &self.session,
+                    &self.volume_key,
+                    self.nonce_context,
+                    compressor,
+                )
+                .with_starting_block_id(block_id);
+
+                let encrypted_block = builder.pack_chunks(vec![])?;
+
+                let (entry, _) =
+                    self.volume_pool
+                        .write_shard(i, &encrypted_block.data, false, 0)?;
+                data_info.push((entry.volume_sequence, entry.physical_offset));
+                // Note: We don't add to `locations` as it's not a real content block,
+                // but we write it to disk to maintain stripe alignment.
+            }
         }
 
         // 2. Write Parity Shards
         let mut parity_locations = Vec::new();
-        let data_count = stripe.data_blocks.len();
+        // Fixed: Use configured data shards count, not actual block count.
+        // If we have a partial stripe (e.g., 1 block for 2+1 scheme), we want
+        // parity to be at index 2, not index 1. Index 1 is implicitly zero/padding.
+        let data_count = stripe.config.data_shards as usize;
 
         for (i, shard) in stripe.parity_shards.iter().enumerate() {
-            let vol_idx = (data_count + i) % volume_count;
-            let writer = &mut self.volume_writers[vol_idx];
-
-            // Write length prefix followed by data
-            let offset = writer.write_raw(&(shard.len() as u32).to_le_bytes())?;
-            writer.write_raw(shard)?;
-
-            parity_locations.push((vol_idx, offset));
+            let (entry, _) = self
+                .volume_pool
+                .write_shard(data_count + i, shard, false, 0)?;
+            parity_locations.push((entry.volume_sequence, entry.physical_offset));
         }
 
         // 3. Update Index for Data Blocks with Stripe Information
@@ -1256,27 +1334,22 @@ impl ArchiveWriter {
             // But for full stripe recovery info, we store others.
             for (j, data_loc) in locations.iter().enumerate() {
                 if i != j {
-                    shard_offsets.push(data_loc.physical_offset);
-                    // Assuming volume_id is available.
-                    // We need to get volume sequence from volume writer?
-                    // loc.volume_id is VolumeId. We need u16 sequence.
-                    // We can infer it from vol_idx in loop above.
-                    let vol_idx = j % volume_count;
-                    shard_volumes.push(vol_idx as u16);
+                    shard_offsets.push(data_info[j].1); // physical_offset
+                    shard_volumes.push(data_info[j].0); // volume_sequence
                 }
             }
 
             // Add parity shards
-            for (vol_idx, offset) in &parity_locations {
+            for (sequence, offset) in &parity_locations {
                 shard_offsets.push(*offset);
-                shard_volumes.push(*vol_idx as u16);
+                shard_volumes.push(*sequence);
             }
 
             loc.erasure_info = Some(ErasureBlockInfo {
                 data_shards: stripe.config.data_shards as u8,
                 parity_shards: stripe.config.parity_shards as u8,
-                shard_size: loc.encrypted_size, // Approximate?
-                original_len: 0,                // Not applicable for blocks
+                shard_size: loc.encrypted_size,
+                original_len: loc.encrypted_size,
             });
 
             loc.shard_offsets = Some(shard_offsets);
@@ -1374,75 +1447,29 @@ impl ArchiveWriter {
             None
         };
 
-        // Handle finalization based on whether we're using VolumePool or legacy writers
-        if let Some(mut pool) = self.volume_pool.take() {
-            // Matrix distribution mode: write catalog to each volume in the pool
-            let volume_count = pool.volume_count();
-            let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
+        // Handle finalization (Unified Mode)
+        let mut pool = self.volume_pool;
 
-            for slot in 0..volume_count {
-                if let Some(writer) = pool.get_writer_mut(slot) {
-                    let location = writer.write_block(&catalog_block)?;
+        // Matrix distribution mode: write catalog to each volume in the pool
+        let volume_count = pool.volume_count();
+        let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
 
-                    if let Some(ref backup) = backup_block {
-                        let _backup_location = writer.write_block(backup)?;
-                        debug!(
-                            "Volume {}: Catalog written with backup at offset {}",
-                            slot, location.physical_offset
-                        );
-                    } else {
-                        debug!(
-                            "Volume {}: Catalog written at offset {}",
-                            slot, location.physical_offset
-                        );
-                    }
+        for slot in 0..volume_count {
+            if let Some(writer) = pool.get_writer_mut(slot) {
+                let mut location = writer.write_block(&catalog_block)?;
+                // Override slot_index with actual block_id for correct key derivation during read
+                location.slot_index = catalog_block_id;
 
-                    catalog_locations.push((
-                        location.physical_offset,
-                        location.encrypted_size,
-                        catalog_block_id,
-                    ));
-                }
-            }
-
-            debug!(
-                "Catalog (block_id={}) written to {} volumes for full redundancy",
-                catalog_block_id,
-                catalog_locations.len()
-            );
-
-            // Finalize the pool
-            let first_catalog = catalog_locations.first().cloned().unwrap_or((0, 0, 0));
-            let pool_stats =
-                pool.finalize_with_catalog(first_catalog.0, first_catalog.1, first_catalog.2)?;
-
-            info!(
-                "VolumePool finalized: {} volumes, {} total bytes, {} blocks",
-                pool_stats.volume_count,
-                pool_stats.total_bytes_written,
-                pool_stats.total_blocks_written
-            );
-        } else {
-            // Legacy mode: use volume_writers
-            // Write catalog to EVERY volume so archive can be opened from any volume
-            // This enables recovery even when some volumes (including the primary) are missing
-            let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
-
-            for (i, writer) in self.volume_writers.iter_mut().enumerate() {
-                // Write the same catalog block to each volume
-                let location = writer.write_block(&catalog_block)?;
-
-                // Write backup copy for erasure-coded archives
                 if let Some(ref backup) = backup_block {
                     let _backup_location = writer.write_block(backup)?;
                     debug!(
                         "Volume {}: Catalog written with backup at offset {}",
-                        i, location.physical_offset
+                        slot, location.physical_offset
                     );
                 } else {
                     debug!(
                         "Volume {}: Catalog written at offset {}",
-                        i, location.physical_offset
+                        slot, location.physical_offset
                     );
                 }
 
@@ -1452,19 +1479,25 @@ impl ArchiveWriter {
                     catalog_block_id,
                 ));
             }
-
-            debug!(
-                "Catalog (block_id={}) written to {} volumes for full redundancy",
-                catalog_block_id,
-                catalog_locations.len()
-            );
-
-            // Finalize volumes with their respective catalog locations
-            for (i, writer) in self.volume_writers.drain(..).enumerate() {
-                let (offset, size, block_id) = catalog_locations[i];
-                writer.finalize_with_catalog(offset, size, block_id)?;
-            }
         }
+
+        debug!(
+            "Catalog (block_id={}) written to {} volumes for full redundancy",
+            catalog_block_id,
+            catalog_locations.len()
+        );
+
+        // Finalize the pool
+        let first_catalog = catalog_locations.first().cloned().unwrap_or((0, 0, 0));
+        let pool_stats =
+            pool.finalize_with_catalog(first_catalog.0, first_catalog.1, first_catalog.2)?;
+
+        info!(
+            "VolumePool finalized: {} volumes, {} total bytes, {} blocks",
+            pool_stats.volume_count,
+            pool_stats.total_bytes_written,
+            pool_stats.total_blocks_written
+        );
 
         // Delete checkpoint after successful completion
         if self.checkpoint_manager.is_some() {

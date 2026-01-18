@@ -18,7 +18,7 @@ fn test_small_file_packing_roundtrip() {
         let filename = format!("file_{:02}.txt", i);
         let filepath = input_dir.join(&filename);
         let content = format!("This is file number {}\n", i).repeat(100); // ~2KB each
-        
+
         fs::write(&filepath, &content).unwrap();
         expected_files.push((filename, content));
     }
@@ -37,7 +37,10 @@ fn test_small_file_packing_roundtrip() {
     }
 
     let stats = writer.finalize().unwrap();
-    println!("Archive stats: {} files, {} bytes", stats.total_files, stats.total_size);
+    println!(
+        "Archive stats: {} files, {} bytes",
+        stats.total_files, stats.total_size
+    );
 
     // Verify archive was created
     assert!(archive_path.exists());
@@ -55,9 +58,13 @@ fn test_small_file_packing_roundtrip() {
     for (filename, expected_content) in &expected_files {
         let extracted_path = output_dir.join(filename);
         assert!(extracted_path.exists(), "File {} should exist", filename);
-        
+
         let actual_content = fs::read_to_string(&extracted_path).unwrap();
-        assert_eq!(&actual_content, expected_content, "Content mismatch for {}", filename);
+        assert_eq!(
+            &actual_content, expected_content,
+            "Content mismatch for {}",
+            filename
+        );
     }
 }
 
@@ -90,10 +97,14 @@ fn test_mixed_small_and_large_files() {
 
     // Add all files
     for i in 0..5 {
-        writer.add_file(&input_dir.join(format!("small_{}.txt", i))).unwrap();
+        writer
+            .add_file(&input_dir.join(format!("small_{}.txt", i)))
+            .unwrap();
     }
     for i in 0..2 {
-        writer.add_file(&input_dir.join(format!("large_{}.txt", i))).unwrap();
+        writer
+            .add_file(&input_dir.join(format!("large_{}.txt", i)))
+            .unwrap();
     }
 
     writer.finalize().unwrap();
@@ -103,7 +114,9 @@ fn test_mixed_small_and_large_files() {
     let files = reader.list_files().unwrap();
     assert_eq!(files.len(), 7);
 
-    let extract_stats = reader.extract_all(&ExtractOptions::new(&output_dir)).unwrap();
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .unwrap();
     assert_eq!(extract_stats.extracted, 7);
 
     // Verify all files exist and have correct size
@@ -143,15 +156,22 @@ fn test_many_small_files() {
         .unwrap();
 
     for i in 0..file_count {
-        writer.add_file(&input_dir.join(format!("file_{:03}.dat", i))).unwrap();
+        writer
+            .add_file(&input_dir.join(format!("file_{:03}.dat", i)))
+            .unwrap();
     }
 
     let stats = writer.finalize().unwrap();
-    println!("Packed {} files into {} bytes", stats.total_files, stats.total_size);
+    println!(
+        "Packed {} files into {} bytes",
+        stats.total_files, stats.total_size
+    );
 
     // Extract
     let mut reader = ArchiveReader::open(&archive_path, "test").unwrap();
-    let extract_stats = reader.extract_all(&ExtractOptions::new(&output_dir)).unwrap();
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .unwrap();
     assert_eq!(extract_stats.extracted as usize, file_count);
 
     // Spot check a few files
@@ -183,14 +203,18 @@ fn test_empty_files_packed() {
         .unwrap();
 
     for i in 0..5 {
-        writer.add_file(&input_dir.join(format!("empty_{}.txt", i))).unwrap();
+        writer
+            .add_file(&input_dir.join(format!("empty_{}.txt", i)))
+            .unwrap();
     }
 
     writer.finalize().unwrap();
 
     // Extract and verify
     let mut reader = ArchiveReader::open(&archive_path, "password").unwrap();
-    let extract_stats = reader.extract_all(&ExtractOptions::new(&output_dir)).unwrap();
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .unwrap();
     assert_eq!(extract_stats.extracted, 5);
 
     for i in 0..5 {

@@ -30,12 +30,12 @@ fn main() {
     match SecureBuffer::<1024>::with_config(config) {
         Ok(mut buffer) => {
             println!("  ✅ Successfully allocated 1KB with guard pages");
-            
+
             // Write and read data
             for i in 0..1024 {
                 buffer.as_mut()[i] = (i % 256) as u8;
             }
-            
+
             // Verify
             let mut errors = 0;
             for i in 0..1024 {
@@ -43,13 +43,13 @@ fn main() {
                     errors += 1;
                 }
             }
-            
+
             if errors == 0 {
                 println!("  ✅ Data integrity verified (1024 bytes)");
             } else {
                 println!("  ❌ Data corruption detected: {} errors", errors);
             }
-            
+
             if buffer.is_locked() {
                 println!("  ✅ Memory successfully locked (protected from swap)");
             } else {
@@ -68,12 +68,12 @@ fn main() {
     match SecureBuffer::<65536>::with_config(config) {
         Ok(mut buffer) => {
             println!("  ✅ Successfully allocated 64KB with guard pages");
-            
+
             // Write pattern
             buffer.as_mut()[0] = 0xAA;
             buffer.as_mut()[32767] = 0xBB;
             buffer.as_mut()[65535] = 0xCC;
-            
+
             // Verify
             if buffer.as_ref()[0] == 0xAA
                 && buffer.as_ref()[32767] == 0xBB
@@ -93,7 +93,7 @@ fn main() {
 
     // Test 3: Performance comparison
     println!("Test 3: Performance Impact");
-    
+
     let start = std::time::Instant::now();
     for _ in 0..1000 {
         let _ = SecureBuffer::<32>::with_config(SecureMemoryConfig {
@@ -103,7 +103,7 @@ fn main() {
         });
     }
     let with_guards = start.elapsed();
-    
+
     let start = std::time::Instant::now();
     for _ in 0..1000 {
         let _ = SecureBuffer::<32>::with_config(SecureMemoryConfig {
@@ -113,18 +113,18 @@ fn main() {
         });
     }
     let without_guards = start.elapsed();
-    
+
     println!("  With guard pages:    {:?}", with_guards);
     println!("  Without guard pages: {:?}", without_guards);
-    
+
     let overhead = if without_guards.as_nanos() > 0 {
         ((with_guards.as_nanos() as f64 / without_guards.as_nanos() as f64) - 1.0) * 100.0
     } else {
         0.0
     };
-    
+
     println!("  Overhead: {:.1}%", overhead);
-    
+
     if overhead < 10.0 {
         println!("  ✅ Acceptable performance overhead");
     } else {

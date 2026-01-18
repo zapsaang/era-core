@@ -11,13 +11,17 @@ era-common = { workspace = true }
 era-crypto = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
-bincode = { workspace = true }
+
+
 thiserror = { workspace = true }
 tracing = { workspace = true }
 fastcdc = { workspace = true }
 walkdir = "2.4"
 glob = "0.3"
 xattr = "1.0"
+exacl = { version = "0.12.0", features = ["serde"] }
+serde_json = "1.0"
+prost = "0.14.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

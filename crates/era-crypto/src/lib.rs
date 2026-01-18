@@ -19,7 +19,7 @@ mod key;
 mod key_session;
 pub mod pem_support;
 pub mod timestamp;
-pub mod migration;
+// pub mod migration; // Removed legacy migration
 mod secure_memory;
 mod security_check;
 

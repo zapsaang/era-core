@@ -11,13 +11,13 @@ era-common = { workspace = true }
 era-storage = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
-bincode = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
 serde-big-array = "0.5"
 rand.workspace = true
+prost = "0.14.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

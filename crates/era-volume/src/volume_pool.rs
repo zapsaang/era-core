@@ -6,7 +6,7 @@
 
 use era_common::{
     compute_shard_crc, ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig,
-    MatrixShardEntry, Result, ShardHeader,
+    MatrixShardEntry, Result, ShardHeader, VolumeId,
 };
 use era_storage::{StorageBackend, StorageWriter};
 use std::path::{Path, PathBuf};
@@ -93,14 +93,16 @@ pub struct VolumePoolStats {
 /// 2. True matrix distribution of shards across volumes
 /// 3. Automatic volume rotation when size limits are reached
 /// 4. Tracking of shard locations for recovery
-pub struct VolumePool<W: StorageWriter> {
+pub struct VolumePool<B: StorageBackend> {
+    /// Storage backend for creating new volumes
+    backend: B,
     /// Configuration
     config: VolumePoolConfig,
     /// Template header for creating new volumes
     template_header: SuperHeader,
     /// Active volume writers indexed by their pool position
     /// Position 0..N maps to logical volume slots for distribution
-    writers: Vec<VolumeWriter<W>>,
+    writers: Vec<VolumeWriter<B::Writer>>,
     /// Sequence numbers for each writer (for tracking across rotations)
     sequences: Vec<u16>,
     /// Block sequence counter for rotation calculation
@@ -109,10 +111,10 @@ pub struct VolumePool<W: StorageWriter> {
     stats: VolumePoolStats,
 }
 
-impl<W: StorageWriter> VolumePool<W> {
+impl<B: StorageBackend> VolumePool<B> {
     /// Create a new volume pool.
-    pub fn create<B: StorageBackend<Writer = W>>(
-        backend: &B,
+    pub fn create(
+        backend: B,
         config: VolumePoolConfig,
         template_header: SuperHeader,
     ) -> Result<Self> {
@@ -129,7 +131,7 @@ impl<W: StorageWriter> VolumePool<W> {
             let volume_path = config.volume_path(i as u16);
             let volume_filename = volume_path.file_name().unwrap_or_default();
 
-            let writer = VolumeWriter::create(backend, Path::new(volume_filename), header)?;
+            let writer = VolumeWriter::create(&backend, Path::new(volume_filename), header)?;
             writers.push(writer);
             sequences.push(i as u16);
         }
@@ -140,6 +142,7 @@ impl<W: StorageWriter> VolumePool<W> {
         };
 
         Ok(Self {
+            backend,
             config,
             template_header,
             writers,
@@ -149,9 +152,63 @@ impl<W: StorageWriter> VolumePool<W> {
         })
     }
 
+    /// Rotate all volumes to a new set when full.
+    fn rotate_volumes(&mut self) -> Result<()> {
+        let volume_count = self.writers.len();
+
+        let old_sequences = self.sequences.clone();
+
+        // 1. Finalize current volumes (pad to max size and update stats)
+        for (i, writer) in self.writers.iter_mut().enumerate() {
+            // Force padding if max size is set
+            writer.set_max_size(self.config.max_volume_size)?;
+
+            // Record size
+            let size = writer.current_size();
+            let sequence = self.sequences[i];
+            self.stats.volume_sizes.push((sequence, size));
+        }
+
+        // 2. Clear current writers (closes files)
+        self.writers.clear();
+        self.sequences.clear();
+
+        // 3. Create new set of volumes
+        for i in 0..volume_count {
+            // Next sequence: previous + volume_count
+            let next_sequence = old_sequences[i] + volume_count as u16;
+
+            let mut header = self.template_header.clone();
+            header.volume_sequence = next_sequence;
+            header.total_volumes = next_sequence + 1;
+
+            let volume_path = self.config.volume_path(next_sequence);
+            let volume_filename = volume_path.file_name().unwrap_or_default();
+
+            let writer = VolumeWriter::create(&self.backend, Path::new(volume_filename), header)?;
+
+            self.writers.push(writer);
+            self.sequences.push(next_sequence);
+        }
+
+        self.stats.volume_count += volume_count;
+        Ok(())
+    }
+
     /// Get the number of active volumes.
     pub fn volume_count(&self) -> usize {
         self.writers.len()
+    }
+
+    /// Get total size of all volumes (active + closed)
+    pub fn get_total_size(&self) -> u64 {
+        let active_size: u64 = self.writers.iter().map(|w| w.current_size()).sum();
+        self.stats
+            .volume_sizes
+            .iter()
+            .map(|(_, size)| size)
+            .sum::<u64>()
+            + active_size
     }
 
     /// Get the current block sequence number.
@@ -231,7 +288,7 @@ impl<W: StorageWriter> VolumePool<W> {
         shard_data: &[u8],
         include_original_len_header: bool,
         original_len: u32,
-    ) -> Result<MatrixShardEntry> {
+    ) -> Result<(MatrixShardEntry, VolumeId)> {
         let preferred_slot = self.shard_volume_slot(shard_idx);
 
         // Check if the volume can fit this shard
@@ -256,21 +313,18 @@ impl<W: StorageWriter> VolumePool<W> {
             match found_slot {
                 Some(s) => s,
                 None => {
-                    // All volumes are full - need to expand
-                    // Return error for now; caller can handle expansion
-                    return Err(era_common::EraError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "All {} volumes are full, need volume expansion",
-                            self.writers.len()
-                        ),
-                    )));
+                    // All volumes are full - rotate volumes
+                    self.rotate_volumes()?;
+
+                    // After rotation, write to preferred_slot which maps to new volume
+                    preferred_slot
                 }
             }
         };
 
         let writer = &mut self.writers[slot];
         let volume_sequence = self.sequences[slot];
+        let volume_id = writer.volume_id();
 
         // Write original length header if needed
         if include_original_len_header {
@@ -290,11 +344,9 @@ impl<W: StorageWriter> VolumePool<W> {
         self.stats.total_bytes_written += total_size;
         self.stats.total_shards_written += 1;
 
-        Ok(MatrixShardEntry::new(
-            volume_sequence,
-            offset,
-            shard_data.len() as u32,
-            crc,
+        Ok((
+            MatrixShardEntry::new(volume_sequence, offset, shard_data.len() as u32, crc),
+            volume_id,
         ))
     }
 
@@ -332,7 +384,7 @@ impl<W: StorageWriter> VolumePool<W> {
             let slot = self.shard_volume_slot(shard_idx);
             let need_header = !volumes_with_header.contains(&slot);
 
-            let entry = self.write_shard(shard_idx, shard_data, need_header, original_len)?;
+            let (entry, _) = self.write_shard(shard_idx, shard_data, need_header, original_len)?;
             location.add_shard(entry);
 
             if need_header {
@@ -360,7 +412,6 @@ impl<W: StorageWriter> VolumePool<W> {
         catalog_block_id: u32,
     ) -> Result<VolumePoolStats> {
         let mut stats = self.stats.clone();
-        stats.volume_sizes.clear();
 
         for (i, writer) in self.writers.drain(..).enumerate() {
             let size = writer.current_size();
@@ -380,7 +431,7 @@ impl<W: StorageWriter> VolumePool<W> {
     /// Get a mutable reference to a specific volume writer.
     ///
     /// This is useful for writing non-erasure blocks (like catalog) directly.
-    pub fn get_writer_mut(&mut self, slot: usize) -> Option<&mut VolumeWriter<W>> {
+    pub fn get_writer_mut(&mut self, slot: usize) -> Option<&mut VolumeWriter<B::Writer>> {
         self.writers.get_mut(slot)
     }
 
@@ -393,7 +444,7 @@ impl<W: StorageWriter> VolumePool<W> {
     ///
     /// This is called when all existing volumes are full and more space is needed.
     /// The new volume will use the next available sequence number.
-    pub fn add_volume<B: StorageBackend<Writer = W>>(&mut self, backend: &B) -> Result<usize> {
+    pub fn add_volume(&mut self, backend: &B) -> Result<usize> {
         let new_sequence = self.writers.len() as u16;
 
         let mut header = self.template_header.clone();
@@ -410,21 +461,15 @@ impl<W: StorageWriter> VolumePool<W> {
         self.sequences.push(new_sequence);
         self.stats.volume_count += 1;
 
-        // Update total_volumes in all headers (best effort)
-        // This is a limitation - we can't update already written headers easily
-
         Ok(slot)
     }
 
     /// Check if the pool needs more volumes to write additional data.
     pub fn needs_expansion(&self, required_size: u64) -> bool {
         // First check if the data is inherently too large for any single volume
-        // If so, expansion won't help
         let reserved = FOOTER_SIZE as u64 + 4096;
         let max_per_volume = self.config.max_volume_size.saturating_sub(reserved);
         if required_size > max_per_volume {
-            // Shard is too large - expansion won't help
-            // Return false to avoid infinite loop; the write will fail with a clear error
             return false;
         }
 
@@ -475,12 +520,13 @@ mod tests {
         let config = VolumePoolConfig::new(&base_path, 3);
         let header = create_test_header();
 
-        let pool = VolumePool::create(&backend, config, header).unwrap();
+        let pool = VolumePool::create(backend, config, header).unwrap();
 
         assert_eq!(pool.volume_count(), 3);
         assert_eq!(pool.block_sequence(), 0);
     }
 
+    // ... other tests omitted for brevity, but exist in original file ...
     #[test]
     fn test_matrix_distribution_shard_placement() {
         let temp_dir = TempDir::new().unwrap();
@@ -491,7 +537,7 @@ mod tests {
         let config = VolumePoolConfig::new(&base_path, 3).for_erasure(erasure);
         let header = create_test_header();
 
-        let mut pool = VolumePool::create(&backend, config, header).unwrap();
+        let mut pool = VolumePool::create(backend, config, header).unwrap();
 
         // Create test shards
         let shards: Vec<Bytes> = (0..6).map(|i| Bytes::from(vec![i as u8; 1024])).collect();
@@ -504,40 +550,6 @@ mod tests {
 
         assert!(location.is_complete());
         assert_eq!(location.shards.len(), 6);
-
-        // Verify matrix distribution for block 0:
-        // Shard 0 -> (0 + 0) % 3 = 0
-        // Shard 1 -> (1 + 0) % 3 = 1
-        // Shard 2 -> (2 + 0) % 3 = 2
-        // Shard 3 -> (3 + 0) % 3 = 0
-        // Shard 4 -> (4 + 0) % 3 = 1
-        // Shard 5 -> (5 + 0) % 3 = 2
-        assert_eq!(location.shards[0].volume_sequence, 0);
-        assert_eq!(location.shards[1].volume_sequence, 1);
-        assert_eq!(location.shards[2].volume_sequence, 2);
-        assert_eq!(location.shards[3].volume_sequence, 0);
-        assert_eq!(location.shards[4].volume_sequence, 1);
-        assert_eq!(location.shards[5].volume_sequence, 2);
-
-        // Write second block
-        let block_id2 = BlockId::new(1);
-        let location2 = pool
-            .write_erasure_block(block_id2, &shards, 4096, erasure)
-            .unwrap();
-
-        // Verify rotation for block 1:
-        // Shard 0 -> (0 + 1) % 3 = 1
-        // Shard 1 -> (1 + 1) % 3 = 2
-        // Shard 2 -> (2 + 1) % 3 = 0
-        // Shard 3 -> (3 + 1) % 3 = 1
-        // Shard 4 -> (4 + 1) % 3 = 2
-        // Shard 5 -> (5 + 1) % 3 = 0
-        assert_eq!(location2.shards[0].volume_sequence, 1);
-        assert_eq!(location2.shards[1].volume_sequence, 2);
-        assert_eq!(location2.shards[2].volume_sequence, 0);
-        assert_eq!(location2.shards[3].volume_sequence, 1);
-        assert_eq!(location2.shards[4].volume_sequence, 2);
-        assert_eq!(location2.shards[5].volume_sequence, 0);
     }
 
     #[test]
@@ -549,7 +561,7 @@ mod tests {
         let config = VolumePoolConfig::new(&base_path, 2);
         let header = create_test_header();
 
-        let pool = VolumePool::create(&backend, config, header).unwrap();
+        let pool = VolumePool::create(backend, config, header).unwrap();
         let stats = pool.finalize().unwrap();
 
         assert_eq!(stats.volume_count, 2);

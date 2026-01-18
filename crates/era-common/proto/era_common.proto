@@ -1,0 +1,211 @@
+syntax = "proto3";
+
+package era.common;
+
+message ArchiveConfig {
+  CompressionConfig compression = 1;
+  EncryptionConfig encryption = 2;
+  VolumeConfig volume = 3;
+  BlockConfig block = 4;
+  optional ErasureCodeConfig erasure = 5;
+  optional MatrixDistributionConfig distribution = 6;
+}
+
+message MatrixDistributionConfig {
+  enum Strategy {
+    STRATEGY_ROTATING_OFFSET = 0;
+    STRATEGY_STRIPED = 1;
+  }
+  Strategy strategy = 1;
+}
+
+message CompressionConfig {
+  enum Algorithm {
+    ALGORITHM_NONE = 0;
+    ALGORITHM_ZSTD = 1;
+    ALGORITHM_LZ4 = 2;
+  }
+  Algorithm algorithm = 1;
+  int32 level = 2;
+}
+
+message EncryptionConfig {
+  enum Algorithm {
+    ALGORITHM_NONE = 0;
+    ALGORITHM_XCHACHA20POLY1305 = 1;
+  }
+  Algorithm algorithm = 1;
+  uint32 kdf_memory_cost = 2;
+  uint32 kdf_time_cost = 3;
+}
+
+message VolumeConfig {
+  uint64 max_size = 1;
+  bool enable_padding = 2;
+  string naming_template = 3;
+}
+
+message BlockConfig {
+  uint32 target_size = 1;
+}
+
+message ErasureCodeConfig {
+  uint32 data_shards = 1;
+  uint32 parity_shards = 2;
+}
+
+message BlockLocation {
+  bytes volume_id = 1;
+  uint32 slot_index = 2;
+  uint64 physical_offset = 3;
+  uint32 encrypted_size = 4;
+  optional ErasureBlockInfo erasure_info = 5;
+  repeated uint64 shard_offsets = 6;
+  repeated uint32 shard_volumes = 7;
+}
+
+message ErasureBlockInfo {
+  uint32 data_shards = 1;
+  uint32 parity_shards = 2;
+  uint32 shard_size = 3;
+  uint32 original_len = 4;
+}
+
+message ChunkHash {
+  bytes hash = 1;
+}
+
+message SuperHeader {
+  bytes magic = 1;
+  uint32 version = 2;
+  bytes volume_id = 3;
+  bytes archive_id = 4;
+  uint32 volume_sequence = 5;
+  uint32 total_volumes = 6;
+  int64 creation_time = 7;
+  uint64 feature_flags = 8;
+  CryptoAnchor crypto_anchor = 9;
+  ArchiveConfig config = 10;
+}
+
+message CryptoAnchor {
+  bytes salt = 1;
+  bytes password_verification_tag = 2;
+  uint32 kdf_memory_cost = 3;
+  uint32 kdf_time_cost = 4;
+  uint32 kdf_parallelism = 5;
+  enum AuthMode {
+    AUTH_MODE_PASSWORD = 0;
+    AUTH_MODE_CERTIFICATE = 1;
+    AUTH_MODE_HYBRID = 2;
+  }
+  AuthMode auth_mode = 6;
+  optional bytes key_encapsulation = 7;
+}
+
+message Footer {
+  bytes magic = 1;
+  uint32 version = 2;
+  uint32 flags = 3;
+  uint64 data_end_offset = 4;
+  uint32 block_count = 5;
+  uint64 sequence_number = 6;
+  uint64 catalog_offset = 7;
+  uint32 catalog_size = 8;
+  uint32 catalog_block_id = 9;
+  uint64 last_checkpoint_offset = 10;
+  bytes checksum = 11;
+  // Previously _reserved array, now using protobuf extensibility
+}
+
+message ChunkRef {
+  ChunkHash hash = 1;
+  uint64 offset = 2;
+  uint32 length = 3;
+  optional PackedChunkInfo packed_info = 4;
+}
+
+message PackedChunkInfo {
+  uint32 file_index = 1;
+  uint32 total_files = 2;
+}
+
+message FileEntry {
+  enum FileType {
+    FILE_TYPE_FILE = 0;
+    FILE_TYPE_DIRECTORY = 1;
+    FILE_TYPE_SYMLINK = 2;
+  }
+  
+  string path = 1;
+  FileType file_type = 2;
+  uint64 size = 3;
+  uint32 permissions = 4;
+  optional uint64 mtime = 5;
+  optional string symlink_target = 6;
+  optional uint32 uid = 7;
+  optional uint32 gid = 8;
+  map<string, bytes> xattrs = 9;
+  optional bytes acl = 10;
+  
+  // Deprecated: for backward compatibility with single-chunk files
+  optional ChunkHash content_hash = 11;
+  
+  repeated ChunkRef chunks = 12;
+}
+
+message Catalog {
+  repeated FileEntry entries = 1;
+  uint64 total_size = 2;
+  uint64 file_count = 3;
+  uint64 dir_count = 4;
+}
+
+message ChunkIndexEntry {
+  bytes hash = 1;
+  uint32 offset = 2;
+  uint32 length = 3;
+}
+
+message BlockChunkIndex {
+  uint32 count = 1;
+  repeated ChunkIndexEntry entries = 2;
+}
+
+message KeyEncapsulation {
+  bytes ephemeral_public = 1;
+  bytes encrypted_master_key = 2;
+}
+
+message InProgressFile {
+  string path = 1;
+  uint64 total_size = 2;
+  uint64 bytes_processed = 3;
+  uint32 chunks_written = 4;
+}
+
+message CheckpointEntry {
+  bytes hash = 1;
+  BlockLocation location = 2;
+}
+
+message Checkpoint {
+  uint32 version = 1;
+  uint64 timestamp = 2;
+  string archive_path = 3;
+  repeated string completed_files = 4;
+  optional InProgressFile in_progress_file = 5;
+  repeated CheckpointEntry written_chunks = 6;
+  uint32 current_volume = 7;
+  uint64 current_offset = 8;
+  uint64 total_bytes_written = 9;
+  uint32 total_files_processed = 10;
+}
+
+message EraCertificate {
+  bytes public_key = 1;
+  bytes key_id = 2;
+  int64 created_at = 3;
+  optional int64 expires_at = 4;
+  optional string label = 5;
+}

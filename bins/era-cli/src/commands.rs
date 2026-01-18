@@ -142,11 +142,11 @@ pub fn create(
                 .volume_count(volumes)
                 .enable_matrix_distribution(true);
             info!("Matrix distribution: enabled across {} volumes", volumes);
+        }
 
-            if let Some(max_size) = max_volume_size {
-                builder = builder.max_volume_size(max_size);
-                info!("Max volume size: {} bytes", HumanBytes(max_size));
-            }
+        if let Some(max_size) = max_volume_size {
+            builder = builder.max_volume_size(max_size);
+            info!("Max volume size: {} bytes", HumanBytes(max_size));
         }
     }
 
@@ -155,7 +155,29 @@ pub fn create(
     info!("Creating archive: {}", output.display());
 
     let start_time = Instant::now();
-    let pb = ProgressBar::new(inputs.len() as u64);
+    // Pre-scan files to update the progress bar length
+    let mut files_to_process = Vec::new();
+
+    // Use ignore::WalkBuilder (implied standard, but user asked for walkdir explicitly or implies standard recursion)
+    // The instructions said "Introduce walkdir crate".
+    // Let's use walkdir::WalkDir
+    for input in inputs {
+        let path = input.as_ref();
+        if path.is_dir() {
+            for entry in walkdir::WalkDir::new(path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.file_type().is_file() {
+                    files_to_process.push(entry.path().to_path_buf());
+                }
+            }
+        } else {
+            files_to_process.push(path.to_path_buf());
+        }
+    }
+
+    let pb = ProgressBar::new(files_to_process.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -165,11 +187,10 @@ pub fn create(
             .progress_chars("█▓▒░-"),
     );
 
-    for input in inputs {
-        let path = input.as_ref();
+    for path in files_to_process {
         pb.set_message(format!("{}", path.display()));
         writer
-            .add_file(path)
+            .add_file(&path)
             .with_context(|| format!("Failed to add file: {}", path.display()))?;
         pb.inc(1);
     }

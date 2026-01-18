@@ -6,25 +6,25 @@
 //! - Type-safe configuration structures
 //! - Comprehensive error reporting
 
+use era_common::{EraError, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use era_common::{EraError, Result};
 
 /// Archive configuration
-/// 
+///
 /// Describes parameters for archive creation and extraction
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArchiveConfig {
     /// Compression algorithm ("zstd" or "lz4")
     pub compression: Option<String>,
-    
+
     /// Compression level (0-22 for zstd, 0-10 for lz4)
     pub compression_level: Option<u32>,
-    
+
     /// Erasure coding data shards (1-255)
     pub erasure_data_shards: Option<usize>,
-    
+
     /// Erasure coding parity shards (1-255)
     pub erasure_parity_shards: Option<usize>,
 }
@@ -35,12 +35,13 @@ impl ArchiveConfig {
         // Validate compression
         if let Some(ref comp) = self.compression {
             if comp != "zstd" && comp != "lz4" {
-                return Err(EraError::InvalidConfig(
-                    format!("compression must be 'zstd' or 'lz4', got '{}'", comp)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "compression must be 'zstd' or 'lz4', got '{}'",
+                    comp
+                )));
             }
         }
-        
+
         // Validate compression level
         if let Some(level) = self.compression_level {
             let max_level = match self.compression.as_deref() {
@@ -49,41 +50,44 @@ impl ArchiveConfig {
                 _ => 22, // Default to zstd
             };
             if level > max_level {
-                return Err(EraError::InvalidConfig(
-                    format!("compression_level must be 0-{}, got {}", max_level, level)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "compression_level must be 0-{}, got {}",
+                    max_level, level
+                )));
             }
         }
-        
+
         // Validate erasure coding
         if let Some(data) = self.erasure_data_shards {
             if data < 1 || data > 255 {
-                return Err(EraError::InvalidConfig(
-                    format!("erasure_data_shards must be 1-255, got {}", data)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "erasure_data_shards must be 1-255, got {}",
+                    data
+                )));
             }
         }
-        
+
         if let Some(parity) = self.erasure_parity_shards {
             if parity < 1 || parity > 255 {
-                return Err(EraError::InvalidConfig(
-                    format!("erasure_parity_shards must be 1-255, got {}", parity)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "erasure_parity_shards must be 1-255, got {}",
+                    parity
+                )));
             }
         }
-        
+
         // Check total shards
         if let (Some(data), Some(parity)) = (self.erasure_data_shards, self.erasure_parity_shards) {
             if data + parity > 255 {
-                return Err(EraError::InvalidConfig(
-                    format!(
-                        "total erasure shards must be <= 255, got {} (data) + {} (parity) = {}",
-                        data, parity, data + parity
-                    )
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "total erasure shards must be <= 255, got {} (data) + {} (parity) = {}",
+                    data,
+                    parity,
+                    data + parity
+                )));
             }
         }
-        
+
         Ok(())
     }
 }
@@ -95,13 +99,13 @@ impl ArchiveConfig {
 pub struct KdfConfig {
     /// Profile: "fast", "standard", or "production"
     pub profile: Option<String>,
-    
+
     /// Memory cost in KB (explicit override)
     pub memory_cost: Option<u32>,
-    
+
     /// Time cost/iterations (explicit override)
     pub time_cost: Option<u32>,
-    
+
     /// Parallelism level (explicit override)
     pub parallelism: Option<u32>,
 }
@@ -111,36 +115,40 @@ impl KdfConfig {
     pub fn validate(&self) -> Result<()> {
         if let Some(ref profile) = self.profile {
             if profile != "fast" && profile != "standard" && profile != "production" {
-                return Err(EraError::InvalidConfig(
-                    format!("profile must be 'fast', 'standard', or 'production', got '{}'", profile)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "profile must be 'fast', 'standard', or 'production', got '{}'",
+                    profile
+                )));
             }
         }
-        
+
         if let Some(mem) = self.memory_cost {
             if mem < 1 {
-                return Err(EraError::InvalidConfig(
-                    format!("memory_cost must be >= 1, got {}", mem)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "memory_cost must be >= 1, got {}",
+                    mem
+                )));
             }
         }
-        
+
         if let Some(time) = self.time_cost {
             if time < 1 {
-                return Err(EraError::InvalidConfig(
-                    format!("time_cost must be >= 1, got {}", time)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "time_cost must be >= 1, got {}",
+                    time
+                )));
             }
         }
-        
+
         if let Some(parallelism) = self.parallelism {
             if parallelism < 1 {
-                return Err(EraError::InvalidConfig(
-                    format!("parallelism must be >= 1, got {}", parallelism)
-                ));
+                return Err(EraError::InvalidConfig(format!(
+                    "parallelism must be >= 1, got {}",
+                    parallelism
+                )));
             }
         }
-        
+
         Ok(())
     }
 }
@@ -150,7 +158,7 @@ impl KdfConfig {
 pub struct EraConfig {
     #[serde(default)]
     pub archive: ArchiveConfig,
-    
+
     #[serde(default)]
     pub kdf: KdfConfig,
 }
@@ -168,32 +176,32 @@ impl EraConfig {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let content = fs::read_to_string(&path)?;
-        
+
         let config: EraConfig = toml::from_str(&content)
             .map_err(|e| EraError::InvalidConfig(format!("Invalid TOML: {}", e)))?;
-        
+
         config.validate()?;
         Ok(config)
     }
-    
+
     /// Save configuration to a TOML file
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let path = path.as_ref();
         let content = toml::to_string_pretty(&self)
             .map_err(|e| EraError::InvalidConfig(format!("Failed to serialize config: {}", e)))?;
-        
+
         fs::write(path, content)?;
-        
+
         Ok(())
     }
-    
+
     /// Validate the complete configuration
     pub fn validate(&self) -> Result<()> {
         self.archive.validate()?;
         self.kdf.validate()?;
         Ok(())
     }
-    
+
     /// Get default configuration
     pub fn default_config() -> Self {
         Self {

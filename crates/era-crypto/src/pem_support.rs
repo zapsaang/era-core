@@ -396,8 +396,11 @@ fn extract_private_key_from_pkcs8(der_bytes: &[u8]) -> Result<EraKeyPair> {
     // Fix for X25519 wrapping (CurvePrivateKey ::= OCTET STRING)
     // standard PKCS#8 for X25519 wraps the key in an OCTET STRING
     // which results in 04 20 <32 bytes> (total 34 bytes)
-    if private_key_bytes.len() == KEY_LEN + 2 && private_key_bytes[0] == 0x04 && private_key_bytes[1] == 0x20 {
-         private_key_bytes = &private_key_bytes[2..];
+    if private_key_bytes.len() == KEY_LEN + 2
+        && private_key_bytes[0] == 0x04
+        && private_key_bytes[1] == 0x20
+    {
+        private_key_bytes = &private_key_bytes[2..];
     }
 
     if private_key_bytes.len() < KEY_LEN {

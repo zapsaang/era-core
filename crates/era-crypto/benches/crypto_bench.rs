@@ -161,60 +161,66 @@ fn bench_aead_decrypt(c: &mut Criterion) {
 /// Benchmark certificate key exchange vs Argon2
 fn bench_key_exchange_vs_argon2(c: &mut Criterion) {
     use era_crypto::certificate::EraKeyPair;
-    
+
     let mut group = c.benchmark_group("key_derivation_comparison");
-    
+
     // 准备 X25519 测试数据
     let recipient = EraKeyPair::generate().unwrap();
     let cert = recipient.certificate();
     let master_key = [42u8; 32];
-    
+
     // 准备 Argon2 测试数据
     let salt = Salt::from_bytes([0u8; 16]);
-    
+
     // Argon2 fast (1MB)
     let fast_params = KdfParams {
         memory_cost: 1024, // 1MB
         time_cost: 1,
         parallelism: 1,
     };
-    
-    // Argon2 standard (64MB) 
+
+    // Argon2 standard (64MB)
     let standard_params = KdfParams {
         memory_cost: 65536, // 64MB
         time_cost: 2,
         parallelism: 1,
     };
-    
+
     // X25519 密钥封装 (全流程)
     group.bench_function("x25519_encapsulate", |b| {
-        b.iter(|| {
-            EraKeyPair::encapsulate_for(black_box(&cert), black_box(&master_key)).unwrap()
-        })
+        b.iter(|| EraKeyPair::encapsulate_for(black_box(&cert), black_box(&master_key)).unwrap())
     });
-    
+
     // X25519 密钥解封装
     let encapsulation = EraKeyPair::encapsulate_for(&cert, &master_key).unwrap();
     group.bench_function("x25519_decapsulate", |b| {
-        b.iter(|| {
-            recipient.decapsulate(black_box(&encapsulation)).unwrap()
-        })
+        b.iter(|| recipient.decapsulate(black_box(&encapsulation)).unwrap())
     });
-    
+
     // Argon2 fast (1MB)
     group.bench_function("argon2_fast_1mb", |b| {
         b.iter(|| {
-            derive_key(black_box(b"password"), black_box(&salt), black_box(&fast_params)).unwrap()
+            derive_key(
+                black_box(b"password"),
+                black_box(&salt),
+                black_box(&fast_params),
+            )
+            .unwrap()
         })
     });
-    
+
     // Argon2 standard (64MB)
     group.bench_function("argon2_standard_64mb", |b| {
         b.iter(|| {
-            derive_key(black_box(b"password"), black_box(&salt), black_box(&standard_params)).unwrap()
+            derive_key(
+                black_box(b"password"),
+                black_box(&salt),
+                black_box(&standard_params),
+            )
+            .unwrap()
         })
     });
-    
+
     group.finish();
 }
 

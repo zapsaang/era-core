@@ -82,7 +82,8 @@ impl MacroBlockBuilder {
         };
 
         // Serialize: [index_length(4) | index_data | chunk_data]
-        let index_bytes = era_common::serialize(&chunk_index)?;
+        let proto_index: era_common::proto::BlockChunkIndex = chunk_index.into();
+        let index_bytes = era_common::serialize_proto(&proto_index)?;
         let original_size = 4 + index_bytes.len() + data.len();
 
         let mut full_data = BytesMut::with_capacity(original_size);

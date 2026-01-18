@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ErasureCodeConfig;
+use crate::{ErasureCodeConfig, MatrixDistributionConfig};
 
 /// Main archive configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -17,6 +17,9 @@ pub struct ArchiveConfig {
     pub block: BlockConfig,
     /// Erasure coding configuration (None = disabled)
     pub erasure: Option<ErasureCodeConfig>,
+    /// Matrix distribution configuration
+    #[serde(default)]
+    pub distribution: MatrixDistributionConfig,
 }
 
 /// Compression algorithm selection

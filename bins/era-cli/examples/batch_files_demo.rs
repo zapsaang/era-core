@@ -36,7 +36,7 @@ fn main() {
     println!("Method 1: Individual add_file() calls");
     let archive1 = temp_dir.path().join("individual.era");
     let start = Instant::now();
-    
+
     {
         let mut writer = ArchiveWriterBuilder::new(&archive1)
             .password("demo_password")
@@ -54,8 +54,10 @@ fn main() {
     let size1 = fs::metadata(&archive1).unwrap().len();
     println!("  Time: {:.2?}", time1);
     println!("  Archive size: {} bytes", size1);
-    println!("  Throughput: {:.2} MiB/s\n", 
-        (files.len() * 10 * 1024) as f64 / time1.as_secs_f64() / 1024.0 / 1024.0);
+    println!(
+        "  Throughput: {:.2} MiB/s\n",
+        (files.len() * 10 * 1024) as f64 / time1.as_secs_f64() / 1024.0 / 1024.0
+    );
 
     // Method 2: Batch add_files call
     println!("Method 2: Batch add_files() call");
@@ -79,16 +81,19 @@ fn main() {
     let size2 = fs::metadata(&archive2).unwrap().len();
     println!("  Time: {:.2?}", time2);
     println!("  Archive size: {} bytes", size2);
-    println!("  Throughput: {:.2} MiB/s\n", 
-        (files.len() * 10 * 1024) as f64 / time2.as_secs_f64() / 1024.0 / 1024.0);
+    println!(
+        "  Throughput: {:.2} MiB/s\n",
+        (files.len() * 10 * 1024) as f64 / time2.as_secs_f64() / 1024.0 / 1024.0
+    );
 
     // Performance comparison
     println!("=== Performance Comparison ===");
     let speedup = time1.as_secs_f64() / time2.as_secs_f64();
     println!("Batch API is {:.2}x faster!", speedup);
-    
+
     if speedup > 1.0 {
-        println!("Time saved: {:.2?} ({:.1}% reduction)", 
+        println!(
+            "Time saved: {:.2?} ({:.1}% reduction)",
             time1 - time2,
             ((time1.as_secs_f64() - time2.as_secs_f64()) / time1.as_secs_f64()) * 100.0
         );
@@ -98,7 +103,8 @@ fn main() {
     println!("\n=== Verification ===");
     println!("Archive 1 size: {} bytes", size1);
     println!("Archive 2 size: {} bytes", size2);
-    println!("Size difference: {} bytes ({:.2}%)", 
+    println!(
+        "Size difference: {} bytes ({:.2}%)",
         (size1 as i64 - size2 as i64).abs(),
         ((size1 as f64 - size2 as f64).abs() / size1 as f64) * 100.0
     );

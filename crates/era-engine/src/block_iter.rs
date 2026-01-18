@@ -15,7 +15,8 @@
 
 use bytes::Bytes;
 use era_common::{
-    BlockId, BlockLocation, ChunkVec, EraError, ErasureBlockInfo, Result, ShardHeader,
+    BlockId, BlockLocation, ChunkVec, EraError, ErasureBlockInfo, MatrixDistributionStrategy,
+    Result, ShardHeader,
 };
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::{
@@ -128,13 +129,17 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
         // Validate block size
         if block_size == 0 {
             self.stats.blocks_failed += 1;
+            // Advance offset to avoid infinite loop
+            self.current_offset += 4;
             return Some(Err(EraError::CorruptedHeader(format!(
                 "Zero-length block at offset {}",
-                self.current_offset
+                self.current_offset - 4
             ))));
         }
         if block_size > MAX_BLOCK_SIZE {
             self.stats.blocks_failed += 1;
+            // Impossible to know where next block starts, so abort iteration
+            self.current_offset = self.data_end;
             return Some(Err(EraError::BlockTooLarge {
                 size: block_size as usize,
                 max_size: MAX_BLOCK_SIZE as usize,
@@ -174,7 +179,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
         };
 
         // Advance to next block
-        self.current_offset += 4 + block_size as u64;
+        self.current_offset += ShardHeader::SIZE as u64 + block_size as u64;
         self.block_index += 1;
 
         Some(result)
@@ -529,13 +534,17 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
         // Validate block size
         if block_size == 0 {
             self.stats.blocks_failed += 1;
+            // Advance offset to avoid infinite loop
+            self.current_offset += 4;
             return Some(Err(EraError::CorruptedHeader(format!(
                 "Zero-length block at offset {}",
-                self.current_offset
+                self.current_offset - 4
             ))));
         }
         if block_size > MAX_BLOCK_SIZE {
             self.stats.blocks_failed += 1;
+            // Impossible to know where next block starts, so abort iteration
+            self.current_offset = self.data_end;
             return Some(Err(EraError::BlockTooLarge {
                 size: block_size as usize,
                 max_size: MAX_BLOCK_SIZE as usize,
@@ -575,7 +584,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
         };
 
         // Advance to next block
-        self.current_offset += 4 + block_size as u64;
+        self.current_offset += ShardHeader::SIZE as u64 + block_size as u64;
         self.block_index += 1;
 
         Some(result)
@@ -615,6 +624,8 @@ pub struct SessionErasureBlockIterator<'a, R: era_storage::StorageReader> {
     current_stripe_index: usize,
     /// Current shard index within stripe (0..k+m)
     current_shard_index: usize,
+    /// Matrix distribution strategy
+    distribution_strategy: MatrixDistributionStrategy,
     /// Iteration statistics
     stats: BlockIterStats,
 }
@@ -640,6 +651,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
         compressor: Box<dyn era_codec::Compressor>,
         data_shards: u8,
         parity_shards: u8,
+        distribution_strategy: MatrixDistributionStrategy,
     ) -> Self {
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
         let mut data_ends = Vec::with_capacity(volume_readers.len());
@@ -682,6 +694,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             block_index: 0,
             current_stripe_index: 0,
             current_shard_index: 0,
+            distribution_strategy,
             stats: BlockIterStats::default(),
         }
     }
@@ -692,12 +705,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         let stripe_size = self.total_shards;
 
         loop {
-            // Determine logical volume index for the current shard (Matrix Distribution or simple sequencing)
-            let vol_idx = if self.original_volume_count > 1 {
-                (self.current_stripe_index + self.current_shard_index) % self.original_volume_count
-            } else {
-                0
-            };
+            // Determine logical volume index based on strategy
+            let vol_idx = self.distribution_strategy.calculate_volume(
+                self.current_shard_index,
+                self.current_stripe_index as u64,
+                self.original_volume_count,
+            );
 
             // Map to actual reader
             let reader_idx_opt = self.vol_index_map.get(vol_idx).copied().flatten();
@@ -752,7 +765,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     };
 
                     // Advance offset (Length + Data)
-                    self.current_offsets[idx] += 4 + block_size as u64;
+                    self.current_offsets[idx] += ShardHeader::SIZE as u64 + block_size as u64;
 
                     // Read and decrypt
                     match reader.read_block(&location) {
@@ -789,7 +802,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     }
                 } else {
                     // Skip Parity Block
-                    self.current_offsets[idx] += 4 + block_size as u64;
+                    self.current_offsets[idx] += ShardHeader::SIZE as u64 + block_size as u64;
 
                     // Advance State (Loop continues)
                     self.current_shard_index += 1;

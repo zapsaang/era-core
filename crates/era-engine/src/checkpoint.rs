@@ -93,6 +93,85 @@ pub struct InProgressFile {
 }
 
 impl Checkpoint {
+    fn to_proto(&self) -> era_common::proto::Checkpoint {
+        let written_chunks = self
+            .written_chunks
+            .iter()
+            .map(|(hash, loc)| era_common::proto::CheckpointEntry {
+                hash: hash.0.to_vec(),
+                location: Some(loc.clone().into()),
+            })
+            .collect();
+
+        era_common::proto::Checkpoint {
+            version: self.version,
+            timestamp: self.timestamp,
+            archive_path: self.archive_path.to_string_lossy().to_string(),
+            completed_files: self
+                .completed_files
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
+            in_progress_file: self.in_progress_file.as_ref().map(|f| {
+                era_common::proto::InProgressFile {
+                    path: f.path.to_string_lossy().to_string(),
+                    total_size: f.total_size,
+                    bytes_processed: f.bytes_processed,
+                    chunks_written: f.chunks_written,
+                }
+            }),
+            written_chunks,
+            current_volume: self.current_volume as u32,
+            current_offset: self.current_offset,
+            total_bytes_written: self.total_bytes_written,
+            total_files_processed: self.total_files_processed,
+        }
+    }
+
+    fn from_proto(proto: era_common::proto::Checkpoint) -> Result<Self> {
+        let mut written_chunks = HashMap::new();
+        for entry in proto.written_chunks {
+            let hash_bytes: [u8; 32] = entry
+                .hash
+                .try_into()
+                .map_err(|_| EraError::Deserialization("Invalid hash length".into()))?;
+            let hash = era_common::ChunkHash(hash_bytes);
+            let loc = entry
+                .location
+                .ok_or_else(|| EraError::Deserialization("Missing location".into()))?;
+            let bl: BlockLocation = loc.try_into()?;
+            written_chunks.insert(hash, bl);
+        }
+
+        let completed_files: HashSet<PathBuf> = proto
+            .completed_files
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let in_progress_file = match proto.in_progress_file {
+            Some(f) => Some(InProgressFile {
+                path: PathBuf::from(f.path),
+                total_size: f.total_size,
+                bytes_processed: f.bytes_processed,
+                chunks_written: f.chunks_written,
+            }),
+            None => None,
+        };
+
+        Ok(Self {
+            version: proto.version,
+            timestamp: proto.timestamp,
+            archive_path: PathBuf::from(proto.archive_path),
+            completed_files,
+            in_progress_file,
+            written_chunks,
+            current_volume: proto.current_volume as u16,
+            current_offset: proto.current_offset,
+            total_bytes_written: proto.total_bytes_written,
+            total_files_processed: proto.total_files_processed,
+        })
+    }
+
     /// Create a new checkpoint for an archive
     pub fn new(archive_path: impl Into<PathBuf>) -> Self {
         let timestamp = SystemTime::now()
@@ -334,22 +413,18 @@ impl CheckpointManager {
             ));
         }
 
-        // Deserialize with bincode
-    let (checkpoint, _): (Checkpoint, usize) = bincode::serde::decode_from_slice(
-        payload,
-        bincode::config::standard(),
-    )
-    .map_err(|e| EraError::Deserialization(format!("Failed to parse checkpoint: {}", e)))?;
+        // Deserialize with Protobuf instead of Bincode
+        let proto: era_common::proto::Checkpoint = era_common::deserialize_proto(payload)
+            .map_err(|e| EraError::Deserialization(format!("Failed to parse checkpoint: {}", e)))?;
 
-    // Version check
+        let checkpoint = Checkpoint::from_proto(proto)?;
+
+        // Version check
         if checkpoint.version > CHECKPOINT_VERSION {
             return Err(EraError::UnsupportedVersion {
                 version: checkpoint.version,
             });
         }
-
-        // Handle version migration if needed
-        // Currently v1 -> v2 migration is automatic (bincode handles it)
 
         Ok(checkpoint)
     }
@@ -358,13 +433,13 @@ impl CheckpointManager {
     pub fn save(&mut self) -> Result<()> {
         let tmp_path = Checkpoint::checkpoint_tmp_path(&self.archive_path);
 
-        // Serialize with bincode (much faster than JSON)
-    let payload = bincode::serde::encode_to_vec(&self.checkpoint, bincode::config::standard())
-        .map_err(|e| {
+        // Serialize with Protobuf
+        let proto = self.checkpoint.to_proto();
+        let payload = era_common::serialize_proto(&proto).map_err(|e| {
             EraError::Serialization(format!("Failed to serialize checkpoint: {}", e))
         })?;
 
-    // Compute HMAC
+        // Compute HMAC
         let key_bytes = self.hmac_key.as_ref().map(|k| k.as_slice());
         let hmac = compute_hmac(&payload, key_bytes);
 

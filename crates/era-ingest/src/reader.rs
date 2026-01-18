@@ -152,12 +152,7 @@ impl DirectoryScanner {
 
         // Extract ACLs if enabled
         if self.options.extract_acls {
-            // Placeholder: ACL extraction is platform-specific and complex.
-            // For now, we might rely on xattrs if they store ACLs (system.posix_acl_access)
-            // Or use a specific crate.
-            // Since we updated FileEntry to store xattrs, we can just ensure we read them.
-            // On Linux "system.posix_acl_access" is an xattr.
-            // So if extract_xattrs is true, we might already get it.
+            entry.acl = self.extract_acls(path);
         }
 
         // Special handling for directories:
@@ -185,6 +180,22 @@ impl DirectoryScanner {
             }
         }
         xattrs
+    }
+
+    /// Extract Access Control Lists (ACLs)
+    fn extract_acls(&self, path: &Path) -> Option<Vec<u8>> {
+        use exacl::{getfacl, AclOption};
+
+        // Use getfacl which is the high-level API for exacl
+        match getfacl(path, AclOption::ACCESS_ACL) {
+            Ok(entries) => {
+                if entries.is_empty() {
+                    return None;
+                }
+                serde_json::to_vec(&entries).ok()
+            }
+            Err(_) => None,
+        }
     }
 }
 

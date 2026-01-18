@@ -75,7 +75,7 @@ impl Default for MatrixDistributionConfig {
     fn default() -> Self {
         Self {
             strategy: MatrixDistributionStrategy::RotatingOffset,
-            min_volumes: 3,  // Minimum for 4+2 erasure
+            min_volumes: 3,    // Minimum for 4+2 erasure
             target_volumes: 6, // Optimal for 4+2 erasure
         }
     }
@@ -182,7 +182,9 @@ impl MatrixBlockLocation {
     /// Get shards grouped by volume sequence.
     ///
     /// Returns a map from volume_sequence to list of (shard_index, entry) pairs.
-    pub fn shards_by_volume(&self) -> std::collections::HashMap<u16, Vec<(usize, &MatrixShardEntry)>> {
+    pub fn shards_by_volume(
+        &self,
+    ) -> std::collections::HashMap<u16, Vec<(usize, &MatrixShardEntry)>> {
         let mut map = std::collections::HashMap::new();
         for (idx, entry) in self.shards.iter().enumerate() {
             map.entry(entry.volume_sequence)
@@ -240,7 +242,7 @@ mod tests {
     #[test]
     fn test_rotating_offset_distribution() {
         let strategy = MatrixDistributionStrategy::RotatingOffset;
-        
+
         // 3 volumes, block 0
         assert_eq!(strategy.calculate_volume(0, 0, 3), 0);
         assert_eq!(strategy.calculate_volume(1, 0, 3), 1);
@@ -248,12 +250,12 @@ mod tests {
         assert_eq!(strategy.calculate_volume(3, 0, 3), 0);
         assert_eq!(strategy.calculate_volume(4, 0, 3), 1);
         assert_eq!(strategy.calculate_volume(5, 0, 3), 2);
-        
+
         // 3 volumes, block 1 (rotated by 1)
         assert_eq!(strategy.calculate_volume(0, 1, 3), 1);
         assert_eq!(strategy.calculate_volume(1, 1, 3), 2);
         assert_eq!(strategy.calculate_volume(2, 1, 3), 0);
-        
+
         // 3 volumes, block 2 (rotated by 2)
         assert_eq!(strategy.calculate_volume(0, 2, 3), 2);
         assert_eq!(strategy.calculate_volume(1, 2, 3), 0);
@@ -263,7 +265,7 @@ mod tests {
     #[test]
     fn test_striped_distribution() {
         let strategy = MatrixDistributionStrategy::Striped;
-        
+
         // All blocks use same distribution
         for block in 0..5 {
             assert_eq!(strategy.calculate_volume(0, block, 3), 0);
@@ -277,7 +279,7 @@ mod tests {
     fn test_matrix_config_from_erasure() {
         let erasure = ErasureCodeConfig::new(4, 2);
         let config = MatrixDistributionConfig::from_erasure_config(erasure);
-        
+
         assert_eq!(config.min_volumes, 3); // parity + 1
         assert_eq!(config.target_volumes, 6); // total shards
     }
@@ -287,15 +289,15 @@ mod tests {
         let block_id = BlockId::new(0);
         let erasure = ErasureCodeConfig::new(4, 2);
         let mut loc = MatrixBlockLocation::new(block_id, 0, erasure, 4096);
-        
+
         assert!(!loc.is_complete());
-        
+
         for i in 0..6 {
             loc.add_shard(MatrixShardEntry::new(i as u16, i as u64 * 1024, 1024, 0));
         }
-        
+
         assert!(loc.is_complete());
-        
+
         let by_volume = loc.shards_by_volume();
         assert_eq!(by_volume.len(), 6);
     }
