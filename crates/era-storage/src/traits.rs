@@ -56,6 +56,9 @@ pub trait StorageWriter: Send {
     /// Get the current size of the storage object
     fn current_size(&self) -> u64;
 
+    /// Truncate storage to a specific size
+    fn truncate(&mut self, size: u64) -> Result<()>;
+
     /// Close the writer
     fn close(self) -> Result<()>;
 }

@@ -24,10 +24,12 @@ use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
-use era_volume::{AuthMode, SuperHeader, VolumeReader};
+use era_volume::{AuthMode, Footer, SuperHeader, VolumeReader};
 use prost::Message;
+use rand::RngCore;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
@@ -83,6 +85,63 @@ pub struct ArchiveReader {
     /// Compression algorithm type
     compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
+    /// Restored embedded LSM directory (if present)
+    embedded_lsm_dir: Option<PathBuf>,
+}
+
+fn create_embedded_lsm_restore_dir() -> PathBuf {
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 8];
+    rng.fill_bytes(&mut bytes);
+    let suffix = u64::from_le_bytes(bytes);
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("era_lsm_restore_{:016x}", suffix));
+    let _ = std::fs::create_dir_all(&path);
+    path
+}
+
+fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
+    let mut cursor = std::io::Cursor::new(data);
+    let mut count_bytes = [0u8; 4];
+    cursor
+        .read_exact(&mut count_bytes)
+        .map_err(era_common::EraError::Io)?;
+    let count = u32::from_le_bytes(count_bytes) as usize;
+
+    for _ in 0..count {
+        let mut len_bytes = [0u8; 4];
+        cursor
+            .read_exact(&mut len_bytes)
+            .map_err(era_common::EraError::Io)?;
+        let path_len = u32::from_le_bytes(len_bytes) as usize;
+
+        let mut path_buf = vec![0u8; path_len];
+        cursor
+            .read_exact(&mut path_buf)
+            .map_err(era_common::EraError::Io)?;
+        let rel_path = String::from_utf8(path_buf)
+            .map_err(|e| era_common::EraError::Deserialization(e.to_string()))?;
+
+        let mut size_bytes = [0u8; 8];
+        cursor
+            .read_exact(&mut size_bytes)
+            .map_err(era_common::EraError::Io)?;
+        let data_len = u64::from_le_bytes(size_bytes) as usize;
+
+        let mut file_data = vec![0u8; data_len];
+        cursor
+            .read_exact(&mut file_data)
+            .map_err(era_common::EraError::Io)?;
+
+        let file_path = path.join(rel_path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).map_err(era_common::EraError::Io)?;
+        }
+        std::fs::write(file_path, file_data).map_err(era_common::EraError::Io)?;
+    }
+
+    Ok(())
 }
 
 impl ArchiveReader {
@@ -268,6 +327,7 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
+            embedded_lsm_dir: None,
         })
     }
 
@@ -389,6 +449,7 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
+            embedded_lsm_dir: None,
         })
     }
 
@@ -599,6 +660,7 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
+            embedded_lsm_dir: None,
         })
     }
 
@@ -640,9 +702,80 @@ impl ArchiveReader {
         )
     }
 
+    /// Metadata-first preflight: restore embedded LSM (if present) and load catalog.
+    pub fn preflight_metadata_recovery(&mut self) -> Result<()> {
+        self.restore_embedded_lsm_manifest()?;
+        self.load_catalog()?;
+        Ok(())
+    }
+
+    fn restore_embedded_lsm_manifest(&mut self) -> Result<()> {
+        if self.embedded_lsm_dir.is_some() {
+            return Ok(());
+        }
+
+        let mut manifest_reader_idx = None;
+        for (i, reader) in self.volume_readers.iter().enumerate() {
+            if let Some(footer) = reader.footer() {
+                if footer.has_lsm_manifest() {
+                    manifest_reader_idx = Some(i);
+                    break;
+                }
+            }
+        }
+
+        let reader_idx = match manifest_reader_idx {
+            Some(idx) => idx,
+            None => return Ok(()),
+        };
+
+        let reader = &self.volume_readers[reader_idx];
+        let footer = reader
+            .footer()
+            .expect("Manifest volume must have valid footer");
+
+        let location = BlockLocation {
+            volume_id: reader.header().volume_id,
+            slot_index: footer.lsm_manifest_block_id,
+            physical_offset: footer.lsm_manifest_offset,
+            encrypted_size: footer.lsm_manifest_size,
+            erasure_info: None,
+            shard_offsets: None,
+            shard_volumes: None,
+        };
+
+        let encrypted_block = reader.read_block(&location)?;
+        let unpacker = self.create_unpacker();
+        let unpacked = unpacker.unpack(&encrypted_block)?;
+        let first_entry = unpacked
+            .index
+            .entries
+            .first()
+            .ok_or_else(|| EraError::EmptyCatalog)?;
+        let start = first_entry.offset as usize;
+        let end = start + first_entry.length as usize;
+        if end > unpacked.data.len() {
+            return Err(EraError::decompression(
+                "LSM manifest chunk offset exceeds data size",
+            ));
+        }
+
+        let manifest_data = unpacked.data.slice(start..end);
+        let restore_dir = create_embedded_lsm_restore_dir();
+        restore_lsm_dir_from_manifest(&restore_dir, &manifest_data)?;
+        self.embedded_lsm_dir = Some(restore_dir);
+
+        Ok(())
+    }
+
     /// Get the archive header
     pub fn header(&self) -> &SuperHeader {
         self.volume_readers[0].header()
+    }
+
+    /// Get the primary volume footer (if available)
+    pub fn primary_footer(&self) -> Option<&Footer> {
+        self.volume_readers.first().and_then(|r| r.footer())
     }
 
     /// Load the catalog from any available volume
@@ -1123,7 +1256,7 @@ impl ArchiveReader {
     pub fn extract_all(&mut self, options: &ExtractOptions) -> Result<ExtractStats> {
         info!("Extracting to: {}", options.output_dir.display());
 
-        self.load_catalog()?;
+        self.preflight_metadata_recovery()?;
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
@@ -1175,7 +1308,7 @@ impl ArchiveReader {
     pub fn verify(&mut self) -> Result<VerifyStats> {
         info!("Verifying archive integrity...");
 
-        self.load_catalog()?;
+        self.preflight_metadata_recovery()?;
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
@@ -1211,6 +1344,14 @@ impl ArchiveReader {
         };
 
         Self::verify_with_iterator(catalog, &mut iter)
+    }
+}
+
+impl Drop for ArchiveReader {
+    fn drop(&mut self) {
+        if let Some(path) = &self.embedded_lsm_dir {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 }
 

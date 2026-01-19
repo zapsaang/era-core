@@ -134,6 +134,27 @@ pub struct ChunkingConfig {
     pub avg_size: usize,
     /// Maximum chunk size in bytes
     pub max_size: usize,
+    /// FastCDC normalization level (v2020)
+    #[serde(default)]
+    pub normalization_level: NormalizationLevel,
+    /// Rolling hash seed for FastCDC (v2020)
+    #[serde(default)]
+    pub rolling_hash_seed: u64,
+}
+
+/// Normalization level for FastCDC
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NormalizationLevel {
+    Level0,
+    Level1,
+    Level2,
+    Level3,
+}
+
+impl Default for NormalizationLevel {
+    fn default() -> Self {
+        NormalizationLevel::Level1
+    }
 }
 
 impl Default for ChunkingConfig {
@@ -142,6 +163,8 @@ impl Default for ChunkingConfig {
             min_size: 4 * 1024,   // 4 KB
             avg_size: 64 * 1024,  // 64 KB
             max_size: 256 * 1024, // 256 KB
+            normalization_level: NormalizationLevel::default(),
+            rolling_hash_seed: 0,
         }
     }
 }

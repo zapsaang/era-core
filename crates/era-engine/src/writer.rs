@@ -28,7 +28,7 @@ use era_packing::{
     Stripe, StripeBuffer,
 };
 use era_storage::LocalStorageBackend;
-use era_volume::{SuperHeader, VolumePool, VolumePoolConfig, VolumeReader, VolumeWriter};
+use era_volume::{Footer, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader, VolumeWriter};
 use prost::Message;
 use rand::RngCore;
 use std::collections::HashMap;
@@ -46,6 +46,7 @@ const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
 use crate::checkpoint::CheckpointManager;
 use crate::chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend};
+use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 
 /// Authentication mode for archive encryption
@@ -82,10 +83,12 @@ fn chunker_config_from_archive(config: &ArchiveConfig) -> Result<ChunkerConfig> 
         ));
     }
 
-    Ok(ChunkerConfig::new(
+    Ok(ChunkerConfig::new_with_params(
         chunking.min_size,
         chunking.avg_size,
         chunking.max_size,
+        chunking.normalization_level,
+        chunking.rolling_hash_seed,
     ))
 }
 
@@ -180,6 +183,8 @@ pub struct ArchiveWriterBuilder {
     target_block_size: Option<usize>,
     /// Enable packing of multiple small files into a single chunk
     enable_small_file_packing: bool,
+    /// Append to an existing archive instead of creating a new one
+    append_existing: bool,
 }
 
 impl ArchiveWriterBuilder {
@@ -207,6 +212,7 @@ impl ArchiveWriterBuilder {
             },
             target_block_size: None,
             enable_small_file_packing: true,
+            append_existing: false,
         }
     }
 
@@ -295,6 +301,8 @@ impl ArchiveWriterBuilder {
             min_size: config.min_size,
             avg_size: config.avg_size,
             max_size: config.max_size,
+            normalization_level: config.normalization_level,
+            rolling_hash_seed: config.rolling_hash_seed,
         };
         self.chunker_config = Some(config);
         self.enable_cdc = true;
@@ -389,38 +397,84 @@ impl ArchiveWriterBuilder {
         self
     }
 
+    /// Append to an existing archive instead of creating a new one.
+    ///
+    /// This enforces chunking configuration inheritance from the existing header.
+    pub fn append_existing(mut self, enable: bool) -> Self {
+        self.append_existing = enable;
+        self
+    }
+
     /// Build the archive writer
     pub fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
+        // Create storage backend
+        let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
+        let backend = LocalStorageBackend::new(output_dir);
 
-        let archive_id = ArchiveId::new();
-        let salt = Salt::generate();
+        let mut archive_id = ArchiveId::new();
+        let mut salt = Salt::generate();
+        let mut config = self.config.clone();
+        let mut enable_erasure = self.enable_erasure;
+        let mut enable_matrix_distribution = self.enable_matrix_distribution;
+        let mut volume_count = self.volume_count;
+        let mut enable_cdc = self.enable_cdc;
+        let mut chunker_override = self.chunker_config;
+        let mut max_volume_size = self.max_volume_size;
+        let mut append_header: Option<SuperHeader> = None;
+        let mut append_footer: Option<Footer> = None;
+        let mut append_catalog: Option<Catalog> = None;
+        if self.append_existing && self.output_path.exists() {
+            match &self.auth_mode {
+                AuthMode::Password(password) => {
+                    let mut reader = ArchiveReader::open(&self.output_path, password)?;
+                    let header = reader.header().clone();
+                    let footer = reader.primary_footer().cloned().ok_or_else(|| {
+                        era_common::EraError::CorruptedHeader("Missing footer".into())
+                    })?;
+
+                    archive_id = header.archive_id;
+                    salt = Salt::from_bytes(header.crypto_anchor.salt);
+                    config = header.config.clone();
+                    append_header = Some(header);
+                    append_footer = Some(footer);
+                    append_catalog = Some(reader.load_catalog()?.clone());
+                }
+                _ => {
+                    return Err(era_common::EraError::InvalidFormat(
+                        "Append mode requires password authentication".into(),
+                    ));
+                }
+            }
+        }
 
         // Create KeySession based on authentication mode
         let (session, key_encapsulation) = match &self.auth_mode {
             AuthMode::Password(password) => {
-                // Traditional password mode: derive master key via Argon2id
                 let kdf_params = KdfParams {
-                    memory_cost: self.config.encryption.kdf_memory_cost,
-                    time_cost: self.config.encryption.kdf_time_cost,
+                    memory_cost: config.encryption.kdf_memory_cost,
+                    time_cost: config.encryption.kdf_time_cost,
                     parallelism: 4,
                 };
                 let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
                 (session, None)
             }
+            AuthMode::Certificate(_) if self.append_existing => {
+                return Err(era_common::EraError::InvalidFormat(
+                    "Append mode is not supported for certificate-only archives".into(),
+                ));
+            }
+            AuthMode::Hybrid { .. } if self.append_existing => {
+                return Err(era_common::EraError::InvalidFormat(
+                    "Append mode is not supported for hybrid archives".into(),
+                ));
+            }
             AuthMode::Certificate(cert) => {
-                // Certificate mode: generate random master key, encapsulate for recipient
-                // This is ~1000x faster than Argon2 password derivation
                 let mut master_key = [0u8; 32];
                 rand::thread_rng().fill_bytes(&mut master_key);
 
-                // Encapsulate the master key for the certificate holder
                 let encapsulation = EraKeyPair::encapsulate_for(cert, &master_key)?;
-
-                // Create session from the raw master key
                 let session = KeySession::from_master_key(&master_key)?;
-
-                // Zeroize the master key after use
                 master_key.iter_mut().for_each(|b| *b = 0);
 
                 info!(
@@ -434,22 +488,17 @@ impl ArchiveWriterBuilder {
                 password,
                 certificate,
             } => {
-                // Hybrid mode: both password AND certificate required
-                // First derive from password, then XOR with certificate-derived key
                 let kdf_params = KdfParams {
-                    memory_cost: self.config.encryption.kdf_memory_cost,
-                    time_cost: self.config.encryption.kdf_time_cost,
+                    memory_cost: config.encryption.kdf_memory_cost,
+                    time_cost: config.encryption.kdf_time_cost,
                     parallelism: 4,
                 };
 
-                // Generate random master key
                 let mut master_key = [0u8; 32];
                 rand::thread_rng().fill_bytes(&mut master_key);
 
-                // Encapsulate for certificate
                 let encapsulation = EraKeyPair::encapsulate_for(certificate, &master_key)?;
 
-                // Create session from password + master key (XOR combined)
                 let password_derived =
                     era_crypto::derive_key(password.as_bytes(), &salt, &kdf_params)?;
                 let mut combined_key = [0u8; 32];
@@ -459,7 +508,6 @@ impl ArchiveWriterBuilder {
 
                 let session = KeySession::from_master_key(&combined_key)?;
 
-                // Zeroize sensitive data
                 master_key.iter_mut().for_each(|b| *b = 0);
                 combined_key.iter_mut().for_each(|b| *b = 0);
 
@@ -472,6 +520,14 @@ impl ArchiveWriterBuilder {
             }
         };
 
+        if let Some(header) = append_header.as_ref() {
+            if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
+                return Err(era_common::EraError::InvalidKey(
+                    "Incorrect password for existing archive".into(),
+                ));
+            }
+        }
+
         // Derive volume key for the primary volume (volume 0)
         // In multi-volume scenarios, each volume gets its own key
         let volume_key = session.derive_volume_key(0);
@@ -479,22 +535,31 @@ impl ArchiveWriterBuilder {
         // Get password verification tag from session
         let password_verification_tag = session.password_verification_tag();
 
-        // Create storage backend
-        let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
-        let backend = LocalStorageBackend::new(output_dir);
-
         // Build config with erasure setting
-        let mut config = self.config.clone();
-        if self.enable_erasure {
+        if !self.append_existing && enable_erasure {
             config.erasure = Some(self.erasure_config);
         }
 
+        if self.append_existing {
+            enable_erasure = config.erasure.is_some();
+            enable_matrix_distribution =
+                config.distribution.strategy == MatrixDistributionStrategy::RotatingOffset;
+            volume_count = append_header
+                .as_ref()
+                .map(|h| h.total_volumes)
+                .unwrap_or(1)
+                .max(1) as usize;
+            enable_cdc = true;
+            chunker_override = None;
+            max_volume_size = Some(config.volume.max_size);
+        }
+
         // Set distribution strategy in config, to match VolumePool behavior
-        if self.enable_matrix_distribution {
+        if enable_matrix_distribution {
             config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
             // Calculate optimal volume counts if needed
-            if self.enable_erasure {
+            if enable_erasure {
                 let erasure = self.erasure_config;
                 let total_shards = (erasure.data_shards + erasure.parity_shards) as usize;
                 config.distribution.min_volumes = (erasure.parity_shards as usize + 1).max(2);
@@ -555,7 +620,7 @@ impl ArchiveWriterBuilder {
         let base_filename = self.output_path.file_name().unwrap_or_default();
 
         // Determine volume count based on erasure config if matrix distribution is enabled
-        let volume_count = if self.enable_matrix_distribution && self.enable_erasure {
+        let resolved_volume_count = if enable_matrix_distribution && enable_erasure {
             let erasure = self.erasure_config;
             let total_shards = (erasure.data_shards + erasure.parity_shards) as usize;
 
@@ -563,7 +628,7 @@ impl ArchiveWriterBuilder {
             // This allows tolerating up to parity_shards volume failures
             let recommended_volumes = total_shards;
 
-            if self.volume_count <= 1 {
+            if volume_count <= 1 {
                 // User didn't specify, use recommended optimal count
                 info!(
                     "Matrix distribution: automatically using {} volumes \
@@ -571,22 +636,22 @@ impl ArchiveWriterBuilder {
                     recommended_volumes, erasure.parity_shards
                 );
                 recommended_volumes
-            } else if self.volume_count < recommended_volumes {
+            } else if volume_count < recommended_volumes {
                 // User specified fewer volumes than optimal
                 let min_viable = (erasure.parity_shards as usize + 1).max(2);
-                if self.volume_count >= min_viable {
+                if volume_count >= min_viable {
                     warn!(
                         "Using {} volumes for matrix distribution. \
                          Note: will tolerate at most 1 volume failure \
                          (recommended: {} volumes for up to {} volume failures)",
-                        self.volume_count, recommended_volumes, erasure.parity_shards
+                        volume_count, recommended_volumes, erasure.parity_shards
                     );
-                    self.volume_count
+                    volume_count
                 } else {
                     warn!(
                         "Insufficient volumes: {} specified, but {} minimum required \
                          for {},{} erasure. Adjusting to minimum.",
-                        self.volume_count, min_viable, erasure.data_shards, erasure.parity_shards
+                        volume_count, min_viable, erasure.data_shards, erasure.parity_shards
                     );
                     min_viable
                 }
@@ -595,12 +660,12 @@ impl ArchiveWriterBuilder {
                 info!(
                     "Using {} volumes for matrix distribution \
                      (will tolerate up to {} volume failures)",
-                    self.volume_count, erasure.parity_shards
+                    volume_count, erasure.parity_shards
                 );
-                self.volume_count
+                volume_count
             }
         } else {
-            self.volume_count
+            volume_count
         };
 
         // Unified Volume Management
@@ -610,30 +675,43 @@ impl ArchiveWriterBuilder {
             .map(|p| p.join(base_filename))
             .unwrap_or_else(|| PathBuf::from(base_filename));
 
-        let mut pool_config = VolumePoolConfig::new(&base_path, volume_count);
+        let mut pool_config = VolumePoolConfig::new(&base_path, resolved_volume_count);
 
-        if self.enable_erasure {
+        if enable_erasure {
             pool_config = pool_config.for_erasure(self.erasure_config);
         }
 
-        if let Some(max_size) = self.max_volume_size {
+        if let Some(max_size) = max_volume_size {
             pool_config = pool_config.with_max_size(max_size);
         }
 
         // Apply correct distribution strategy
-        if !self.enable_matrix_distribution {
+        if !enable_matrix_distribution {
             // Force Striped (Legacy) behavior
             let mut dist_config = pool_config.distribution.clone();
             dist_config.strategy = MatrixDistributionStrategy::Striped;
             pool_config = pool_config.with_distribution(dist_config);
         }
 
-        let volume_pool = VolumePool::create(backend.clone(), pool_config, header.clone())?;
+        let volume_pool = if self.append_existing {
+            if enable_erasure {
+                return Err(era_common::EraError::InvalidFormat(
+                    "Append mode is not supported for erasure-coded archives".into(),
+                ));
+            }
+            let header = append_header.clone().unwrap_or_else(|| header.clone());
+            let footer = append_footer
+                .as_ref()
+                .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
+            VolumePool::open_append_single(backend.clone(), pool_config, header, footer)?
+        } else {
+            VolumePool::create(backend.clone(), pool_config, header.clone())?
+        };
 
         info!(
             "Created VolumePool with {} volumes (Strategy: {:?})",
             volume_pool.volume_count(),
-            if self.enable_matrix_distribution {
+            if enable_matrix_distribution {
                 "Matrix"
             } else {
                 "Striped"
@@ -688,8 +766,8 @@ impl ArchiveWriterBuilder {
         }
 
         // Configure file reader with CDC if enabled
-        let chunker_config = if self.enable_cdc {
-            let config = match self.chunker_config {
+        let chunker_config = if enable_cdc {
+            let config = match chunker_override {
                 Some(cfg) => cfg,
                 None => chunker_config_from_archive(&config)?,
             };
@@ -767,7 +845,7 @@ impl ArchiveWriterBuilder {
 
         let mut target_block_size = if let Some(target) = self.target_block_size {
             target
-        } else if self.enable_cdc && self.enable_erasure {
+        } else if enable_cdc && enable_erasure {
             chunker_config
                 .as_ref()
                 .map(|cfg| cfg.max_size)
@@ -778,8 +856,8 @@ impl ArchiveWriterBuilder {
             4 * 1024 * 1024
         };
 
-        if let Some(max_volume_size) = self.max_volume_size {
-            if self.enable_erasure {
+        if let Some(max_volume_size) = max_volume_size {
+            if enable_erasure {
                 let prefix_len = self.erasure_config.data_shards as usize * 4;
                 let reserved =
                     era_volume::FOOTER_SIZE + 4096 + era_common::ShardHeader::SIZE + prefix_len;
@@ -790,25 +868,39 @@ impl ArchiveWriterBuilder {
             }
         }
 
+        let mut catalog = Catalog::new();
+        if let Some(existing) = append_catalog {
+            catalog = existing;
+        } else if self.append_existing {
+            let mut reader = ArchiveReader::open_with_session(&self.output_path, &session)?;
+            catalog = reader.load_catalog()?.clone();
+        }
+
+        let next_block_id = if self.append_existing {
+            volume_pool.current_block_count() as u64
+        } else {
+            0
+        };
+
         Ok(ArchiveWriter {
             archive_id,
             output_path: self.output_path,
             session,
             volume_key,
             nonce_context,
-            compression_config: self.config.compression.clone(),
-            erasure_config: if self.enable_erasure {
+            compression_config: config.compression.clone(),
+            erasure_config: if enable_erasure {
                 Some(self.erasure_config)
             } else {
                 None
             },
             volume_pool,
-            catalog: Catalog::new(),
+            catalog,
             chunk_index,
             key_encapsulation,
             file_reader,
-            enable_cdc: self.enable_cdc,
-            stripe_buffer: if self.enable_erasure {
+            enable_cdc,
+            stripe_buffer: if enable_erasure {
                 Some(StripeBuffer::new(self.erasure_config))
             } else {
                 None
@@ -819,7 +911,7 @@ impl ArchiveWriterBuilder {
             // CRITICAL: Set target_block_size matching StagingPool
             target_block_size,
             checkpoint_manager,
-            next_block_id: AtomicU64::new(0),
+            next_block_id: AtomicU64::new(next_block_id),
             // Small file packing
             small_file_buffer: Vec::new(),
             small_file_total_size: 0,

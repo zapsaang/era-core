@@ -1,0 +1,165 @@
+use era_common::{ErasureCodeConfig, ShardHeader};
+use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
+use era_storage::LocalStorageBackend;
+use era_volume::VolumeReader;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use tempfile::TempDir;
+
+fn flip_byte_at(path: &Path, offset: u64) {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0xFF;
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&byte).unwrap();
+}
+
+fn corrupt_standard_block(path: &Path) {
+    let parent = path.parent().unwrap();
+    let backend = LocalStorageBackend::new(parent);
+    let volume_path = path.file_name().unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(volume_path)).unwrap();
+    let (data_start, _) = reader.data_region();
+    let header_bytes = reader.read_raw(data_start, ShardHeader::SIZE).unwrap();
+    let header = ShardHeader::from_bytes(&header_bytes).unwrap();
+    let corrupt_offset = data_start + ShardHeader::SIZE as u64 + (header.length as u64 / 2);
+    flip_byte_at(path, corrupt_offset);
+}
+
+fn corrupt_erasure_shard(path: &Path, data_shards: usize) {
+    let parent = path.parent().unwrap();
+    let backend = LocalStorageBackend::new(parent);
+    let volume_path = path.file_name().unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(volume_path)).unwrap();
+    let (data_start, _) = reader.data_region();
+    let header_prefix_len = (data_shards * 4) as u64;
+    let header_offset = data_start + header_prefix_len;
+    let header_bytes = reader.read_raw(header_offset, ShardHeader::SIZE).unwrap();
+    let header = ShardHeader::from_bytes(&header_bytes).unwrap();
+    let corrupt_offset = header_offset + ShardHeader::SIZE as u64 + (header.length as u64 / 2);
+    flip_byte_at(path, corrupt_offset);
+}
+
+fn truncate_erasure_shard_payload(path: &Path, data_shards: usize) {
+    let parent = path.parent().unwrap();
+    let backend = LocalStorageBackend::new(parent);
+    let volume_path = path.file_name().unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(volume_path)).unwrap();
+    let (data_start, _) = reader.data_region();
+    let header_prefix_len = (data_shards * 4) as u64;
+    let header_offset = data_start + header_prefix_len;
+    let header_bytes = reader.read_raw(header_offset, ShardHeader::SIZE).unwrap();
+    let header = ShardHeader::from_bytes(&header_bytes).unwrap();
+    let data_offset = header_offset + ShardHeader::SIZE as u64;
+    let tail_len = 16u64.min(header.length as u64);
+    let truncate_offset = data_offset + header.length as u64 - tail_len;
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.seek(SeekFrom::Start(truncate_offset)).unwrap();
+    file.write_all(&vec![0u8; tail_len as usize]).unwrap();
+}
+
+#[test]
+fn test_standard_block_crc_detection() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("standard_crc.era");
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("crc_test")
+        .enable_small_file_packing(false)
+        .build()
+        .unwrap();
+
+    writer.add_bytes("data.bin", &vec![0xA5u8; 64 * 1024]).unwrap();
+    writer.finalize().unwrap();
+
+    corrupt_standard_block(&archive_path);
+
+    let mut reader = ArchiveReader::open(&archive_path, "crc_test").unwrap();
+    let stats = reader.verify().unwrap();
+
+    assert!(
+        !stats.is_ok(),
+        "CRC corruption should fail verification"
+    );
+    assert!(stats.blocks_failed > 0);
+}
+
+#[test]
+fn test_single_shard_crc_auto_recovery() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("erasure_crc.era");
+    let payload = vec![0x5Cu8; 256 * 1024];
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("erasure_test")
+        .erasure_config(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        })
+        .enable_small_file_packing(false)
+        .build()
+        .unwrap();
+
+    writer.add_bytes("payload.bin", &payload).unwrap();
+    writer.finalize().unwrap();
+
+    corrupt_erasure_shard(&archive_path, 4);
+
+    let output_dir = temp_dir.path().join("output_crc");
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").unwrap();
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .unwrap();
+
+    assert_eq!(extract_stats.extracted, 1);
+    let extracted = fs::read(output_dir.join("payload.bin")).unwrap();
+    assert_eq!(extracted, payload);
+
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").unwrap();
+    let verify_stats = reader.verify().unwrap();
+    assert!(verify_stats.is_ok());
+}
+
+#[test]
+fn test_single_shard_truncation_auto_recovery() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("erasure_trunc.era");
+    let payload = vec![0x3Du8; 128 * 1024];
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("erasure_test")
+        .erasure_config(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        })
+        .enable_small_file_packing(false)
+        .build()
+        .unwrap();
+
+    writer.add_bytes("payload.bin", &payload).unwrap();
+    writer.finalize().unwrap();
+
+    truncate_erasure_shard_payload(&archive_path, 4);
+
+    let output_dir = temp_dir.path().join("output_trunc");
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").unwrap();
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .unwrap();
+
+    assert_eq!(extract_stats.extracted, 1);
+    let extracted = fs::read(output_dir.join("payload.bin")).unwrap();
+    assert_eq!(extracted, payload);
+}

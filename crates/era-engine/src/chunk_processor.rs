@@ -257,7 +257,7 @@ impl VerificationContext {
                 stats.errors.push(format!(
                     "File '{}': missing {} of {} chunks",
                     get_file_path(file_idx),
-                    expected - found,
+                    expected.saturating_sub(found),
                     expected
                 ));
             }

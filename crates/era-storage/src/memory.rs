@@ -163,6 +163,20 @@ impl StorageWriter for MemoryStorageWriter {
         self.buffer.len() as u64
     }
 
+    fn truncate(&mut self, size: u64) -> Result<()> {
+        let new_len = size as usize;
+        if new_len < self.buffer.len() {
+            self.buffer.truncate(new_len);
+        } else if new_len > self.buffer.len() {
+            self.buffer.resize(new_len, 0);
+        }
+
+        self.storage
+            .write()
+            .insert(self.path.clone(), self.buffer.clone());
+        Ok(())
+    }
+
     fn close(self) -> Result<()> {
         // Final sync
         self.storage.write().insert(self.path.clone(), self.buffer);

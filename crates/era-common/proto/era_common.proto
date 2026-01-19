@@ -77,6 +77,14 @@ message ChunkingConfig {
   uint32 min_size = 1;
   uint32 avg_size = 2;
   uint32 max_size = 3;
+  enum NormalizationLevel {
+    NORMALIZATION_LEVEL_0 = 0;
+    NORMALIZATION_LEVEL_1 = 1;
+    NORMALIZATION_LEVEL_2 = 2;
+    NORMALIZATION_LEVEL_3 = 3;
+  }
+  NormalizationLevel normalization_level = 4;
+  uint64 rolling_hash_seed = 5;
 }
 
 message PackingConfig {

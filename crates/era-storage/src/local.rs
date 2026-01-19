@@ -163,6 +163,12 @@ impl StorageWriter for LocalStorageWriter {
         self.size
     }
 
+    fn truncate(&mut self, size: u64) -> Result<()> {
+        self.file.set_len(size)?;
+        self.size = size;
+        Ok(())
+    }
+
     fn close(self) -> Result<()> {
         self.file.sync_all()?;
         Ok(())

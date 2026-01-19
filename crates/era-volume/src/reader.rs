@@ -141,13 +141,31 @@ impl<R: StorageReader> VolumeReader<R> {
         // Unified format: [ShardHeader][Data]
         // Skip ShardHeader to get to data
         let header_size = ShardHeader::SIZE as u64;
+        let header_bytes = self
+            .reader
+            .read_at(location.physical_offset, ShardHeader::SIZE)?;
+        let header = ShardHeader::from_bytes(&header_bytes)
+            .ok_or_else(|| EraError::IntegrityError("Invalid shard header".into()))?;
+
+        if header.length != location.encrypted_size {
+            return Err(EraError::IntegrityError(format!(
+                "Shard length mismatch: header={} location={}",
+                header.length, location.encrypted_size
+            )));
+        }
+
         let offset = location.physical_offset + header_size;
-        let len = location.encrypted_size as usize;
+        let len = header.length as usize;
 
         // Read block data
         let data = self.reader.read_at(offset, len)?;
 
-        // Optional: We could verify ShardHeader here for extra integrity
+        // Read-time CRC validation for lowest-level integrity
+        if !header.verify(&data) {
+            return Err(EraError::IntegrityError(
+                "Shard CRC verification failed".into(),
+            ));
+        }
 
         Ok(EncryptedMacroBlock {
             block_id: BlockId::new(location.slot_index as u64),
@@ -177,27 +195,36 @@ impl<R: StorageReader> VolumeReader<R> {
         let mut offset = location.physical_offset;
 
         for idx in 0..total_shards {
-            // Read length prefix (4 bytes)
-            let len_bytes = match self.reader.read_at(offset, 4) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    // Shard unavailable
+            // Read shard header (length + CRC)
+            let header_bytes = match self.reader.read_at(offset, ShardHeader::SIZE) {
+                Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                _ => {
                     shards.push((idx, None));
-                    // We don't know the actual shard size, so we skip by expected size
-                    offset += 4 + erasure_info.shard_size as u64;
+                    offset += ShardHeader::SIZE as u64 + erasure_info.shard_size as u64;
                     continue;
                 }
             };
 
-            let shard_len =
-                u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
-                    as usize;
+            let header = match ShardHeader::from_bytes(&header_bytes) {
+                Some(h) => h,
+                None => {
+                    shards.push((idx, None));
+                    offset += ShardHeader::SIZE as u64 + erasure_info.shard_size as u64;
+                    continue;
+                }
+            };
 
             // Read shard data
-            let shard_data = self.reader.read_at(offset + 4, shard_len).ok();
+            let shard_data = match self
+                .reader
+                .read_at(offset + ShardHeader::SIZE as u64, header.length as usize)
+            {
+                Ok(data) if header.verify(&data) => Some(data),
+                _ => None,
+            };
 
             shards.push((idx, shard_data));
-            offset += 4 + shard_len as u64;
+            offset += ShardHeader::SIZE as u64 + header.length as u64;
         }
 
         Ok(shards)

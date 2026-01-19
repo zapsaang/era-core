@@ -15,6 +15,7 @@
 //! - Legacy: All shards in a single volume using `shard_idx % volume_count`
 //! - Matrix: Shards distributed using `(shard_idx + block_sequence) % volume_count`
 
+use crate::reader::ArchiveReader;
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{compute_shard_crc, EraError, ErasureCodeConfig, Result, ShardHeader};
@@ -42,6 +43,11 @@ pub struct RepairStats {
     pub unrecoverable_blocks: u64,
     /// Detailed error messages for unrecoverable blocks
     pub errors: Vec<String>,
+}
+
+fn preflight_metadata_recovery(path: &Path, password: &str) -> Result<()> {
+    let mut reader = ArchiveReader::open(path, password)?;
+    reader.preflight_metadata_recovery()
 }
 
 impl RepairStats {
@@ -120,6 +126,9 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
     if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
         return Err(EraError::InvalidKey("Incorrect password".to_string()));
     }
+
+    // Metadata-first preflight: restore embedded LSM and catalog before repair
+    preflight_metadata_recovery(path, password)?;
 
     // Create compressor (kept for future decode-based validation if needed)
     let _compressor: Box<dyn era_codec::Compressor> =
@@ -448,6 +457,9 @@ pub fn repair_archive_matrix(
         "Starting matrix-distributed archive repair: {}",
         path.display()
     );
+
+    // Metadata-first preflight: restore embedded LSM and catalog before repair
+    preflight_metadata_recovery(path, password)?;
 
     let parent_dir = path.parent().unwrap_or(Path::new("."));
     let backend = LocalStorageBackend::new(parent_dir);

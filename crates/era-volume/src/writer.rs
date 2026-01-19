@@ -52,6 +52,27 @@ impl<W: StorageWriter> VolumeWriter<W> {
         })
     }
 
+    /// Open an existing volume for appending (truncate footer)
+    pub fn open_append<B: StorageBackend<Writer = W>>(
+        backend: &B,
+        path: &Path,
+        header: SuperHeader,
+        footer: &Footer,
+    ) -> Result<Self> {
+        let mut writer = backend.open_append(path)?;
+        writer.truncate(footer.data_end_offset)?;
+
+        Ok(Self {
+            writer,
+            header,
+            position: footer.data_end_offset,
+            block_count: footer.block_count,
+            sequence: footer.sequence_number,
+            max_size: None,
+            last_checkpoint_offset: footer.last_checkpoint_offset,
+        })
+    }
+
     /// Set the maximum size for this volume
     pub fn set_max_size(&mut self, max_size: u64) -> Result<()> {
         self.max_size = Some(max_size);

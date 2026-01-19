@@ -12,7 +12,7 @@ use era_storage::StorageBackend;
 use std::path::{Path, PathBuf};
 
 use crate::footer::FOOTER_SIZE;
-use crate::{SuperHeader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE};
+use crate::{SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE};
 
 /// Configuration for the volume pool.
 #[derive(Debug, Clone)]
@@ -150,6 +150,100 @@ impl<B: StorageBackend> VolumePool<B> {
             block_sequence: 0,
             stats,
         })
+    }
+
+    /// Open an existing volume pool for appending.
+    pub fn open_append(
+        backend: B,
+        mut config: VolumePoolConfig,
+        template_header: SuperHeader,
+    ) -> Result<Self> {
+        let mut writers = Vec::new();
+        let mut sequences = Vec::new();
+
+        let volume_count = if template_header.total_volumes > 0 {
+            template_header.total_volumes as usize
+        } else {
+            config.initial_volume_count
+        };
+        config.initial_volume_count = volume_count.max(1);
+
+        let mut max_block_count = 0u32;
+
+        for seq in 0..config.initial_volume_count {
+            let volume_path = config.volume_path(seq as u16);
+            let volume_filename = volume_path.file_name().unwrap_or_default();
+
+            let reader = VolumeReader::open(&backend, Path::new(volume_filename))?;
+            let footer = reader
+                .footer()
+                .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
+
+            let writer = VolumeWriter::open_append(
+                &backend,
+                Path::new(volume_filename),
+                reader.header().clone(),
+                footer,
+            )?;
+
+            max_block_count = max_block_count.max(writer.block_count());
+            writers.push(writer);
+            sequences.push(reader.header().volume_sequence);
+        }
+
+        let stats = VolumePoolStats {
+            volume_count: writers.len(),
+            ..Default::default()
+        };
+
+        Ok(Self {
+            backend,
+            config,
+            template_header,
+            writers,
+            sequences,
+            block_sequence: max_block_count as u64,
+            stats,
+        })
+    }
+
+    /// Open a single-volume archive for appending using a known footer.
+    pub fn open_append_single(
+        backend: B,
+        mut config: VolumePoolConfig,
+        header: SuperHeader,
+        footer: &crate::Footer,
+    ) -> Result<Self> {
+        config.initial_volume_count = 1;
+        let volume_path = config.volume_path(0);
+        let volume_filename = volume_path.file_name().unwrap_or_default();
+
+        let writer = VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)?;
+        let block_sequence = writer.block_count() as u64;
+
+        let stats = VolumePoolStats {
+            volume_count: 1,
+            ..Default::default()
+        };
+
+        Ok(Self {
+            backend,
+            config,
+            template_header: header,
+            writers: vec![writer],
+            sequences: vec![0],
+            block_sequence,
+            stats,
+        })
+    }
+
+    /// Get the highest block count across volumes (for block_id continuation).
+    pub fn current_block_count(&self) -> u32 {
+        self.writers
+            .iter()
+            .map(|w| w.block_count())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Rotate all volumes to a new set when full.

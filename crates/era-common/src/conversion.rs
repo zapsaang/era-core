@@ -2,7 +2,7 @@ use crate::proto;
 use crate::{
     ArchiveConfig, BlockConfig, ChunkingConfig, CompressionAlgorithm, CompressionConfig,
     EncryptionAlgorithm, EncryptionConfig, ErasureCodeConfig, MatrixDistributionConfig,
-    MatrixDistributionStrategy, PackingConfig, VolumeConfig,
+    MatrixDistributionStrategy, NormalizationLevel, PackingConfig, VolumeConfig,
 };
 
 impl From<ArchiveConfig> for proto::ArchiveConfig {
@@ -299,6 +299,21 @@ impl From<ChunkingConfig> for proto::ChunkingConfig {
             min_size: config.min_size as u32,
             avg_size: config.avg_size as u32,
             max_size: config.max_size as u32,
+            normalization_level: match config.normalization_level {
+                NormalizationLevel::Level0 => {
+                    proto::chunking_config::NormalizationLevel::NormalizationLevel0.into()
+                }
+                NormalizationLevel::Level1 => {
+                    proto::chunking_config::NormalizationLevel::NormalizationLevel1.into()
+                }
+                NormalizationLevel::Level2 => {
+                    proto::chunking_config::NormalizationLevel::NormalizationLevel2.into()
+                }
+                NormalizationLevel::Level3 => {
+                    proto::chunking_config::NormalizationLevel::NormalizationLevel3.into()
+                }
+            },
+            rolling_hash_seed: config.rolling_hash_seed,
         }
     }
 }
@@ -309,6 +324,21 @@ impl From<proto::ChunkingConfig> for ChunkingConfig {
             min_size: proto.min_size as usize,
             avg_size: proto.avg_size as usize,
             max_size: proto.max_size as usize,
+            normalization_level: match proto.normalization_level() {
+                proto::chunking_config::NormalizationLevel::NormalizationLevel0 => {
+                    NormalizationLevel::Level0
+                }
+                proto::chunking_config::NormalizationLevel::NormalizationLevel1 => {
+                    NormalizationLevel::Level1
+                }
+                proto::chunking_config::NormalizationLevel::NormalizationLevel2 => {
+                    NormalizationLevel::Level2
+                }
+                proto::chunking_config::NormalizationLevel::NormalizationLevel3 => {
+                    NormalizationLevel::Level3
+                }
+            },
+            rolling_hash_seed: proto.rolling_hash_seed,
         }
     }
 }

@@ -14,8 +14,8 @@
 //! - Active community maintenance and bug fixes
 
 use bytes::Bytes;
-use era_common::{ChunkHash, Result, UniqueChunk};
-use fastcdc::v2020::FastCDC;
+use era_common::{ChunkHash, NormalizationLevel, Result, UniqueChunk};
+use fastcdc::v2020::{FastCDC, Normalization};
 use std::io::Read;
 
 /// Default minimum chunk size (4 KB)
@@ -36,6 +36,10 @@ pub struct ChunkerConfig {
     pub avg_size: usize,
     /// Maximum chunk size in bytes
     pub max_size: usize,
+    /// FastCDC normalization level (v2020)
+    pub normalization_level: NormalizationLevel,
+    /// Rolling hash seed for FastCDC (v2020)
+    pub rolling_hash_seed: u64,
 }
 
 impl Default for ChunkerConfig {
@@ -44,6 +48,8 @@ impl Default for ChunkerConfig {
             min_size: DEFAULT_MIN_SIZE,
             avg_size: DEFAULT_AVG_SIZE,
             max_size: DEFAULT_MAX_SIZE,
+            normalization_level: NormalizationLevel::default(),
+            rolling_hash_seed: 0,
         }
     }
 }
@@ -57,6 +63,27 @@ impl ChunkerConfig {
             min_size,
             avg_size,
             max_size,
+            normalization_level: NormalizationLevel::default(),
+            rolling_hash_seed: 0,
+        }
+    }
+
+    /// Create a new configuration with custom sizes, normalization, and seed
+    pub fn new_with_params(
+        min_size: usize,
+        avg_size: usize,
+        max_size: usize,
+        normalization_level: NormalizationLevel,
+        rolling_hash_seed: u64,
+    ) -> Self {
+        assert!(min_size <= avg_size, "min_size must be <= avg_size");
+        assert!(avg_size <= max_size, "avg_size must be <= max_size");
+        Self {
+            min_size,
+            avg_size,
+            max_size,
+            normalization_level,
+            rolling_hash_seed,
         }
     }
 
@@ -93,11 +120,13 @@ impl Chunker {
     pub fn chunk_bytes<'a>(&'a self, data: &'a [u8]) -> ChunkIterator<'a> {
         ChunkIterator {
             data,
-            inner: FastCDC::new(
+            inner: FastCDC::with_level_and_seed(
                 data,
                 self.config.min_size as u32,
                 self.config.avg_size as u32,
                 self.config.max_size as u32,
+                normalization_to_fastcdc(self.config.normalization_level),
+                self.config.rolling_hash_seed,
             ),
         }
     }
@@ -126,6 +155,15 @@ impl Chunker {
 pub struct ChunkIterator<'a> {
     data: &'a [u8],
     inner: FastCDC<'a>,
+}
+
+fn normalization_to_fastcdc(level: NormalizationLevel) -> Normalization {
+    match level {
+        NormalizationLevel::Level0 => Normalization::Level0,
+        NormalizationLevel::Level1 => Normalization::Level1,
+        NormalizationLevel::Level2 => Normalization::Level2,
+        NormalizationLevel::Level3 => Normalization::Level3,
+    }
 }
 
 impl<'a> Iterator for ChunkIterator<'a> {
@@ -230,11 +268,13 @@ impl<R: Read> StreamingChunker<R> {
         let data_slice = &self.buffer[self.position..self.valid_len];
 
         // Create FastCDC iterator over the available data
-        let mut cdc = FastCDC::new(
+        let mut cdc = FastCDC::with_level_and_seed(
             data_slice,
             self.config.min_size as u32,
             self.config.avg_size as u32,
             self.config.max_size as u32,
+            normalization_to_fastcdc(self.config.normalization_level),
+            self.config.rolling_hash_seed,
         );
 
         // Get the FIRST chunk from this window
