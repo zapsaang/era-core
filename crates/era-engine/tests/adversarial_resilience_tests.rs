@@ -81,7 +81,9 @@ fn test_standard_block_crc_detection() {
         .build()
         .unwrap();
 
-    writer.add_bytes("data.bin", &vec![0xA5u8; 64 * 1024]).unwrap();
+    writer
+        .add_bytes("data.bin", &vec![0xA5u8; 64 * 1024])
+        .unwrap();
     writer.finalize().unwrap();
 
     corrupt_standard_block(&archive_path);
@@ -89,10 +91,7 @@ fn test_standard_block_crc_detection() {
     let mut reader = ArchiveReader::open(&archive_path, "crc_test").unwrap();
     let stats = reader.verify().unwrap();
 
-    assert!(
-        !stats.is_ok(),
-        "CRC corruption should fail verification"
-    );
+    assert!(!stats.is_ok(), "CRC corruption should fail verification");
     assert!(stats.blocks_failed > 0);
 }
 

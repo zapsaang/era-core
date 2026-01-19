@@ -75,6 +75,18 @@ pub struct EraKeyPair {
     created_at: u64,
 }
 
+impl Clone for EraKeyPair {
+    fn clone(&self) -> Self {
+        let secret_bytes = self.secret_key.to_bytes();
+        Self {
+            secret_key: StaticSecret::from(secret_bytes),
+            public_key: self.public_key,
+            key_id: self.key_id,
+            created_at: self.created_at,
+        }
+    }
+}
+
 /// ERA public certificate (v0.2.0+)
 ///
 /// Contains only public key data and is safe to distribute. Used to create

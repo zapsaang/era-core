@@ -24,6 +24,7 @@
 //!
 //! For production workloads with incremental backups, enable the `lsm` feature.
 
+pub mod auth;
 mod block_iter;
 mod checkpoint;
 pub mod chunk_index;

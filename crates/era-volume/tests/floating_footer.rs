@@ -13,7 +13,7 @@ fn test_floating_footer_recovery() {
     // Create header
     let archive_id = ArchiveId::new();
     let config = ArchiveConfig::default();
-    let header = SuperHeader::new(archive_id, [0u8; 16], [0u8; 16], config);
+    let header = SuperHeader::new(archive_id, vec![], config, [0u8; 16]);
     let header_bytes = header.to_bytes().unwrap();
 
     // 2. Write initial data and a valid footer (Checkpoint 1)

@@ -6,8 +6,11 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use era_common::{BlockLocation, ChunkHash, VolumeId};
-use era_engine::chunk_index::{ChunkIndex, MemoryChunkIndex};
+use era_engine::chunk_index::{
+    create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex,
+};
 use std::sync::Arc;
+use tempfile::TempDir;
 
 /// Create a test BlockLocation
 fn test_location(slot: u32) -> BlockLocation {

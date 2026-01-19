@@ -4,8 +4,6 @@ use era_volume::{SuperHeader, VolumeReader, VolumeWriter};
 use std::path::Path;
 use tempfile::TempDir;
 
-const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
-
 #[test]
 fn test_resilient_footer_open_with_erasure() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
@@ -21,7 +19,7 @@ fn test_resilient_footer_open_with_erasure() -> Result<()> {
         ..Default::default()
     };
 
-    let header = SuperHeader::new(ArchiveId::new(), [0u8; 16], TEST_VERIFICATION_TAG, config);
+    let header = SuperHeader::new(ArchiveId::new(), vec![], config, [0u8; 16]);
 
     // 2. Write a valid volume first
     let writer = VolumeWriter::create(&backend, path, header.clone())?;
@@ -76,7 +74,7 @@ fn test_fail_without_erasure() -> Result<()> {
     // 1. Create a volume configuration WITHOUT erasure coding
     let config = ArchiveConfig::default(); // erasure is None by default
 
-    let header = SuperHeader::new(ArchiveId::new(), [0u8; 16], TEST_VERIFICATION_TAG, config);
+    let header = SuperHeader::new(ArchiveId::new(), vec![], config, [0u8; 16]);
 
     // 2. Write
     let writer = VolumeWriter::create(&backend, path, header)?;

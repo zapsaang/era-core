@@ -105,23 +105,21 @@ message SuperHeader {
   uint32 total_volumes = 6;
   int64 creation_time = 7;
   uint64 feature_flags = 8;
-  CryptoAnchor crypto_anchor = 9;
+  repeated RecipientSlot recipients = 9;
   ArchiveConfig config = 10;
+  bytes salt = 11;
 }
 
-message CryptoAnchor {
-  bytes salt = 1;
-  bytes password_verification_tag = 2;
-  uint32 kdf_memory_cost = 3;
-  uint32 kdf_time_cost = 4;
-  uint32 kdf_parallelism = 5;
-  enum AuthMode {
-    AUTH_MODE_PASSWORD = 0;
-    AUTH_MODE_CERTIFICATE = 1;
-    AUTH_MODE_HYBRID = 2;
+message RecipientSlot {
+  enum RecipientType {
+    RECIPIENT_TYPE_SCRYPT_PASSWORD = 0;
+    RECIPIENT_TYPE_X25519_PUBKEY = 1;
+    RECIPIENT_TYPE_FIDO2_HMAC = 2;
   }
-  AuthMode auth_mode = 6;
-  optional bytes key_encapsulation = 7;
+  RecipientType type = 1;
+  bytes key_id = 2;
+  bytes params = 3;
+  bytes encrypted_master_key = 4;
 }
 
 message Footer {

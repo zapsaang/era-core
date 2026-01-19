@@ -5,8 +5,6 @@ use era_volume::{MultiVolumeConfig, MultiVolumeWriter, SuperHeader};
 use std::fs;
 use tempfile::TempDir;
 
-const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
-
 #[test]
 fn test_multi_volume_padding_and_atomicity() {
     let temp_dir = TempDir::new().unwrap();
@@ -23,9 +21,9 @@ fn test_multi_volume_padding_and_atomicity() {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        [0u8; 16],
-        TEST_VERIFICATION_TAG,
+        vec![],
         ArchiveConfig::default(),
+        [0u8; 16],
     );
 
     let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).unwrap();

@@ -125,7 +125,8 @@ fn test_wrong_password_fails() {
         Err(err) => {
             assert!(
                 err.to_string().contains("Incorrect password")
-                    || err.to_string().contains("InvalidKey"),
+                    || err.to_string().contains("InvalidKey")
+                    || err.to_string().contains("No valid credentials found"),
                 "Expected password error, got: {}",
                 err
             );
@@ -739,7 +740,7 @@ fn test_repair_wrong_password() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("password") || err.to_string().contains("InvalidKey"),
+        err.to_string().contains("password") || err.to_string().contains("InvalidKey") || err.to_string().contains("No valid credentials found"),
         "Error should mention password: {}",
         err
     );

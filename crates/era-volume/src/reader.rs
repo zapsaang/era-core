@@ -250,9 +250,6 @@ mod tests {
     use era_storage::LocalStorageBackend;
     use tempfile::TempDir;
 
-    /// Test verification tag for unit tests
-    const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
-
     #[test]
     fn test_open_volume() {
         let temp_dir = TempDir::new().unwrap();
@@ -262,9 +259,9 @@ mod tests {
         // Create a volume
         let header = SuperHeader::new(
             ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
+            vec![],
             ArchiveConfig::default(),
+            [0u8; 16],
         );
         let archive_id = header.archive_id;
 
@@ -286,9 +283,9 @@ mod tests {
         // Create a volume with a block
         let header = SuperHeader::new(
             ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
+            vec![],
             ArchiveConfig::default(),
+            [0u8; 16],
         );
 
         let mut writer = VolumeWriter::create(&backend, path, header).unwrap();

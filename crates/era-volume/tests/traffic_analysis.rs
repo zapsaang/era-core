@@ -6,8 +6,6 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
-
 #[test]
 fn test_volume_traffic_fingerprint_padding() {
     // 1. Setup
@@ -17,9 +15,9 @@ fn test_volume_traffic_fingerprint_padding() {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        [0u8; 16],
-        TEST_VERIFICATION_TAG,
+        vec![],
         ArchiveConfig::default(),
+        [0u8; 16],
     );
 
     // 2. Create Writer
@@ -95,9 +93,9 @@ fn test_checkpoint_traffic_safety() {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        [0u8; 16],
-        TEST_VERIFICATION_TAG,
+        vec![],
         ArchiveConfig::default(),
+        [0u8; 16],
     );
 
     // 2. Create Writer & Set Max Size

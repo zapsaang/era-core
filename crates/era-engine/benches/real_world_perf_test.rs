@@ -6,8 +6,65 @@
 //! Run with: cargo bench --bench real_world_perf_test
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use era_engine::{ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
+use era_crypto::{AeadContext, KdfParams, KeySession, Salt, XChaCha20Poly1305Context};
+use era_engine::{auth::PasswordSlotParams, ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
+use era_volume::{RecipientType, SuperHeader};
 use tempfile::TempDir;
+
+/// Helper to manually derive the Master Key Session from an archive header
+fn derive_session_from_header(
+    header: &SuperHeader,
+    password: &str,
+) -> era_common::Result<KeySession> {
+    let slot = header
+        .recipients
+        .iter()
+        .find(|s| s.r_type == RecipientType::ScryptPassword)
+        .ok_or(era_common::EraError::InvalidKey(
+            "No password slot found".into(),
+        ))?;
+
+    let params: PasswordSlotParams =
+        bincode::serde::decode_from_slice(&slot.params, bincode::config::standard())
+            .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
+            .0;
+
+    let salt = Salt::from_bytes(params.salt);
+    let kdf_params = KdfParams {
+        memory_cost: params.kdf_memory_cost,
+        time_cost: params.kdf_time_cost,
+        parallelism: params.kdf_parallelism,
+    };
+
+    // 1. Derive KEK
+    let kek = era_crypto::derive_key(password.as_bytes(), &salt, &kdf_params)
+        .map_err(|_| era_common::EraError::InvalidKey("KDF failed".into()))?;
+
+    // 2. Decrypt MK
+    let combined = &slot.encrypted_master_key;
+    if combined.len() < 24 {
+        return Err(era_common::EraError::InvalidKey(
+            "Invalid encrypted key length".into(),
+        ));
+    }
+    let nonce_array: &[u8; 24] = combined[0..24]
+        .try_into()
+        .map_err(|_| era_common::EraError::InvalidKey("Invalid nonce".into()))?;
+    let ciphertext = &combined[24..];
+
+    let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)
+        .map_err(|_| era_common::EraError::InvalidKey("Failed to create context".into()))?;
+
+    let mk = ctx
+        .decrypt(nonce_array, &[], ciphertext)
+        .map_err(|_| era_common::EraError::InvalidKey("Incorrect password".into()))?;
+
+    // 3. Create Session
+    let mk_array: [u8; 32] = mk
+        .try_into()
+        .map_err(|_| era_common::EraError::InvalidKey("Invalid MK length".into()))?;
+    KeySession::from_master_key(&mk_array).map_err(Into::into)
+}
 
 /// Create test data with specified pattern
 fn create_test_data(size: usize) -> Vec<u8> {
@@ -219,8 +276,6 @@ fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
 
 /// Benchmark: Multiple archive reads with vs without KeySession
 fn bench_key_session_reader_speedup(c: &mut Criterion) {
-    use era_crypto::{KdfParams, KeySession, Salt};
-
     // Setup: Create test archives
     let setup_dir = TempDir::new().unwrap();
     let archive_paths: Vec<_> = (0..5)
@@ -257,23 +312,17 @@ fn bench_key_session_reader_speedup(c: &mut Criterion) {
         });
     });
 
-    // Get salt from first archive for KeySession
+    // Get session for first archive
     let first_reader = ArchiveReader::open(&archive_paths[0], "benchmark_password").unwrap();
     let header = first_reader.header();
-    let salt = Salt::from_bytes(header.crypto_anchor.salt);
-    let kdf_params = KdfParams {
-        memory_cost: header.crypto_anchor.kdf_memory_cost,
-        time_cost: header.crypto_anchor.kdf_time_cost,
-        parallelism: header.crypto_anchor.kdf_parallelism,
-    };
+
+    let session = derive_session_from_header(header, "benchmark_password").unwrap();
     drop(first_reader);
 
-    // Note: In this benchmark, each archive has a different salt, so KeySession
-    // can only help with the FIRST archive. For real-world improvement,
-    // users would need to use the same salt across archives.
-    // This benchmark shows the API works correctly.
+    // Note: In this benchmark, each archive has a different Master Key, so KeySession
+    // can only help with the FIRST archive.
     group.bench_function("open_1_archive_with_session", |b| {
-        let session = KeySession::new(b"benchmark_password", &salt, &kdf_params).unwrap();
+        let session = session.clone();
         b.iter(|| {
             let reader = ArchiveReader::open_with_session(&archive_paths[0], &session).unwrap();
             black_box(reader);

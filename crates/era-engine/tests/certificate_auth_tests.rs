@@ -145,8 +145,8 @@ fn test_password_archive_rejects_keypair() {
         Ok(_) => panic!("Expected error"),
     };
     assert!(
-        err_msg.contains("password authentication"),
-        "Error should mention password authentication: {}",
+        err_msg.contains("password authentication") || err_msg.contains("No valid credentials found"),
+        "Error should mention password authentication or no creds: {}",
         err_msg
     );
 }
@@ -184,8 +184,8 @@ fn test_wrong_keypair_rejected() {
         Ok(_) => panic!("Expected error"),
     };
     assert!(
-        err_msg.contains("Decryption error") || err_msg.contains("does not match"),
-        "Error should indicate keypair mismatch: {}",
+        err_msg.contains("Decryption error") || err_msg.contains("does not match") || err_msg.contains("No valid credentials found"),
+        "Error should indicate keypair mismatch or no creds: {}",
         err_msg
     );
 }

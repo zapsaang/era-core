@@ -52,10 +52,22 @@ pub struct Footer {
 impl Footer {
     /// Create a new footer
     pub fn new(data_end_offset: u64, block_count: u32, sequence_number: u64) -> Self {
-        Self::with_catalog(data_end_offset, block_count, sequence_number, 0, 0, 0, 0, 0, 0, 0)
+        Self::with_catalog(
+            data_end_offset,
+            block_count,
+            sequence_number,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
     }
 
     /// Create a new footer with catalog location
+    #[allow(clippy::too_many_arguments)]
     pub fn with_catalog(
         data_end_offset: u64,
         block_count: u32,

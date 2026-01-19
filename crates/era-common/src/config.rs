@@ -143,18 +143,13 @@ pub struct ChunkingConfig {
 }
 
 /// Normalization level for FastCDC
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum NormalizationLevel {
     Level0,
+    #[default]
     Level1,
     Level2,
     Level3,
-}
-
-impl Default for NormalizationLevel {
-    fn default() -> Self {
-        NormalizationLevel::Level1
-    }
 }
 
 impl Default for ChunkingConfig {

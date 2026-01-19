@@ -218,7 +218,12 @@ impl<B: StorageBackend> VolumePool<B> {
         let volume_path = config.volume_path(0);
         let volume_filename = volume_path.file_name().unwrap_or_default();
 
-        let writer = VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)?;
+        let writer = VolumeWriter::open_append(
+            &backend,
+            Path::new(volume_filename),
+            header.clone(),
+            footer,
+        )?;
         let block_sequence = writer.block_count() as u64;
 
         let stats = VolumePoolStats {
@@ -670,16 +675,12 @@ mod tests {
     use era_storage::LocalStorageBackend;
     use tempfile::TempDir;
 
-    const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
-
     fn create_test_header() -> SuperHeader {
-        SuperHeader::with_kdf_params(
+        SuperHeader::new(
             ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
-            1024,
-            1,
+            vec![],
             ArchiveConfig::default(),
+            [0u8; 16],
         )
     }
 

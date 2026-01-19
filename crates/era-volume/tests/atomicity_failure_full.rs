@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
-const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
-
 // Mock Backend to simulate failures
 #[derive(Clone)]
 struct FaultyBackend {
@@ -86,9 +84,9 @@ fn test_atomicity_failure_recovery() {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        [0u8; 16],
-        TEST_VERIFICATION_TAG,
+        vec![],
         ArchiveConfig::default(),
+        [0u8; 16],
     );
 
     let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).unwrap();

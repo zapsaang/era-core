@@ -19,7 +19,7 @@ use crate::reader::ArchiveReader;
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{compute_shard_crc, EraError, ErasureCodeConfig, Result, ShardHeader};
-use era_crypto::{KdfParams, KeySession, Salt};
+use era_crypto::KeySession;
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use std::collections::HashMap;
@@ -113,19 +113,24 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
         erasure_config.data_shards, erasure_config.parity_shards
     );
 
-    // Create key session for per-block key derivation
-    let salt = Salt::from_bytes(header.crypto_anchor.salt);
-    let kdf_params = KdfParams {
-        memory_cost: header.crypto_anchor.kdf_memory_cost,
-        time_cost: header.crypto_anchor.kdf_time_cost,
-        parallelism: header.crypto_anchor.kdf_parallelism,
-    };
-    let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
+    // Create key session using PasswordProvider
+    // Requires crate::auth::AuthProvider and crate::auth::PasswordProvider
+    let provider = crate::auth::PasswordProvider::new(password.to_string());
 
-    // Verify password using the session
-    if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
-        return Err(EraError::InvalidKey("Incorrect password".to_string()));
+    let mut master_key = None;
+    for slot in &header.recipients {
+        use crate::auth::AuthProvider;
+        if let Ok(Some(mk)) = provider.try_unlock(slot) {
+            master_key = Some(mk);
+            break;
+        }
     }
+
+    let master_key = master_key.ok_or(EraError::InvalidKey("Incorrect password".into()))?;
+    let mk_array: [u8; 32] = master_key
+        .try_into()
+        .map_err(|_| EraError::InvalidKey("Invalid master key length".into()))?;
+    let _session = KeySession::from_master_key(&mk_array)?;
 
     // Metadata-first preflight: restore embedded LSM and catalog before repair
     preflight_metadata_recovery(path, password)?;
@@ -535,17 +540,22 @@ pub fn repair_archive_matrix(
     );
 
     // Create key session
-    let salt = Salt::from_bytes(header.crypto_anchor.salt);
-    let kdf_params = KdfParams {
-        memory_cost: header.crypto_anchor.kdf_memory_cost,
-        time_cost: header.crypto_anchor.kdf_time_cost,
-        parallelism: header.crypto_anchor.kdf_parallelism,
-    };
-    let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
+    let provider = crate::auth::PasswordProvider::new(password.to_string());
 
-    if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
-        return Err(EraError::InvalidKey("Incorrect password".to_string()));
+    let mut master_key = None;
+    for slot in &header.recipients {
+        use crate::auth::AuthProvider;
+        if let Ok(Some(mk)) = provider.try_unlock(slot) {
+            master_key = Some(mk);
+            break;
+        }
     }
+
+    let master_key = master_key.ok_or(EraError::InvalidKey("Incorrect password".into()))?;
+    let mk_array: [u8; 32] = master_key
+        .try_into()
+        .map_err(|_| EraError::InvalidKey("Invalid master key length".into()))?;
+    let _session = KeySession::from_master_key(&mk_array)?;
 
     let _compressor: Box<dyn era_codec::Compressor> =
         Box::new(ZstdCompressor::new(header.config.compression.level));

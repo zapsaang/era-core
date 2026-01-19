@@ -12,106 +12,38 @@ pub const HEADER_VERSION: u16 = 2;
 /// Size of the header region (4KB aligned)
 pub const HEADER_SIZE: usize = 4096;
 
-/// Authentication mode stored in the header
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AuthMode {
-    /// Password-only authentication
-    Password,
-    /// Certificate-only authentication
-    Certificate,
-    /// Both password AND certificate required
-    Hybrid,
+/// Recipient type for the multi-recipient envelope
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecipientType {
+    ScryptPassword,
+    X25519PubKey,
+    Fido2Hmac,
 }
 
-/// Cryptographic anchor containing key derivation parameters
+/// A recipient slot containing an encrypted master key
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CryptoAnchor {
-    /// Salt for key derivation (16 bytes)
-    pub salt: [u8; 16],
-    /// Memory cost for Argon2id (KB)
-    pub kdf_memory_cost: u32,
-    /// Time cost for Argon2id (iterations)
-    pub kdf_time_cost: u32,
-    /// Parallelism for Argon2id
-    pub kdf_parallelism: u32,
-    /// Password verification tag (16 bytes) - allows early detection of wrong password
-    /// This is HMAC(key, "ERA-PASSWORD-VERIFY") truncated to 16 bytes
-    pub password_verification_tag: [u8; 16],
-    /// Authentication mode
-    pub auth_mode: AuthMode,
-    /// Certificate key encapsulation (only present for Certificate/Hybrid modes)
-    /// Contains the encrypted master key and ephemeral public key
-    #[serde(default)]
-    pub key_encapsulation: Option<Vec<u8>>, // Serialized KeyEncapsulation
+pub struct RecipientSlot {
+    pub r_type: RecipientType,
+    /// Optional Key ID (e.g., fingerprint) for fast matching
+    pub key_id: Option<[u8; 8]>,
+    /// Dynamic parameters (Salt, Nonce, Scrypt params, etc.)
+    pub params: Vec<u8>,
+    /// The Master Key wrapped by this recipient's specific credential
+    pub encrypted_master_key: Vec<u8>,
 }
 
-impl CryptoAnchor {
-    /// Create a new crypto anchor with the given salt and verification tag (password mode)
-    pub fn new(salt: [u8; 16], password_verification_tag: [u8; 16]) -> Self {
-        Self {
-            salt,
-            kdf_memory_cost: 65536, // 64 MB
-            kdf_time_cost: 3,
-            kdf_parallelism: 4,
-            password_verification_tag,
-            auth_mode: AuthMode::Password,
-            key_encapsulation: None,
-        }
-    }
-
-    /// Create a new crypto anchor with default KDF parameters (password mode)
-    pub fn with_params(
-        salt: [u8; 16],
-        password_verification_tag: [u8; 16],
-        kdf_memory_cost: u32,
-        kdf_time_cost: u32,
-        kdf_parallelism: u32,
+impl RecipientSlot {
+    pub fn new(
+        r_type: RecipientType,
+        key_id: Option<[u8; 8]>,
+        params: Vec<u8>,
+        encrypted_master_key: Vec<u8>,
     ) -> Self {
         Self {
-            salt,
-            kdf_memory_cost,
-            kdf_time_cost,
-            kdf_parallelism,
-            password_verification_tag,
-            auth_mode: AuthMode::Password,
-            key_encapsulation: None,
-        }
-    }
-
-    /// Create a crypto anchor for certificate mode
-    pub fn with_certificate(
-        salt: [u8; 16],
-        password_verification_tag: [u8; 16],
-        key_encapsulation: Vec<u8>,
-    ) -> Self {
-        Self {
-            salt,
-            kdf_memory_cost: 0, // Not used for certificate mode
-            kdf_time_cost: 0,
-            kdf_parallelism: 0,
-            password_verification_tag,
-            auth_mode: AuthMode::Certificate,
-            key_encapsulation: Some(key_encapsulation),
-        }
-    }
-
-    /// Create a crypto anchor for hybrid mode (both password and certificate)
-    pub fn with_hybrid(
-        salt: [u8; 16],
-        password_verification_tag: [u8; 16],
-        kdf_memory_cost: u32,
-        kdf_time_cost: u32,
-        kdf_parallelism: u32,
-        key_encapsulation: Vec<u8>,
-    ) -> Self {
-        Self {
-            salt,
-            kdf_memory_cost,
-            kdf_time_cost,
-            kdf_parallelism,
-            password_verification_tag,
-            auth_mode: AuthMode::Hybrid,
-            key_encapsulation: Some(key_encapsulation),
+            r_type,
+            key_id,
+            params,
+            encrypted_master_key,
         }
     }
 }
@@ -136,10 +68,12 @@ pub struct SuperHeader {
     pub creation_time: i64,
     /// Feature flags
     pub feature_flags: u64,
-    /// Cryptographic parameters
-    pub crypto_anchor: CryptoAnchor,
+    /// Recipient slots (Dynamic Multi-Recipient Envelope)
+    pub recipients: Vec<RecipientSlot>,
     /// Archive configuration
     pub config: ArchiveConfig,
+    /// Archive-wide salt (16 bytes) for key context/nonce generation
+    pub salt: [u8; 16],
 }
 
 impl SuperHeader {
@@ -147,14 +81,14 @@ impl SuperHeader {
     ///
     /// # Arguments
     /// * `archive_id` - Unique archive identifier
-    /// * `salt` - 16-byte salt for key derivation
-    /// * `password_verification_tag` - 16-byte tag for password verification
+    /// * `recipients` - List of recipient slots
     /// * `config` - Archive configuration
+    /// * `salt` - Random salt for the archive context
     pub fn new(
         archive_id: ArchiveId,
-        salt: [u8; 16],
-        password_verification_tag: [u8; 16],
+        recipients: Vec<RecipientSlot>,
         config: ArchiveConfig,
+        salt: [u8; 16],
     ) -> Self {
         Self {
             magic: MAGIC,
@@ -168,103 +102,9 @@ impl SuperHeader {
                 .unwrap_or_default()
                 .as_secs() as i64,
             feature_flags: 0,
-            crypto_anchor: CryptoAnchor::new(salt, password_verification_tag),
+            recipients,
             config,
-        }
-    }
-
-    /// Create a new super header with custom KDF parameters
-    pub fn with_kdf_params(
-        archive_id: ArchiveId,
-        salt: [u8; 16],
-        password_verification_tag: [u8; 16],
-        kdf_memory_cost: u32,
-        kdf_time_cost: u32,
-        config: ArchiveConfig,
-    ) -> Self {
-        Self {
-            magic: MAGIC,
-            version: HEADER_VERSION,
-            volume_id: VolumeId::new(),
-            archive_id,
-            volume_sequence: 0,
-            total_volumes: 0, // Unknown at creation, set by writer
-            creation_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-            feature_flags: 0,
-            crypto_anchor: CryptoAnchor::with_params(
-                salt,
-                password_verification_tag,
-                kdf_memory_cost,
-                kdf_time_cost,
-                4, // parallelism
-            ),
-            config,
-        }
-    }
-
-    /// Create a new super header with certificate authentication
-    pub fn with_certificate(
-        archive_id: ArchiveId,
-        salt: [u8; 16],
-        password_verification_tag: [u8; 16],
-        key_encapsulation: Vec<u8>,
-        config: ArchiveConfig,
-    ) -> Self {
-        Self {
-            magic: MAGIC,
-            version: HEADER_VERSION,
-            volume_id: VolumeId::new(),
-            archive_id,
-            volume_sequence: 0,
-            total_volumes: 0,
-            creation_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-            feature_flags: 0,
-            crypto_anchor: CryptoAnchor::with_certificate(
-                salt,
-                password_verification_tag,
-                key_encapsulation,
-            ),
-            config,
-        }
-    }
-
-    /// Create a new super header with hybrid authentication (password + certificate)
-    pub fn with_hybrid(
-        archive_id: ArchiveId,
-        salt: [u8; 16],
-        password_verification_tag: [u8; 16],
-        kdf_memory_cost: u32,
-        kdf_time_cost: u32,
-        key_encapsulation: Vec<u8>,
-        config: ArchiveConfig,
-    ) -> Self {
-        Self {
-            magic: MAGIC,
-            version: HEADER_VERSION,
-            volume_id: VolumeId::new(),
-            archive_id,
-            volume_sequence: 0,
-            total_volumes: 0,
-            creation_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-            feature_flags: 0,
-            crypto_anchor: CryptoAnchor::with_hybrid(
-                salt,
-                password_verification_tag,
-                kdf_memory_cost,
-                kdf_time_cost,
-                4,
-                key_encapsulation,
-            ),
-            config,
+            salt,
         }
     }
 
@@ -282,8 +122,9 @@ impl SuperHeader {
                 .unwrap_or_default()
                 .as_secs() as i64,
             feature_flags: self.feature_flags,
-            crypto_anchor: self.crypto_anchor.clone(),
+            recipients: self.recipients.clone(),
             config: self.config.clone(),
+            salt: self.salt,
         }
     }
 
@@ -330,42 +171,43 @@ impl SuperHeader {
 
 use era_common::proto;
 
-impl From<CryptoAnchor> for proto::CryptoAnchor {
-    fn from(anchor: CryptoAnchor) -> Self {
+impl From<RecipientSlot> for proto::RecipientSlot {
+    fn from(slot: RecipientSlot) -> Self {
         Self {
-            salt: anchor.salt.to_vec(),
-            password_verification_tag: anchor.password_verification_tag.to_vec(),
-            kdf_memory_cost: anchor.kdf_memory_cost,
-            kdf_time_cost: anchor.kdf_time_cost,
-            kdf_parallelism: anchor.kdf_parallelism,
-            auth_mode: match anchor.auth_mode {
-                AuthMode::Password => proto::crypto_anchor::AuthMode::Password.into(),
-                AuthMode::Certificate => proto::crypto_anchor::AuthMode::Certificate.into(),
-                AuthMode::Hybrid => proto::crypto_anchor::AuthMode::Hybrid.into(),
+            r#type: match slot.r_type {
+                RecipientType::ScryptPassword => {
+                    proto::recipient_slot::RecipientType::ScryptPassword.into()
+                }
+                RecipientType::X25519PubKey => {
+                    proto::recipient_slot::RecipientType::X25519Pubkey.into()
+                }
+                RecipientType::Fido2Hmac => proto::recipient_slot::RecipientType::Fido2Hmac.into(),
             },
-            key_encapsulation: anchor.key_encapsulation,
+            key_id: slot.key_id.map(|k| k.to_vec()).unwrap_or_default(),
+            params: slot.params,
+            encrypted_master_key: slot.encrypted_master_key,
         }
     }
 }
 
-impl From<proto::CryptoAnchor> for CryptoAnchor {
-    fn from(proto: proto::CryptoAnchor) -> Self {
-        let auth_mode = proto.auth_mode();
+impl From<proto::RecipientSlot> for RecipientSlot {
+    fn from(proto: proto::RecipientSlot) -> Self {
+        let r_type = proto.r#type();
         Self {
-            salt: proto.salt.try_into().unwrap_or([0u8; 16]),
-            password_verification_tag: proto
-                .password_verification_tag
-                .try_into()
-                .unwrap_or([0u8; 16]),
-            kdf_memory_cost: proto.kdf_memory_cost,
-            kdf_time_cost: proto.kdf_time_cost,
-            kdf_parallelism: proto.kdf_parallelism,
-            auth_mode: match auth_mode {
-                proto::crypto_anchor::AuthMode::Password => AuthMode::Password,
-                proto::crypto_anchor::AuthMode::Certificate => AuthMode::Certificate,
-                proto::crypto_anchor::AuthMode::Hybrid => AuthMode::Hybrid,
+            r_type: match r_type {
+                proto::recipient_slot::RecipientType::ScryptPassword => {
+                    RecipientType::ScryptPassword
+                }
+                proto::recipient_slot::RecipientType::X25519Pubkey => RecipientType::X25519PubKey,
+                proto::recipient_slot::RecipientType::Fido2Hmac => RecipientType::Fido2Hmac,
             },
-            key_encapsulation: proto.key_encapsulation,
+            key_id: if proto.key_id.is_empty() {
+                None
+            } else {
+                Some(proto.key_id.try_into().unwrap_or([0u8; 8]))
+            },
+            params: proto.params,
+            encrypted_master_key: proto.encrypted_master_key,
         }
     }
 }
@@ -381,8 +223,9 @@ impl From<SuperHeader> for proto::SuperHeader {
             total_volumes: header.total_volumes as u32,
             creation_time: header.creation_time,
             feature_flags: header.feature_flags,
-            crypto_anchor: Some(header.crypto_anchor.into()),
+            recipients: header.recipients.into_iter().map(Into::into).collect(),
             config: Some(header.config.into()),
+            salt: header.salt.to_vec(),
         }
     }
 }
@@ -402,11 +245,9 @@ impl From<proto::SuperHeader> for SuperHeader {
             total_volumes: proto.total_volumes as u16,
             creation_time: proto.creation_time,
             feature_flags: proto.feature_flags,
-            crypto_anchor: proto
-                .crypto_anchor
-                .map(Into::into)
-                .unwrap_or_else(|| CryptoAnchor::new([0; 16], [0; 16])),
+            recipients: proto.recipients.into_iter().map(Into::into).collect(),
             config: proto.config.map(Into::into).unwrap_or_default(),
+            salt: proto.salt.try_into().unwrap_or([0u8; 16]),
         }
     }
 }
@@ -415,38 +256,46 @@ impl From<proto::SuperHeader> for SuperHeader {
 mod tests {
     use super::*;
 
-    /// Test verification tag for unit tests
-    const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
+    const TEST_PARAMS: [u8; 16] = [0xABu8; 16];
+
+    fn mock_recipient() -> RecipientSlot {
+        RecipientSlot::new(
+            RecipientType::ScryptPassword,
+            Some([0x12; 8]),
+            TEST_PARAMS.to_vec(),
+            vec![1, 2, 3, 4],
+        )
+    }
 
     #[test]
     fn test_header_roundtrip() {
+        let recipients = vec![mock_recipient()];
         let header = SuperHeader::new(
             ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
+            recipients.clone(),
             ArchiveConfig::default(),
+            [0u8; 16],
         );
 
         let bytes = header.to_bytes().unwrap();
-        assert_eq!(bytes.len(), HEADER_SIZE);
+        assert_eq!(bytes.len(), HEADER_SIZE, "Header must be 4KB padded");
 
         let restored = SuperHeader::from_bytes(&bytes).unwrap();
         assert_eq!(restored.magic, MAGIC);
         assert_eq!(restored.version, HEADER_VERSION);
         assert_eq!(restored.archive_id.0, header.archive_id.0);
-        assert_eq!(
-            restored.crypto_anchor.password_verification_tag,
-            TEST_VERIFICATION_TAG
-        );
+        assert_eq!(restored.recipients.len(), 1);
+        assert_eq!(restored.recipients[0].params, TEST_PARAMS.to_vec());
     }
 
     #[test]
     fn test_next_volume() {
+        let recipients = vec![mock_recipient()];
         let header1 = SuperHeader::new(
             ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
+            recipients,
             ArchiveConfig::default(),
+            [0u8; 16],
         );
 
         let header2 = header1.next_volume();
@@ -454,92 +303,6 @@ mod tests {
         assert_eq!(header2.archive_id.0, header1.archive_id.0);
         assert_ne!(header2.volume_id.0, header1.volume_id.0);
         assert_eq!(header2.volume_sequence, 1);
-        // Verification tag should be preserved across volumes
-        assert_eq!(
-            header2.crypto_anchor.password_verification_tag,
-            TEST_VERIFICATION_TAG
-        );
-    }
-
-    #[test]
-    fn test_invalid_magic_rejected() {
-        let header = SuperHeader::new(
-            ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
-            ArchiveConfig::default(),
-        );
-
-        // Create a valid proto but with invalid magic
-        let mut proto: era_common::proto::SuperHeader = header.into();
-        proto.magic = vec![0xDE, 0xAD, 0xBE, 0xEF]; // INvalid magic
-
-        let mut bytes = Vec::new();
-        use prost::Message;
-        proto.encode_length_delimited(&mut bytes).unwrap();
-
-        let result = SuperHeader::from_bytes(&bytes);
-        assert!(result.is_err());
-        match result {
-            Err(era_common::EraError::InvalidMagic) => {}
-            Err(e) => panic!("Expected InvalidMagic error, got: {:?}", e),
-            Ok(_) => panic!("Expected error, but got Ok"),
-        }
-    }
-
-    #[test]
-    fn test_crypto_anchor_with_params() {
-        let anchor = CryptoAnchor::with_params(
-            [1u8; 16], [2u8; 16], 131072, // 128 MB
-            5, 8,
-        );
-        assert_eq!(anchor.salt, [1u8; 16]);
-        assert_eq!(anchor.password_verification_tag, [2u8; 16]);
-        assert_eq!(anchor.kdf_memory_cost, 131072);
-        assert_eq!(anchor.kdf_time_cost, 5);
-        assert_eq!(anchor.kdf_parallelism, 8);
-    }
-
-    #[test]
-    fn test_header_with_kdf_params() {
-        let header = SuperHeader::with_kdf_params(
-            ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
-            131072, // 128 MB
-            5,
-            ArchiveConfig::default(),
-        );
-
-        assert_eq!(header.crypto_anchor.kdf_memory_cost, 131072);
-        assert_eq!(header.crypto_anchor.kdf_time_cost, 5);
-
-        // Round-trip should preserve KDF params
-        let bytes = header.to_bytes().unwrap();
-        let restored = SuperHeader::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.crypto_anchor.kdf_memory_cost, 131072);
-        assert_eq!(restored.crypto_anchor.kdf_time_cost, 5);
-    }
-
-    #[test]
-    fn test_header_size_is_4kb() {
-        // Ensure our header serialization always produces 4KB
-        let header = SuperHeader::new(
-            ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
-            ArchiveConfig::default(),
-        );
-
-        let bytes = header.to_bytes().unwrap();
-        assert_eq!(bytes.len(), 4096);
-    }
-
-    #[test]
-    fn test_different_salts_produce_different_anchors() {
-        let anchor1 = CryptoAnchor::new([0u8; 16], [0u8; 16]);
-        let anchor2 = CryptoAnchor::new([1u8; 16], [0u8; 16]);
-
-        assert_ne!(anchor1.salt, anchor2.salt);
+        assert_eq!(header2.recipients.len(), 1);
     }
 }

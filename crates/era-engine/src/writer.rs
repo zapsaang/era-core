@@ -14,6 +14,7 @@
 //! - **Password mode**: Traditional Argon2id key derivation (~50-300ms overhead)
 //! - **Certificate mode**: X25519 key exchange (~0.05ms overhead, ~1000x faster)
 
+use crate::auth::PasswordSlotParams;
 use bytes::Bytes;
 use era_codec::{Compressor, ErasureCoder, ErasureConfig, NoCompressor, ZstdCompressor};
 use era_common::{
@@ -21,6 +22,8 @@ use era_common::{
     ErasureBlockInfo, ErasureCodeConfig, MatrixDistributionStrategy, Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
+use era_crypto::Nonce;
+use era_crypto::{AeadContext, XChaCha20Poly1305Context};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{
@@ -28,8 +31,10 @@ use era_packing::{
     Stripe, StripeBuffer,
 };
 use era_storage::LocalStorageBackend;
-use era_volume::{Footer, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader, VolumeWriter};
-use prost::Message;
+use era_volume::{
+    Footer, RecipientSlot, RecipientType, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader,
+    VolumeWriter,
+};
 use rand::RngCore;
 use std::collections::HashMap;
 use std::io::Read;
@@ -412,146 +417,109 @@ impl ArchiveWriterBuilder {
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(output_dir);
 
-        let mut archive_id = ArchiveId::new();
-        let mut salt = Salt::generate();
+        let archive_id = ArchiveId::new();
+        // let mut salt = Salt::generate(); // Salt is per-recipient now
+
+        // Refactor placeholders - Append mode disabled
+        let append_header: Option<SuperHeader> = None;
+        let append_footer: Option<Footer> = None;
+        let append_catalog: Option<Catalog> = None;
+        let mut key_encapsulation: Option<KeyEncapsulation> = None;
+
         let mut config = self.config.clone();
-        let mut enable_erasure = self.enable_erasure;
-        let mut enable_matrix_distribution = self.enable_matrix_distribution;
-        let mut volume_count = self.volume_count;
-        let mut enable_cdc = self.enable_cdc;
-        let mut chunker_override = self.chunker_config;
-        let mut max_volume_size = self.max_volume_size;
-        let mut append_header: Option<SuperHeader> = None;
-        let mut append_footer: Option<Footer> = None;
-        let mut append_catalog: Option<Catalog> = None;
+        let enable_erasure = self.enable_erasure;
+        let enable_matrix_distribution = self.enable_matrix_distribution;
+        let volume_count = self.volume_count;
+        let enable_cdc = self.enable_cdc;
+        let chunker_override = self.chunker_config;
+        let max_volume_size = self.max_volume_size;
+
         if self.append_existing && self.output_path.exists() {
-            match &self.auth_mode {
-                AuthMode::Password(password) => {
-                    let mut reader = ArchiveReader::open(&self.output_path, password)?;
-                    let header = reader.header().clone();
-                    let footer = reader.primary_footer().cloned().ok_or_else(|| {
-                        era_common::EraError::CorruptedHeader("Missing footer".into())
-                    })?;
-
-                    archive_id = header.archive_id;
-                    salt = Salt::from_bytes(header.crypto_anchor.salt);
-                    config = header.config.clone();
-                    append_header = Some(header);
-                    append_footer = Some(footer);
-                    append_catalog = Some(reader.load_catalog()?.clone());
-                }
-                _ => {
-                    return Err(era_common::EraError::InvalidFormat(
-                        "Append mode requires password authentication".into(),
-                    ));
-                }
-            }
+            return Err(era_common::EraError::InvalidFormat(
+                "Append mode currently disabled for refactor".into(),
+            ));
         }
 
-        // Create KeySession based on authentication mode
-        let (session, key_encapsulation) = match &self.auth_mode {
-            AuthMode::Password(password) => {
-                let kdf_params = KdfParams {
-                    memory_cost: config.encryption.kdf_memory_cost,
-                    time_cost: config.encryption.kdf_time_cost,
-                    parallelism: 4,
-                };
-                let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
-                (session, None)
-            }
-            AuthMode::Certificate(_) if self.append_existing => {
-                return Err(era_common::EraError::InvalidFormat(
-                    "Append mode is not supported for certificate-only archives".into(),
-                ));
-            }
-            AuthMode::Hybrid { .. } if self.append_existing => {
-                return Err(era_common::EraError::InvalidFormat(
-                    "Append mode is not supported for hybrid archives".into(),
-                ));
-            }
-            AuthMode::Certificate(cert) => {
-                let mut master_key = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut master_key);
+        // Generate Master Key (DEK)
+        let mut master_key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut master_key);
 
-                let encapsulation = EraKeyPair::encapsulate_for(cert, &master_key)?;
-                let session = KeySession::from_master_key(&master_key)?;
-                master_key.iter_mut().for_each(|b| *b = 0);
+        let archive_salt = era_crypto::Salt::generate();
 
-                info!(
-                    "Using certificate mode (key_id: {})",
-                    hex::encode(&cert.key_id()[..8])
-                );
+        let session = KeySession::from_master_key(&master_key)?;
+        let mut recipients = Vec::new();
 
-                (session, Some(encapsulation))
-            }
-            AuthMode::Hybrid {
-                password,
-                certificate,
-            } => {
-                let kdf_params = KdfParams {
-                    memory_cost: config.encryption.kdf_memory_cost,
-                    time_cost: config.encryption.kdf_time_cost,
-                    parallelism: 4,
-                };
+        // 1. Password Mode (adds a password recipient)
+        if let AuthMode::Password(ref pwd)
+        | AuthMode::Hybrid {
+            password: ref pwd, ..
+        } = self.auth_mode
+        {
+            let salt = Salt::generate();
+            let kdf_params = KdfParams {
+                memory_cost: config.encryption.kdf_memory_cost,
+                time_cost: config.encryption.kdf_time_cost,
+                parallelism: 4,
+            };
 
-                let mut master_key = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut master_key);
+            let kek = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)?;
 
-                let encapsulation = EraKeyPair::encapsulate_for(certificate, &master_key)?;
+            let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
+            let nonce = Nonce::generate();
+            let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &master_key)?;
 
-                let password_derived =
-                    era_crypto::derive_key(password.as_bytes(), &salt, &kdf_params)?;
-                let mut combined_key = [0u8; 32];
-                for i in 0..32 {
-                    combined_key[i] = master_key[i] ^ password_derived.as_bytes()[i];
-                }
+            let mut combined = Vec::new();
+            combined.extend_from_slice(nonce.as_bytes());
+            combined.extend_from_slice(&encrypted_mk);
 
-                let session = KeySession::from_master_key(&combined_key)?;
+            let p_params = PasswordSlotParams {
+                salt: *salt.as_bytes(),
+                kdf_memory_cost: kdf_params.memory_cost,
+                kdf_time_cost: kdf_params.time_cost,
+                kdf_parallelism: kdf_params.parallelism,
+            };
 
-                master_key.iter_mut().for_each(|b| *b = 0);
-                combined_key.iter_mut().for_each(|b| *b = 0);
-
-                info!(
-                    "Using hybrid mode (key_id: {})",
-                    hex::encode(&certificate.key_id()[..8])
-                );
-
-                (session, Some(encapsulation))
-            }
-        };
-
-        if let Some(header) = append_header.as_ref() {
-            if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
-                return Err(era_common::EraError::InvalidKey(
-                    "Incorrect password for existing archive".into(),
-                ));
-            }
+            recipients.push(RecipientSlot {
+                r_type: RecipientType::ScryptPassword,
+                key_id: None,
+                params: bincode::serde::encode_to_vec(&p_params, bincode::config::standard())
+                    .map_err(|e| era_common::EraError::Serialization(e.to_string()))?,
+                encrypted_master_key: combined,
+            });
         }
+
+        // 2. Certificate Mode (adds a certificate recipient)
+        if let AuthMode::Certificate(ref cert)
+        | AuthMode::Hybrid {
+            certificate: ref cert,
+            ..
+        } = self.auth_mode
+        {
+            // Create ephemeral copy of MK for encapsulation (which might zeroize it, but we need it for session)
+            // Encapsulate takes generic key slice, checking signature?
+            // EraKeyPair::encapsulate_for(cert, &master_key)
+            let encapsulation = EraKeyPair::encapsulate_for(cert, &master_key)?;
+            key_encapsulation = Some(encapsulation.clone());
+
+            let key_id_bytes: [u8; 8] = cert.key_id()[..8].try_into().unwrap_or([0u8; 8]);
+
+            recipients.push(RecipientSlot {
+                r_type: RecipientType::X25519PubKey,
+                key_id: Some(key_id_bytes),
+                params: encapsulation.ephemeral_public.to_vec(),
+                encrypted_master_key: encapsulation.encrypted_master_key,
+            });
+        }
+
+        // Zeroize master key from stack
+        master_key.iter_mut().for_each(|b| *b = 0);
 
         // Derive volume key for the primary volume (volume 0)
-        // In multi-volume scenarios, each volume gets its own key
         let volume_key = session.derive_volume_key(0);
-
-        // Get password verification tag from session
-        let password_verification_tag = session.password_verification_tag();
 
         // Build config with erasure setting
         if !self.append_existing && enable_erasure {
             config.erasure = Some(self.erasure_config);
-        }
-
-        if self.append_existing {
-            enable_erasure = config.erasure.is_some();
-            enable_matrix_distribution =
-                config.distribution.strategy == MatrixDistributionStrategy::RotatingOffset;
-            volume_count = append_header
-                .as_ref()
-                .map(|h| h.total_volumes)
-                .unwrap_or(1)
-                .max(1) as usize;
-            enable_cdc = true;
-            chunker_override = None;
-            max_volume_size = Some(config.volume.max_size);
         }
 
         // Set distribution strategy in config, to match VolumePool behavior
@@ -569,54 +537,14 @@ impl ArchiveWriterBuilder {
             config.distribution.strategy = MatrixDistributionStrategy::Striped;
         }
 
-        // Create volume header based on authentication mode
-        let header = match (&self.auth_mode, &key_encapsulation) {
-            (AuthMode::Password(_), None) => {
-                // Password mode
-                SuperHeader::with_kdf_params(
-                    archive_id,
-                    *salt.as_bytes(),
-                    password_verification_tag,
-                    config.encryption.kdf_memory_cost,
-                    config.encryption.kdf_time_cost,
-                    config.clone(),
-                )
-            }
-            (AuthMode::Certificate(_), Some(encap)) => {
-                // Certificate mode
-                let encap_bytes = encap.to_proto().encode_to_vec();
-                SuperHeader::with_certificate(
-                    archive_id,
-                    *salt.as_bytes(),
-                    password_verification_tag,
-                    encap_bytes,
-                    config.clone(),
-                )
-            }
-            (AuthMode::Hybrid { .. }, Some(encap)) => {
-                // Hybrid mode
-                let encap_bytes = encap.to_proto().encode_to_vec();
-                SuperHeader::with_hybrid(
-                    archive_id,
-                    *salt.as_bytes(),
-                    password_verification_tag,
-                    config.encryption.kdf_memory_cost,
-                    config.encryption.kdf_time_cost,
-                    encap_bytes,
-                    config.clone(),
-                )
-            }
-            _ => {
-                eprintln!(
-                    "DEBUG: Invalid auth mode combination: {:?}, has encap: {}",
-                    &self.auth_mode,
-                    key_encapsulation.is_some()
-                );
-                return Err(era_common::EraError::InvalidFormat(
-                    "Invalid authentication mode configuration".into(),
-                ));
-            }
-        };
+        // Create volume header
+        let header = SuperHeader::new(
+            archive_id,
+            recipients,
+            config.clone(),
+            *archive_salt.as_bytes(),
+        );
+
         let base_filename = self.output_path.file_name().unwrap_or_default();
 
         // Determine volume count based on erasure config if matrix distribution is enabled
@@ -719,7 +647,7 @@ impl ArchiveWriterBuilder {
         );
 
         // Store nonce context (salt) for block encryption
-        let nonce_context = *salt.as_bytes();
+        let nonce_context = *archive_salt.as_bytes();
 
         // Restore embedded LSM index if present (self-contained resume)
         if let ChunkIndexBackend::EmbeddedLsm { path } = &self.index_backend {
@@ -2345,39 +2273,67 @@ pub mod generic {
         /// Build the archive writer
         pub fn build(self) -> Result<GenericArchiveWriter<B::Writer>> {
             let archive_id = ArchiveId::new();
-            let salt = Salt::generate();
+            let archive_salt = era_crypto::Salt::generate();
 
-            // Derive encryption key using KeySession for per-block key derivation
+            // Generate Master Key (DEK)
+            let mut master_key = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut master_key);
+
+            // Password Recipient
             let password = self.password.unwrap_or_default();
+            let pwd_salt = era_crypto::Salt::generate();
             let kdf_params = KdfParams {
                 memory_cost: self.config.encryption.kdf_memory_cost,
                 time_cost: self.config.encryption.kdf_time_cost,
                 parallelism: 4,
             };
 
-            // Create KeySession - this derives the master key once (mlock-protected)
-            let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
+            let kek = era_crypto::derive_key(password.as_bytes(), &pwd_salt, &kdf_params)?;
+            let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
+            let nonce = Nonce::generate();
+            let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &master_key)?;
+
+            let mut combined = Vec::new();
+            combined.extend_from_slice(nonce.as_bytes());
+            combined.extend_from_slice(&encrypted_mk);
+
+            let p_params = crate::auth::PasswordSlotParams {
+                salt: *pwd_salt.as_bytes(),
+                kdf_memory_cost: kdf_params.memory_cost,
+                kdf_time_cost: kdf_params.time_cost,
+                kdf_parallelism: kdf_params.parallelism,
+            };
+
+            let slot = RecipientSlot {
+                r_type: RecipientType::ScryptPassword,
+                key_id: None,
+                params: bincode::serde::encode_to_vec(&p_params, bincode::config::standard())
+                    .map_err(|e| era_common::EraError::Serialization(e.to_string()))?,
+                encrypted_master_key: combined,
+            };
+
+            let recipients = vec![slot];
+
+            // Create KeySession
+            let session = KeySession::from_master_key(&master_key)?;
+            master_key.fill(0);
 
             // Derive volume key for volume 0
             let volume_key = session.derive_volume_key(0);
 
-            // Get password verification tag from session
-            let password_verification_tag = session.password_verification_tag();
-
             // Create volume writer
-            let header = SuperHeader::with_kdf_params(
+            let header = SuperHeader::new(
                 archive_id,
-                *salt.as_bytes(),
-                password_verification_tag,
-                self.config.encryption.kdf_memory_cost,
-                self.config.encryption.kdf_time_cost,
+                recipients,
                 self.config.clone(),
+                *archive_salt.as_bytes(),
             );
+
             let volume_writer =
                 VolumeWriter::create(&self.backend, Path::new(&self.filename), header)?;
 
             // Store nonce context for block encryption
-            let nonce_context = *salt.as_bytes();
+            let nonce_context = *archive_salt.as_bytes();
 
             // Store compression config for creating compressors on demand
             let compression_config = self.config.compression.clone();

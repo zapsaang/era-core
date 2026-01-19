@@ -17,15 +17,13 @@ pub use crate::chunk_processor::{ExtractStats, VerifyStats};
 use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
-use era_common::proto::KeyEncapsulation as ProtoKeyEncapsulation;
 use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result};
-use era_crypto::certificate::{EraKeyPair, KeyEncapsulation};
-use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
+use era_crypto::certificate::EraKeyPair;
+use era_crypto::{KeySession, VolumeKey};
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
-use era_volume::{AuthMode, Footer, SuperHeader, VolumeReader};
-use prost::Message;
+use era_volume::{Footer, SuperHeader, VolumeReader};
 use rand::RngCore;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -154,6 +152,14 @@ impl ArchiveReader {
     /// This function verifies the password early using the stored verification tag,
     /// providing clear error messages for incorrect passwords.
     pub fn open(path: &Path, password: &str) -> Result<Self> {
+        let provider = Box::new(crate::auth::PasswordProvider::new(password.to_string()));
+        Self::open_with_providers(path, vec![provider])
+    }
+
+    pub fn open_with_providers(
+        path: &Path,
+        providers: Vec<Box<dyn crate::auth::AuthProvider>>,
+    ) -> Result<Self> {
         info!("Opening archive: {}", path.display());
 
         let parent_dir = path.parent().unwrap_or(Path::new("."));
@@ -295,26 +301,37 @@ impl ArchiveReader {
         // Use first available reader for key derivation (all volumes share same crypto params)
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
-        let salt = Salt::from_bytes(header.crypto_anchor.salt);
-        let kdf_params = KdfParams {
-            memory_cost: header.crypto_anchor.kdf_memory_cost,
-            time_cost: header.crypto_anchor.kdf_time_cost,
-            parallelism: header.crypto_anchor.kdf_parallelism,
-        };
 
-        // Create KeySession for per-block key derivation (mlock-protected)
-        let session = KeySession::new(password.as_bytes(), &salt, &kdf_params)?;
-
-        // Verify password using stored verification tag
-        if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
-            return Err(EraError::InvalidKey("Incorrect password".to_string()));
+        let mut master_key = None;
+        for slot in &header.recipients {
+            for provider in &providers {
+                if let Ok(Some(mk)) = provider.try_unlock(slot) {
+                    master_key = Some(mk);
+                    break;
+                }
+            }
+            if master_key.is_some() {
+                break;
+            }
         }
+
+        let master_key_bytes = master_key.ok_or(EraError::InvalidKey(
+            "No valid credentials found".to_string(),
+        ))?;
+
+        let mk_array: [u8; 32] = master_key_bytes
+            .try_into()
+            .map_err(|_| EraError::InvalidKey("Invalid master key length".to_string()))?;
+
+        // Create KeySession
+        let session = KeySession::from_master_key(&mk_array)?;
 
         // Derive volume key for volume 0
         let volume_key = session.derive_volume_key(0);
 
-        // Store nonce context and compression config for creating temporary unpackers
-        let nonce_context = header.crypto_anchor.salt;
+        // Store nonce context
+        let nonce_context = header.salt;
+
         let compression_level = header.config.compression.level;
         let compression_algorithm = header.config.compression.algorithm;
 
@@ -427,16 +444,12 @@ impl ArchiveReader {
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
 
-        if !session.verify_password(&header.crypto_anchor.password_verification_tag) {
-            return Err(EraError::InvalidKey("Incorrect password".to_string()));
-        }
-
         // 5. Clone session and derive volume key
         let owned_session = session.clone();
         let volume_key = owned_session.derive_volume_key(0);
 
         // Store nonce context and compression config
-        let nonce_context = header.crypto_anchor.salt;
+        let nonce_context = header.salt;
         let compression_level = header.config.compression.level;
         let compression_algorithm = header.config.compression.algorithm;
 
@@ -477,191 +490,8 @@ impl ArchiveReader {
     /// - The keypair doesn't match the certificate used to create the archive
     /// - The key encapsulation data is corrupted
     pub fn open_with_keypair(path: &Path, keypair: &EraKeyPair) -> Result<Self> {
-        info!("Opening archive with certificate: {}", path.display());
-
-        let parent_dir = path.parent().unwrap_or(Path::new("."));
-        let backend = LocalStorageBackend::new(parent_dir);
-        let base_filename = path.file_name().unwrap_or_default();
-
-        // Open first volume to get header
-        let first_reader = VolumeReader::open(&backend, Path::new(base_filename))?;
-
-        // Check authentication mode
-        let auth_mode = first_reader.header().crypto_anchor.auth_mode.clone();
-        match &auth_mode {
-            AuthMode::Password => {
-                return Err(EraError::InvalidKey(
-                    "Archive was created with password authentication. Use open() instead.".into(),
-                ));
-            }
-            AuthMode::Certificate | AuthMode::Hybrid => {
-                // Certificate mode - proceed
-            }
-        }
-
-        // Get key encapsulation data from header
-        let encap_bytes = first_reader
-            .header()
-            .crypto_anchor
-            .key_encapsulation
-            .as_ref()
-            .ok_or_else(|| {
-                EraError::InvalidFormat(
-                    "Certificate mode archive missing key encapsulation data".into(),
-                )
-            })?
-            .clone();
-
-        // Deserialize key encapsulation
-        let proto = ProtoKeyEncapsulation::decode(&*encap_bytes).map_err(|e| {
-            EraError::InvalidFormat(format!("Failed to decode key encapsulation proto: {}", e))
-        })?;
-        let encapsulation = KeyEncapsulation::from_proto(proto)?;
-
-        // Decapsulate to get master key
-        let decapsulated = keypair.decapsulate(&encapsulation)?;
-
-        // Create KeySession from master key
-        let session = KeySession::from_master_key(&decapsulated.to_array())?;
-
-        // Verify the key works by checking the verification tag
-        let verification_tag = first_reader
-            .header()
-            .crypto_anchor
-            .password_verification_tag;
-        if !session.verify_password(&verification_tag) {
-            return Err(EraError::InvalidKey(
-                "Keypair does not match the certificate used to create this archive".into(),
-            ));
-        }
-
-        info!("Certificate authentication successful");
-
-        // Now scan for all volumes
-        let first_vol_sequence = first_reader.header().volume_sequence as usize;
-        let total_volumes = first_reader.header().total_volumes as usize;
-        let erasure_config = first_reader.header().config.erasure;
-        let first_archive_id = first_reader.header().archive_id;
-        let salt = first_reader.header().crypto_anchor.salt;
-        let compression_level = first_reader.header().config.compression.level;
-        let compression_algorithm = first_reader.header().config.compression.algorithm;
-
-        let scan_tolerance = if let Some(config) = erasure_config {
-            (config.parity_shards as usize + 1).max(2)
-        } else {
-            2
-        };
-
-        const MAX_SCAN: usize = 32;
-        let scan_limit = if total_volumes > 0 {
-            total_volumes
-        } else {
-            MAX_SCAN
-        };
-
-        let base_str = base_filename.to_string_lossy();
-        let base_path = if base_str.ends_with(".era") {
-            PathBuf::from(base_filename)
-        } else {
-            let s = base_str.to_string();
-            if let Some(idx) = s.rfind(".era.") {
-                PathBuf::from(&s[..idx + 4])
-            } else {
-                PathBuf::from(base_filename)
-            }
-        };
-
-        let mut found_readers: Vec<(usize, VolumeReader<era_storage::LocalStorageReader>)> =
-            Vec::new();
-        let mut missing_count = 0;
-        let mut first_reader_opt = Some(first_reader);
-
-        for i in 0..scan_limit {
-            let volume_path = if i == 0 {
-                base_path.clone()
-            } else {
-                let mut p = base_path.as_os_str().to_os_string();
-                p.push(format!(".{:03}", i));
-                PathBuf::from(p)
-            };
-
-            let full_path = parent_dir.join(&volume_path);
-
-            if i == first_vol_sequence {
-                if let Some(reader) = first_reader_opt.take() {
-                    found_readers.push((first_vol_sequence, reader));
-                    missing_count = 0;
-                }
-                continue;
-            }
-
-            if !full_path.exists() {
-                missing_count += 1;
-                if total_volumes > 0 {
-                    continue;
-                } else if missing_count >= scan_tolerance {
-                    break;
-                }
-                continue;
-            }
-
-            missing_count = 0;
-
-            match VolumeReader::open(&backend, &volume_path) {
-                Ok(reader) => {
-                    if reader.header().archive_id == first_archive_id {
-                        let vol_seq = reader.header().volume_sequence as usize;
-                        found_readers.push((vol_seq, reader));
-                    } else {
-                        tracing::warn!(
-                            "Volume {} has different archive_id, skipping",
-                            volume_path.display()
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to open volume {}: {}", volume_path.display(), e);
-                }
-            }
-        }
-
-        if let Some(reader) = first_reader_opt {
-            found_readers.push((first_vol_sequence, reader));
-        }
-
-        found_readers.sort_by_key(|(seq, _)| *seq);
-
-        let volume_indices: Vec<usize> = found_readers.iter().map(|(seq, _)| *seq).collect();
-        let volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>> =
-            found_readers.into_iter().map(|(_, r)| r).collect();
-
-        if volume_readers.is_empty() {
-            return Err(EraError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "No valid volumes found",
-            )));
-        }
-
-        info!(
-            "Opened {} volumes at sequences {:?}",
-            volume_readers.len(),
-            volume_indices
-        );
-
-        let volume_key = session.derive_volume_key(0);
-        let nonce_context = salt;
-
-        Ok(Self {
-            volume_readers,
-            volume_indices,
-            session,
-            volume_key,
-            nonce_context,
-            compression_level,
-            compression_algorithm,
-            catalog: None,
-            embedded_lsm_dir: None,
-        })
+        let provider = Box::new(crate::auth::CertificateProvider::new(keypair.clone()));
+        Self::open_with_providers(path, vec![provider])
     }
 
     /// Create a fresh compressor based on configuration.
@@ -751,7 +581,7 @@ impl ArchiveReader {
             .index
             .entries
             .first()
-            .ok_or_else(|| EraError::EmptyCatalog)?;
+            .ok_or(EraError::EmptyCatalog)?;
         let start = first_entry.offset as usize;
         let end = start + first_entry.length as usize;
         if end > unpacked.data.len() {

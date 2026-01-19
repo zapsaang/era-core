@@ -79,6 +79,8 @@ fn bench_chunking_configs(c: &mut Criterion) {
             min_size: avg / 4,
             avg_size: avg,
             max_size: avg * 4,
+            normalization_level: Default::default(),
+            rolling_hash_seed: 0,
         };
         let chunker = Chunker::new(config);
 

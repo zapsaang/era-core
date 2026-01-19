@@ -975,17 +975,13 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 decoded = Some(chunks);
             }
 
-            if decoded.is_none() {
-                if parity_shards > 0 {
-                    let mut override_shards = shard_array.clone();
-                    override_shards[i] = None;
-                    if let Ok(alt_recovered) =
-                        coder.recover_data_shards(&override_shards, shard_size)
-                    {
-                        if let Some(chunks) = attempt_decode(&alt_recovered[i]) {
-                            decoded = Some(chunks);
-                            self.stats.corrupted_shards += 1;
-                        }
+            if decoded.is_none() && parity_shards > 0 {
+                let mut override_shards = shard_array.clone();
+                override_shards[i] = None;
+                if let Ok(alt_recovered) = coder.recover_data_shards(&override_shards, shard_size) {
+                    if let Some(chunks) = attempt_decode(&alt_recovered[i]) {
+                        decoded = Some(chunks);
+                        self.stats.corrupted_shards += 1;
                     }
                 }
             }

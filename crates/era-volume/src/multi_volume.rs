@@ -310,15 +310,12 @@ mod tests {
     use era_storage::LocalStorageBackend;
     use tempfile::TempDir;
 
-    /// Test verification tag for unit tests
-    const TEST_VERIFICATION_TAG: [u8; 16] = [0xABu8; 16];
-
     fn create_test_header() -> SuperHeader {
         SuperHeader::new(
             ArchiveId::new(),
-            [0u8; 16],
-            TEST_VERIFICATION_TAG,
+            vec![],
             ArchiveConfig::default(),
+            [0u8; 16],
         )
     }
 
