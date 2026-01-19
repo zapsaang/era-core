@@ -1,4 +1,6 @@
 use era_engine::ArchiveWriter;
+use era_storage::LocalStorageBackend;
+use era_volume::VolumeReader;
 use tempfile::TempDir;
 
 #[test]
@@ -15,27 +17,19 @@ fn test_mandatory_lsm_index_creation() {
         .build()
         .expect("Failed to build writer");
 
-    // Check 1: LSM Index Directory
-    // By convention, we expect the index to be at .<filename>.idx (hidden)
-    // matches implementation logic in ArchiveWriterBuilder::new
-    let file_name = archive_path.file_name().unwrap().to_string_lossy();
-    let expected_index_path = archive_path
-        .parent()
-        .unwrap()
-        .join(format!(".{}.idx", file_name));
-
-    assert!(
-        expected_index_path.exists(),
-        "LSM Index directory must be created by default at {}",
-        expected_index_path.display()
-    );
-    assert!(
-        expected_index_path.is_dir(),
-        "LSM Index must be a directory"
-    );
-
-    // Close writer to flush everything
+    // Close writer to flush everything and embed the LSM manifest
     writer.finalize().expect("Finalize failed");
+
+    // Check 1: Embedded LSM manifest is written by default
+    let backend = LocalStorageBackend::new(temp_dir.path());
+    let file_name = archive_path.file_name().unwrap();
+    let reader = VolumeReader::open(&backend, std::path::Path::new(file_name))
+        .expect("Failed to open volume");
+    let footer = reader.footer().expect("Missing footer");
+    assert!(
+        footer.has_lsm_manifest(),
+        "Embedded LSM manifest should be present by default"
+    );
 }
 
 #[test]

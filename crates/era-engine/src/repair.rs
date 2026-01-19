@@ -579,7 +579,19 @@ pub fn repair_archive_matrix(
         .iter()
         .map(|reader| {
             let (_, end) = reader.data_region();
-            reader.footer().map(|f| f.catalog_offset).unwrap_or(end)
+            if let Some(f) = reader.footer() {
+                let mut limit = if f.has_catalog_location() {
+                    f.catalog_offset
+                } else {
+                    end
+                };
+                if f.has_lsm_manifest() && f.lsm_manifest_offset < limit {
+                    limit = f.lsm_manifest_offset;
+                }
+                limit
+            } else {
+                end
+            }
         })
         .collect();
 

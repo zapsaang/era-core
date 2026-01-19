@@ -128,6 +128,9 @@ message Footer {
   uint32 catalog_block_id = 9;
   uint64 last_checkpoint_offset = 10;
   bytes checksum = 11;
+  uint64 lsm_manifest_offset = 12;
+  uint32 lsm_manifest_size = 13;
+  uint32 lsm_manifest_block_id = 14;
   // Previously _reserved array, now using protobuf extensibility
 }
 

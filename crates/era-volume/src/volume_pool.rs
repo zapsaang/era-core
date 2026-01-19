@@ -421,16 +421,19 @@ impl<B: StorageBackend> VolumePool<B> {
     }
 
     /// Finalize all volumes.
-    pub fn finalize(self) -> Result<VolumePoolStats> {
-        self.finalize_with_catalog(0, 0, 0)
+    pub fn finalize(&mut self) -> Result<VolumePoolStats> {
+        self.finalize_with_catalog(0, 0, 0, 0, 0, 0)
     }
 
     /// Finalize all volumes with catalog information.
     pub fn finalize_with_catalog(
-        mut self,
+        &mut self,
         catalog_offset: u64,
         catalog_size: u32,
         catalog_block_id: u32,
+        lsm_manifest_offset: u64,
+        lsm_manifest_size: u32,
+        lsm_manifest_block_id: u32,
     ) -> Result<VolumePoolStats> {
         let mut stats = self.stats.clone();
 
@@ -438,7 +441,14 @@ impl<B: StorageBackend> VolumePool<B> {
             let size = writer.current_size();
             let sequence = self.sequences[i];
             stats.volume_sizes.push((sequence, size));
-            writer.finalize_with_catalog(catalog_offset, catalog_size, catalog_block_id)?;
+            writer.finalize_with_catalog(
+                catalog_offset,
+                catalog_size,
+                catalog_block_id,
+                lsm_manifest_offset,
+                lsm_manifest_size,
+                lsm_manifest_block_id,
+            )?;
         }
 
         Ok(stats)
@@ -446,8 +456,9 @@ impl<B: StorageBackend> VolumePool<B> {
 
     /// Finalize all volumes with per-volume catalog information.
     pub fn finalize_with_catalogs(
-        mut self,
+        &mut self,
         catalog_locations: &[(u64, u32, u32)],
+        lsm_locations: Option<&[(u64, u32, u32)]>,
     ) -> Result<VolumePoolStats> {
         if catalog_locations.len() != self.writers.len() {
             return Err(era_common::EraError::InvalidConfig(format!(
@@ -457,6 +468,16 @@ impl<B: StorageBackend> VolumePool<B> {
             )));
         }
 
+        if let Some(lsm) = lsm_locations {
+            if lsm.len() != self.writers.len() {
+                return Err(era_common::EraError::InvalidConfig(format!(
+                    "lsm_locations length {} does not match volume count {}",
+                    lsm.len(),
+                    self.writers.len()
+                )));
+            }
+        }
+
         let mut stats = self.stats.clone();
 
         for (i, writer) in self.writers.drain(..).enumerate() {
@@ -464,7 +485,17 @@ impl<B: StorageBackend> VolumePool<B> {
             let sequence = self.sequences[i];
             stats.volume_sizes.push((sequence, size));
             let (offset, size_u32, block_id) = catalog_locations[i];
-            writer.finalize_with_catalog(offset, size_u32, block_id)?;
+            let (lsm_offset, lsm_size, lsm_block_id) = lsm_locations
+                .and_then(|lsm| lsm.get(i).copied())
+                .unwrap_or((0, 0, 0));
+            writer.finalize_with_catalog(
+                offset,
+                size_u32,
+                block_id,
+                lsm_offset,
+                lsm_size,
+                lsm_block_id,
+            )?;
         }
 
         Ok(stats)
@@ -608,7 +639,7 @@ mod tests {
         let config = VolumePoolConfig::new(&base_path, 2);
         let header = create_test_header();
 
-        let pool = VolumePool::create(backend, config, header).unwrap();
+        let mut pool = VolumePool::create(backend, config, header).unwrap();
         let stats = pool.finalize().unwrap();
 
         assert_eq!(stats.volume_count, 2);

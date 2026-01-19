@@ -240,7 +240,7 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
         for reader in volume_readers {
             let (start, end) = reader.data_region();
             let footer = reader.footer();
-            let limit = if let Some(f) = footer {
+            let mut limit = if let Some(f) = footer {
                 if f.has_catalog_location() {
                     f.catalog_offset
                 } else {
@@ -249,6 +249,12 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             } else {
                 end
             };
+
+            if let Some(f) = footer {
+                if f.has_lsm_manifest() && f.lsm_manifest_offset < limit {
+                    limit = f.lsm_manifest_offset;
+                }
+            }
             current_offsets.push(start);
             data_ends.push(limit);
         }
@@ -679,7 +685,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
         for reader in volume_readers {
             let (start, end) = reader.data_region();
             let footer = reader.footer();
-            let limit = if let Some(f) = footer {
+            let mut limit = if let Some(f) = footer {
                 if f.has_catalog_location() {
                     f.catalog_offset
                 } else {
@@ -688,6 +694,12 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             } else {
                 end
             };
+
+            if let Some(f) = footer {
+                if f.has_lsm_manifest() && f.lsm_manifest_offset < limit {
+                    limit = f.lsm_manifest_offset;
+                }
+            }
             current_offsets.push(start);
             data_ends.push(limit);
         }
@@ -741,6 +753,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         let mut stripe_lengths: Option<Vec<u32>> = None;
         let header_prefix_len = data_shards * 4;
 
+        let mut any_shard_seen = false;
+
         for shard_idx in 0..stripe_size {
             let vol_idx = self.distribution_strategy.calculate_volume(
                 shard_idx,
@@ -753,32 +767,22 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 let reader = &self.volume_readers[idx];
 
                 if self.current_offsets[idx] >= self.data_ends[idx] {
-                    if shard_idx == 0 {
-                        return None;
-                    }
-                    self.pending_blocks.push_back(Err(EraError::ErasureError(
-                        "Unexpected EOF while reading stripe".into(),
-                    )));
-                    return self.pending_blocks.pop_front();
+                    continue;
                 }
 
                 let prefix_bytes =
                     match reader.read_raw(self.current_offsets[idx], header_prefix_len) {
-                        Ok(bytes) if bytes.len() == header_prefix_len => bytes,
+                        Ok(bytes) if bytes.len() == header_prefix_len => {
+                            any_shard_seen = true;
+                            bytes
+                        }
                         Ok(_) => {
-                            if shard_idx == 0 {
-                                return None;
-                            }
                             self.current_offsets[idx] = self.data_ends[idx];
                             continue;
                         }
-                        Err(e) => {
-                            if shard_idx == 0 {
-                                return None;
-                            }
+                        Err(_) => {
                             self.current_offsets[idx] = self.data_ends[idx];
-                            self.pending_blocks.push_back(Err(e));
-                            return self.pending_blocks.pop_front();
+                            continue;
                         }
                     };
 
@@ -796,28 +800,18 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 ) {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                     Ok(_) => {
-                        if shard_idx == 0 {
-                            return None;
-                        }
                         self.current_offsets[idx] = self.data_ends[idx];
                         continue;
                     }
-                    Err(e) => {
-                        if shard_idx == 0 {
-                            return None;
-                        }
+                    Err(_) => {
                         self.current_offsets[idx] = self.data_ends[idx];
-                        self.pending_blocks.push_back(Err(e));
-                        return self.pending_blocks.pop_front();
+                        continue;
                     }
                 };
 
                 let shard_header = match ShardHeader::from_bytes(&header_bytes) {
                     Some(h) => h,
                     None => {
-                        if shard_idx == 0 {
-                            return None;
-                        }
                         self.current_offsets[idx] = self.data_ends[idx];
                         continue;
                     }
@@ -869,7 +863,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         }
 
         if max_len == 0 {
-            return None;
+            return if any_shard_seen {
+                self.pending_blocks.push_back(Err(EraError::ErasureError(
+                    "Unexpected EOF while reading stripe".into(),
+                )));
+                self.pending_blocks.pop_front()
+            } else {
+                None
+            };
         }
 
         let shard_size = if max_len.is_multiple_of(2) {
@@ -909,66 +910,92 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
         for (i, shard_data) in recovered.into_iter().enumerate().take(data_shards) {
             let block_index = (self.current_stripe_index * data_shards + i) as u32;
-            let mut candidate_lengths: Vec<usize> = Vec::new();
+            let build_candidate_lengths = |data: &Vec<u8>| {
+                let mut candidate_lengths: Vec<usize> = Vec::new();
+                let mut trimmed_len = data.len();
 
-            let mut trimmed_len = shard_data.len();
+                if let Some(len) = data_lengths[i] {
+                    candidate_lengths.push(len as usize);
+                } else {
+                    for len in data_lengths.iter().flatten() {
+                        candidate_lengths.push(*len as usize);
+                    }
 
-            if let Some(len) = data_lengths[i] {
-                candidate_lengths.push(len as usize);
-            } else {
-                for len in data_lengths.iter().flatten() {
-                    candidate_lengths.push(*len as usize);
+                    while trimmed_len > 0 && data[trimmed_len - 1] == 0 {
+                        trimmed_len -= 1;
+                    }
+                    if trimmed_len > 0 {
+                        candidate_lengths.push(trimmed_len);
+                    }
+
+                    if shard_size > 0 && shard_size <= data.len() {
+                        candidate_lengths.push(shard_size);
+                    }
                 }
 
-                while trimmed_len > 0 && shard_data[trimmed_len - 1] == 0 {
-                    trimmed_len -= 1;
-                }
-                if trimmed_len > 0 {
-                    candidate_lengths.push(trimmed_len);
-                }
-
-                if shard_size > 0 && shard_size <= shard_data.len() {
-                    candidate_lengths.push(shard_size);
-                }
-            }
-
-            candidate_lengths.sort_unstable_by(|a, b| b.cmp(a));
-            candidate_lengths.dedup();
+                candidate_lengths.sort_unstable_by(|a, b| b.cmp(a));
+                candidate_lengths.dedup();
+                candidate_lengths
+            };
 
             let mut decoded = None;
             let mut last_err = None;
 
-            for original_len in candidate_lengths.iter().copied() {
-                if original_len == 0 || original_len > shard_data.len() {
-                    continue;
-                }
-
-                let mut data = shard_data.clone();
-                data.truncate(original_len);
-
-                if data.iter().all(|&b| b == 0) {
-                    decoded = Some(ChunkVec::new());
-                    break;
-                }
-
-                let encrypted_block = era_common::EncryptedMacroBlock {
-                    block_id: BlockId::new(block_index as u64),
-                    data: Bytes::from(data),
-                    original_size: original_len as u32,
-                    compressed_size: original_len as u32,
-                    chunk_count: 0,
-                };
-
-                match self.unpacker.extract_all_chunks(&encrypted_block) {
-                    Ok(chunks) => {
-                        decoded = Some(chunks);
-                        break;
+            let mut attempt_decode = |data: &Vec<u8>| -> Option<ChunkVec> {
+                let candidate_lengths = build_candidate_lengths(data);
+                for original_len in candidate_lengths.iter().copied() {
+                    if original_len == 0 || original_len > data.len() {
+                        continue;
                     }
-                    Err(e) => {
-                        last_err = Some(e);
+
+                    let mut trimmed = data.clone();
+                    trimmed.truncate(original_len);
+
+                    if trimmed.iter().all(|&b| b == 0) {
+                        return Some(ChunkVec::new());
+                    }
+
+                    let encrypted_block = era_common::EncryptedMacroBlock {
+                        block_id: BlockId::new(block_index as u64),
+                        data: Bytes::from(trimmed),
+                        original_size: original_len as u32,
+                        compressed_size: original_len as u32,
+                        chunk_count: 0,
+                    };
+
+                    match self.unpacker.extract_all_chunks(&encrypted_block) {
+                        Ok(chunks) => return Some(chunks),
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                None
+            };
+
+            if let Some(chunks) = attempt_decode(&shard_data) {
+                decoded = Some(chunks);
+            }
+
+            if decoded.is_none() {
+                if parity_shards > 0 {
+                    let mut override_shards = shard_array.clone();
+                    override_shards[i] = None;
+                    if let Ok(alt_recovered) =
+                        coder.recover_data_shards(&override_shards, shard_size)
+                    {
+                        if let Some(chunks) = attempt_decode(&alt_recovered[i]) {
+                            decoded = Some(chunks);
+                            self.stats.corrupted_shards += 1;
+                        }
                     }
                 }
             }
+
+            let mut trimmed_len = shard_data.len();
+            while trimmed_len > 0 && shard_data[trimmed_len - 1] == 0 {
+                trimmed_len -= 1;
+            }
+
+            let candidate_lengths = build_candidate_lengths(&shard_data);
 
             if decoded.is_none() && data_lengths[i].is_none() && trimmed_len < shard_size {
                 let padding = shard_size.saturating_sub(trimmed_len);

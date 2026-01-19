@@ -32,6 +32,7 @@ parking_lot = { workspace = true }
 hex = "0.4"
 metrics = { workspace = true }
 walkdir = "2.5.0"
+bincode = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

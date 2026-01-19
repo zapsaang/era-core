@@ -24,19 +24,28 @@ use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{
-    BlockMeta, PackedBlock, PackedChunk, SessionBlockBuilder, StagingPool, Stripe, StripeBuffer,
+    BlockMeta, PackedBlock, PackedChunk, SessionBlockBuilder, SessionBlockUnpacker, StagingPool,
+    Stripe, StripeBuffer,
 };
 use era_storage::LocalStorageBackend;
-use era_volume::{SuperHeader, VolumePool, VolumePoolConfig, VolumeWriter};
+use era_volume::{SuperHeader, VolumePool, VolumePoolConfig, VolumeReader, VolumeWriter};
 use prost::Message;
+use rand::RngCore;
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
+const INTERNAL_INDEX_NAME: &str = ".era/meta/index.bin";
+const INTERNAL_CHECKPOINT_NAME: &str = ".era/meta/checkpoint.bin";
+const EMBEDDED_INDEX_VERSION: u32 = 1;
+const INTERNAL_META_PREFIX: &str = ".era/meta/";
+
 use crate::checkpoint::CheckpointManager;
-use crate::chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex};
+use crate::chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend};
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 
 /// Authentication mode for archive encryption
@@ -80,6 +89,69 @@ fn chunker_config_from_archive(config: &ArchiveConfig) -> Result<ChunkerConfig> 
     ))
 }
 
+fn create_embedded_lsm_path() -> PathBuf {
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 8];
+    rng.fill_bytes(&mut bytes);
+    let suffix = u64::from_le_bytes(bytes);
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("era_lsm_embedded_{:016x}", suffix));
+    let _ = std::fs::create_dir_all(&path);
+    path
+}
+
+fn create_compressor_with_config(config: &era_common::CompressionConfig) -> Box<dyn Compressor> {
+    match config.algorithm {
+        CompressionAlgorithm::None => Box::new(NoCompressor),
+        CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(config.level)),
+        CompressionAlgorithm::LZ4 => Box::new(era_codec::LZ4Compressor::new(config.level)),
+    }
+}
+
+fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
+    let mut cursor = std::io::Cursor::new(data);
+    let mut count_bytes = [0u8; 4];
+    cursor
+        .read_exact(&mut count_bytes)
+        .map_err(era_common::EraError::Io)?;
+    let count = u32::from_le_bytes(count_bytes) as usize;
+
+    for _ in 0..count {
+        let mut len_bytes = [0u8; 4];
+        cursor
+            .read_exact(&mut len_bytes)
+            .map_err(era_common::EraError::Io)?;
+        let path_len = u32::from_le_bytes(len_bytes) as usize;
+
+        let mut path_buf = vec![0u8; path_len];
+        cursor
+            .read_exact(&mut path_buf)
+            .map_err(era_common::EraError::Io)?;
+        let rel_path = String::from_utf8(path_buf)
+            .map_err(|e| era_common::EraError::Deserialization(e.to_string()))?;
+
+        let mut size_bytes = [0u8; 8];
+        cursor
+            .read_exact(&mut size_bytes)
+            .map_err(era_common::EraError::Io)?;
+        let data_len = u64::from_le_bytes(size_bytes) as usize;
+
+        let mut file_data = vec![0u8; data_len];
+        cursor
+            .read_exact(&mut file_data)
+            .map_err(era_common::EraError::Io)?;
+
+        let file_path = path.join(rel_path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).map_err(era_common::EraError::Io)?;
+        }
+        std::fs::write(file_path, file_data).map_err(era_common::EraError::Io)?;
+    }
+
+    Ok(())
+}
+
 /// Builder for creating an ArchiveWriter
 pub struct ArchiveWriterBuilder {
     output_path: PathBuf,
@@ -106,6 +178,8 @@ pub struct ArchiveWriterBuilder {
     index_backend: ChunkIndexBackend,
     /// Target size for encrypted blocks (default: 4MB)
     target_block_size: Option<usize>,
+    /// Enable packing of multiple small files into a single chunk
+    enable_small_file_packing: bool,
 }
 
 impl ArchiveWriterBuilder {
@@ -113,18 +187,7 @@ impl ArchiveWriterBuilder {
     pub fn new(output_path: impl Into<PathBuf>) -> Self {
         let output_path = output_path.into();
 
-        // Mandatory Default: LSM Index
-        // We derive a sensible default path for the index: .<filename>.idx
-        // This ensures every archive has a persistent index by default.
-        let file_name = output_path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "archive".to_string());
-
-        let index_path = output_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(format!(".{}.idx", file_name));
+        let embedded_lsm_path = create_embedded_lsm_path();
 
         Self {
             output_path,
@@ -139,14 +202,18 @@ impl ArchiveWriterBuilder {
             volume_count: 1,
             enable_matrix_distribution: false,
             max_volume_size: None,
-            index_backend: ChunkIndexBackend::Lsm { path: index_path }, // MANDATORY DEFAULT
+            index_backend: ChunkIndexBackend::EmbeddedLsm {
+                path: embedded_lsm_path,
+            },
             target_block_size: None,
+            enable_small_file_packing: true,
         }
     }
 
     /// Set the chunk index backend.
     ///
-    /// **Lsm** (default): RocksDB-based LSM-Tree, persistent, supports incremental backups.
+    /// **EmbeddedLsm** (default): RocksDB-based LSM-Tree stored inside the archive.
+    /// **Lsm**: RocksDB-based LSM-Tree stored at an external path.
     /// **Memory**: In-memory HashMap, no persistence, not recommended for production.
     ///
     /// # Example
@@ -163,7 +230,7 @@ impl ArchiveWriterBuilder {
         self
     }
 
-    /// Use LSM-Tree index backend (recommended for production).
+    /// Use LSM-Tree index backend at an external path.
     ///
     /// This enables persistent chunk deduplication, which is essential for:
     /// - Incremental backups
@@ -311,6 +378,14 @@ impl ArchiveWriterBuilder {
     /// Default is 4MB.
     pub fn target_block_size(mut self, size: usize) -> Self {
         self.target_block_size = Some(size);
+        self
+    }
+
+    /// Enable packing of multiple small files into a single chunk.
+    ///
+    /// Disabled by default to preserve deduplication efficiency across identical datasets.
+    pub fn enable_small_file_packing(mut self, enable: bool) -> Self {
+        self.enable_small_file_packing = enable;
         self
     }
 
@@ -568,6 +643,50 @@ impl ArchiveWriterBuilder {
         // Store nonce context (salt) for block encryption
         let nonce_context = *salt.as_bytes();
 
+        // Restore embedded LSM index if present (self-contained resume)
+        if let ChunkIndexBackend::EmbeddedLsm { path } = &self.index_backend {
+            if self.output_path.exists() {
+                let parent_dir = self.output_path.parent().unwrap_or(Path::new("."));
+                let backend = LocalStorageBackend::new(parent_dir);
+                let volume_path = self.output_path.file_name().unwrap_or_default();
+
+                if let Ok(reader) = VolumeReader::open(&backend, Path::new(volume_path)) {
+                    if let Some(footer) = reader.footer() {
+                        if footer.has_lsm_manifest() {
+                            let location = BlockLocation {
+                                volume_id: reader.header().volume_id,
+                                slot_index: footer.lsm_manifest_block_id,
+                                physical_offset: footer.lsm_manifest_offset,
+                                encrypted_size: footer.lsm_manifest_size,
+                                erasure_info: None,
+                                shard_offsets: None,
+                                shard_volumes: None,
+                            };
+
+                            let encrypted_block = reader.read_block(&location)?;
+                            let compressor =
+                                create_compressor_with_config(&reader.header().config.compression);
+                            let unpacker = SessionBlockUnpacker::new(
+                                &session,
+                                &volume_key,
+                                nonce_context,
+                                compressor,
+                            );
+                            let unpacked = unpacker.unpack(&encrypted_block)?;
+                            if let Some(first_entry) = unpacked.index.entries.first() {
+                                let start = first_entry.offset as usize;
+                                let end = start + first_entry.length as usize;
+                                if end <= unpacked.data.len() {
+                                    let data = unpacked.data.slice(start..end);
+                                    restore_lsm_dir_from_manifest(path, &data)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Configure file reader with CDC if enabled
         let chunker_config = if self.enable_cdc {
             let config = match self.chunker_config {
@@ -623,6 +742,11 @@ impl ArchiveWriterBuilder {
 
         // Create chunk index with configured backend
         let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index(self.index_backend.clone())?;
+        let mut embedded_index: HashMap<ChunkHash, BlockLocation> = HashMap::new();
+        let embedded_lsm_path = match &self.index_backend {
+            ChunkIndexBackend::EmbeddedLsm { path } => Some(path.clone()),
+            _ => None,
+        };
 
         // Load existing chunk locations from checkpoint if resuming
         if let Some(ref mgr) = checkpoint_manager {
@@ -631,6 +755,7 @@ impl ArchiveWriterBuilder {
                 chunk_index.start_batch();
                 for (hash, location) in mgr.written_chunks() {
                     chunk_index.put(*hash, location.clone())?;
+                    embedded_index.insert(*hash, location.clone());
                 }
                 chunk_index.commit_batch()?;
                 info!(
@@ -698,9 +823,20 @@ impl ArchiveWriterBuilder {
             // Small file packing
             small_file_buffer: Vec::new(),
             small_file_total_size: 0,
-            small_file_threshold: 16 * 1024,  // 16KB
-            pack_size_threshold: 1024 * 1024, // 1MB
+            small_file_threshold: if self.enable_small_file_packing {
+                16 * 1024
+            } else {
+                0
+            },
+            pack_size_threshold: if self.enable_small_file_packing {
+                1024 * 1024
+            } else {
+                0
+            },
             max_buffered_files: 1000,
+            enable_small_file_packing: self.enable_small_file_packing,
+            embedded_index,
+            embedded_lsm_path,
         })
     }
 }
@@ -756,6 +892,10 @@ pub struct ArchiveWriter {
     /// - Memory efficiency at scale
     /// - Bloom filter accelerated lookups
     chunk_index: Arc<dyn ChunkIndex>,
+    /// Embedded snapshot of chunk index for self-contained recovery
+    embedded_index: HashMap<ChunkHash, BlockLocation>,
+    /// Path to embedded LSM working directory (if enabled)
+    embedded_lsm_path: Option<PathBuf>,
 
     // File reading
     file_reader: FileReader,
@@ -789,6 +929,26 @@ pub struct ArchiveWriter {
     pack_size_threshold: u64,
     /// Maximum number of files to buffer
     max_buffered_files: usize,
+    /// Enable packing of multiple small files into a single chunk
+    enable_small_file_packing: bool,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct EmbeddedIndexSnapshot {
+    version: u32,
+    entries: Vec<(ChunkHash, BlockLocation)>,
+}
+
+impl EmbeddedIndexSnapshot {
+    fn from_map(map: &HashMap<ChunkHash, BlockLocation>) -> Self {
+        let mut entries: Vec<(ChunkHash, BlockLocation)> =
+            map.iter().map(|(k, v)| (*k, v.clone())).collect();
+        entries.sort_by_key(|(hash, _)| hash.0);
+        Self {
+            version: EMBEDDED_INDEX_VERSION,
+            entries,
+        }
+    }
 }
 
 /// Entry for a small file waiting to be packed
@@ -865,7 +1025,8 @@ impl ArchiveWriter {
         let relative_path = stored_path.to_path_buf();
 
         // Small file path: buffer for packing (but not empty files)
-        if file_size > 0 && file_size < self.small_file_threshold {
+        if self.enable_small_file_packing && file_size > 0 && file_size < self.small_file_threshold
+        {
             debug!(
                 "Buffering small file: {} ({} bytes)",
                 disk_path.display(),
@@ -926,10 +1087,8 @@ impl ArchiveWriter {
     /// individual `add_file` calls by:
     /// - Batching catalog updates
     /// - Optimizing chunk buffer management
-    /// - Reducing per-file overhead
     ///
     /// ## Example
-    ///
     /// ```no_run
     /// # use std::path::Path;
     /// # use era_engine::ArchiveWriterBuilder;
@@ -1124,9 +1283,26 @@ impl ArchiveWriter {
         let file_count = buffered.len();
         self.small_file_total_size = 0;
 
-        // Create packed chunk
-        let mut packed = PackedChunk::new();
+        // Deterministic fingerprint alignment: group by hash and pack unique data in hash order
+        let mut grouped: HashMap<ChunkHash, Vec<&SmallFileEntry>> = HashMap::new();
         for entry in &buffered {
+            grouped.entry(entry.hash).or_default().push(entry);
+        }
+
+        let mut unique_entries: Vec<&SmallFileEntry> = grouped
+            .values()
+            .filter_map(|entries| entries.first().copied())
+            .collect();
+        unique_entries.sort_by_key(|entry| entry.hash.0);
+
+        let mut hash_to_index: HashMap<ChunkHash, usize> = HashMap::new();
+        for (idx, entry) in unique_entries.iter().enumerate() {
+            hash_to_index.insert(entry.hash, idx);
+        }
+
+        // Create packed chunk with unique files only (deterministic order)
+        let mut packed = PackedChunk::new();
+        for entry in &unique_entries {
             packed.add_file(&entry.data)?;
         }
 
@@ -1145,28 +1321,46 @@ impl ArchiveWriter {
 
         // Collect individual file hashes to ensure they get indexed
         // (This allows finding the packed chunk by looking up any small file hash)
-        let small_file_hashes: Vec<ChunkHash> = buffered.iter().map(|e| e.hash).collect();
+        let mut small_file_hashes: Vec<ChunkHash> = grouped.keys().copied().collect();
+        small_file_hashes.sort_by_key(|hash| hash.0);
 
-        // Process the packed chunk (write or buffer)
-        // Pass small_file_hashes so they are associated with the block location
-        self.process_packed_block(vec![packed_chunk], small_file_hashes)?;
+        // Pre-validation: reuse existing packed chunk when possible
+        if self.chunk_index.contains(&chunk_hash)? {
+            if let Some(existing_location) = self.chunk_index.get(&chunk_hash)? {
+                for hash in &small_file_hashes {
+                    if !self.chunk_index.contains(hash)? {
+                        self.record_chunk_location(*hash, existing_location.clone())?;
+                    }
+                }
+            } else {
+                self.process_packed_block(vec![packed_chunk], small_file_hashes)?;
+            }
+        } else {
+            // Process the packed chunk (write or buffer)
+            // Pass small_file_hashes so they are associated with the block location
+            self.process_packed_block(vec![packed_chunk], small_file_hashes)?;
+        }
 
         // Note: process_packed_block handles index update for both packed_hash
         // and all small_file_hashes.
 
         // Update catalog for each file
-        for (file_index, entry) in buffered.iter().enumerate() {
+        let packed_file_count = unique_entries.len();
+        for entry in buffered.iter() {
             // Check for dedup (file hash already exists)
             // Note: We check pre-write. If it exists, catalog points to old location.
             // If we just wrote it, we just updated the index.
 
             // Create chunk reference with packed info
+            let file_index = *hash_to_index
+                .get(&entry.hash)
+                .expect("packed file index must exist");
             let chunk_ref = ChunkRef::new_packed(
                 chunk_hash,
                 0, // offset within file (always 0 for single-chunk small files)
                 packed_chunk_size,
                 file_index,
-                file_count,
+                packed_file_count,
             );
 
             let catalog_entry = FileEntry::file(entry.path.clone(), entry.data.len() as u64)
@@ -1259,10 +1453,7 @@ impl ArchiveWriter {
 
             // Update index
             for hash in hashes {
-                self.chunk_index.put(hash, location.clone())?;
-                if let Some(ref mut mgr) = self.checkpoint_manager {
-                    mgr.record_chunk(hash, location.clone())?;
-                }
+                self.record_chunk_location(hash, location.clone())?;
             }
         }
         Ok(())
@@ -1439,10 +1630,7 @@ impl ArchiveWriter {
 
             // Update index
             for hash in &meta.chunk_hashes {
-                self.chunk_index.put(*hash, loc.clone())?;
-                if let Some(ref mut mgr) = self.checkpoint_manager {
-                    mgr.record_chunk(*hash, loc.clone())?;
-                }
+                self.record_chunk_location(*hash, loc.clone())?;
             }
         }
 
@@ -1509,11 +1697,46 @@ impl ArchiveWriter {
             }
         }
 
+        // Embed critical metadata in-archive (self-contained recovery)
+        self.write_internal_metadata()?;
+
+        // Flush any metadata chunks that were added
+        self.flush_pending()?;
+        if let Some(ref mut buffer) = self.stripe_buffer {
+            if !buffer.is_empty() {
+                let stripe = buffer.flush()?;
+                self.flush_stripe(stripe)?;
+            }
+        }
+
         // Sync checkpoint before writing catalog (atomic point)
         if let Some(ref mut mgr) = self.checkpoint_manager {
             mgr.sync()?;
             debug!("Checkpoint synced before catalog write");
         }
+
+        // Prepare embedded LSM manifest block (if enabled)
+        let lsm_locations = if let Some(lsm_path) = self.embedded_lsm_path.clone() {
+            self.chunk_index.flush()?;
+            let manifest_block_id = self.next_block_id();
+            let compression_config = self.compression_config.clone();
+            let session = self.session.clone();
+            let volume_key = self.volume_key.clone();
+            let nonce_context = self.nonce_context;
+            let pool = &mut self.volume_pool;
+
+            Some(Self::write_lsm_manifest_with(
+                pool,
+                &lsm_path,
+                &session,
+                &volume_key,
+                nonce_context,
+                &compression_config,
+                manifest_block_id,
+            )?)
+        } else {
+            None
+        };
 
         // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
@@ -1551,15 +1774,12 @@ impl ArchiveWriter {
             None
         };
 
-        // Handle finalization (Unified Mode)
-        let mut pool = self.volume_pool;
-
         // Matrix distribution mode: write catalog to each volume in the pool
-        let volume_count = pool.volume_count();
+        let volume_count = self.volume_pool.volume_count();
         let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
 
         for slot in 0..volume_count {
-            if let Some(writer) = pool.get_writer_mut(slot) {
+            if let Some(writer) = self.volume_pool.get_writer_mut(slot) {
                 let mut location = writer.write_block(&catalog_block)?;
                 // Override slot_index with actual block_id for correct key derivation during read
                 location.slot_index = catalog_block_id;
@@ -1592,7 +1812,9 @@ impl ArchiveWriter {
         );
 
         // Finalize the pool with per-volume catalog offsets
-        let pool_stats = pool.finalize_with_catalogs(&catalog_locations)?;
+        let pool_stats = self
+            .volume_pool
+            .finalize_with_catalogs(&catalog_locations, lsm_locations.as_deref())?;
 
         info!(
             "VolumePool finalized: {} volumes, {} total bytes, {} blocks",
@@ -1618,10 +1840,25 @@ impl ArchiveWriter {
 
         let stats = ArchiveStats {
             archive_id: self.archive_id,
-            total_files: self.catalog.file_count,
-            total_size: self.catalog.total_size,
+            total_files: self
+                .catalog
+                .entries
+                .iter()
+                .filter(|entry| !is_internal_path(&entry.path))
+                .count() as u64,
+            total_size: self
+                .catalog
+                .entries
+                .iter()
+                .filter(|entry| !is_internal_path(&entry.path))
+                .map(|entry| entry.size)
+                .sum(),
             blocks_written,
         };
+
+        if let Some(path) = &self.embedded_lsm_path {
+            let _ = std::fs::remove_dir_all(path);
+        }
 
         info!(
             "Archive finalized: {} files, {} bytes, {} blocks",
@@ -1630,6 +1867,102 @@ impl ArchiveWriter {
 
         Ok(stats)
     }
+
+    fn record_chunk_location(&mut self, hash: ChunkHash, location: BlockLocation) -> Result<()> {
+        self.chunk_index.put(hash, location.clone())?;
+        self.embedded_index.insert(hash, location.clone());
+        if let Some(ref mut mgr) = self.checkpoint_manager {
+            mgr.record_chunk(hash, location)?;
+        }
+        Ok(())
+    }
+
+    fn write_internal_metadata(&mut self) -> Result<()> {
+        if !self.embedded_index.is_empty() {
+            let snapshot = EmbeddedIndexSnapshot::from_map(&self.embedded_index);
+            let data = bincode::serde::encode_to_vec(snapshot, bincode::config::standard())
+                .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
+            self.add_bytes(INTERNAL_INDEX_NAME, &data)?;
+        }
+
+        if let Some(ref mgr) = self.checkpoint_manager {
+            let data = mgr.snapshot_bytes()?;
+            self.add_bytes(INTERNAL_CHECKPOINT_NAME, &data)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_lsm_manifest_with(
+        pool: &mut VolumePool<era_storage::LocalStorageBackend>,
+        lsm_path: &Path,
+        session: &KeySession,
+        volume_key: &VolumeKey,
+        nonce_context: [u8; 16],
+        compression_config: &era_common::CompressionConfig,
+        block_id: u64,
+    ) -> Result<Vec<(u64, u32, u32)>> {
+        let manifest_bytes = Self::serialize_lsm_dir(lsm_path)?;
+        let manifest_hash = era_crypto::hash(&manifest_bytes);
+        let manifest_chunk = UniqueChunk::new(Bytes::from(manifest_bytes), manifest_hash);
+
+        let compressor = create_compressor_with_config(compression_config);
+        let builder = SessionBlockBuilder::new(session, volume_key, nonce_context, compressor)
+            .with_starting_block_id(block_id);
+
+        let manifest_block = builder.pack_single(manifest_chunk)?;
+        let manifest_block_id = manifest_block.block_id.sequence() as u32;
+
+        let volume_count = pool.volume_count();
+        let mut locations: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
+
+        for slot in 0..volume_count {
+            if let Some(writer) = pool.get_writer_mut(slot) {
+                let mut location = writer.write_block(&manifest_block)?;
+                location.slot_index = manifest_block_id;
+                locations.push((
+                    location.physical_offset,
+                    location.encrypted_size,
+                    manifest_block_id,
+                ));
+            }
+        }
+
+        Ok(locations)
+    }
+
+    fn serialize_lsm_dir(path: &Path) -> Result<Vec<u8>> {
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for entry in walkdir::WalkDir::new(path) {
+            let entry = entry.map_err(std::io::Error::other)?;
+            if entry.file_type().is_file() {
+                entries.push(entry.path().to_path_buf());
+            }
+        }
+
+        entries.sort_by_key(|p| p.strip_prefix(path).unwrap_or(p).to_path_buf());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+
+        for file_path in entries {
+            let rel = file_path.strip_prefix(path).unwrap_or(&file_path);
+            let rel_str = rel.to_string_lossy();
+            let rel_bytes = rel_str.as_bytes();
+            let data = std::fs::read(&file_path)?;
+
+            out.extend_from_slice(&(rel_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(rel_bytes);
+            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&data);
+        }
+
+        Ok(out)
+    }
+}
+
+fn is_internal_path(path: &Path) -> bool {
+    path.to_string_lossy().starts_with(INTERNAL_META_PREFIX)
 }
 
 /// Statistics about the created archive
@@ -1957,6 +2290,8 @@ pub mod generic {
             // Store compression config for creating compressors on demand
             let compression_config = self.config.compression.clone();
 
+            let chunk_index = create_chunk_index(ChunkIndexBackend::Memory)?;
+
             Ok(GenericArchiveWriter {
                 archive_id,
                 session,
@@ -1965,7 +2300,7 @@ pub mod generic {
                 compression_config,
                 volume_writer,
                 catalog: Catalog::new(),
-                chunk_index: Arc::new(MemoryChunkIndex::new()),
+                chunk_index,
                 staging_pool: StagingPool::new(self.config.packing.k_factor, 4 * 1024 * 1024)
                     .with_flush_threshold(self.config.packing.flush_threshold),
                 next_block_id: AtomicU64::new(0),
@@ -2117,6 +2452,9 @@ pub mod generic {
                 catalog_location.physical_offset,
                 catalog_location.encrypted_size,
                 catalog_block_id,
+                0,
+                0,
+                0,
             )?;
 
             let blocks_written = self.next_block_id.load(Ordering::SeqCst);

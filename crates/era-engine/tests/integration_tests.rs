@@ -447,11 +447,12 @@ fn test_multifile_packing_efficiency() {
     let stats = writer.finalize().unwrap();
 
     // With 100 files of 1KB each = 100KB total
-    // Should be packed into just 1-2 blocks (not 100 blocks!)
-    // Target block size is 4MB, so all 100KB should fit in 1 block
+    // Should be packed into just a few blocks (not 100 blocks!).
+    // Target block size is 4MB, so data should fit in 1 block, plus
+    // overhead blocks for catalog + embedded metadata/LSM manifest.
     assert!(
-        stats.blocks_written <= 2,
-        "Expected <=2 blocks for 100KB, got {}",
+        stats.blocks_written <= 4,
+        "Expected <=4 blocks for 100KB, got {}",
         stats.blocks_written
     );
 

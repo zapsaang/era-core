@@ -164,6 +164,8 @@ pub enum ChunkIndexBackend {
     Memory,
     /// LSM-Tree with RocksDB (recommended)
     Lsm { path: std::path::PathBuf },
+    /// LSM-Tree with RocksDB hosted in a temporary directory and embedded into the archive
+    EmbeddedLsm { path: std::path::PathBuf },
 }
 
 /// Create a chunk index with the specified backend.
@@ -171,6 +173,11 @@ pub fn create_chunk_index(backend: ChunkIndexBackend) -> EraResult<Arc<dyn Chunk
     match backend {
         ChunkIndexBackend::Memory => Ok(Arc::new(MemoryChunkIndex::new())),
         ChunkIndexBackend::Lsm { path } => {
+            let index = era_index::LsmChunkIndex::open(path)
+                .map_err(|e| era_common::EraError::IndexError(e.to_string()))?;
+            Ok(Arc::new(index))
+        }
+        ChunkIndexBackend::EmbeddedLsm { path } => {
             let index = era_index::LsmChunkIndex::open(path)
                 .map_err(|e| era_common::EraError::IndexError(e.to_string()))?;
             Ok(Arc::new(index))

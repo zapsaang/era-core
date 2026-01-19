@@ -31,6 +31,8 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
+const INTERNAL_META_PREFIX: &str = ".era/meta/";
+
 /// Maximum allowed file size declared in catalog (100 GB) - sanity check
 const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
 
@@ -859,7 +861,11 @@ impl ArchiveReader {
     /// List all files in the archive
     pub fn list_files(&mut self) -> Result<Vec<&FileEntry>> {
         let catalog = self.load_catalog()?;
-        Ok(catalog.entries.iter().collect())
+        Ok(catalog
+            .entries
+            .iter()
+            .filter(|entry| !is_internal_entry(entry))
+            .collect())
     }
 
     /// Extract using the provided block iterator
@@ -874,6 +880,9 @@ impl ArchiveReader {
         let mut context = ExtractionContext::new();
 
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            if is_internal_entry(entry) {
+                continue;
+            }
             let output_path = options.output_dir.join(&entry.path);
 
             if output_path.exists() && !options.overwrite {
@@ -986,6 +995,10 @@ impl ArchiveReader {
         let mut packed_chunk_files: HashMap<ChunkHash, Vec<usize>> = HashMap::new();
 
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            if is_internal_entry(entry) {
+                context.file_chunk_counts.push(0);
+                continue;
+            }
             if entry.is_chunked() {
                 let chunk_count = entry.chunks.len();
 
@@ -1199,6 +1212,13 @@ impl ArchiveReader {
 
         Self::verify_with_iterator(catalog, &mut iter)
     }
+}
+
+fn is_internal_entry(entry: &FileEntry) -> bool {
+    entry
+        .path
+        .to_string_lossy()
+        .starts_with(INTERNAL_META_PREFIX)
 }
 
 #[cfg(test)]

@@ -110,6 +110,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 0,
                 0,
                 self.last_checkpoint_offset,
+                0,
+                0,
+                0,
             );
 
             let footer_bytes = footer.to_bytes()?;
@@ -138,6 +141,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 0,
                 0,
                 self.last_checkpoint_offset,
+                0,
+                0,
+                0,
             );
 
             let footer_bytes = footer.to_bytes()?;
@@ -251,7 +257,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Finalize the volume by writing the footer and syncing
     pub fn finalize(self) -> Result<SuperHeader> {
-        self.finalize_with_catalog(0, 0, 0)
+        self.finalize_with_catalog(0, 0, 0, 0, 0, 0)
     }
 
     /// Finalize the volume with catalog location information
@@ -260,6 +266,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
         catalog_offset: u64,
         catalog_size: u32,
         catalog_block_id: u32,
+        lsm_manifest_offset: u64,
+        lsm_manifest_size: u32,
+        lsm_manifest_block_id: u32,
     ) -> Result<SuperHeader> {
         self.sequence += 1;
 
@@ -281,6 +290,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 catalog_size,
                 catalog_block_id,
                 self.last_checkpoint_offset,
+                lsm_manifest_offset,
+                lsm_manifest_size,
+                lsm_manifest_block_id,
             );
             let footer_bytes = footer.to_bytes()?;
 
@@ -295,6 +307,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 catalog_size,
                 catalog_block_id,
                 self.last_checkpoint_offset,
+                lsm_manifest_offset,
+                lsm_manifest_size,
+                lsm_manifest_block_id,
             );
             let footer_bytes = footer.to_bytes()?;
             self.writer.append(&footer_bytes)?;

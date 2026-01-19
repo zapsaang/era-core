@@ -557,6 +557,22 @@ impl CheckpointManager {
         self.save()
     }
 
+    /// Serialize current checkpoint state (payload + HMAC) for embedding in-archive.
+    pub fn snapshot_bytes(&self) -> Result<Vec<u8>> {
+        let proto = self.checkpoint.to_proto();
+        let payload = era_common::serialize_proto(&proto).map_err(|e| {
+            EraError::Serialization(format!("Failed to serialize checkpoint: {}", e))
+        })?;
+
+        let key_bytes = self.hmac_key.as_ref().map(|k| k.as_slice());
+        let hmac = compute_hmac(&payload, key_bytes);
+
+        let mut out = Vec::with_capacity(payload.len() + hmac.len());
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&hmac);
+        Ok(out)
+    }
+
     /// Get reference to written chunks (avoids cloning)
     pub fn written_chunks(&self) -> &HashMap<ChunkHash, BlockLocation> {
         &self.checkpoint.written_chunks

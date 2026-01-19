@@ -11,7 +11,7 @@ pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
 pub const FOOTER_SIZE: usize = 128;
 
 /// Current footer version
-pub const FOOTER_VERSION: u16 = 3;
+pub const FOOTER_VERSION: u16 = 4;
 
 /// Volume footer - stored at the end of each volume
 ///
@@ -39,6 +39,12 @@ pub struct Footer {
     pub catalog_block_id: u32,
     /// Offset of the last checkpoint (for atomic updates)
     pub last_checkpoint_offset: u64,
+    /// Offset of embedded LSM manifest block
+    pub lsm_manifest_offset: u64,
+    /// Size of embedded LSM manifest block
+    pub lsm_manifest_size: u32,
+    /// Block ID of embedded LSM manifest
+    pub lsm_manifest_block_id: u32,
     /// Blake3 checksum of the footer (excluding this field)
     pub checksum: [u8; 32],
 }
@@ -46,7 +52,7 @@ pub struct Footer {
 impl Footer {
     /// Create a new footer
     pub fn new(data_end_offset: u64, block_count: u32, sequence_number: u64) -> Self {
-        Self::with_catalog(data_end_offset, block_count, sequence_number, 0, 0, 0, 0)
+        Self::with_catalog(data_end_offset, block_count, sequence_number, 0, 0, 0, 0, 0, 0, 0)
     }
 
     /// Create a new footer with catalog location
@@ -58,6 +64,9 @@ impl Footer {
         catalog_size: u32,
         catalog_block_id: u32,
         last_checkpoint_offset: u64,
+        lsm_manifest_offset: u64,
+        lsm_manifest_size: u32,
+        lsm_manifest_block_id: u32,
     ) -> Self {
         let mut footer = Self {
             magic: FOOTER_MAGIC,
@@ -70,6 +79,9 @@ impl Footer {
             catalog_size,
             catalog_block_id,
             last_checkpoint_offset,
+            lsm_manifest_offset,
+            lsm_manifest_size,
+            lsm_manifest_block_id,
             checksum: [0u8; 32],
         };
 
@@ -80,6 +92,11 @@ impl Footer {
     /// Check if catalog location is available
     pub fn has_catalog_location(&self) -> bool {
         self.catalog_offset > 0 && self.catalog_size > 0
+    }
+
+    /// Check if embedded LSM manifest location is available
+    pub fn has_lsm_manifest(&self) -> bool {
+        self.lsm_manifest_offset > 0 && self.lsm_manifest_size > 0
     }
 
     fn to_proto(&self) -> ProtoFooter {
@@ -94,6 +111,9 @@ impl Footer {
             catalog_size: self.catalog_size,
             catalog_block_id: self.catalog_block_id,
             last_checkpoint_offset: self.last_checkpoint_offset,
+            lsm_manifest_offset: self.lsm_manifest_offset,
+            lsm_manifest_size: self.lsm_manifest_size,
+            lsm_manifest_block_id: self.lsm_manifest_block_id,
             checksum: self.checksum.to_vec(),
         }
     }
@@ -113,6 +133,9 @@ impl Footer {
             catalog_size: proto.catalog_size,
             catalog_block_id: proto.catalog_block_id,
             last_checkpoint_offset: proto.last_checkpoint_offset,
+            lsm_manifest_offset: proto.lsm_manifest_offset,
+            lsm_manifest_size: proto.lsm_manifest_size,
+            lsm_manifest_block_id: proto.lsm_manifest_block_id,
             checksum,
         })
     }
