@@ -747,7 +747,6 @@ impl ArchiveWriterBuilder {
             pool_config = pool_config.with_distribution(dist_config);
         }
 
-        panic!("DEBUG TRAP: PRE-POOL CREATION");
         let volume_pool = if self.append_existing {
             if enable_erasure {
                 return Err(era_common::EraError::InvalidFormat(
