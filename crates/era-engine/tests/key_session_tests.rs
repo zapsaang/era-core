@@ -8,9 +8,9 @@
 //! is already known. For writing new archives, a new salt is generated,
 //! so the session key won't match unless explicitly managed.
 
-use era_crypto::{KdfParams, KeySession, Salt, XChaCha20Poly1305Context, AeadContext};
-use era_engine::{ArchiveReader, ArchiveWriterBuilder, ExtractOptions, auth::PasswordSlotParams};
-use era_volume::{SuperHeader, RecipientType};
+use era_crypto::{AeadContext, KdfParams, KeySession, Salt, XChaCha20Poly1305Context};
+use era_engine::{auth::PasswordSlotParams, ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
+use era_volume::{RecipientType, SuperHeader};
 use std::fs;
 use tempfile::TempDir;
 
@@ -33,44 +33,60 @@ fn fast_kdf_config() -> era_common::ArchiveConfig {
 
 /// Helper to manually derive the Master Key Session from an archive header
 /// This mimics the internal authentication process but allows us to cache the session
-fn derive_session_from_header(header: &SuperHeader, password: &str) -> era_common::Result<KeySession> {
-    let slot = header.recipients.iter()
+fn derive_session_from_header(
+    header: &SuperHeader,
+    password: &str,
+) -> era_common::Result<KeySession> {
+    let slot = header
+        .recipients
+        .iter()
         .find(|s| s.r_type == RecipientType::ScryptPassword)
-        .ok_or(era_common::EraError::InvalidKey("No password slot found".into()))?;
-        
-    let params: PasswordSlotParams = bincode::serde::decode_from_slice(&slot.params, bincode::config::standard())
-        .map_err(|e| era_common::EraError::Serialization(e.to_string()))?.0;
-        
+        .ok_or(era_common::EraError::InvalidKey(
+            "No password slot found".into(),
+        ))?;
+
+    let params: PasswordSlotParams =
+        bincode::serde::decode_from_slice(&slot.params, bincode::config::standard())
+            .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
+            .0;
+
     let salt = Salt::from_bytes(params.salt);
     let kdf_params = KdfParams {
         memory_cost: params.kdf_memory_cost,
         time_cost: params.kdf_time_cost,
         parallelism: params.kdf_parallelism,
     };
-    
+
     // 1. Derive KEK
     let kek = era_crypto::derive_key(password.as_bytes(), &salt, &kdf_params)
         .map_err(|_| era_common::EraError::InvalidKey("KDF failed".into()))?;
-    
+
     // 2. Decrypt MK
     let combined = &slot.encrypted_master_key;
     if combined.len() < 24 {
-         return Err(era_common::EraError::InvalidKey("Invalid encrypted key length".into()));
+        return Err(era_common::EraError::InvalidKey(
+            "Invalid encrypted key length".into(),
+        ));
     }
-    let nonce_array: &[u8; 24] = combined[0..24].try_into().map_err(|_| era_common::EraError::InvalidKey("Invalid nonce".into()))?;
+    let nonce_array: &[u8; 24] = combined[0..24]
+        .try_into()
+        .map_err(|_| era_common::EraError::InvalidKey("Invalid nonce".into()))?;
     let ciphertext = &combined[24..];
-    
+
     // We need to use Nonce from era_crypto, assuming it implements From slice or similar
     // If not public, we might need to manually construct relevant container
     let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)
-         .map_err(|_| era_common::EraError::InvalidKey("Failed to create context".into()))?;
-         
-    let mk = ctx.decrypt(nonce_array, &[], ciphertext)
-         .map_err(|_| era_common::EraError::InvalidKey("Incorrect password".into()))?;
-    
+        .map_err(|_| era_common::EraError::InvalidKey("Failed to create context".into()))?;
+
+    let mk = ctx
+        .decrypt(nonce_array, &[], ciphertext)
+        .map_err(|_| era_common::EraError::InvalidKey("Incorrect password".into()))?;
+
     // 3. Create Session
-    let mk_array: [u8; 32] = mk.try_into().map_err(|_| era_common::EraError::InvalidKey("Invalid MK length".into()))?;
-    KeySession::from_master_key(&mk_array).map_err(Into::into)
+    let mk_array: [u8; 32] = mk
+        .try_into()
+        .map_err(|_| era_common::EraError::InvalidKey("Invalid MK length".into()))?;
+    KeySession::from_master_key(&mk_array)
 }
 
 #[test]
@@ -93,10 +109,10 @@ fn test_key_session_writer_roundtrip() {
     // Read header to get context
     let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").unwrap();
     let header = reader_for_salt.header();
-    
+
     // Derive Session
     let session = derive_session_from_header(header, "test_password").unwrap();
-    
+
     drop(reader_for_salt);
 
     // Now read with session (fast path - no KDF needed)
@@ -135,7 +151,7 @@ fn test_key_session_reader_works() {
     // Read archive header to get salt
     let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").unwrap();
     let header = reader_for_salt.header();
-    
+
     let session = derive_session_from_header(header, "test_password").unwrap();
     drop(reader_for_salt);
 
@@ -175,7 +191,7 @@ fn test_key_session_wrong_password_fails() {
     // Read archive header to get salt
     let reader_for_salt = ArchiveReader::open(&archive_path, "correct_password").unwrap();
     let header = reader_for_salt.header();
-    
+
     // Create session with WRONG password - should fail at derivation stage
     let result = derive_session_from_header(header, "wrong_password");
     assert!(result.is_err());
@@ -214,7 +230,7 @@ fn test_key_session_multiple_files() {
     // Get salt from archive and create session
     let reader_for_salt = ArchiveReader::open(&archive_path, "multi_password").unwrap();
     let header = reader_for_salt.header();
-    
+
     let session = derive_session_from_header(header, "multi_password").unwrap();
     drop(reader_for_salt);
 
@@ -263,7 +279,7 @@ fn test_key_session_with_erasure_coding() {
     // Get salt and create session
     let reader_for_salt = ArchiveReader::open(&archive_path, "erasure_password").unwrap();
     let header = reader_for_salt.header();
-    
+
     let session = derive_session_from_header(header, "erasure_password").unwrap();
     drop(reader_for_salt);
 
@@ -301,10 +317,10 @@ fn test_key_session_from_derived_key() {
     // Get salt from archive
     let reader_for_salt = ArchiveReader::open(&archive_path, "from_derived").unwrap();
     let header = reader_for_salt.header();
-    
+
     // Use helper which does the derivation and unwrapping
     let session = derive_session_from_header(header, "from_derived").unwrap();
-    
+
     drop(reader_for_salt);
 
     // Use session to read archive

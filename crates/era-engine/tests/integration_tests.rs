@@ -740,7 +740,9 @@ fn test_repair_wrong_password() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("password") || err.to_string().contains("InvalidKey") || err.to_string().contains("No valid credentials found"),
+        err.to_string().contains("password")
+            || err.to_string().contains("InvalidKey")
+            || err.to_string().contains("No valid credentials found"),
         "Error should mention password: {}",
         err
     );

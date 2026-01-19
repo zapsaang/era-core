@@ -63,7 +63,7 @@ fn derive_session_from_header(
     let mk_array: [u8; 32] = mk
         .try_into()
         .map_err(|_| era_common::EraError::InvalidKey("Invalid MK length".into()))?;
-    KeySession::from_master_key(&mk_array).map_err(Into::into)
+    KeySession::from_master_key(&mk_array)
 }
 
 /// Create test data with specified pattern

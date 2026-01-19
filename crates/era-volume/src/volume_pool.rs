@@ -141,15 +141,17 @@ impl<B: StorageBackend> VolumePool<B> {
             ..Default::default()
         };
 
-        Ok(Self {
+        let pool = Self {
             backend,
-            config,
+            config: config.clone(), // Clone config here to access it below? No, need to borrow.
             template_header,
             writers,
             sequences,
             block_sequence: 0,
             stats,
-        })
+        };
+
+        Ok(pool)
     }
 
     /// Open an existing volume pool for appending.

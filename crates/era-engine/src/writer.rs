@@ -471,37 +471,35 @@ impl ArchiveWriterBuilder {
             let mut recovered_mk: Option<[u8; 32]> = None;
 
             for slot in &recipients {
-                match (&self.auth_mode, slot.r_type) {
-                    (
-                        AuthMode::Password(pwd) | AuthMode::Hybrid { password: pwd, .. },
-                        RecipientType::ScryptPassword,
-                    ) => {
-                        if let Ok((params, _)) =
-                            bincode::serde::decode_from_slice::<PasswordSlotParams, _>(
-                                &slot.params,
-                                bincode::config::standard(),
-                            )
+                if let (
+                    AuthMode::Password(pwd) | AuthMode::Hybrid { password: pwd, .. },
+                    RecipientType::ScryptPassword,
+                ) = (&self.auth_mode, slot.r_type)
+                {
+                    if let Ok((params, _)) =
+                        bincode::serde::decode_from_slice::<PasswordSlotParams, _>(
+                            &slot.params,
+                            bincode::config::standard(),
+                        )
+                    {
+                        let salt = Salt::from_bytes(params.salt);
+                        let kdf_params = KdfParams {
+                            memory_cost: params.kdf_memory_cost,
+                            time_cost: params.kdf_time_cost,
+                            parallelism: params.kdf_parallelism,
+                        };
+                        if let Ok(kek) = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)
                         {
-                            let salt = Salt::from_bytes(params.salt);
-                            let kdf_params = KdfParams {
-                                memory_cost: params.kdf_memory_cost,
-                                time_cost: params.kdf_time_cost,
-                                parallelism: params.kdf_parallelism,
-                            };
-                            if let Ok(kek) =
-                                era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)
-                            {
-                                if let Ok(ctx) = XChaCha20Poly1305Context::from_derived_key(&kek) {
-                                    if slot.encrypted_master_key.len() >= 24 {
-                                        if let Ok(nonce_arr) =
-                                            slot.encrypted_master_key[0..24].try_into()
-                                        {
-                                            let ct = &slot.encrypted_master_key[24..];
-                                            if let Ok(mk) = ctx.decrypt(nonce_arr, &[], ct) {
-                                                if let Ok(mk_arr) = mk.try_into() {
-                                                    recovered_mk = Some(mk_arr);
-                                                    break;
-                                                }
+                            if let Ok(ctx) = XChaCha20Poly1305Context::from_derived_key(&kek) {
+                                if slot.encrypted_master_key.len() >= 24 {
+                                    if let Ok(nonce_arr) =
+                                        slot.encrypted_master_key[0..24].try_into()
+                                    {
+                                        let ct = &slot.encrypted_master_key[24..];
+                                        if let Ok(mk) = ctx.decrypt(nonce_arr, &[], ct) {
+                                            if let Ok(mk_arr) = mk.try_into() {
+                                                recovered_mk = Some(mk_arr);
+                                                break;
                                             }
                                         }
                                     }
@@ -509,9 +507,6 @@ impl ArchiveWriterBuilder {
                             }
                         }
                     }
-                    // Basic Certificate support could go here, but omitted for brevity in this specific patch
-                    // strictly following the mandate to restore typical append flow.
-                    _ => {}
                 }
             }
 
@@ -643,6 +638,56 @@ impl ArchiveWriterBuilder {
         // Derive volume key for the primary volume (volume 0)
         let volume_key = session.derive_volume_key(0);
 
+        // Store nonce context (salt) for block encryption
+        let nonce_context = *archive_salt.as_bytes();
+
+        // Restore embedded LSM index if present (self-contained resume)
+        // Note: This must be done BEFORE creating VolumePool, as VolumePool::open_append
+        // might truncate the file (removing the footer/LSM manifest).
+        if let ChunkIndexBackend::EmbeddedLsm { path } = &self.index_backend {
+            if self.output_path.exists() {
+                let parent_dir = self.output_path.parent().unwrap_or(Path::new("."));
+                let backend = LocalStorageBackend::new(parent_dir);
+                let volume_path = self.output_path.file_name().unwrap_or_default();
+
+                // Open for READ only (no truncate)
+                if let Ok(reader) = VolumeReader::open(&backend, Path::new(volume_path)) {
+                    if let Some(footer) = reader.footer() {
+                        if footer.has_lsm_manifest() {
+                            let location = BlockLocation {
+                                volume_id: reader.header().volume_id,
+                                slot_index: footer.lsm_manifest_block_id,
+                                physical_offset: footer.lsm_manifest_offset,
+                                encrypted_size: footer.lsm_manifest_size,
+                                erasure_info: None,
+                                shard_offsets: None,
+                                shard_volumes: None,
+                            };
+
+                            let encrypted_block = reader.read_block(&location)?;
+                            let compressor =
+                                create_compressor_with_config(&reader.header().config.compression);
+                            let unpacker = SessionBlockUnpacker::new(
+                                &session,
+                                &volume_key,
+                                nonce_context,
+                                compressor,
+                            );
+                            let unpacked = unpacker.unpack(&encrypted_block)?;
+                            if let Some(first_entry) = unpacked.index.entries.first() {
+                                let start = first_entry.offset as usize;
+                                let end = start + first_entry.length as usize;
+                                if end <= unpacked.data.len() {
+                                    let data = unpacked.data.slice(start..end);
+                                    restore_lsm_dir_from_manifest(path, &data)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Build config with erasure setting
         if !self.append_existing && enable_erasure {
             config.erasure = Some(self.erasure_config);
@@ -747,6 +792,15 @@ impl ArchiveWriterBuilder {
             pool_config = pool_config.with_distribution(dist_config);
         }
 
+        // Initialize catalog - MUST be done before VolumePool creation (truncation)
+        let mut catalog = Catalog::new();
+        if let Some(existing) = append_catalog {
+            catalog = existing;
+        } else if self.append_existing {
+            let mut reader = ArchiveReader::open_with_session(&self.output_path, &session)?;
+            catalog = reader.load_catalog()?.clone();
+        }
+
         let volume_pool = if self.append_existing {
             if enable_erasure {
                 return Err(era_common::EraError::InvalidFormat(
@@ -772,54 +826,8 @@ impl ArchiveWriterBuilder {
             }
         );
 
-        // Store nonce context (salt) for block encryption
-        let nonce_context = *archive_salt.as_bytes();
-
-        // Restore embedded LSM index if present (self-contained resume)
-        if let ChunkIndexBackend::EmbeddedLsm { path } = &self.index_backend {
-            if self.output_path.exists() {
-                let parent_dir = self.output_path.parent().unwrap_or(Path::new("."));
-                let backend = LocalStorageBackend::new(parent_dir);
-                let volume_path = self.output_path.file_name().unwrap_or_default();
-
-                if let Ok(reader) = VolumeReader::open(&backend, Path::new(volume_path)) {
-                    if let Some(footer) = reader.footer() {
-                        if footer.has_lsm_manifest() {
-                            let location = BlockLocation {
-                                volume_id: reader.header().volume_id,
-                                slot_index: footer.lsm_manifest_block_id,
-                                physical_offset: footer.lsm_manifest_offset,
-                                encrypted_size: footer.lsm_manifest_size,
-                                erasure_info: None,
-                                shard_offsets: None,
-                                shard_volumes: None,
-                            };
-
-                            let encrypted_block = reader.read_block(&location)?;
-                            let compressor =
-                                create_compressor_with_config(&reader.header().config.compression);
-                            let unpacker = SessionBlockUnpacker::new(
-                                &session,
-                                &volume_key,
-                                nonce_context,
-                                compressor,
-                            );
-                            let unpacked = unpacker.unpack(&encrypted_block)?;
-                            if let Some(first_entry) = unpacked.index.entries.first() {
-                                let start = first_entry.offset as usize;
-                                let end = start + first_entry.length as usize;
-                                if end <= unpacked.data.len() {
-                                    let data = unpacked.data.slice(start..end);
-                                    restore_lsm_dir_from_manifest(path, &data)?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // Configure file reader with CDC if enabled
+
         let chunker_config = if enable_cdc {
             let config = match chunker_override {
                 Some(cfg) => cfg,
@@ -920,14 +928,6 @@ impl ArchiveWriterBuilder {
                     target_block_size = target_block_size.min(max_block);
                 }
             }
-        }
-
-        let mut catalog = Catalog::new();
-        if let Some(existing) = append_catalog {
-            catalog = existing;
-        } else if self.append_existing {
-            let mut reader = ArchiveReader::open_with_session(&self.output_path, &session)?;
-            catalog = reader.load_catalog()?.clone();
         }
 
         let next_block_id = if self.append_existing {
