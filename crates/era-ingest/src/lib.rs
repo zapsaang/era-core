@@ -14,6 +14,7 @@
 //! - Configurable chunk sizes
 
 mod chunker;
+mod chunker_zerocopy;
 mod entry;
 mod reader;
 
@@ -21,5 +22,6 @@ pub use chunker::{
     ChunkIterator, Chunker, ChunkerConfig, StreamingChunker, DEFAULT_AVG_SIZE, DEFAULT_MAX_SIZE,
     DEFAULT_MIN_SIZE,
 };
+pub use chunker_zerocopy::StreamingChunkerZeroCopy;
 pub use entry::{Catalog, ChunkRef, FileEntry, FileType, PackedChunkInfo};
 pub use reader::{DirectoryScanner, FileReader, ScanOptions};

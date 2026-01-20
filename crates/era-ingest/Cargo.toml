@@ -35,3 +35,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "ingest_bench"
 harness = false
+
+[[bench]]
+name = "streaming_memory_bench"
+harness = false
