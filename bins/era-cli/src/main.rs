@@ -193,7 +193,8 @@ enum Commands {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     // Initialize tracing subscriber first
     let cli = Cli::parse();
 
@@ -236,23 +237,26 @@ fn main() -> anyhow::Result<()> {
             cdc_avg,
             cdc_max,
             packing_k,
-        } => commands::create(commands::CreateArgs {
-            inputs: &input,
-            output: &output,
-            config_path: config.as_deref(),
-            certificate_path: certificate.as_deref(),
-            password: password.as_deref(),
-            compression_level: level,
-            no_compression,
-            erasure: erasure.as_deref(),
-            volume_count: volumes,
-            max_volume_size,
-            matrix_distribution,
-            cdc_min,
-            cdc_avg,
-            cdc_max,
-            packing_k,
-        }),
+        } => {
+            commands::create(commands::CreateArgs {
+                inputs: &input,
+                output: &output,
+                config_path: config.as_deref(),
+                certificate_path: certificate.as_deref(),
+                password: password.as_deref(),
+                compression_level: level,
+                no_compression,
+                erasure: erasure.as_deref(),
+                volume_count: volumes,
+                max_volume_size,
+                matrix_distribution,
+                cdc_min,
+                cdc_avg,
+                cdc_max,
+                packing_k,
+            })
+            .await
+        }
 
         Commands::Extract {
             input,

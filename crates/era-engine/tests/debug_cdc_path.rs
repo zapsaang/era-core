@@ -7,8 +7,8 @@ use era_ingest::ChunkerConfig;
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_debug_cdc_path() -> Result<()> {
+#[tokio::test]
+async fn test_debug_cdc_path() -> Result<()> {
     let temp = TempDir::new()?;
     let data_dir = temp.path().join("data");
     let index_dir = temp.path().join("index");
@@ -39,7 +39,7 @@ fn test_debug_cdc_path() -> Result<()> {
 
     println!("CDC enabled in writer");
 
-    writer.add_file(&file_path)?;
+    writer.add_file(&file_path).await?;
     let stats = writer.finalize()?;
 
     let disk_size = fs::metadata(&archive_file)?.len();

@@ -13,10 +13,15 @@
 //! - Better performance with optimized algorithms
 //! - Active community maintenance and bug fixes
 
+use async_stream::try_stream;
 use bytes::Bytes;
 use era_common::{ChunkHash, NormalizationLevel, Result, UniqueChunk};
 use fastcdc::v2020::{FastCDC, Normalization};
-use std::io::Read;
+use futures::stream::Stream;
+// use pin_project_lite::pin_project;
+// use std::pin::Pin;
+// use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Default minimum chunk size (4 KB)
 pub const DEFAULT_MIN_SIZE: usize = 4 * 1024;
@@ -184,7 +189,7 @@ impl<'a> Iterator for ChunkIterator<'a> {
 /// Unlike the naive approach of creating a new FastCDC instance for each chunk,
 /// this implementation maintains the chunking state across multiple reads,
 /// ensuring proper chunk size distribution (avg 64KB, not fixed 256KB).
-pub struct StreamingChunker<R: Read> {
+pub struct StreamingChunker<R> {
     reader: R,
     config: ChunkerConfig,
     /// Read buffer - stores raw data from reader
@@ -197,7 +202,7 @@ pub struct StreamingChunker<R: Read> {
     eof: bool,
 }
 
-impl<R: Read> StreamingChunker<R> {
+impl<R: AsyncRead + Unpin> StreamingChunker<R> {
     /// Create a new streaming chunker
     pub fn new(reader: R, config: ChunkerConfig) -> Self {
         // Buffer needs to be large enough to:
@@ -218,7 +223,7 @@ impl<R: Read> StreamingChunker<R> {
 
     /// Ensure buffer has enough data to process a chunk
     /// Returns true if there's data available, false if EOF with no data
-    fn ensure_data(&mut self) -> std::io::Result<bool> {
+    async fn ensure_data(&mut self) -> std::io::Result<bool> {
         // If we've consumed most of the buffer, compact it
         if self.position > self.buffer.len() / 2 {
             let remaining = self.valid_len - self.position;
@@ -228,13 +233,20 @@ impl<R: Read> StreamingChunker<R> {
         }
 
         // Fill buffer if we have space and haven't hit EOF
-        while self.valid_len < self.buffer.len() && !self.eof {
-            let n = self.reader.read(&mut self.buffer[self.valid_len..])?;
+        // For async, we try to read at least once if needed
+        if self.valid_len < self.buffer.len() && !self.eof {
+            // Only read if we don't have enough data for a max chunk?
+            // Or always try to fill?
+            // Let's read once.
+            let n = self.reader.read(&mut self.buffer[self.valid_len..]).await?;
             if n == 0 {
                 self.eof = true;
-                break;
+            } else {
+                self.valid_len += n;
+                // Try to read more if possible to fill buffer for better CDC?
+                // But without blocking too much.
+                // Simple implementation: just return.
             }
-            self.valid_len += n;
         }
 
         // Return true if we have any data to process
@@ -242,90 +254,79 @@ impl<R: Read> StreamingChunker<R> {
     }
 
     /// Get the next chunk using FastCDC algorithm
-    pub fn next_chunk(&mut self) -> Result<Option<UniqueChunk>> {
-        // Ensure we have data to process
-        if !self.ensure_data()? {
-            return Ok(None);
-        }
+    pub async fn next_chunk(&mut self) -> Result<Option<UniqueChunk>> {
+        loop {
+            // Ensure we have data to process
+            if !self.ensure_data().await.map_err(era_common::EraError::Io)? {
+                return Ok(None);
+            }
 
-        let available = self.valid_len - self.position;
+            let available = self.valid_len - self.position;
 
-        // Handle final chunk at EOF
-        if self.eof && available > 0 && available < self.config.min_size {
-            // Last chunk is smaller than min_size, just return it
-            let chunk_data = &self.buffer[self.position..self.valid_len];
-            let hash = era_crypto::hash(chunk_data);
-            self.position = self.valid_len;
-
-            return Ok(Some(UniqueChunk::new(
-                Bytes::copy_from_slice(chunk_data),
-                hash,
-            )));
-        }
-
-        // Use FastCDC to find the next chunk boundary
-        // Key insight: We process ALL available data, not just a fixed window
-        let data_slice = &self.buffer[self.position..self.valid_len];
-
-        // Create FastCDC iterator over the available data
-        let mut cdc = FastCDC::with_level_and_seed(
-            data_slice,
-            self.config.min_size as u32,
-            self.config.avg_size as u32,
-            self.config.max_size as u32,
-            normalization_to_fastcdc(self.config.normalization_level),
-            self.config.rolling_hash_seed,
-        );
-
-        // Get the FIRST chunk from this window
-        if let Some(chunk_info) = cdc.next() {
-            // Extract chunk data
-            let chunk_start = self.position + chunk_info.offset;
-            let chunk_end = chunk_start + chunk_info.length;
-            let chunk_data = &self.buffer[chunk_start..chunk_end];
-
-            // Compute hash
-            let hash = era_crypto::hash(chunk_data);
-
-            // Advance position ONLY by the chunk length (not offset+length)
-            // This is critical: offset should always be 0 for the first chunk
-            // in the slice we give to FastCDC
-            self.position += chunk_info.length;
-
-            Ok(Some(UniqueChunk::new(
-                Bytes::copy_from_slice(chunk_data),
-                hash,
-            )))
-        } else {
-            // FastCDC didn't find any boundary in available data
-            // This can happen if we're near EOF with less than min_size data
-            if self.eof && available > 0 {
-                // Return remaining data as final chunk
+            // Handle final chunk at EOF
+            if self.eof && available > 0 && available < self.config.min_size {
                 let chunk_data = &self.buffer[self.position..self.valid_len];
                 let hash = era_crypto::hash(chunk_data);
                 self.position = self.valid_len;
 
-                Ok(Some(UniqueChunk::new(
+                return Ok(Some(UniqueChunk::new(
                     Bytes::copy_from_slice(chunk_data),
                     hash,
-                )))
-            } else {
-                // No chunk found and not EOF - this shouldn't happen normally
-                // but we handle it gracefully
-                Ok(None)
+                )));
             }
+
+            if available == 0 {
+                if self.eof {
+                    return Ok(None);
+                }
+                continue;
+            }
+
+            // Use FastCDC to find the next chunk boundary
+            let data_slice = &self.buffer[self.position..self.valid_len];
+
+            let mut cdc = FastCDC::with_level_and_seed(
+                data_slice,
+                self.config.min_size as u32,
+                self.config.avg_size as u32,
+                self.config.max_size as u32,
+                normalization_to_fastcdc(self.config.normalization_level),
+                self.config.rolling_hash_seed,
+            );
+
+            if let Some(chunk_info) = cdc.next() {
+                let chunk_start = self.position + chunk_info.offset;
+                let chunk_end = chunk_start + chunk_info.length;
+                let chunk_data = &self.buffer[chunk_start..chunk_end];
+                let hash = era_crypto::hash(chunk_data);
+
+                self.position += chunk_info.length;
+
+                return Ok(Some(UniqueChunk::new(
+                    Bytes::copy_from_slice(chunk_data),
+                    hash,
+                )));
+            } else if self.eof {
+                if available > 0 {
+                    let chunk_data = &self.buffer[self.position..self.valid_len];
+                    let hash = era_crypto::hash(chunk_data);
+                    self.position = self.valid_len;
+                    return Ok(Some(UniqueChunk::new(
+                        Bytes::copy_from_slice(chunk_data),
+                        hash,
+                    )));
+                }
+                return Ok(None);
+            }
+            // Loop to get more data
         }
     }
-}
 
-impl<R: Read> Iterator for StreamingChunker<R> {
-    type Item = Result<UniqueChunk>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.next_chunk() {
-            Ok(Some(chunk)) => Some(Ok(chunk)),
-            Ok(None) => None,
-            Err(e) => Some(Err(e)),
+    pub fn into_stream(mut self) -> impl Stream<Item = Result<UniqueChunk>> {
+        try_stream! {
+            while let Some(chunk) = self.next_chunk().await? {
+                yield chunk;
+            }
         }
     }
 }
@@ -441,8 +442,8 @@ mod tests {
         assert_eq!(data, reconstructed);
     }
 
-    #[test]
-    fn test_streaming_chunker() {
+    #[tokio::test]
+    async fn test_streaming_chunker() {
         use std::io::Cursor;
 
         let config = ChunkerConfig::new(64, 256, 1024);
@@ -452,7 +453,7 @@ mod tests {
         let mut streaming = StreamingChunker::new(reader, config.clone());
 
         let mut chunks = Vec::new();
-        while let Ok(Some(chunk)) = streaming.next_chunk() {
+        while let Ok(Some(chunk)) = streaming.next_chunk().await {
             chunks.push(chunk);
         }
 

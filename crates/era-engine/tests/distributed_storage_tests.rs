@@ -3,8 +3,8 @@ use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_distributed_erasure_writing() {
+#[tokio::test]
+async fn test_distributed_erasure_writing() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("dist_test.era");
 
@@ -55,6 +55,7 @@ fn test_distributed_erasure_writing() {
     // Add using add_file_with_path to respect CDC and specify stored name
     writer
         .add_file_with_path(&input_path, std::path::Path::new("test_file.bin"))
+        .await
         .unwrap();
     writer.finalize().unwrap();
 

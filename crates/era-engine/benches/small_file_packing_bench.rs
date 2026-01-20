@@ -6,6 +6,7 @@ use std::fs;
 use tempfile::TempDir;
 
 fn bench_small_files_packing(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("small_file_performance");
 
     for file_count in [10, 50, 100, 200] {
@@ -29,19 +30,21 @@ fn bench_small_files_packing(c: &mut Criterion) {
             &file_count,
             |b, &count| {
                 b.iter(|| {
-                    let archive_path = temp_dir.path().join(format!("packed_{}.era", count));
-                    let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                        .password("benchmark")
-                        .build()
-                        .unwrap();
+                    rt.block_on(async {
+                        let archive_path = temp_dir.path().join(format!("packed_{}.era", count));
+                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                            .password("benchmark")
+                            .build()
+                            .unwrap();
 
-                    for i in 0..count {
-                        let path = input_dir.join(format!("file_{:03}.dat", i));
-                        writer.add_file(&path).unwrap();
-                    }
+                        for i in 0..count {
+                            let path = input_dir.join(format!("file_{:03}.dat", i));
+                            writer.add_file(&path).await.unwrap();
+                        }
 
-                    black_box(writer.finalize().unwrap());
-                    fs::remove_file(&archive_path).ok();
+                        black_box(writer.finalize().unwrap());
+                        fs::remove_file(&archive_path).ok();
+                    })
                 });
             },
         );
@@ -51,6 +54,7 @@ fn bench_small_files_packing(c: &mut Criterion) {
 }
 
 fn bench_various_file_sizes(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("file_size_vs_packing");
 
     for file_size in [512, 1024, 4096, 8192, 16384] {
@@ -73,19 +77,21 @@ fn bench_various_file_sizes(c: &mut Criterion) {
             &file_size,
             |b, _size| {
                 b.iter(|| {
-                    let archive_path = temp_dir.path().join(format!("size_{}.era", file_size));
-                    let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                        .password("benchmark")
-                        .build()
-                        .unwrap();
+                    rt.block_on(async {
+                        let archive_path = temp_dir.path().join(format!("size_{}.era", file_size));
+                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                            .password("benchmark")
+                            .build()
+                            .unwrap();
 
-                    for i in 0..file_count {
-                        let path = input_dir.join(format!("file_{:03}.dat", i));
-                        writer.add_file(&path).unwrap();
-                    }
+                        for i in 0..file_count {
+                            let path = input_dir.join(format!("file_{:03}.dat", i));
+                            writer.add_file(&path).await.unwrap();
+                        }
 
-                    black_box(writer.finalize().unwrap());
-                    fs::remove_file(&archive_path).ok();
+                        black_box(writer.finalize().unwrap());
+                        fs::remove_file(&archive_path).ok();
+                    })
                 });
             },
         );

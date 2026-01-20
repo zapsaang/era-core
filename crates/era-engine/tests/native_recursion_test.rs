@@ -2,8 +2,8 @@ use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_native_directory_recursion() {
+#[tokio::test]
+async fn test_native_directory_recursion() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("recursion_test.era");
     let source_dir = temp_dir.path().join("source");
@@ -23,7 +23,7 @@ fn test_native_directory_recursion() {
 
     // This method needs to be recursive or support directories
     // Currently, based on audit, this might fail or not exist
-    let result = writer.add_path(&source_dir, true); // true for recursive
+    let result = writer.add_path(&source_dir, true).await; // true for recursive
 
     assert!(result.is_ok(), "Adding directory should succeed");
 

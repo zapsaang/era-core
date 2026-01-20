@@ -31,6 +31,7 @@ fn fast_kdf_config() -> era_common::ArchiveConfig {
 }
 
 fn bench_batch_vs_individual(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("batch_vs_individual");
 
     for (file_count, file_size) in [(10, 1024), (50, 10240), (100, 10240)] {
@@ -51,19 +52,21 @@ fn bench_batch_vs_individual(c: &mut Criterion) {
                         (temp_dir, files)
                     },
                     |(temp_dir, files)| {
-                        let archive_path = temp_dir.path().join("test.era");
-                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                            .password("bench")
-                            .config(fast_kdf_config())
-                            .build()
-                            .unwrap();
+                        rt.block_on(async {
+                            let archive_path = temp_dir.path().join("test.era");
+                            let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                                .password("bench")
+                                .config(fast_kdf_config())
+                                .build()
+                                .unwrap();
 
-                        let file_refs: Vec<&std::path::Path> =
-                            files.iter().map(|p| p.as_path()).collect();
-                        writer.add_files(&file_refs).unwrap();
-                        writer.finalize().unwrap();
+                            let file_refs: Vec<&std::path::Path> =
+                                files.iter().map(|p| p.as_path()).collect();
+                            writer.add_files(&file_refs).await.unwrap();
+                            writer.finalize().unwrap();
 
-                        black_box(archive_path)
+                            black_box(archive_path)
+                        })
                     },
                 );
             },
@@ -86,19 +89,21 @@ fn bench_batch_vs_individual(c: &mut Criterion) {
                         (temp_dir, files)
                     },
                     |(temp_dir, files)| {
-                        let archive_path = temp_dir.path().join("test.era");
-                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                            .password("bench")
-                            .config(fast_kdf_config())
-                            .build()
-                            .unwrap();
+                        rt.block_on(async {
+                            let archive_path = temp_dir.path().join("test.era");
+                            let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                                .password("bench")
+                                .config(fast_kdf_config())
+                                .build()
+                                .unwrap();
 
-                        for file in &files {
-                            writer.add_file(file).unwrap();
-                        }
-                        writer.finalize().unwrap();
+                            for file in &files {
+                                writer.add_file(file).await.unwrap();
+                            }
+                            writer.finalize().unwrap();
 
-                        black_box(archive_path)
+                            black_box(archive_path)
+                        })
                     },
                 );
             },
@@ -109,6 +114,7 @@ fn bench_batch_vs_individual(c: &mut Criterion) {
 }
 
 fn bench_small_files_batch(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("small_files_batch");
 
     for file_count in [10, 50, 100, 200] {
@@ -129,19 +135,21 @@ fn bench_small_files_batch(c: &mut Criterion) {
                         (temp_dir, files)
                     },
                     |(temp_dir, files)| {
-                        let archive_path = temp_dir.path().join("test.era");
-                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                            .password("bench")
-                            .config(fast_kdf_config())
-                            .build()
-                            .unwrap();
+                        rt.block_on(async {
+                            let archive_path = temp_dir.path().join("test.era");
+                            let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                                .password("bench")
+                                .config(fast_kdf_config())
+                                .build()
+                                .unwrap();
 
-                        let file_refs: Vec<&std::path::Path> =
-                            files.iter().map(|p| p.as_path()).collect();
-                        writer.add_files(&file_refs).unwrap();
-                        writer.finalize().unwrap();
+                            let file_refs: Vec<&std::path::Path> =
+                                files.iter().map(|p| p.as_path()).collect();
+                            writer.add_files(&file_refs).await.unwrap();
+                            writer.finalize().unwrap();
 
-                        black_box(archive_path)
+                            black_box(archive_path)
+                        })
                     },
                 );
             },

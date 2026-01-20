@@ -1,10 +1,11 @@
 //! Direct test of StreamingChunker to verify it's working
 
 use era_ingest::{ChunkerConfig, StreamingChunker};
+use futures::stream::StreamExt;
 use std::io::Cursor;
 
-#[test]
-fn test_streaming_chunker_directly() {
+#[tokio::test]
+async fn test_streaming_chunker_directly() {
     // Create 1MB of TRULY random data
     let data_size = 1024 * 1024;
     let mut data = vec![0u8; data_size];
@@ -22,11 +23,12 @@ fn test_streaming_chunker_directly() {
 
     let reader = Cursor::new(data);
     let config = ChunkerConfig::default(); // 64KB avg
-    let streaming = StreamingChunker::new(reader, config);
+    let streaming = StreamingChunker::new(reader, config).into_stream();
+    tokio::pin!(streaming);
 
     let mut chunks = Vec::new();
     let mut count = 0;
-    for result in streaming {
+    while let Some(result) = streaming.next().await {
         let chunk = result.unwrap();
         println!("  Chunk {}: {} bytes", count, chunk.data.len());
         chunks.push(chunk);

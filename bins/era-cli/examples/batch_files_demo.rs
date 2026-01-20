@@ -11,7 +11,8 @@ use std::io::Write;
 use std::time::Instant;
 use tempfile::TempDir;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("=== Batch Files API Demonstration ===\n");
 
     let temp_dir = TempDir::new().unwrap();
@@ -44,7 +45,7 @@ fn main() {
             .unwrap();
 
         for file in &files {
-            writer.add_file(file).unwrap();
+            writer.add_file(file).await.unwrap();
         }
 
         writer.finalize().unwrap();
@@ -72,7 +73,7 @@ fn main() {
 
         // Convert to &[&Path]
         let file_refs: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
-        writer.add_files(&file_refs).unwrap();
+        writer.add_files(&file_refs).await.unwrap();
 
         writer.finalize().unwrap();
     }

@@ -8,8 +8,8 @@ use std::fs;
 use tempfile::TempDir;
 
 /// Test that certificate mode creates an archive successfully.
-#[test]
-fn test_certificate_mode_creates_archive() {
+#[tokio::test]
+async fn test_certificate_mode_creates_archive() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
     let test_file = temp_dir.path().join("test.txt");
@@ -32,7 +32,10 @@ fn test_certificate_mode_creates_archive() {
     assert!(writer.key_encapsulation().is_some());
 
     // Add a file
-    writer.add_file(&test_file).expect("Failed to add file");
+    writer
+        .add_file(&test_file)
+        .await
+        .expect("Failed to add file");
 
     // Finalize
     writer.finalize().expect("Failed to finalize");
@@ -42,8 +45,8 @@ fn test_certificate_mode_creates_archive() {
 }
 
 /// Test full roundtrip: create with certificate, extract with keypair
-#[test]
-fn test_certificate_mode_roundtrip() {
+#[tokio::test]
+async fn test_certificate_mode_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("roundtrip.era");
     let input_dir = temp_dir.path().join("input");
@@ -69,8 +72,8 @@ fn test_certificate_mode_roundtrip() {
             .build()
             .unwrap();
 
-        writer.add_file(&test_file1).unwrap();
-        writer.add_file(&test_file2).unwrap();
+        writer.add_file(&test_file1).await.unwrap();
+        writer.add_file(&test_file2).await.unwrap();
         writer.finalize().unwrap();
     }
 
@@ -113,8 +116,8 @@ fn test_certificate_mode_roundtrip() {
 }
 
 /// Test that password-mode archive rejects keypair authentication
-#[test]
-fn test_password_archive_rejects_keypair() {
+#[tokio::test]
+async fn test_password_archive_rejects_keypair() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("password.era");
     let test_file = temp_dir.path().join("test.txt");
@@ -128,7 +131,7 @@ fn test_password_archive_rejects_keypair() {
             .build()
             .unwrap();
 
-        writer.add_file(&test_file).unwrap();
+        writer.add_file(&test_file).await.unwrap();
         writer.finalize().unwrap();
     }
 
@@ -153,8 +156,8 @@ fn test_password_archive_rejects_keypair() {
 }
 
 /// Test that wrong keypair is rejected
-#[test]
-fn test_wrong_keypair_rejected() {
+#[tokio::test]
+async fn test_wrong_keypair_rejected() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
     let test_file = temp_dir.path().join("test.txt");
@@ -171,7 +174,7 @@ fn test_wrong_keypair_rejected() {
             .build()
             .unwrap();
 
-        writer.add_file(&test_file).unwrap();
+        writer.add_file(&test_file).await.unwrap();
         writer.finalize().unwrap();
     }
 
@@ -194,8 +197,8 @@ fn test_wrong_keypair_rejected() {
 }
 
 /// Test that certificate mode is significantly faster than password mode.
-#[test]
-fn test_certificate_mode_performance() {
+#[tokio::test]
+async fn test_certificate_mode_performance() {
     use std::time::Instant;
 
     let temp_dir = TempDir::new().unwrap();
@@ -246,8 +249,8 @@ fn test_certificate_mode_performance() {
 }
 
 /// Test that key encapsulation contains valid data.
-#[test]
-fn test_key_encapsulation_roundtrip() {
+#[tokio::test]
+async fn test_key_encapsulation_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
     let test_file = temp_dir.path().join("test.txt");
@@ -282,6 +285,6 @@ fn test_key_encapsulation_roundtrip() {
         "Master key should be 32 bytes"
     );
 
-    writer.add_file(&test_file).unwrap();
+    writer.add_file(&test_file).await.unwrap();
     writer.finalize().unwrap();
 }

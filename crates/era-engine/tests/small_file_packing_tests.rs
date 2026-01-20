@@ -4,8 +4,8 @@ use era_engine::{ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
 use std::fs::{self, File};
 use tempfile::TempDir;
 
-#[test]
-fn test_small_file_packing_roundtrip() {
+#[tokio::test]
+async fn test_small_file_packing_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -33,7 +33,7 @@ fn test_small_file_packing_roundtrip() {
         .unwrap();
 
     for (filename, _) in &expected_files {
-        writer.add_file(&input_dir.join(filename)).unwrap();
+        writer.add_file(&input_dir.join(filename)).await.unwrap();
     }
 
     let stats = writer.finalize().unwrap();
@@ -68,8 +68,8 @@ fn test_small_file_packing_roundtrip() {
     }
 }
 
-#[test]
-fn test_mixed_small_and_large_files() {
+#[tokio::test]
+async fn test_mixed_small_and_large_files() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -99,11 +99,13 @@ fn test_mixed_small_and_large_files() {
     for i in 0..5 {
         writer
             .add_file(&input_dir.join(format!("small_{}.txt", i)))
+            .await
             .unwrap();
     }
     for i in 0..2 {
         writer
             .add_file(&input_dir.join(format!("large_{}.txt", i)))
+            .await
             .unwrap();
     }
 
@@ -134,8 +136,8 @@ fn test_mixed_small_and_large_files() {
     }
 }
 
-#[test]
-fn test_many_small_files() {
+#[tokio::test]
+async fn test_many_small_files() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -158,6 +160,7 @@ fn test_many_small_files() {
     for i in 0..file_count {
         writer
             .add_file(&input_dir.join(format!("file_{:03}.dat", i)))
+            .await
             .unwrap();
     }
 
@@ -183,8 +186,8 @@ fn test_many_small_files() {
     }
 }
 
-#[test]
-fn test_empty_files_packed() {
+#[tokio::test]
+async fn test_empty_files_packed() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     let output_dir = temp_dir.path().join("output");
@@ -205,6 +208,7 @@ fn test_empty_files_packed() {
     for i in 0..5 {
         writer
             .add_file(&input_dir.join(format!("empty_{}.txt", i)))
+            .await
             .unwrap();
     }
 

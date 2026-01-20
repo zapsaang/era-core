@@ -19,8 +19,8 @@ fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBu
     path
 }
 
-#[test]
-fn test_create_and_extract_single_file() {
+#[tokio::test]
+async fn test_create_and_extract_single_file() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -36,7 +36,7 @@ fn test_create_and_extract_single_file() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     let _stats = writer.finalize().unwrap();
 
     // Extract archive
@@ -52,8 +52,8 @@ fn test_create_and_extract_single_file() {
     assert_eq!(extracted_content, content);
 }
 
-#[test]
-fn test_create_and_extract_multiple_files() {
+#[tokio::test]
+async fn test_create_and_extract_multiple_files() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -77,7 +77,7 @@ fn test_create_and_extract_multiple_files() {
         .unwrap();
 
     for (name, _) in &files {
-        writer.add_file(&input_dir.join(name)).unwrap();
+        writer.add_file(&input_dir.join(name)).await.unwrap();
     }
     let stats = writer.finalize().unwrap();
 
@@ -97,8 +97,8 @@ fn test_create_and_extract_multiple_files() {
     }
 }
 
-#[test]
-fn test_wrong_password_fails() {
+#[tokio::test]
+async fn test_wrong_password_fails() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -113,7 +113,7 @@ fn test_wrong_password_fails() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     writer.finalize().unwrap();
 
     // Try to open with wrong password - should fail
@@ -135,8 +135,8 @@ fn test_wrong_password_fails() {
     }
 }
 
-#[test]
-fn test_list_files() {
+#[tokio::test]
+async fn test_list_files() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -155,7 +155,7 @@ fn test_list_files() {
         .unwrap();
 
     for name in &files {
-        writer.add_file(&input_dir.join(name)).unwrap();
+        writer.add_file(&input_dir.join(name)).await.unwrap();
     }
     writer.finalize().unwrap();
 
@@ -176,8 +176,8 @@ fn test_list_files() {
     }
 }
 
-#[test]
-fn test_empty_password() {
+#[tokio::test]
+async fn test_empty_password() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -191,7 +191,7 @@ fn test_empty_password() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     writer.finalize().unwrap();
 
     // Open with empty password
@@ -203,8 +203,8 @@ fn test_empty_password() {
     assert!(wrong.is_err(), "Should fail with non-empty password");
 }
 
-#[test]
-fn test_archive_info() {
+#[tokio::test]
+async fn test_archive_info() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -218,7 +218,7 @@ fn test_archive_info() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     writer.finalize().unwrap();
 
     // Open and check header info
@@ -230,8 +230,8 @@ fn test_archive_info() {
     assert!(header.creation_time > 0);
 }
 
-#[test]
-fn test_large_file() {
+#[tokio::test]
+async fn test_large_file() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -247,7 +247,7 @@ fn test_large_file() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     let stats = writer.finalize().unwrap();
 
     assert_eq!(stats.total_size, content.len() as u64);
@@ -263,8 +263,8 @@ fn test_large_file() {
     assert_eq!(extracted, content);
 }
 
-#[test]
-fn test_binary_file() {
+#[tokio::test]
+async fn test_binary_file() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -280,7 +280,7 @@ fn test_binary_file() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     writer.finalize().unwrap();
 
     // Extract and verify
@@ -294,8 +294,8 @@ fn test_binary_file() {
     assert_eq!(extracted, content);
 }
 
-#[test]
-fn test_cdc_large_file_roundtrip() {
+#[tokio::test]
+async fn test_cdc_large_file_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -315,7 +315,7 @@ fn test_cdc_large_file_roundtrip() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     let stats = writer.finalize().unwrap();
 
     // The file should be chunked into multiple pieces
@@ -336,8 +336,8 @@ fn test_cdc_large_file_roundtrip() {
     assert_eq!(extracted, content);
 }
 
-#[test]
-fn test_cdc_deduplication() {
+#[tokio::test]
+async fn test_cdc_deduplication() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -356,7 +356,7 @@ fn test_cdc_deduplication() {
         .build()
         .unwrap();
 
-    writer.add_file(&file_path).unwrap();
+    writer.add_file(&file_path).await.unwrap();
     let _stats = writer.finalize().unwrap();
 
     // Extract and verify
@@ -371,8 +371,8 @@ fn test_cdc_deduplication() {
     assert_eq!(extracted, content);
 }
 
-#[test]
-fn test_cdc_mixed_files() {
+#[tokio::test]
+async fn test_cdc_mixed_files() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -395,8 +395,8 @@ fn test_cdc_mixed_files() {
         .build()
         .unwrap();
 
-    writer.add_file(&small_path).unwrap();
-    writer.add_file(&large_path).unwrap();
+    writer.add_file(&small_path).await.unwrap();
+    writer.add_file(&large_path).await.unwrap();
     writer.finalize().unwrap();
 
     // Extract and verify both files
@@ -415,8 +415,8 @@ fn test_cdc_mixed_files() {
     assert_eq!(extracted_large, large_content);
 }
 
-#[test]
-fn test_multifile_packing_efficiency() {
+#[tokio::test]
+async fn test_multifile_packing_efficiency() {
     // Test that multiple small files are packed into fewer blocks
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
@@ -442,7 +442,7 @@ fn test_multifile_packing_efficiency() {
         .unwrap();
 
     for path in &paths {
-        writer.add_file(path).unwrap();
+        writer.add_file(path).await.unwrap();
     }
 
     let stats = writer.finalize().unwrap();
@@ -477,8 +477,8 @@ fn test_multifile_packing_efficiency() {
 
 // ============ Erasure Coding E2E Tests ============
 
-#[test]
-fn test_erasure_coding_roundtrip() {
+#[tokio::test]
+async fn test_erasure_coding_roundtrip() {
     use era_common::ErasureCodeConfig;
 
     let temp_dir = TempDir::new().unwrap();
@@ -510,7 +510,7 @@ fn test_erasure_coding_roundtrip() {
         .unwrap();
 
     for (name, _) in &files {
-        writer.add_file(&input_dir.join(name)).unwrap();
+        writer.add_file(&input_dir.join(name)).await.unwrap();
     }
 
     let stats = writer.finalize().unwrap();
@@ -543,8 +543,8 @@ fn test_erasure_coding_roundtrip() {
     }
 }
 
-#[test]
-fn test_erasure_verify_integration() {
+#[tokio::test]
+async fn test_erasure_verify_integration() {
     use era_common::ErasureCodeConfig;
 
     let temp_dir = TempDir::new().unwrap();
@@ -568,7 +568,7 @@ fn test_erasure_verify_integration() {
         .build()
         .unwrap();
 
-    writer.add_file(&input_dir.join("data.bin")).unwrap();
+    writer.add_file(&input_dir.join("data.bin")).await.unwrap();
     writer.finalize().unwrap();
 
     // Verify archive integrity
@@ -584,8 +584,8 @@ fn test_erasure_verify_integration() {
     assert_eq!(verify_stats.blocks_failed, 0);
 }
 
-#[test]
-fn test_erasure_different_configs() {
+#[tokio::test]
+async fn test_erasure_different_configs() {
     use era_common::ErasureCodeConfig;
 
     let temp_dir = TempDir::new().unwrap();
@@ -619,7 +619,7 @@ fn test_erasure_different_configs() {
             .build()
             .unwrap();
 
-        writer.add_file(&input_dir.join("test.bin")).unwrap();
+        writer.add_file(&input_dir.join("test.bin")).await.unwrap();
         writer.finalize().unwrap();
 
         // Verify extraction works
@@ -644,8 +644,8 @@ fn test_erasure_different_configs() {
 }
 
 /// Test repair on a healthy erasure archive (should report no repairs needed)
-#[test]
-fn test_repair_healthy_archive() {
+#[tokio::test]
+async fn test_repair_healthy_archive() {
     use era_common::ErasureCodeConfig;
 
     let temp_dir = TempDir::new().unwrap();
@@ -669,7 +669,10 @@ fn test_repair_healthy_archive() {
         .build()
         .unwrap();
 
-    writer.add_file(&input_dir.join("healthy.bin")).unwrap();
+    writer
+        .add_file(&input_dir.join("healthy.bin"))
+        .await
+        .unwrap();
     writer.finalize().unwrap();
 
     // Run repair in dry-run mode
@@ -689,8 +692,8 @@ fn test_repair_healthy_archive() {
 }
 
 /// Test repair on non-erasure archive (should fail gracefully)
-#[test]
-fn test_repair_non_erasure_archive() {
+#[tokio::test]
+async fn test_repair_non_erasure_archive() {
     let temp_dir = TempDir::new().unwrap();
 
     // Create a standard archive without erasure coding
@@ -717,8 +720,8 @@ fn test_repair_non_erasure_archive() {
 }
 
 /// Test repair with wrong password (should fail)
-#[test]
-fn test_repair_wrong_password() {
+#[tokio::test]
+async fn test_repair_wrong_password() {
     use era_common::ErasureCodeConfig;
 
     let temp_dir = TempDir::new().unwrap();

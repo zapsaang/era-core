@@ -18,8 +18,8 @@ fn write_repeating_file(path: &std::path::Path, total_size: u64) {
     writer.flush().unwrap();
 }
 
-#[test]
-fn test_zero_drift_append_dedup() {
+#[tokio::test]
+async fn test_zero_drift_append_dedup() {
     let temp_dir = TempDir::new().unwrap();
     let data_path = temp_dir.path().join("data.bin");
     let copy_path = temp_dir.path().join("data_copy.bin");
@@ -42,7 +42,7 @@ fn test_zero_drift_append_dedup() {
         .build()
         .unwrap();
 
-    writer.add_file(&data_path).unwrap();
+    writer.add_file(&data_path).await.unwrap();
     let stats_first = writer.finalize().unwrap();
     let size_first = fs::metadata(&archive_path).unwrap().len();
 
@@ -68,7 +68,7 @@ fn test_zero_drift_append_dedup() {
         .build()
         .unwrap();
 
-    writer.add_file(&copy_path).unwrap();
+    writer.add_file(&copy_path).await.unwrap();
     let stats_second = writer.finalize().unwrap();
     let size_second = fs::metadata(&archive_path).unwrap().len();
 

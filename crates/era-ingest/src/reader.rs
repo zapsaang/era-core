@@ -4,12 +4,13 @@ use crate::chunker::{Chunker, ChunkerConfig, StreamingChunker};
 use crate::entry::FileEntry;
 use bytes::Bytes;
 use era_common::{ChunkHash, EraError, Result, UniqueChunk};
+use futures::stream::{Stream, StreamExt};
 use glob::Pattern;
 use ignore::WalkBuilder;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, BufReader};
 // use tracing::{debug, warn};
 
 /// Threshold for using CDC chunking (files larger than this use chunking)
@@ -250,66 +251,89 @@ impl FileReader {
     ///
     /// This is the original MVP behavior, kept for backward compatibility.
     /// For large files, consider using `read_file_chunked` instead.
-    pub fn read_file(&self, path: &Path) -> Result<UniqueChunk> {
-        let file = File::open(path)?;
-        let metadata = file.metadata()?;
+    pub async fn read_file(&self, path: &Path) -> Result<UniqueChunk> {
+        let file = File::open(path).await.map_err(EraError::Io)?;
+        let metadata = file.metadata().await.map_err(EraError::Io)?;
         let size = metadata.len() as usize;
 
         let mut reader = BufReader::with_capacity(self.buffer_size, file);
         let mut data = Vec::with_capacity(size);
-        reader.read_to_end(&mut data)?;
+        reader.read_to_end(&mut data).await.map_err(EraError::Io)?;
 
         let hash = era_crypto::hash(&data);
 
         Ok(UniqueChunk::new(Bytes::from(data), hash))
     }
 
-    /// Read a file with automatic chunking for large files
+    /// Read a file with automatic chunking for large files (Async Stream)
     ///
     /// Files smaller than `CDC_THRESHOLD` are returned as a single chunk.
     /// Larger files are split using FastCDC content-defined chunking.
-    pub fn read_file_chunked(&self, path: &Path) -> Result<Vec<UniqueChunk>> {
-        let file = File::open(path)?;
-        let metadata = file.metadata()?;
+    pub async fn read_file_chunked_stream(
+        &self,
+        path: &Path,
+    ) -> Result<std::pin::Pin<Box<dyn Stream<Item = Result<UniqueChunk>> + Send>>> {
+        let file = File::open(path).await.map_err(EraError::Io)?;
+        let metadata = file.metadata().await.map_err(EraError::Io)?;
         let size = metadata.len();
 
         if !self.use_cdc || size <= CDC_THRESHOLD {
             // Small file: read as single chunk
-            let chunk = self.read_file(path)?;
-            return Ok(vec![chunk]);
+            let chunk = self.read_file(path).await?;
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok::<UniqueChunk, EraError>(chunk)
+            })));
         }
 
         // Large file: use streaming CDC
-        let file = File::open(path)?;
+        // We open file again? read_file opened it.
+        // read_file consumed it? No, read_file opens its own file.
+        // Here we opened 'file' for metadata check.
+        // We can reuse 'file'.
+
+        // We need to seek to start if we used it? No, we only did metadata().
+        // metadata() on File doesn't advance cursor? std::fs::File::metadata() doesn't. tokio::fs::File::metadata() doesn't.
+
         let reader = BufReader::with_capacity(self.buffer_size, file);
         let streaming = StreamingChunker::new(reader, self.chunker_config.clone());
 
-        streaming.collect()
+        Ok(Box::pin(streaming.into_stream()))
+    }
+
+    /// Legacy compatible async method returning Vec
+    pub async fn read_file_chunked(&self, path: &Path) -> Result<Vec<UniqueChunk>> {
+        let mut stream = self.read_file_chunked_stream(path).await?;
+        let mut chunks = Vec::new();
+        while let Some(res) = stream.next().await {
+            chunks.push(res?);
+        }
+        Ok(chunks)
     }
 
     /// Read a file and split into chunks using FastCDC
     ///
     /// Always uses CDC chunking regardless of file size.
-    pub fn read_file_cdc(&self, path: &Path) -> Result<Vec<UniqueChunk>> {
+    pub async fn read_file_cdc(&self, path: &Path) -> Result<Vec<UniqueChunk>> {
         let chunker = Chunker::new(self.chunker_config.clone());
-        chunker.chunk_file(path)
+        let data = self.read_bytes(path).await?;
+        Ok(chunker.chunk_all(&data))
     }
 
     /// Read a file and compute its hash without loading all data at once
-    pub fn hash_file(&self, path: &Path) -> Result<ChunkHash> {
-        let file = File::open(path)?;
-        era_crypto::hash_reader(file).map_err(Into::into)
+    pub async fn hash_file(&self, path: &Path) -> Result<ChunkHash> {
+        let bytes = self.read_bytes(path).await?;
+        Ok(era_crypto::hash(&bytes))
     }
 
     /// Read file contents into memory
-    pub fn read_bytes(&self, path: &Path) -> Result<Bytes> {
-        let file = File::open(path)?;
-        let metadata = file.metadata()?;
+    pub async fn read_bytes(&self, path: &Path) -> Result<Bytes> {
+        let file = File::open(path).await.map_err(EraError::Io)?;
+        let metadata = file.metadata().await.map_err(EraError::Io)?;
         let size = metadata.len() as usize;
 
         let mut reader = BufReader::with_capacity(self.buffer_size, file);
         let mut data = Vec::with_capacity(size);
-        reader.read_to_end(&mut data)?;
+        reader.read_to_end(&mut data).await.map_err(EraError::Io)?;
 
         Ok(Bytes::from(data))
     }
@@ -327,29 +351,29 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    #[test]
-    fn test_read_file() {
+    #[tokio::test]
+    async fn test_read_file() {
         let mut temp = NamedTempFile::new().unwrap();
         let data = b"Hello, ERA file reader!";
         temp.write_all(data).unwrap();
         temp.flush().unwrap();
 
         let reader = FileReader::new();
-        let chunk = reader.read_file(temp.path()).unwrap();
+        let chunk = reader.read_file(temp.path()).await.unwrap();
 
         assert_eq!(chunk.data.as_ref(), data);
         assert!(!chunk.hash.as_bytes().iter().all(|&b| b == 0));
     }
 
-    #[test]
-    fn test_hash_file() {
+    #[tokio::test]
+    async fn test_hash_file() {
         let mut temp = NamedTempFile::new().unwrap();
         let data = b"Test data for hashing";
         temp.write_all(data).unwrap();
         temp.flush().unwrap();
 
         let reader = FileReader::new();
-        let hash1 = reader.hash_file(temp.path()).unwrap();
+        let hash1 = reader.hash_file(temp.path()).await.unwrap();
         let hash2 = era_crypto::hash(data);
 
         assert_eq!(hash1, hash2);

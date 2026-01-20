@@ -96,7 +96,7 @@ pub struct CreateArgs<'a> {
 }
 
 /// Create a new ERA archive
-pub fn create(args: CreateArgs<'_>) -> Result<()> {
+pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     let CreateArgs {
         inputs,
         output,
@@ -333,6 +333,7 @@ pub fn create(args: CreateArgs<'_>) -> Result<()> {
         pb.set_message(format!("{}", disk_path.display()));
         writer
             .add_file_with_path(&disk_path, &stored_path)
+            .await
             .with_context(|| format!("Failed to add file: {}", disk_path.display()))?;
         pb.inc(1);
     }

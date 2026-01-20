@@ -7,8 +7,8 @@ use std::fs;
 use std::io::Write;
 use tempfile::TempDir;
 
-#[test]
-fn test_simple_lsm_dedup_debug() -> Result<()> {
+#[tokio::test]
+async fn test_simple_lsm_dedup_debug() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let index_path = temp_dir.path().join("debug_index");
 
@@ -27,7 +27,7 @@ fn test_simple_lsm_dedup_debug() -> Result<()> {
             .with_lsm_index(&index_path)
             .build()?;
 
-        writer.add_file(&test_file)?;
+        writer.add_file(&test_file).await?;
         writer.finalize()?
     };
 
@@ -61,7 +61,7 @@ fn test_simple_lsm_dedup_debug() -> Result<()> {
             .with_lsm_index(&index_path) // Should reuse index
             .build()?;
 
-        writer.add_file(&test_file)?; // Same file again
+        writer.add_file(&test_file).await?; // Same file again
         writer.finalize()?
     };
 

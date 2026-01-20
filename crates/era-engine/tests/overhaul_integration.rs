@@ -30,8 +30,8 @@ fn archive_volumes(base: &Path) -> Vec<PathBuf> {
     volumes
 }
 
-#[test]
-fn dedup_audit_small_files() {
+#[tokio::test]
+async fn dedup_audit_small_files() {
     let temp = TempDir::new().unwrap();
     let archive_path = temp.path().join("dedup.era");
 
@@ -44,7 +44,7 @@ fn dedup_audit_small_files() {
     for i in 0..10 {
         let file_path = temp.path().join(format!("file_{i}.txt"));
         fs::write(&file_path, b"identical-content").unwrap();
-        writer.add_file(&file_path).unwrap();
+        writer.add_file(&file_path).await.unwrap();
     }
 
     writer.finalize().unwrap();
@@ -77,8 +77,8 @@ fn dedup_audit_small_files() {
     );
 }
 
-#[test]
-fn missing_volume_recovery_extracts_successfully() {
+#[tokio::test]
+async fn missing_volume_recovery_extracts_successfully() {
     let temp = TempDir::new().unwrap();
     let archive_path = temp.path().join("missing.era");
 
@@ -97,7 +97,7 @@ fn missing_volume_recovery_extracts_successfully() {
         .build()
         .unwrap();
 
-    writer.add_file(&source_path).unwrap();
+    writer.add_file(&source_path).await.unwrap();
     writer.finalize().unwrap();
 
     let mut volumes = archive_volumes(&archive_path);
@@ -116,8 +116,8 @@ fn missing_volume_recovery_extracts_successfully() {
     assert_eq!(restored, source_data);
 }
 
-#[test]
-fn aware_read_recovers_aead_corruption() {
+#[tokio::test]
+async fn aware_read_recovers_aead_corruption() {
     let temp = TempDir::new().unwrap();
     let archive_path = temp.path().join("aware.era");
 
@@ -136,7 +136,7 @@ fn aware_read_recovers_aead_corruption() {
         .build()
         .unwrap();
 
-    writer.add_file(&source_path).unwrap();
+    writer.add_file(&source_path).await.unwrap();
     writer.finalize().unwrap();
 
     let volumes = archive_volumes(&archive_path);

@@ -6,10 +6,11 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use era_common::{BlockLocation, ChunkHash, VolumeId};
-use era_engine::chunk_index::{
-    create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex,
-};
+use era_engine::chunk_index::{ChunkIndex, MemoryChunkIndex};
+#[cfg(feature = "lsm")]
+use era_engine::{create_chunk_index, ChunkIndexBackend};
 use std::sync::Arc;
+#[cfg(feature = "lsm")]
 use tempfile::TempDir;
 
 /// Create a test BlockLocation

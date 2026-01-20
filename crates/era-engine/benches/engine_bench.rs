@@ -27,6 +27,7 @@ fn fast_kdf_config() -> era_common::ArchiveConfig {
 }
 
 fn bench_archive_creation(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("archive_creation");
 
     // Test different file sizes
@@ -55,7 +56,9 @@ fn bench_archive_creation(c: &mut Criterion) {
                             .unwrap();
 
                         let file_path = input_dir.join("file_0.bin");
-                        writer.add_file(&file_path).unwrap();
+                        rt.block_on(async {
+                            writer.add_file(&file_path).await.unwrap();
+                        });
                         writer.finalize().unwrap();
 
                         black_box(archive_path)
@@ -69,6 +72,7 @@ fn bench_archive_creation(c: &mut Criterion) {
 }
 
 fn bench_archive_extraction(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("archive_extraction");
 
     for file_size in [1024, 10 * 1024, 100 * 1024] {
@@ -91,7 +95,9 @@ fn bench_archive_extraction(c: &mut Criterion) {
                     .unwrap();
 
                 let file_path = input_dir.join("file_0.bin");
-                writer.add_file(&file_path).unwrap();
+                rt.block_on(async {
+                    writer.add_file(&file_path).await.unwrap();
+                });
                 writer.finalize().unwrap();
 
                 // Benchmark extraction
@@ -115,6 +121,7 @@ fn bench_archive_extraction(c: &mut Criterion) {
 }
 
 fn bench_multiple_files(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("multiple_files");
 
     for file_count in [1, 5, 10, 20] {
@@ -146,7 +153,9 @@ fn bench_multiple_files(c: &mut Criterion) {
 
                         for i in 0..count {
                             let file_path = input_dir.join(format!("file_{}.bin", i));
-                            writer.add_file(&file_path).unwrap();
+                            rt.block_on(async {
+                                writer.add_file(&file_path).await.unwrap();
+                            });
                         }
                         writer.finalize().unwrap();
 
@@ -161,6 +170,7 @@ fn bench_multiple_files(c: &mut Criterion) {
 }
 
 fn bench_roundtrip(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("roundtrip");
 
     let file_size = 50 * 1024; // 50KB
@@ -189,7 +199,9 @@ fn bench_roundtrip(c: &mut Criterion) {
                     .unwrap();
 
                 let file_path = input_dir.join("file_0.bin");
-                writer.add_file(&file_path).unwrap();
+                rt.block_on(async {
+                    writer.add_file(&file_path).await.unwrap();
+                });
                 writer.finalize().unwrap();
 
                 // Extract archive

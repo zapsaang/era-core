@@ -4,8 +4,8 @@ use std::fs;
 use std::io::Write;
 use tempfile::TempDir;
 
-#[test]
-fn test_reproduce_matrix_distribution_panic() {
+#[tokio::test]
+async fn test_reproduce_matrix_distribution_panic() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -38,7 +38,7 @@ fn test_reproduce_matrix_distribution_panic() {
     {
         Ok(mut writer) => {
             // This line should panic if the bug exists
-            if let Err(e) = writer.add_file(&file_path) {
+            if let Err(e) = writer.add_file(&file_path).await {
                 panic!("Failed to add file: {}", e);
             }
             if let Err(e) = writer.finalize() {

@@ -19,8 +19,8 @@ fn create_test_file(dir: &TempDir, name: &str, content: &[u8]) -> std::path::Pat
 }
 
 /// Test basic archive creation with Memory backend (default)
-#[test]
-fn test_archive_with_memory_index() -> Result<()> {
+#[tokio::test]
+async fn test_archive_with_memory_index() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let archive_path = temp_dir.path().join("test_memory.era");
 
@@ -33,7 +33,7 @@ fn test_archive_with_memory_index() -> Result<()> {
         .password("test123")
         .build()?;
 
-    writer.add_file(&file1)?;
+    writer.add_file(&file1).await?;
     let stats = writer.finalize()?;
 
     assert_eq!(stats.total_files, 1);
@@ -47,8 +47,8 @@ fn test_archive_with_memory_index() -> Result<()> {
 }
 
 /// Test archive with explicit Memory backend
-#[test]
-fn test_archive_with_explicit_memory_index() -> Result<()> {
+#[tokio::test]
+async fn test_archive_with_explicit_memory_index() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let archive_path = temp_dir.path().join("test_explicit_memory.era");
 
@@ -60,7 +60,7 @@ fn test_archive_with_explicit_memory_index() -> Result<()> {
         .index_backend(ChunkIndexBackend::Memory)
         .build()?;
 
-    writer.add_file(&file1)?;
+    writer.add_file(&file1).await?;
     let stats = writer.finalize()?;
 
     assert_eq!(stats.total_files, 1);
@@ -77,8 +77,8 @@ fn test_archive_with_explicit_memory_index() -> Result<()> {
 }
 
 /// Test deduplication with Memory backend
-#[test]
-fn test_dedup_with_memory_index() -> Result<()> {
+#[tokio::test]
+async fn test_dedup_with_memory_index() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let archive_path = temp_dir.path().join("test_dedup_memory.era");
 
@@ -112,8 +112,8 @@ fn test_dedup_with_memory_index() -> Result<()> {
 }
 
 /// Test with multiple different files
-#[test]
-fn test_multiple_unique_files() -> Result<()> {
+#[tokio::test]
+async fn test_multiple_unique_files() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let archive_path = temp_dir.path().join("test_multiple.era");
 
@@ -126,7 +126,7 @@ fn test_multiple_unique_files() -> Result<()> {
         .password("test123")
         .build()?;
 
-    writer.add_files(&[&a, &b, &c])?;
+    writer.add_files(&[&a, &b, &c]).await?;
     let stats = writer.finalize()?;
 
     assert_eq!(stats.total_files, 3);
@@ -153,8 +153,8 @@ fn test_multiple_unique_files() -> Result<()> {
 }
 
 /// Test large file with CDC chunking and deduplication
-#[test]
-fn test_large_file_dedup_memory_index() -> Result<()> {
+#[tokio::test]
+async fn test_large_file_dedup_memory_index() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let archive_path = temp_dir.path().join("test_large_dedup.era");
 
@@ -172,7 +172,7 @@ fn test_large_file_dedup_memory_index() -> Result<()> {
         .enable_cdc(true)
         .build()?;
 
-    writer.add_file(&file1)?;
+    writer.add_file(&file1).await?;
     let stats = writer.finalize()?;
 
     assert_eq!(stats.total_files, 1);
@@ -190,8 +190,8 @@ fn test_large_file_dedup_memory_index() -> Result<()> {
 }
 
 /// Test add_bytes with Memory index
-#[test]
-fn test_add_bytes_memory_index() -> Result<()> {
+#[tokio::test]
+async fn test_add_bytes_memory_index() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let archive_path = temp_dir.path().join("test_add_bytes.era");
 
@@ -248,8 +248,8 @@ mod lsm_tests {
     }
 
     /// Test archive creation with LSM (RocksDB) backend
-    #[test]
-    fn test_archive_with_lsm_index() -> Result<()> {
+    #[tokio::test]
+    async fn test_archive_with_lsm_index() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let archive_path = temp_dir.path().join("test_lsm.era");
         let index_path = temp_dir.path().join("chunk_index");
@@ -262,7 +262,7 @@ mod lsm_tests {
             .with_lsm_index(&index_path)
             .build()?;
 
-        writer.add_file(&file1)?;
+        writer.add_file(&file1).await?;
         let stats = writer.finalize()?;
 
         assert_eq!(stats.total_files, 1);
@@ -279,8 +279,8 @@ mod lsm_tests {
     }
 
     /// Test deduplication with LSM backend
-    #[test]
-    fn test_dedup_with_lsm_index() -> Result<()> {
+    #[tokio::test]
+    async fn test_dedup_with_lsm_index() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let archive_path = temp_dir.path().join("test_lsm_dedup.era");
         let index_path = temp_dir.path().join("chunk_index");
@@ -296,7 +296,7 @@ mod lsm_tests {
             .with_lsm_index(&index_path)
             .build()?;
 
-        writer.add_files(&[&dup1, &dup2, &unique])?;
+        writer.add_files(&[&dup1, &dup2, &unique]).await?;
         let stats = writer.finalize()?;
 
         assert_eq!(stats.total_files, 3);
@@ -317,8 +317,8 @@ mod lsm_tests {
     }
 
     /// Test LSM persistence across sessions
-    #[test]
-    fn test_lsm_persistence() -> Result<()> {
+    #[tokio::test]
+    async fn test_lsm_persistence() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let index_path = temp_dir.path().join("persistent_index");
 
@@ -360,8 +360,8 @@ mod lsm_tests {
     }
 
     /// Test batch operations with LSM
-    #[test]
-    fn test_lsm_batch_operations() -> Result<()> {
+    #[tokio::test]
+    async fn test_lsm_batch_operations() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let index_path = temp_dir.path().join("batch_index");
 
@@ -389,8 +389,8 @@ mod lsm_tests {
     }
 
     /// Test large archive with LSM backend
-    #[test]
-    fn test_large_archive_with_lsm() -> Result<()> {
+    #[tokio::test]
+    async fn test_large_archive_with_lsm() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let archive_path = temp_dir.path().join("test_large_lsm.era");
         let index_path = temp_dir.path().join("large_index");
@@ -415,7 +415,7 @@ mod lsm_tests {
             .with_lsm_index(&index_path)
             .build()?;
 
-        writer.add_files(&file_refs)?;
+        writer.add_files(&file_refs).await?;
         let stats = writer.finalize()?;
 
         assert_eq!(stats.total_files, 100);
@@ -435,8 +435,8 @@ mod lsm_tests {
     }
 
     /// Test CDC chunking with LSM backend
-    #[test]
-    fn test_cdc_with_lsm_index() -> Result<()> {
+    #[tokio::test]
+    async fn test_cdc_with_lsm_index() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let archive_path = temp_dir.path().join("test_cdc_lsm.era");
         let index_path = temp_dir.path().join("cdc_index");
@@ -456,7 +456,7 @@ mod lsm_tests {
             .with_lsm_index(&index_path)
             .build()?;
 
-        writer.add_file(&file1)?;
+        writer.add_file(&file1).await?;
         let stats = writer.finalize()?;
 
         assert_eq!(stats.total_files, 1);

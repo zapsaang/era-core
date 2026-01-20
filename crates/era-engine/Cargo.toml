@@ -19,7 +19,15 @@ era-volume = { workspace = true }
 era-packing = { workspace = true }
 era-ingest = { workspace = true }
 era-index = { workspace = true }
+futures = "0.3"
+
 bytes = { workspace = true }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "macros",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 prost = { workspace = true }

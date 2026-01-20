@@ -17,8 +17,8 @@ fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBu
     path
 }
 
-#[test]
-fn test_batch_add_files() {
+#[tokio::test]
+async fn test_batch_add_files() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -40,7 +40,7 @@ fn test_batch_add_files() {
 
     // Convert to &[&Path] for batch API
     let file_refs: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
-    writer.add_files(&file_refs).unwrap();
+    writer.add_files(&file_refs).await.unwrap();
     let stats = writer.finalize().unwrap();
 
     assert_eq!(stats.total_files, 10);
@@ -61,8 +61,8 @@ fn test_batch_add_files() {
     }
 }
 
-#[test]
-fn test_batch_vs_individual_equivalence() {
+#[tokio::test]
+async fn test_batch_vs_individual_equivalence() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -83,7 +83,7 @@ fn test_batch_vs_individual_equivalence() {
         .unwrap();
 
     let file_refs: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
-    writer_batch.add_files(&file_refs).unwrap();
+    writer_batch.add_files(&file_refs).await.unwrap();
     let stats_batch = writer_batch.finalize().unwrap();
 
     // Create archive with individual adds
@@ -94,7 +94,7 @@ fn test_batch_vs_individual_equivalence() {
         .unwrap();
 
     for file in &files {
-        writer_individual.add_file(file).unwrap();
+        writer_individual.add_file(file).await.unwrap();
     }
     let stats_individual = writer_individual.finalize().unwrap();
 
@@ -126,8 +126,8 @@ fn test_batch_vs_individual_equivalence() {
     }
 }
 
-#[test]
-fn test_batch_empty() {
+#[tokio::test]
+async fn test_batch_empty() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
 
@@ -137,14 +137,14 @@ fn test_batch_empty() {
         .unwrap();
 
     // Empty batch should work without error
-    writer.add_files(&[]).unwrap();
+    writer.add_files(&[]).await.unwrap();
     let stats = writer.finalize().unwrap();
 
     assert_eq!(stats.total_files, 0);
 }
 
-#[test]
-fn test_batch_large_number_of_files() {
+#[tokio::test]
+async fn test_batch_large_number_of_files() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -168,7 +168,7 @@ fn test_batch_large_number_of_files() {
         .unwrap();
 
     let file_refs: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
-    writer.add_files(&file_refs).unwrap();
+    writer.add_files(&file_refs).await.unwrap();
     let stats = writer.finalize().unwrap();
 
     assert_eq!(stats.total_files, 100);
@@ -180,8 +180,8 @@ fn test_batch_large_number_of_files() {
     assert_eq!(verify_stats.files_verified, 100);
 }
 
-#[test]
-fn test_mixed_batch_and_individual() {
+#[tokio::test]
+async fn test_mixed_batch_and_individual() {
     let temp_dir = TempDir::new().unwrap();
     let input_dir = temp_dir.path().join("input");
     fs::create_dir_all(&input_dir).unwrap();
@@ -199,11 +199,12 @@ fn test_mixed_batch_and_individual() {
         .unwrap();
 
     // Mix batch and individual operations
-    writer.add_file(&file1).unwrap();
+    writer.add_file(&file1).await.unwrap();
     writer
         .add_files(&[file2.as_path(), file3.as_path()])
+        .await
         .unwrap();
-    writer.add_file(&file4).unwrap();
+    writer.add_file(&file4).await.unwrap();
 
     let stats = writer.finalize().unwrap();
     assert_eq!(stats.total_files, 4);

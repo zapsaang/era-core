@@ -29,9 +29,9 @@ fn create_random_data(size: usize) -> Vec<u8> {
     data
 }
 
-#[test]
+#[tokio::test]
 #[cfg(feature = "lsm")]
-fn test_realistic_cdc_chunking() -> Result<()> {
+async fn test_realistic_cdc_chunking() -> Result<()> {
     let temp = TempDir::new()?;
     let data_dir = temp.path().join("data");
     let index_dir = temp.path().join("index");
@@ -55,7 +55,7 @@ fn test_realistic_cdc_chunking() -> Result<()> {
             .with_lsm_index(&index_dir)
             .build()?;
 
-        writer.add_file(&file_path)?;
+        writer.add_file(&file_path).await?;
         let stats = writer.finalize()?;
 
         let disk_size = fs::metadata(&archive_file)?.len();
@@ -94,7 +94,7 @@ fn test_realistic_cdc_chunking() -> Result<()> {
             .with_lsm_index(&index_dir)
             .build()?;
 
-        writer.add_file(&file_path)?;
+        writer.add_file(&file_path).await?;
         let stats = writer.finalize()?;
 
         let disk_size = fs::metadata(&archive_file)?.len();
@@ -129,7 +129,7 @@ fn test_realistic_cdc_chunking() -> Result<()> {
             .with_lsm_index(&index_dir)
             .build()?;
 
-        writer.add_file(&file_path)?;
+        writer.add_file(&file_path).await?;
         let stats = writer.finalize()?;
 
         let disk_size = fs::metadata(&archive_file)?.len();
@@ -159,9 +159,9 @@ fn test_realistic_cdc_chunking() -> Result<()> {
     Ok(())
 }
 
-#[test]
+#[tokio::test]
 #[cfg(feature = "lsm")]
-fn test_realistic_incremental_dedup() -> Result<()> {
+async fn test_realistic_incremental_dedup() -> Result<()> {
     let temp = TempDir::new()?;
     let data_dir = temp.path().join("data");
     let index_dir = temp.path().join("index");
@@ -187,7 +187,7 @@ fn test_realistic_incremental_dedup() -> Result<()> {
         .build()?;
 
     for file_path in &file_paths {
-        writer.add_file(file_path)?;
+        writer.add_file(file_path).await?;
     }
     let stats1 = writer.finalize()?;
 
@@ -215,7 +215,7 @@ fn test_realistic_incremental_dedup() -> Result<()> {
         .build()?;
 
     for file_path in &file_paths {
-        writer.add_file(file_path)?;
+        writer.add_file(file_path).await?;
     }
     let stats2 = writer.finalize()?;
 
@@ -251,9 +251,9 @@ fn test_realistic_incremental_dedup() -> Result<()> {
     Ok(())
 }
 
-#[test]
+#[tokio::test]
 #[cfg(feature = "lsm")]
-fn test_chunk_config_comparison() -> Result<()> {
+async fn test_chunk_config_comparison() -> Result<()> {
     let temp = TempDir::new()?;
     let data_dir = temp.path().join("data");
     let index_dir = temp.path().join("index");
@@ -286,7 +286,7 @@ fn test_chunk_config_comparison() -> Result<()> {
             .with_lsm_index(&index_dir)
             .build()?;
 
-        writer.add_file(&file_path)?;
+        writer.add_file(&file_path).await?;
         let stats = writer.finalize()?;
 
         let disk_size = fs::metadata(&archive_file)?.len();

@@ -42,9 +42,9 @@ fn create_file_with_size(
 ///
 /// Scenario: Archive 100MB data on Monday, then archive 80% same + 20% new on Friday
 /// Expected: Friday archive should be ~20% size of Monday archive
-#[test]
+#[tokio::test]
 #[cfg(feature = "lsm")]
-fn test_incremental_dedup_scenario() -> Result<()> {
+async fn test_incremental_dedup_scenario() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let index_path = temp_dir.path().join("shared_index");
     let archive1_path = temp_dir.path().join("monday.era");
@@ -69,7 +69,7 @@ fn test_incremental_dedup_scenario() -> Result<()> {
             .build()?;
 
         for file_path in &monday_files {
-            writer.add_file(file_path)?;
+            writer.add_file(file_path).await?;
         }
 
         let stats = writer.finalize()?;
@@ -91,14 +91,14 @@ fn test_incremental_dedup_scenario() -> Result<()> {
 
         // Add 8 old files (should be fully deduped)
         for file in monday_files.iter().take(8) {
-            writer.add_file(file)?;
+            writer.add_file(file).await?;
         }
 
         // Add 2 new files
         let new_file1 = create_file_with_size(&source_dir, "new_file_1.dat", 10, 100);
         let new_file2 = create_file_with_size(&source_dir, "new_file_2.dat", 10, 101);
-        writer.add_file(&new_file1)?;
-        writer.add_file(&new_file2)?;
+        writer.add_file(&new_file1).await?;
+        writer.add_file(&new_file2).await?;
 
         let stats = writer.finalize()?;
         println!("\nFriday backup (80% same + 20% new):");
@@ -150,9 +150,9 @@ fn test_incremental_dedup_scenario() -> Result<()> {
 ///
 /// Scenario: Archive 50MB file twice (identical content)
 /// Expected: Second archive should be much smaller (only catalog, blocks deduped)
-#[test]
+#[tokio::test]
 #[cfg(feature = "lsm")]
-fn test_cdc_dedup_effectiveness() -> Result<()> {
+async fn test_cdc_dedup_effectiveness() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let index_path = temp_dir.path().join("cdc_index");
     let archive1_path = temp_dir.path().join("version1.era");
@@ -179,7 +179,7 @@ fn test_cdc_dedup_effectiveness() -> Result<()> {
             .with_lsm_index(&index_path)
             .build()?;
 
-        writer.add_file(&test_file)?;
+        writer.add_file(&test_file).await?;
         let stats = writer.finalize()?;
 
         println!("Version 1 (50MB file with repeating blocks):");
@@ -201,7 +201,7 @@ fn test_cdc_dedup_effectiveness() -> Result<()> {
             .with_lsm_index(&index_path) // Reuse index
             .build()?;
 
-        writer.add_file(&test_file2)?;
+        writer.add_file(&test_file2).await?;
         let stats = writer.finalize()?;
 
         println!("\nVersion 2 (identical content, different filename):");
@@ -250,9 +250,9 @@ fn test_cdc_dedup_effectiveness() -> Result<()> {
 ///
 /// Scenario: Archive 500MB data and monitor memory impact
 /// Expected: LSM index memory stays bounded (< 500MB)
-#[test]
+#[tokio::test]
 #[cfg(feature = "lsm")]
-fn test_large_scale_memory_usage() -> Result<()> {
+async fn test_large_scale_memory_usage() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let index_path = temp_dir.path().join("large_index");
     let archive_path = temp_dir.path().join("large_archive.era");
@@ -284,7 +284,7 @@ fn test_large_scale_memory_usage() -> Result<()> {
         .build()?;
 
     for (i, file_path) in file_paths.iter().enumerate() {
-        writer.add_file(file_path)?;
+        writer.add_file(file_path).await?;
         if (i + 1) % 10 == 0 {
             println!("  Archived {} files", i + 1);
         }
@@ -327,9 +327,9 @@ fn test_large_scale_memory_usage() -> Result<()> {
 /// Week 2: 70% same + 30% new
 /// Week 3: 60% same + 40% new  
 /// Week 4: 80% same + 20% new
-#[test]
+#[tokio::test]
 #[cfg(feature = "lsm")]
-fn test_weekly_incremental_backups() -> Result<()> {
+async fn test_weekly_incremental_backups() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let index_path = temp_dir.path().join("weekly_index");
 
@@ -354,7 +354,7 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .build()?;
 
         for file in file_pool.iter().take(10) {
-            writer.add_file(file)?;
+            writer.add_file(file).await?;
         }
 
         let stats = writer.finalize()?;
@@ -376,7 +376,7 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .build()?;
 
         for file in file_pool.iter().take(13).skip(3) {
-            writer.add_file(file)?;
+            writer.add_file(file).await?;
         }
 
         let stats = writer.finalize()?;
@@ -400,7 +400,7 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .build()?;
 
         for file in file_pool.iter().take(16).skip(6) {
-            writer.add_file(file)?;
+            writer.add_file(file).await?;
         }
 
         let stats = writer.finalize()?;
@@ -424,7 +424,7 @@ fn test_weekly_incremental_backups() -> Result<()> {
             .build()?;
 
         for file in file_pool.iter().take(12).skip(2) {
-            writer.add_file(file)?;
+            writer.add_file(file).await?;
         }
 
         let stats = writer.finalize()?;
@@ -467,8 +467,8 @@ fn test_weekly_incremental_backups() -> Result<()> {
 /// Test 5: Memory Backend Comparison
 ///
 /// Compare LSM vs Memory backend for the same workload
-#[test]
-fn test_backend_comparison() -> Result<()> {
+#[tokio::test]
+async fn test_backend_comparison() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let source_dir = TempDir::new()?;
 
@@ -484,8 +484,8 @@ fn test_backend_comparison() -> Result<()> {
             .enable_cdc(true)
             .build()?; // Default is Memory backend
 
-        writer.add_file(&file1)?;
-        writer.add_file(&file2)?;
+        writer.add_file(&file1).await?;
+        writer.add_file(&file2).await?;
         writer.finalize()?
     };
 
@@ -501,8 +501,8 @@ fn test_backend_comparison() -> Result<()> {
             .with_lsm_index(&index_path)
             .build()?;
 
-        writer.add_file(&file1)?;
-        writer.add_file(&file2)?;
+        writer.add_file(&file1).await?;
+        writer.add_file(&file2).await?;
         writer.finalize()?
     };
 
