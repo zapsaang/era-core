@@ -2,7 +2,8 @@
 
 use bytes::Bytes;
 use era_common::{
-    BlockId, BlockLocation, EncryptedMacroBlock, EraError, ErasureBlockInfo, Result, ShardHeader,
+    BlockHeader, BlockId, BlockLocation, BlockType, EncryptedMacroBlock, EraError,
+    ErasureBlockInfo, Result, ShardHeader,
 };
 use era_storage::{StorageBackend, StorageReader};
 use std::path::Path;
@@ -239,6 +240,137 @@ impl<R: StorageReader> VolumeReader<R> {
             .map(|f| f.data_end_offset)
             .unwrap_or(self.reader.size());
         (start, end)
+    }
+
+    /// Read a typed block (V5 format with BlockHeader)
+    ///
+    /// Returns the block type and encrypted data
+    pub fn read_typed_block(
+        &self,
+        location: &BlockLocation,
+    ) -> Result<(BlockType, EncryptedMacroBlock)> {
+        // Read BlockHeader (16 bytes)
+        let header_bytes = self
+            .reader
+            .read_at(location.physical_offset, BlockHeader::SIZE)?;
+        let header = BlockHeader::from_bytes(&header_bytes)
+            .ok_or_else(|| EraError::InvalidFormat("Invalid BlockHeader".into()))?;
+
+        // Read encrypted data
+        let data_offset = location.physical_offset + BlockHeader::SIZE as u64;
+        let data = self.reader.read_at(data_offset, header.length as usize)?;
+
+        // Verify CRC
+        if !header.verify(&data) {
+            return Err(EraError::IntegrityError(
+                "BlockHeader CRC verification failed".into(),
+            ));
+        }
+
+        let block = EncryptedMacroBlock {
+            block_id: BlockId::new(location.slot_index as u64),
+            data,
+            original_size: 0,
+            compressed_size: header.length,
+            chunk_count: 0,
+        };
+
+        Ok((header.block_type, block))
+    }
+
+    /// Scan the entire volume for blocks of a specific type
+    ///
+    /// **CRITICAL FOR COLD RECOVERY:** This performs a raw linear scan to find
+    /// orphaned index blocks when the footer is lost or corrupted.
+    ///
+    /// Returns a vector of BlockLocations for all matching blocks.
+    pub fn scan_for_typed_blocks(&self, target_type: BlockType) -> Result<Vec<BlockLocation>> {
+        let (start_offset, end_offset) = self.data_region();
+        let mut current_offset = start_offset;
+        let mut found_blocks = Vec::new();
+
+        tracing::info!(
+            "Scanning volume for {:?} blocks (region: {} - {})",
+            target_type,
+            start_offset,
+            end_offset
+        );
+
+        while current_offset + BlockHeader::SIZE as u64 <= end_offset {
+            // Try to read BlockHeader
+            match self.reader.read_at(current_offset, BlockHeader::SIZE) {
+                Ok(header_bytes) => {
+                    if let Some(header) = BlockHeader::from_bytes(&header_bytes) {
+                        // Check if this is a typed block (V5 format)
+                        if header.version == BlockHeader::VERSION {
+                            let data_len = header.length as u64;
+
+                            // Verify we have enough space for the full block
+                            if current_offset + BlockHeader::SIZE as u64 + data_len <= end_offset {
+                                // Verify CRC by reading the data
+                                if let Ok(data) = self.reader.read_at(
+                                    current_offset + BlockHeader::SIZE as u64,
+                                    data_len as usize,
+                                ) {
+                                    if header.verify(&data) {
+                                        // Valid typed block found
+                                        if header.block_type == target_type {
+                                            found_blocks.push(BlockLocation {
+                                                volume_id: era_common::VolumeId::new(), // Will be set by caller
+                                                slot_index: found_blocks.len() as u32,
+                                                physical_offset: current_offset,
+                                                encrypted_size: (BlockHeader::SIZE as u32
+                                                    + header.length),
+                                                erasure_info: None,
+                                                shard_offsets: None,
+                                                shard_volumes: None,
+                                            });
+
+                                            tracing::debug!(
+                                                "Found {:?} block at offset {}",
+                                                target_type,
+                                                current_offset
+                                            );
+                                        }
+
+                                        // Skip to next block
+                                        current_offset += BlockHeader::SIZE as u64 + data_len;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // If we get here, this wasn't a valid typed block
+                    // Could be legacy format (ShardHeader) - skip 8 bytes
+                    if let Ok(shard_header_bytes) =
+                        self.reader.read_at(current_offset, ShardHeader::SIZE)
+                    {
+                        if let Some(shard_header) = ShardHeader::from_bytes(&shard_header_bytes) {
+                            // Valid legacy block - skip it
+                            current_offset += ShardHeader::SIZE as u64 + shard_header.length as u64;
+                            continue;
+                        }
+                    }
+
+                    // Unknown format - advance 1 byte and continue scanning
+                    current_offset += 1;
+                }
+                Err(_) => {
+                    // Read error - skip forward
+                    current_offset += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            "Scan complete: found {} {:?} blocks",
+            found_blocks.len(),
+            target_type
+        );
+
+        Ok(found_blocks)
     }
 }
 

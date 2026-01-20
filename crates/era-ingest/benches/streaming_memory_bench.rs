@@ -109,8 +109,8 @@ fn bench_buffer_compaction_cost(c: &mut Criterion) {
         let mut buffer = vec![0u8; buffer_size];
 
         // Fill with pattern
-        for i in 0..buffer_size {
-            buffer[i] = (i & 0xFF) as u8;
+        for (i, item) in buffer.iter_mut().enumerate().take(buffer_size) {
+            *item = (i & 0xFF) as u8;
         }
 
         group.throughput(Throughput::Bytes(buffer_size as u64));

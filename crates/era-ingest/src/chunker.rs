@@ -229,7 +229,7 @@ impl<R: AsyncRead + Unpin> StreamingChunker<R> {
             self.position = 0;
             self.valid_len = 0;
         }
-        
+
         // If we've consumed most of the buffer, compact it
         // OPTIMIZED: Delay compaction until 75% instead of 50% to reduce frequency
         // Analysis showed copy_within is extremely fast (>150 GiB/s), so this

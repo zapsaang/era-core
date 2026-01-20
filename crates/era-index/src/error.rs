@@ -5,7 +5,8 @@ use thiserror::Error;
 /// Errors that can occur during index operations
 #[derive(Error, Debug)]
 pub enum IndexError {
-    /// RocksDB error
+    /// RocksDB error (only when rocksdb-backend feature enabled)
+    #[cfg(feature = "rocksdb-backend")]
     #[error("RocksDB error: {0}")]
     RocksDb(#[from] rocksdb::Error),
 

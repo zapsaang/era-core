@@ -239,3 +239,131 @@ impl ShardHeader {
         compute_shard_crc(data) == self.crc
     }
 }
+
+/// Block type identifier for self-describing volume structure
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum BlockType {
+    /// Standard data block containing encrypted chunks
+    Data = 0x01,
+    /// Index page containing chunk→location mappings (V2.1)
+    IndexPage = 0x02,
+    /// Index manifest root (MetaIndex)
+    IndexManifest = 0x03,
+    /// File catalog containing metadata
+    Catalog = 0x04,
+    /// LSM manifest (legacy RocksDB index)
+    LsmManifest = 0x05,
+    /// Reserved for future use
+    Reserved = 0xFF,
+}
+
+impl BlockType {
+    /// Convert to raw byte value
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Parse from raw byte value
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x01 => Some(Self::Data),
+            0x02 => Some(Self::IndexPage),
+            0x03 => Some(Self::IndexManifest),
+            0x04 => Some(Self::Catalog),
+            0x05 => Some(Self::LsmManifest),
+            0xFF => Some(Self::Reserved),
+            _ => None,
+        }
+    }
+
+    /// Check if this block type is an index-related block
+    pub fn is_index_block(self) -> bool {
+        matches!(self, Self::IndexPage | Self::IndexManifest)
+    }
+}
+
+/// Block header for self-identifying blocks (V5 format)
+/// Replaces legacy ShardHeader with type discrimination
+#[derive(Debug, Clone, Copy)]
+pub struct BlockHeader {
+    /// Block format version (current: 1)
+    pub version: u8,
+    /// Block type identifier
+    pub block_type: BlockType,
+    /// Reserved for alignment (2 bytes)
+    pub reserved: [u8; 2],
+    /// Encrypted payload length
+    pub length: u32,
+    /// CRC32 checksum of encrypted payload
+    pub crc: u32,
+    /// Reserved for future expansion (4 bytes)
+    pub reserved2: [u8; 4],
+}
+
+impl BlockHeader {
+    /// Size of serialized block header (16 bytes for cache alignment)
+    pub const SIZE: usize = 16;
+
+    /// Current header version
+    pub const VERSION: u8 = 1;
+
+    /// Create a new block header
+    pub fn new(block_type: BlockType, length: u32, crc: u32) -> Self {
+        Self {
+            version: Self::VERSION,
+            block_type,
+            reserved: [0u8; 2],
+            length,
+            crc,
+            reserved2: [0u8; 4],
+        }
+    }
+
+    /// Serialize to bytes
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut buf = [0u8; 16];
+        buf[0] = self.version;
+        buf[1] = self.block_type.to_u8();
+        buf[2..4].copy_from_slice(&self.reserved);
+        buf[4..8].copy_from_slice(&self.length.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.crc.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.reserved2);
+        buf
+    }
+
+    /// Deserialize from bytes
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < 16 {
+            return None;
+        }
+        let version = buf[0];
+        let block_type = BlockType::from_u8(buf[1])?;
+        let reserved = [buf[2], buf[3]];
+        let length = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let crc = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        let reserved2 = [buf[12], buf[13], buf[14], buf[15]];
+
+        Some(Self {
+            version,
+            block_type,
+            reserved,
+            length,
+            crc,
+            reserved2,
+        })
+    }
+
+    /// Verify payload against stored CRC
+    pub fn verify(&self, data: &[u8]) -> bool {
+        if data.len() != self.length as usize {
+            return false;
+        }
+        compute_shard_crc(data) == self.crc
+    }
+
+    /// Check if this is a legacy ShardHeader (version 0)
+    pub fn is_legacy(&self) -> bool {
+        self.version == 0
+    }
+}

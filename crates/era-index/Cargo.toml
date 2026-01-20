@@ -10,13 +10,13 @@ description = "LSM-Tree based chunk deduplication index for ERA archive system"
 [dependencies]
 # Internal crates
 era-common = { path = "../era-common" }
-
-# RocksDB - LSM-Tree implementation
-rocksdb = "0.22"
+era-crypto = { path = "../era-crypto" }
+era-volume = { path = "../era-volume" }
 
 # Serialization
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # Bytes
 bytes = "1.5"
@@ -29,6 +29,26 @@ tracing = "0.1"
 
 # Concurrency
 parking_lot = "0.12"
+
+# Bloom filter
+bloomfilter = { version = "1.0", features = ["serde"] }
+
+# Random number generation (for ephemeral keys)
+rand = "0.8"
+
+# Temporary files (for secure spilling)
+tempfile = "3.10"
+
+# Storage backend (needed for VolumeWriter trait bound)
+era-storage = { path = "../era-storage" }
+
+# Optional: RocksDB (for era-engine compatibility)
+rocksdb = { version = "0.22", optional = true }
+
+[features]
+default = []
+# Enable legacy RocksDB-based index (for era-engine compatibility)
+rocksdb-backend = ["rocksdb"]
 
 [dev-dependencies]
 tempfile = "3.10"

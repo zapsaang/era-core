@@ -137,7 +137,10 @@ message Footer {
   uint64 lsm_manifest_offset = 12;
   uint32 lsm_manifest_size = 13;
   uint32 lsm_manifest_block_id = 14;
-  // Previously _reserved array, now using protobuf extensibility
+  // V5 additions for self-contained index
+  uint64 index_root_offset = 15;
+  uint32 index_root_size = 16;
+  uint32 index_root_block_id = 17;
 }
 
 message ChunkRef {

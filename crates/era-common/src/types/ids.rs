@@ -32,8 +32,36 @@ impl std::fmt::Display for ArchiveId {
 }
 
 /// Unique identifier for a volume within an archive
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VolumeId(pub Uuid);
+
+// Manual bincode implementation for VolumeId (Uuid doesn't implement bincode traits)
+impl bincode::Encode for VolumeId {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(self.0.as_bytes(), encoder)
+    }
+}
+
+impl bincode::Decode<()> for VolumeId {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bytes: [u8; 16] = bincode::Decode::decode(decoder)?;
+        Ok(VolumeId(Uuid::from_bytes(bytes)))
+    }
+}
+
+impl<'de> bincode::BorrowDecode<'de, ()> for VolumeId {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bytes: [u8; 16] = bincode::BorrowDecode::borrow_decode(decoder)?;
+        Ok(VolumeId(Uuid::from_bytes(bytes)))
+    }
+}
 
 impl VolumeId {
     /// Generate a new random volume ID
@@ -55,7 +83,20 @@ impl std::fmt::Display for VolumeId {
 }
 
 /// Unique identifier for a MacroBlock
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+)]
 pub struct BlockId(pub u64);
 
 impl BlockId {
@@ -77,7 +118,19 @@ impl std::fmt::Display for BlockId {
 }
 
 /// Hash of a chunk (32 bytes, Blake3)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+)]
 pub struct ChunkHash(pub [u8; 32]);
 
 impl ChunkHash {

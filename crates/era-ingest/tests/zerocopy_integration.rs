@@ -8,7 +8,9 @@ use std::io::Cursor;
 
 /// Generate deterministic test data with patterns
 fn generate_test_data(size: usize, pattern: u8) -> Vec<u8> {
-    (0..size).map(|i| pattern.wrapping_add((i % 251) as u8)).collect()
+    (0..size)
+        .map(|i| pattern.wrapping_add((i % 251) as u8))
+        .collect()
 }
 
 #[tokio::test]
@@ -132,27 +134,33 @@ async fn test_random_like_data() {
 
 // Helper functions
 
-async fn get_chunks_original(data: &[u8], config: ChunkerConfig) -> Vec<(Vec<u8>, era_common::ChunkHash)> {
+async fn get_chunks_original(
+    data: &[u8],
+    config: ChunkerConfig,
+) -> Vec<(Vec<u8>, era_common::ChunkHash)> {
     let reader = Cursor::new(data.to_vec());
     let mut chunker = StreamingChunker::new(reader, config);
     let mut chunks = Vec::new();
-    
+
     while let Ok(Some(chunk)) = chunker.next_chunk().await {
         chunks.push((chunk.data.to_vec(), chunk.hash));
     }
-    
+
     chunks
 }
 
-async fn get_chunks_zerocopy(data: &[u8], config: ChunkerConfig) -> Vec<(Vec<u8>, era_common::ChunkHash)> {
+async fn get_chunks_zerocopy(
+    data: &[u8],
+    config: ChunkerConfig,
+) -> Vec<(Vec<u8>, era_common::ChunkHash)> {
     let reader = Cursor::new(data.to_vec());
     let mut chunker = StreamingChunkerZeroCopy::new(reader, config);
     let mut chunks = Vec::new();
-    
+
     while let Ok(Some(chunk)) = chunker.next_chunk().await {
         chunks.push((chunk.data.to_vec(), chunk.hash));
     }
-    
+
     chunks
 }
 
@@ -180,17 +188,9 @@ fn assert_chunks_identical(
             data_zero.len()
         );
 
-        assert_eq!(
-            hash_orig, hash_zero,
-            "Chunk {} has different hash",
-            i
-        );
+        assert_eq!(hash_orig, hash_zero, "Chunk {} has different hash", i);
 
-        assert_eq!(
-            data_orig, data_zero,
-            "Chunk {} has different content",
-            i
-        );
+        assert_eq!(data_orig, data_zero, "Chunk {} has different content", i);
     }
 
     // Verify total data size matches
