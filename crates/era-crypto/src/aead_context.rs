@@ -31,7 +31,12 @@ pub trait AeadContext {
         plaintext: &[u8],
     ) -> Result<Vec<u8>> {
         let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
-        self.encrypt(&nonce, &[], plaintext)
+
+        // Build AAD: block_id (8 bytes) for cryptographic binding
+        let mut aad = [0u8; 8];
+        aad.copy_from_slice(&block_id.sequence().to_le_bytes());
+
+        self.encrypt(&nonce, &aad, plaintext)
     }
 
     /// Decrypt with implicit nonce derivation (for backward compatibility)
@@ -42,7 +47,12 @@ pub trait AeadContext {
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
         let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
-        self.decrypt(&nonce, &[], ciphertext)
+
+        // Build AAD: block_id (8 bytes) - MUST match encryption
+        let mut aad = [0u8; 8];
+        aad.copy_from_slice(&block_id.sequence().to_le_bytes());
+
+        self.decrypt(&nonce, &aad, ciphertext)
     }
 
     /// Derive a nonce from context and block ID
@@ -80,23 +90,35 @@ impl XChaCha20Poly1305Context {
 }
 
 impl AeadContext for XChaCha20Poly1305Context {
-    fn encrypt(&self, nonce: &[u8; NONCE_SIZE], _aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-        use chacha20poly1305::aead::Aead;
+    fn encrypt(&self, nonce: &[u8; NONCE_SIZE], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+        use chacha20poly1305::aead::{Aead, Payload};
         use chacha20poly1305::XNonce;
 
         let xnonce = XNonce::from(*nonce);
+
+        let payload = Payload {
+            msg: plaintext,
+            aad,
+        };
+
         self.cipher
-            .encrypt(&xnonce, plaintext)
+            .encrypt(&xnonce, payload)
             .map_err(|e| EraError::encryption(e.to_string()))
     }
 
-    fn decrypt(&self, nonce: &[u8; NONCE_SIZE], _aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
-        use chacha20poly1305::aead::Aead;
+    fn decrypt(&self, nonce: &[u8; NONCE_SIZE], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+        use chacha20poly1305::aead::{Aead, Payload};
         use chacha20poly1305::XNonce;
 
         let xnonce = XNonce::from(*nonce);
+
+        let payload = Payload {
+            msg: ciphertext,
+            aad,
+        };
+
         self.cipher
-            .decrypt(&xnonce, ciphertext)
+            .decrypt(&xnonce, payload)
             .map_err(|e| EraError::decryption(e.to_string()))
     }
 
@@ -187,5 +209,37 @@ mod tests {
 
         assert_eq!(packet2.nonce(), &nonce);
         assert_eq!(packet2.ciphertext(), ciphertext.as_slice());
+    }
+
+    #[test]
+    fn test_aad_binding_prevents_block_id_tampering() {
+        // CRITICAL: Test that AAD binding prevents block ID manipulation
+        let key = [0x42u8; 32];
+        let context = XChaCha20Poly1305Context::new(&key).unwrap();
+
+        let plaintext = b"secret data";
+        let block_id_100 = BlockId::new(100);
+        let block_id_200 = BlockId::new(200);
+        let nonce_context = [0x11; 16];
+
+        // Encrypt with block_id 100
+        let ciphertext = context
+            .encrypt_with_context(&nonce_context, block_id_100, plaintext)
+            .unwrap();
+
+        // ATTACK: Try to decrypt with different block_id 200 - should FAIL
+        let result = context.decrypt_with_context(&nonce_context, block_id_200, &ciphertext);
+
+        assert!(
+            result.is_err(),
+            "AAD mismatch should cause decryption failure"
+        );
+
+        // Legitimate: Decrypt with correct block_id 100 - should SUCCEED
+        let decrypted = context
+            .decrypt_with_context(&nonce_context, block_id_100, &ciphertext)
+            .unwrap();
+
+        assert_eq!(decrypted, plaintext);
     }
 }
