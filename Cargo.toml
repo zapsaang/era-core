@@ -75,9 +75,6 @@ hex = "0.4"
 # Concurrency primitives (faster than std::sync)
 parking_lot = "0.12"
 
-# RocksDB for LSM-Tree index
-rocksdb = { version = "0.22", features = ["multi-threaded-cf"] }
-
 # Content-defined chunking (FastCDC)
 fastcdc = "3.2"
 

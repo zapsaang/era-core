@@ -14,7 +14,7 @@
 
 use era_common::{ArchiveConfig, ArchiveId, BlockId, ChunkHash, VolumeId};
 use era_crypto::{KeySession, Salt};
-use era_index::v2::{IndexBuilder, IndexEntry, IndexReader};
+use era_index::{IndexBuilder, IndexEntry, IndexReader};
 use era_storage::LocalStorageBackend;
 use era_volume::{SuperHeader, VolumeReader, VolumeWriter};
 use std::fs;

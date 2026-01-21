@@ -36,19 +36,14 @@ bloomfilter = { version = "1.0", features = ["serde"] }
 # Random number generation (for ephemeral keys)
 rand = "0.8"
 
+# Zeroization (for secure key handling)
+zeroize = "1.7"
+
 # Temporary files (for secure spilling)
 tempfile = "3.10"
 
 # Storage backend (needed for VolumeWriter trait bound)
 era-storage = { path = "../era-storage" }
-
-# Optional: RocksDB (for era-engine compatibility)
-rocksdb = { version = "0.22", optional = true }
-
-[features]
-default = []
-# Enable legacy RocksDB-based index (for era-engine compatibility)
-rocksdb-backend = ["rocksdb"]
 
 [dev-dependencies]
 tempfile = "3.10"

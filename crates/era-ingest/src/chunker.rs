@@ -150,8 +150,8 @@ impl Chunker {
     ///
     /// Reads the entire file into memory first. For very large files,
     /// consider using streaming chunking.
-    pub fn chunk_file(&self, path: &std::path::Path) -> Result<Vec<UniqueChunk>> {
-        let data = std::fs::read(path)?;
+    pub async fn chunk_file(&self, path: &std::path::Path) -> Result<Vec<UniqueChunk>> {
+        let data = tokio::fs::read(path).await?;
         Ok(self.chunk_all(&data))
     }
 }

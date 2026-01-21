@@ -122,65 +122,41 @@ impl ChunkIndex for MemoryChunkIndex {
     }
 }
 
-impl ChunkIndex for era_index::LsmChunkIndex {
-    fn contains(&self, hash: &ChunkHash) -> EraResult<bool> {
-        self.contains(hash).map_err(Into::into)
-    }
-
-    fn get(&self, hash: &ChunkHash) -> EraResult<Option<BlockLocation>> {
-        self.get(hash).map_err(Into::into)
-    }
-
-    fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
-        era_index::LsmChunkIndex::put(self, hash, location).map_err(Into::into)
-    }
-
-    fn delete(&self, hash: &ChunkHash) -> EraResult<()> {
-        era_index::LsmChunkIndex::delete(self, hash).map_err(Into::into)
-    }
-
-    fn len(&self) -> usize {
-        era_index::LsmChunkIndex::len(self) as usize
-    }
-
-    fn flush(&self) -> EraResult<()> {
-        era_index::LsmChunkIndex::flush(self).map_err(Into::into)
-    }
-
-    fn start_batch(&self) {
-        era_index::LsmChunkIndex::start_batch(self);
-    }
-
-    fn commit_batch(&self) -> EraResult<()> {
-        era_index::LsmChunkIndex::commit_batch(self).map_err(Into::into)
-    }
-}
+// NOTE: Legacy LsmChunkIndex trait implementation removed during V2.1 migration.
+// The V2 index uses a different architecture (IndexBuilder/IndexReader) that doesn't
+// implement the ChunkIndex trait. For production use, migrate to V2 APIs directly.
 
 /// Chunk index backend selection.
+///
+/// NOTE: LSM backends have been removed during V2.1 migration. Only Memory backend
+/// is supported. For persistent indexing, use era_index::v2 APIs directly.
 #[derive(Debug, Clone, Default)]
 pub enum ChunkIndexBackend {
     /// In-memory HashMap (legacy, not recommended for production)
     #[default]
     Memory,
-    /// LSM-Tree with RocksDB (recommended)
+    /// DEPRECATED: LSM-Tree backend removed. Use Memory or migrate to V2 APIs.
+    #[deprecated(note = "LSM backend removed in V2.1. Use Memory or era_index::v2 APIs.")]
     Lsm { path: std::path::PathBuf },
-    /// LSM-Tree with RocksDB hosted in a temporary directory and embedded into the archive
+    /// DEPRECATED: Embedded LSM backend removed. Use Memory or migrate to V2 APIs.
+    #[deprecated(note = "Embedded LSM backend removed in V2.1. Use Memory or era_index::v2 APIs.")]
     EmbeddedLsm { path: std::path::PathBuf },
 }
 
 /// Create a chunk index with the specified backend.
+///
+/// NOTE: Only Memory backend is supported after V2.1 migration.
+/// LSM backends will fall back to Memory with a warning.
 pub fn create_chunk_index(backend: ChunkIndexBackend) -> EraResult<Arc<dyn ChunkIndex>> {
     match backend {
         ChunkIndexBackend::Memory => Ok(Arc::new(MemoryChunkIndex::new())),
-        ChunkIndexBackend::Lsm { path } => {
-            let index = era_index::LsmChunkIndex::open(path)
-                .map_err(|e| era_common::EraError::IndexError(e.to_string()))?;
-            Ok(Arc::new(index))
-        }
-        ChunkIndexBackend::EmbeddedLsm { path } => {
-            let index = era_index::LsmChunkIndex::open(path)
-                .map_err(|e| era_common::EraError::IndexError(e.to_string()))?;
-            Ok(Arc::new(index))
+        ChunkIndexBackend::Lsm { .. } | ChunkIndexBackend::EmbeddedLsm { .. } => {
+            // Fallback to Memory mode - LSM backends removed in V2.1
+            eprintln!(
+                "WARNING: LSM backend requested but removed in V2.1. Falling back to Memory mode."
+            );
+            eprintln!("         For persistent indexing, migrate to era_index::v2 APIs.");
+            Ok(Arc::new(MemoryChunkIndex::new()))
         }
     }
 }

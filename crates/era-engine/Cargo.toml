@@ -18,9 +18,7 @@ era-storage = { workspace = true }
 era-volume = { workspace = true }
 era-packing = { workspace = true }
 era-ingest = { workspace = true }
-era-index = { workspace = true, features = [
-    "rocksdb-backend",
-] } # Enable RocksDB for engine
+era-index = { workspace = true }
 futures = "0.3"
 
 bytes = { workspace = true }

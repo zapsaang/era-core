@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use rand::RngCore;
+use zeroize::Zeroize;
 
 use era_common::{EraError, Result};
 use era_crypto::{AeadCipher, AeadKey, Nonce};
@@ -37,6 +38,9 @@ impl Spiller {
         let mut key_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key_bytes);
         let key = AeadKey::from_bytes(&key_bytes).expect("32-byte key is valid");
+
+        // CRITICAL: Zeroize the stack array to prevent memory forensics
+        key_bytes.zeroize();
 
         Self {
             key,

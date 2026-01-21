@@ -528,22 +528,22 @@ fn test_crash_recovery_from_bloom_snapshot() {
 // ============================================================================
 
 #[test]
-fn test_rocksdb_is_optional() {
-    // This verifies that RocksDB is only an optional dependency, not a required one.
-    // V2.1 should work standalone without RocksDB by default.
+fn test_rocksdb_is_removed() {
+    // This verifies that RocksDB has been completely removed in V2.1.
+    // The V2 implementation is now the only implementation.
 
     let cargo_toml_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let cargo_toml_content = fs::read_to_string(cargo_toml_path).unwrap();
 
-    // RocksDB should exist as an optional dependency
+    // RocksDB should NOT exist in dependencies
     assert!(
-        cargo_toml_content.contains("rocksdb") && cargo_toml_content.contains("optional = true"),
-        "RocksDB should be an optional dependency for backward compatibility"
+        !cargo_toml_content.contains("rocksdb"),
+        "RocksDB should be completely removed in V2.1"
     );
 
-    // Verify the feature flag exists
+    // Verify the rocksdb-backend feature does NOT exist
     assert!(
-        cargo_toml_content.contains(r#"rocksdb-backend = ["rocksdb"]"#),
-        "rocksdb-backend feature should be defined"
+        !cargo_toml_content.contains("rocksdb-backend"),
+        "rocksdb-backend feature should be removed"
     );
 }
