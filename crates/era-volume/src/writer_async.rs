@@ -28,10 +28,7 @@ use std::path::Path;
 
 use crate::header::HEADER_SIZE;
 use crate::{Footer, SuperHeader};
-
-/// Static zero-filled page for padding (1MB, no allocations)
-/// CRITICAL: Zero-copy padding - no vec![0; size] allocations in hot path
-static ZERO_PAGE: [u8; 1024 * 1024] = [0u8; 1024 * 1024];
+use rand::RngCore;
 
 /// Async writer for a single volume
 pub struct AsyncVolumeWriter<W: AsyncStorageWriter> {
@@ -117,16 +114,19 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
         self.last_checkpoint_block_id = block_id;
     }
 
-    /// Internal helper to pad the volume with zeros up to target_size
-    /// Uses static ZERO_PAGE buffer to avoid heap allocations
+    /// Internal helper to pad the volume with random data up to target_size
+    /// Uses stack buffer to avoid heap allocations, fills with random data for security
     async fn pad_to_size(&mut self, target_size: u64) -> Result<()> {
         let current_size = self.writer.current_size();
         if current_size < target_size {
             let mut remaining = target_size - current_size;
+            let mut buffer = [0u8; 16 * 1024]; // 16KB stack buffer
 
             while remaining > 0 {
-                let to_write = remaining.min(ZERO_PAGE.len() as u64) as usize;
-                self.writer.append(&ZERO_PAGE[..to_write]).await?;
+                let to_write = remaining.min(buffer.len() as u64) as usize;
+                // Security: Must be random to prevent traffic analysis
+                rand::thread_rng().fill_bytes(&mut buffer[..to_write]);
+                self.writer.append(&buffer[..to_write]).await?;
                 remaining -= to_write as u64;
             }
         }

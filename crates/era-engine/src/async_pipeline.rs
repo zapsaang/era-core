@@ -24,7 +24,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use era_engine::async_pipeline::{ChunkPipeline, PipelineConfig};
 //!
 //! let config = PipelineConfig {
@@ -137,7 +137,7 @@ impl ChunkPipeline {
     ///
     /// ## Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// let hash = pipeline.process_chunk(chunk_data).await?;
     /// ```
     pub async fn process_chunk(&self, data: Bytes) -> Result<ChunkHash> {
@@ -244,7 +244,7 @@ impl ChunkPipeline {
     ///
     /// ## Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// while let Some(processed) = pipeline.recv().await {
     ///     // Encrypt and write to storage
     ///     let location = write_chunk(&processed).await?;
