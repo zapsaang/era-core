@@ -29,7 +29,8 @@ jobs:
     
           sudo -E apt-get install -y --no-install-recommends \
               build-essential \
-              protobuf-compiler
+              protobuf-compiler \
+              libacl1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
