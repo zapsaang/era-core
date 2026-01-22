@@ -21,3 +21,4 @@ prost = "0.14.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

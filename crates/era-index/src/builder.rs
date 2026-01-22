@@ -85,8 +85,28 @@ impl IndexBuilder {
         self.bloom.check(hash)
     }
 
-    /// Flush MemTable to encrypted spill file
-    fn flush_memtable(&mut self, temp_dir: &Path) -> Result<()> {
+    /// Get reference to spilled segment paths (for finalization)
+    pub fn spilled_segments(&self) -> &[PathBuf] {
+        &self.spilled_segments
+    }
+
+    /// Get reference to the spiller (for finalization)
+    pub fn spiller(&self) -> &Spiller {
+        &self.spiller
+    }
+
+    /// Get reference to the bloom filter (for finalization)
+    pub fn bloom(&self) -> &Bloom<ChunkHash> {
+        &self.bloom
+    }
+
+    /// Get reference to the memtable (for finalization)
+    pub fn memtable(&self) -> &[IndexEntry] {
+        &self.memtable
+    }
+
+    /// Flush MemTable to encrypted spill file (made public for LsmTree)
+    pub fn flush_memtable(&mut self, temp_dir: &Path) -> Result<()> {
         if self.memtable.is_empty() {
             return Ok(());
         }
@@ -111,13 +131,14 @@ impl IndexBuilder {
 
     /// Snapshot the Bloom filter to disk (for crash recovery)
     pub fn snapshot_bloom(&self, path: &Path) -> Result<()> {
-        // Serialize Bloom filter using serde_json (bloomfilter crate uses serde)
-        let bloom_json =
-            serde_json::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Serialize Bloom filter using bincode (bloomfilter crate uses serde)
+        let config = bincode::config::standard();
+        let bloom_bytes = bincode::serde::encode_to_vec(&self.bloom, config)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
 
         // Write to file
         let mut file = File::create(path).map_err(EraError::Io)?;
-        file.write_all(&bloom_json).map_err(EraError::Io)?;
+        file.write_all(&bloom_bytes).map_err(EraError::Io)?;
         file.sync_all().map_err(EraError::Io)?;
 
         tracing::info!("Bloom filter snapshot written: {:?}", path);
@@ -130,7 +151,8 @@ impl IndexBuilder {
         let mut bloom_bytes = Vec::new();
         file.read_to_end(&mut bloom_bytes).map_err(EraError::Io)?;
 
-        let bloom = serde_json::from_slice(&bloom_bytes)
+        let config = bincode::config::standard();
+        let (bloom, _len) = bincode::serde::decode_from_slice(&bloom_bytes, config)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         tracing::info!("Restored Bloom filter from snapshot: {:?}", path);
@@ -193,9 +215,10 @@ impl IndexBuilder {
             // Create IndexPage
             let page = IndexPage::new(page_entries.to_vec());
 
-            // Serialize page to JSON
-            let page_json =
-                serde_json::to_vec(&page).map_err(|e| EraError::Serialization(e.to_string()))?;
+            // Serialize page to bincode
+            let config = bincode::config::standard();
+            let page_bytes = bincode::serde::encode_to_vec(&page, config)
+                .map_err(|e| EraError::Serialization(e.to_string()))?;
 
             // Encrypt page with session keys
             let block_id = BlockId::new(block_id_counter);
@@ -206,15 +229,15 @@ impl IndexBuilder {
                 &derived_key,
                 &nonce_context,
                 block_id,
-                &page_json,
+                &page_bytes,
             )?;
 
             // Create EncryptedMacroBlock
             let encrypted_block = EncryptedMacroBlock {
                 block_id,
                 data: encrypted_data,
-                original_size: page_json.len() as u32,
-                compressed_size: page_json.len() as u32, // No compression for index
+                original_size: page_bytes.len() as u32,
+                compressed_size: page_bytes.len() as u32, // No compression for index
                 chunk_count: page_entries.len() as u16,
             };
 
@@ -229,13 +252,14 @@ impl IndexBuilder {
         }
 
         // Serialize Bloom filter
-        let bloom_bytes =
-            serde_json::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
+        let config = bincode::config::standard();
+        let bloom_bytes = bincode::serde::encode_to_vec(&self.bloom, config)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
         meta.set_bloom_filter(bloom_bytes);
 
         // Encrypt and write MetaIndex as IndexManifest block
-        let meta_json =
-            serde_json::to_vec(&meta).map_err(|e| EraError::Serialization(e.to_string()))?;
+        let meta_bytes = bincode::serde::encode_to_vec(&meta, config)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let manifest_block_id = BlockId::new(block_id_counter);
         let manifest_key =
@@ -245,14 +269,14 @@ impl IndexBuilder {
             &manifest_derived_key,
             &nonce_context,
             manifest_block_id,
-            &meta_json,
+            &meta_bytes,
         )?;
 
         let manifest_encrypted_block = EncryptedMacroBlock {
             block_id: manifest_block_id,
             data: encrypted_manifest,
-            original_size: meta_json.len() as u32,
-            compressed_size: meta_json.len() as u32,
+            original_size: meta_bytes.len() as u32,
+            compressed_size: meta_bytes.len() as u32,
             chunk_count: 0,
         };
 
@@ -299,10 +323,11 @@ impl IndexBuilder {
             }
 
             let page = IndexPage::new(page_entries.to_vec());
-            let page_json =
-                serde_json::to_vec(&page).map_err(|e| EraError::Serialization(e.to_string()))?;
+            let config = bincode::config::standard();
+            let page_bytes = bincode::serde::encode_to_vec(&page, config)
+                .map_err(|e| EraError::Serialization(e.to_string()))?;
             let page_path = output_dir.join(format!("page_{}.bin", block_id_counter));
-            fs::write(&page_path, &page_json).map_err(EraError::Io)?;
+            fs::write(&page_path, &page_bytes).map_err(EraError::Io)?;
 
             meta.add_page(
                 page.min_hash,
@@ -313,8 +338,9 @@ impl IndexBuilder {
             block_id_counter += 1;
         }
 
-        let bloom_bytes =
-            serde_json::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
+        let config = bincode::config::standard();
+        let bloom_bytes = bincode::serde::encode_to_vec(&self.bloom, config)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
         meta.set_bloom_filter(bloom_bytes);
 
         Ok(meta)

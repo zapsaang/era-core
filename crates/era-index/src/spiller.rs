@@ -68,8 +68,9 @@ impl Spiller {
         let nonce = self.generate_nonce();
 
         // Serialize entries
-        let plaintext =
-            serde_json::to_vec(entries).map_err(|e| EraError::Serialization(e.to_string()))?;
+        let config = bincode::config::standard();
+        let plaintext = bincode::serde::encode_to_vec(entries, config)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
 
         // Encrypt payload
         let ciphertext = self.cipher.encrypt(&self.key, &nonce, &plaintext)?;
@@ -115,8 +116,10 @@ impl Spiller {
             .map_err(|e| EraError::Decryption(format!("Failed to decrypt spill file: {}", e)))?;
 
         // Deserialize
-        let entries = serde_json::from_slice(&plaintext)
-            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        let config = bincode::config::standard();
+        let entries: Vec<IndexEntry> = bincode::serde::decode_from_slice(&plaintext, config)
+            .map_err(|e| EraError::Deserialization(e.to_string()))?
+            .0;
 
         Ok(entries)
     }

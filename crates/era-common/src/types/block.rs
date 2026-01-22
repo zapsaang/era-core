@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{BlockId, ChunkHash, VolumeId};
 
@@ -49,7 +50,8 @@ impl EncryptedMacroBlock {
 }
 
 /// Location of a block in the archive
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
 pub struct BlockLocation {
     /// Volume containing this block
     pub volume_id: VolumeId,
@@ -72,7 +74,8 @@ pub struct BlockLocation {
 }
 
 /// Information about an erasure-coded block
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
 pub struct ErasureBlockInfo {
     /// Number of data shards
     pub data_shards: u8,
@@ -254,6 +257,8 @@ pub enum BlockType {
     Catalog = 0x04,
     /// LSM manifest (legacy RocksDB index)
     LsmManifest = 0x05,
+    /// Checkpoint block for crash recovery (WAL)
+    Checkpoint = 0x06,
     /// Reserved for future use
     Reserved = 0xFF,
 }
@@ -272,6 +277,7 @@ impl BlockType {
             0x03 => Some(Self::IndexManifest),
             0x04 => Some(Self::Catalog),
             0x05 => Some(Self::LsmManifest),
+            0x06 => Some(Self::Checkpoint),
             0xFF => Some(Self::Reserved),
             _ => None,
         }

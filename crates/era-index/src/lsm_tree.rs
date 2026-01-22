@@ -180,21 +180,66 @@ impl LsmTree {
             ));
         }
 
-        let _builder = self
+        let mut builder = self
             .builder
             .take()
             .expect("Builder must exist in Building state");
 
-        // TODO: Implement finalization logic
-        // 1. Flush remaining MemTable
-        // 2. Merge all spill segments using TieredMerger
-        // 3. Build MetaIndex (L1) and IndexPages (L2)
-        // 4. Serialize Bloom filter
-        // 5. Create IndexReader
+        // STEP 1: Flush remaining MemTable to spill segment
+        if !builder.memtable().is_empty() {
+            tracing::info!(
+                "Flushing final MemTable ({} entries)",
+                builder.memtable().len()
+            );
+            builder.flush_memtable(&self.config.temp_dir)?;
+        }
 
-        // For now, create a placeholder reader
+        // STEP 2: Merge all spill segments using TieredMerger
+        tracing::info!("Merging {} spill segments", builder.spilled_segments().len());
+        let merged_entries: Vec<IndexEntry> = if !builder.spilled_segments().is_empty() {
+            let merger = crate::merger::TieredMerger::new(
+                builder.spilled_segments().to_vec(),
+                builder.spiller(),
+            )?;
+            merger.collect()
+        } else {
+            Vec::new()
+        };
+
+        // STEP 3: Build MetaIndex from merged entries
+        // For in-memory index, we don't create pages, just store entries directly in reader
         let meta = MetaIndex::new();
-        let reader = IndexReader::open(&self.config.temp_dir, meta)?;
+
+        // STEP 4: Create IndexReader with Bloom filter
+        // Serialize the Bloom filter
+        let config = bincode::config::standard();
+        let bloom_bytes =
+            bincode::serde::encode_to_vec(builder.bloom(), config).map_err(|e| {
+                era_common::EraError::Serialization(format!("Failed to serialize bloom: {}", e))
+            })?;
+
+        let mut meta_with_bloom = meta;
+        meta_with_bloom.set_bloom_filter(bloom_bytes);
+
+        // Create reader from memory (entries embedded, not on disk)
+        // We need to clone the bloom filter since we're consuming the builder
+        let bloom_clone = builder.bloom().clone();
+        let entries_count = merged_entries.len();
+        let reader = IndexReader::from_memory(meta_with_bloom, bloom_clone, merged_entries)?;
+
+        // STEP 5: Clean up temporary spill files
+        for spill_path in builder.spilled_segments() {
+            if spill_path.exists() {
+                if let Err(e) = std::fs::remove_file(spill_path) {
+                    tracing::warn!("Failed to remove spill file {:?}: {}", spill_path, e);
+                }
+            }
+        }
+
+        tracing::info!(
+            "Index finalized: {} total entries",
+            entries_count
+        );
 
         self.reader = Some(Arc::new(RwLock::new(reader)));
         self.state = TreeState::Finalized;

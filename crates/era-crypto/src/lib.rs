@@ -8,12 +8,14 @@
 //! - XChaCha20-Poly1305 AEAD encryption
 //! - HKDF-based key session management for efficient sub-key derivation
 //! - X25519-based certificate key exchange (high-performance alternative to Argon2)
+//! - Hybrid Post-Quantum KEM (X25519 + Kyber-768)
 
 mod aead;
 mod aead_context;
 pub mod certificate;
 mod hash;
 mod hkdf_utils;
+pub mod hybrid_kem;
 mod kdf;
 mod key;
 mod key_session;

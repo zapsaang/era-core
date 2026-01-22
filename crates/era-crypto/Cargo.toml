@@ -21,6 +21,8 @@ garde = { workspace = true }
 time = { workspace = true }
 zeroize = { version = "1.7", features = ["derive"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+pqcrypto-mlkem = { workspace = true }
+pqcrypto-traits = { workspace = true }
 serde = { workspace = true }
 hex = { workspace = true }
 pem = { workspace = true }
@@ -32,7 +34,6 @@ pkcs8 = "0.10"
 x509-cert = "0.2"
 ssh-key = "0.6"
 zeroize_alloc = "0.1"
-serde_json = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -46,6 +47,7 @@ windows-sys = { version = "0.52", features = [
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = "3"
+serde_json = { workspace = true }
 
 [[bench]]
 name = "crypto_bench"

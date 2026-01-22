@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Unique identifier for an archive set
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -34,6 +35,28 @@ impl std::fmt::Display for ArchiveId {
 /// Unique identifier for a volume within an archive
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VolumeId(pub Uuid);
+
+// Manual rkyv implementation for VolumeId (Uuid doesn't implement Archive)
+impl Archive for VolumeId {
+    type Archived = [u8; 16];
+    type Resolver = ();
+
+    unsafe fn resolve(&self, _pos: usize, _resolver: Self::Resolver, out: *mut Self::Archived) {
+        out.write(*self.0.as_bytes());
+    }
+}
+
+impl<S: rkyv::ser::Serializer + ?Sized> RkyvSerialize<S> for VolumeId {
+    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: rkyv::Fallible + ?Sized> RkyvDeserialize<VolumeId, D> for [u8; 16] {
+    fn deserialize(&self, _deserializer: &mut D) -> Result<VolumeId, D::Error> {
+        Ok(VolumeId(Uuid::from_bytes(*self)))
+    }
+}
 
 // Manual bincode implementation for VolumeId (Uuid doesn't implement bincode traits)
 impl bincode::Encode for VolumeId {
@@ -130,7 +153,12 @@ impl std::fmt::Display for BlockId {
     Deserialize,
     bincode::Encode,
     bincode::Decode,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
 )]
+#[archive(check_bytes)]
+#[archive_attr(derive(Hash, Eq, PartialEq))]
 pub struct ChunkHash(pub [u8; 32]);
 
 impl ChunkHash {

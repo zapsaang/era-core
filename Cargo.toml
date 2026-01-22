@@ -49,6 +49,11 @@ hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 subtle = "2.5"
+x25519-dalek = "2.0"
+
+# Post-Quantum Cryptography (Kyber-768)
+pqcrypto-mlkem = "0.1.1"
+pqcrypto-traits = "0.3"
 
 # Compression
 zstd = "0.13"
@@ -80,6 +85,11 @@ fastcdc = "3.2"
 
 # Zero-copy serialization
 bytemuck = { version = "1.14", features = ["derive"] }
+rkyv = { version = "0.7", default-features = false, features = ["validation", "size_64", "std"] }
+async-trait = "0.1"
+
+# Secure memory handling
+zeroize = { version = "1.7", features = ["alloc"] }
 
 # PEM format support
 pem = "3.0"

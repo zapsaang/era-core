@@ -120,6 +120,18 @@ pub enum EraError {
     #[error("Lock poisoned: {0}")]
     LockPoisoned(String),
 
+    // Async operation error
+    #[error("Async operation error: {0}")]
+    AsyncError(String),
+
+    // Post-Quantum Cryptography error
+    #[error("PQC operation error: {0}")]
+    PostQuantumError(String),
+
+    // Write-Ahead Log error
+    #[error("WAL error: {0}")]
+    WalError(String),
+
     // Generic Errors
     #[error("{0}")]
     Other(String),
@@ -159,6 +171,21 @@ impl EraError {
     /// Create a new other error
     pub fn other(msg: impl Into<String>) -> Self {
         Self::Other(msg.into())
+    }
+
+    /// Create a new async error
+    pub fn async_error(msg: impl Into<String>) -> Self {
+        Self::AsyncError(msg.into())
+    }
+
+    /// Create a new PQC error
+    pub fn pqc_error(msg: impl Into<String>) -> Self {
+        Self::PostQuantumError(msg.into())
+    }
+
+    /// Create a new WAL error
+    pub fn wal_error(msg: impl Into<String>) -> Self {
+        Self::WalError(msg.into())
     }
 }
 

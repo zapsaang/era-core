@@ -70,8 +70,8 @@ impl RecoveryManager {
         let manager = CheckpointManager::load_or_create(archive_path)?;
         let checkpoint = manager.checkpoint();
 
-        let completed_files: Vec<PathBuf> = checkpoint.completed_files.iter().cloned().collect();
-        let in_progress_file = checkpoint.in_progress_file.as_ref().map(|f| f.path.clone());
+        let completed_files = checkpoint.get_completed_files();
+        let in_progress_file = checkpoint.in_progress_file.as_ref().map(|f| PathBuf::from(&f.path));
         let chunks_written = checkpoint.written_chunks.len();
         let bytes_written = checkpoint.total_bytes_written;
 
@@ -121,14 +121,14 @@ impl RecoveryManager {
     pub fn get_chunk_location(&self, hash: &ChunkHash) -> Option<BlockLocation> {
         self.checkpoint_manager
             .as_ref()
-            .and_then(|m| m.get_chunk_location(hash))
+            .and_then(|m| m.get_chunk_location(hash).cloned())
     }
 
     /// Get all completed files
     pub fn completed_files(&self) -> Vec<PathBuf> {
         self.checkpoint_manager
             .as_ref()
-            .map(|m| m.checkpoint().completed_files.iter().cloned().collect())
+            .map(|m| m.checkpoint().get_completed_files())
             .unwrap_or_default()
     }
 
@@ -328,7 +328,7 @@ impl RecoverableWriter {
     /// Check if a chunk was already written
     pub fn get_existing_chunk(&self, hash: &ChunkHash) -> Option<BlockLocation> {
         if self.options.strategy == RecoveryStrategy::Resume {
-            self.checkpoint.get_chunk_location(hash)
+            self.checkpoint.get_chunk_location(hash).cloned()
         } else {
             None
         }

@@ -24,6 +24,7 @@
 //!
 //! For production workloads with incremental backups, enable the `lsm` feature.
 
+pub mod async_pipeline;
 pub mod auth;
 mod block_iter;
 mod checkpoint;
@@ -39,6 +40,7 @@ pub use block_iter::{
     BlockIterStats, BlockIterator, DecodedBlock, ErasureBlockIterator, SessionBlockIterator,
     SessionErasureBlockIterator, StandardBlockIterator,
 };
+pub use async_pipeline::{ChunkPipeline, PipelineConfig, ProcessedChunk};
 pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_VERSION};
 pub use chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend, MemoryChunkIndex};
 // Re-export KeySession for convenient access

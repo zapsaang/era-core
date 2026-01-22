@@ -42,7 +42,8 @@ impl IndexReader {
     /// Open an index from a directory
     pub fn open(index_dir: &Path, meta: MetaIndex) -> Result<Self> {
         // Deserialize Bloom filter
-        let bloom = serde_json::from_slice(&meta.bloom_filter)
+        let config = bincode::config::standard();
+        let (bloom, _len) = bincode::serde::decode_from_slice(&meta.bloom_filter, config)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         Ok(Self {
@@ -51,6 +52,35 @@ impl IndexReader {
             bloom,
             page_cache: HashMap::new(),
             embedded_pages: HashMap::new(),
+        })
+    }
+
+    /// Create an in-memory index reader from finalized entries
+    ///
+    /// This is used by LsmTree::finalize() to create a reader
+    /// from merged entries without disk I/O.
+    pub fn from_memory(
+        meta: MetaIndex,
+        bloom: Bloom<ChunkHash>,
+        entries: Vec<IndexEntry>,
+    ) -> Result<Self> {
+        // For in-memory mode, we store all entries as a single "page"
+        // This is simpler than creating actual pages for small indices
+        let embedded_pages = if !entries.is_empty() {
+            let mut pages = HashMap::new();
+            let page = IndexPage::new(entries);
+            pages.insert(BlockId::new(0), page);
+            pages
+        } else {
+            HashMap::new()
+        };
+
+        Ok(Self {
+            index_dir: None,
+            meta,
+            bloom,
+            page_cache: HashMap::new(),
+            embedded_pages,
         })
     }
 
@@ -110,10 +140,11 @@ impl IndexReader {
                     &encrypted_block.data,
                 )?;
 
-                Some(
-                    serde_json::from_slice::<MetaIndex>(&decrypted_data)
-                        .map_err(|e| EraError::Deserialization(e.to_string()))?,
-                )
+                let config = bincode::config::standard();
+                let (meta, _len) = bincode::serde::decode_from_slice(&decrypted_data, config)
+                    .map_err(|e| EraError::Deserialization(e.to_string()))?;
+
+                Some(meta)
             } else {
                 None
             }
@@ -156,8 +187,9 @@ impl IndexReader {
                     &encrypted_block.data,
                 ) {
                     // Try to deserialize as MetaIndex
-                    if let Ok(meta_candidate) = serde_json::from_slice::<MetaIndex>(&decrypted_data)
-                    {
+                    let config = bincode::config::standard();
+                    let result: std::result::Result<(MetaIndex, usize), _> = bincode::serde::decode_from_slice(&decrypted_data, config);
+                    if let Ok((meta_candidate, _len)) = result {
                         // Verify this looks like a valid MetaIndex
                         if !meta_candidate.pages.is_empty() {
                             tracing::info!(
@@ -205,7 +237,9 @@ impl IndexReader {
                     block_id,
                     &encrypted_block.data,
                 ) {
-                    if let Ok(page) = serde_json::from_slice::<IndexPage>(&decrypted_data) {
+                    let config = bincode::config::standard();
+                    let result: std::result::Result<(IndexPage, usize), _> = bincode::serde::decode_from_slice(&decrypted_data, config);
+                    if let Ok((page, _len)) = result {
                         // Verify this is the right page by checking hash range
                         if page.min_hash == page_ptr.min_hash && page.max_hash == page_ptr.max_hash
                         {
@@ -224,7 +258,8 @@ impl IndexReader {
         }
 
         // Step 5: Deserialize Bloom filter
-        let bloom = serde_json::from_slice(&meta.bloom_filter)
+        let config = bincode::config::standard();
+        let (bloom, _len) = bincode::serde::decode_from_slice(&meta.bloom_filter, config)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         tracing::info!(
@@ -289,7 +324,8 @@ impl IndexReader {
                 EraError::InvalidFormat(format!("Failed to read page {:?}: {}", page_path, e))
             })?;
 
-            let page = serde_json::from_slice(&page_bytes)
+            let config = bincode::config::standard();
+            let (page, _len) = bincode::serde::decode_from_slice(&page_bytes, config)
                 .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
             self.page_cache.insert(block_id, page);
@@ -329,7 +365,8 @@ mod tests {
             .collect();
 
         let page = IndexPage::new(entries.clone());
-        let page_bytes = serde_json::to_vec(&page).unwrap();
+        let config = bincode::config::standard();
+        let page_bytes = bincode::serde::encode_to_vec(&page, config).unwrap();
         fs::write(index_dir.join("page_0.bin"), page_bytes).unwrap();
 
         // Create meta-index
@@ -341,7 +378,8 @@ mod tests {
         for entry in &entries {
             bloom.set(&entry.hash);
         }
-        let bloom_bytes = serde_json::to_vec(&bloom).unwrap();
+        let config = bincode::config::standard();
+        let bloom_bytes = bincode::serde::encode_to_vec(&bloom, config).unwrap();
         meta.set_bloom_filter(bloom_bytes);
 
         // Create reader

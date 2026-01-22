@@ -237,12 +237,12 @@ fn test_index_page_layout() {
     }
 
     // Verify serialization size is reasonable
-    // Note: JSON is more verbose than bincode, so we expect larger sizes
-    let serialized = serde_json::to_vec(&page).unwrap();
+    // Note: bincode with serde is compact binary format
+    let serialized = bincode::serde::encode_to_vec(&page, bincode::config::standard()).unwrap();
     let size_kb = serialized.len() / 1024;
     assert!(
-        (100..=2000).contains(&size_kb),
-        "IndexPage serialized size out of range: {}KB (expected 100-2000KB for JSON)",
+        (50..=1000).contains(&size_kb),
+        "IndexPage serialized size out of range: {}KB (expected 50-1000KB for bincode)",
         size_kb
     );
 }
@@ -454,13 +454,13 @@ fn test_index_page_compression_and_encryption() {
     let page = IndexPage::new(entries);
 
     // Serialize and measure uncompressed size
-    let uncompressed = serde_json::to_vec(&page).unwrap();
+    let uncompressed = bincode::serde::encode_to_vec(&page, bincode::config::standard()).unwrap();
     let uncompressed_size = uncompressed.len();
 
     // NOTE: This will fail initially until we integrate with era-packing
     // For now, we'll just verify serialization works
     assert!(
-        uncompressed_size > 100_000,
+        uncompressed_size > 50_000,
         "Serialized page suspiciously small: {} bytes",
         uncompressed_size
     );

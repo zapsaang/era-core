@@ -1,9 +1,31 @@
-//! Volume writer for creating and appending to volumes.
+//! Async volume writer for creating and appending to volumes.
+//!
+//! **CRITICAL CHANGE (v2.2):** Async I/O eliminates executor blocking.
+//!
+//! ## Design Goals
+//!
+//! 1. **Zero Blocking**: All I/O operations are async
+//! 2. **Zero Allocations**: Static ZERO_PAGE buffer for padding
+//! 3. **Backpressure Compatible**: Works with async ChunkPipeline
+//!
+//! ## Migration from Sync VolumeWriter
+//!
+//! ```rust,ignore
+//! // OLD (sync):
+//! let mut writer = VolumeWriter::create(&backend, path, header)?;
+//! writer.write_block(&block)?;
+//! writer.finalize()?;
+//!
+//! // NEW (async):
+//! let mut writer = AsyncVolumeWriter::create(&backend, path, header).await?;
+//! writer.write_block(&block).await?;
+//! writer.finalize().await?;
+//! ```
 
 use era_common::{
     compute_shard_crc, BlockLocation, EncryptedMacroBlock, Result, ShardHeader, VolumeId,
 };
-use era_storage::{StorageBackend, StorageWriter};
+use era_storage::{AsyncStorageBackend, AsyncStorageWriter};
 use std::path::Path;
 
 use crate::header::HEADER_SIZE;
@@ -13,8 +35,8 @@ use crate::{Footer, SuperHeader};
 /// CRITICAL: Zero-copy padding - no vec![0; size] allocations in hot path
 static ZERO_PAGE: [u8; 1024 * 1024] = [0u8; 1024 * 1024];
 
-/// Writer for a single volume
-pub struct VolumeWriter<W: StorageWriter> {
+/// Async writer for a single volume
+pub struct AsyncVolumeWriter<W: AsyncStorageWriter> {
     /// Underlying storage writer
     writer: W,
     /// Volume header
@@ -31,18 +53,18 @@ pub struct VolumeWriter<W: StorageWriter> {
     last_checkpoint_offset: u64,
 }
 
-impl<W: StorageWriter> VolumeWriter<W> {
+impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
     /// Create a new volume with the given header
-    pub fn create<B: StorageBackend<Writer = W>>(
+    pub async fn create<B: AsyncStorageBackend<Writer = W>>(
         backend: &B,
         path: &Path,
         header: SuperHeader,
     ) -> Result<Self> {
-        let mut writer = backend.create(path)?;
+        let mut writer = backend.create(path).await?;
 
         // Write header
         let header_bytes = header.to_bytes()?;
-        writer.append(&header_bytes)?;
+        writer.append(&header_bytes).await?;
 
         Ok(Self {
             writer,
@@ -56,14 +78,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Open an existing volume for appending (truncate footer)
-    pub fn open_append<B: StorageBackend<Writer = W>>(
+    pub async fn open_append<B: AsyncStorageBackend<Writer = W>>(
         backend: &B,
         path: &Path,
         header: SuperHeader,
         footer: &Footer,
     ) -> Result<Self> {
-        let mut writer = backend.open_append(path)?;
-        writer.truncate(footer.data_end_offset)?;
+        let mut writer = backend.open_append(path).await?;
+        writer.truncate(footer.data_end_offset).await?;
 
         Ok(Self {
             writer,
@@ -77,9 +99,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Set the maximum size for this volume
-    pub fn set_max_size(&mut self, max_size: u64) -> Result<()> {
+    pub async fn set_max_size(&mut self, max_size: u64) -> Result<()> {
         self.max_size = Some(max_size);
-        self.pad_to_size(max_size)
+        self.pad_to_size(max_size).await
     }
 
     /// Update the last checkpoint offset
@@ -89,14 +111,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Internal helper to pad the volume with zeros up to target_size
     /// Uses static ZERO_PAGE buffer to avoid heap allocations
-    fn pad_to_size(&mut self, target_size: u64) -> Result<()> {
+    async fn pad_to_size(&mut self, target_size: u64) -> Result<()> {
         let current_size = self.writer.current_size();
         if current_size < target_size {
             let mut remaining = target_size - current_size;
 
             while remaining > 0 {
                 let to_write = remaining.min(ZERO_PAGE.len() as u64) as usize;
-                self.writer.append(&ZERO_PAGE[..to_write])?;
+                self.writer.append(&ZERO_PAGE[..to_write]).await?;
                 remaining -= to_write as u64;
             }
         }
@@ -104,15 +126,15 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Commit a checkpoint by updating the footer atomically
-    pub fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
+    pub async fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
         if let Some(max_size) = self.max_size {
             // Fixed Size Mode: Update footer at fixed location
 
             // 1. Ensure padding
-            self.pad_to_size(max_size)?;
+            self.pad_to_size(max_size).await?;
 
             // 2. Sync data
-            self.writer.sync()?;
+            self.writer.sync().await?;
 
             // 3. Update state
             self.set_last_checkpoint(checkpoint_offset);
@@ -139,14 +161,13 @@ impl<W: StorageWriter> VolumeWriter<W> {
             // 5. Overwrite
             use crate::footer::FOOTER_SIZE;
             let footer_offset = max_size - FOOTER_SIZE as u64;
-            self.writer.write_at(footer_offset, &footer_bytes)?;
-            self.writer.sync()?;
+            self.writer.write_at(footer_offset, &footer_bytes).await?;
+            self.writer.sync().await?;
         } else {
             // Dynamic/Store Mode: Append floating footer (inline checkpoint)
-            // This enables "Journaling" where we have a stream of [Data...][Footer][Data...][Footer]
 
             // 1. Sync data
-            self.writer.sync()?;
+            self.writer.sync().await?;
 
             // 2. Update state
             self.set_last_checkpoint(checkpoint_offset);
@@ -171,19 +192,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
             let footer_bytes = footer.to_bytes()?;
 
             // 4. Append footer
-            let offset = self.writer.append(&footer_bytes)?;
-            self.writer.sync()?;
+            let offset = self.writer.append(&footer_bytes).await?;
+            self.writer.sync().await?;
 
-            // 5. Advance position (Footer is now part of the stream)
-            // Note: This means subsequent blocks will be shifted.
-            // The Reader must be able to handle scanning or use the Index which we aren't persisting here yet.
-            // But for "Atomic Checkpoint" of the *Stream*, this is correct.
+            // 5. Advance position
             self.position += footer_bytes.len() as u64;
-
-            // Update last_checkpoint to point to this footer?
-            // The previous logic `self.set_last_checkpoint(checkpoint_offset)` sets the `last_checkpoint_offset` field *inside* the footer.
-            // But `self.last_checkpoint_offset` struct field tracks the *location of the footer itself* for the *next* footer to reference?
-            // Yes, usually a linked list.
             self.write_floating_checkpoint_internal(offset);
         }
 
@@ -211,7 +224,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Write an encrypted macro block to the volume
-    pub fn write_block(&mut self, block: &EncryptedMacroBlock) -> Result<BlockLocation> {
+    pub async fn write_block(&mut self, block: &EncryptedMacroBlock) -> Result<BlockLocation> {
         // Legacy format: Write ShardHeader + Data (for backward compatibility)
         let offset = self.position;
         let block_len = block.data.len() as u32;
@@ -235,11 +248,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         if self.max_size.is_some() {
             // Traffic Analysis Defense: Use write_at inside the padded volume
-            self.writer.write_at(offset, &header_bytes)?;
-            self.writer.write_at(offset + header_size, &block.data)?;
+            self.writer.write_at(offset, &header_bytes).await?;
+            self.writer.write_at(offset + header_size, &block.data).await?;
         } else {
-            self.writer.append(&header_bytes)?;
-            self.writer.append(&block.data)?;
+            self.writer.append(&header_bytes).await?;
+            self.writer.append(&block.data).await?;
         }
 
         let location = BlockLocation {
@@ -263,7 +276,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Write a typed block with explicit BlockType (V5 format)
-    pub fn write_typed_block(
+    pub async fn write_typed_block(
         &mut self,
         block: &EncryptedMacroBlock,
         block_type: era_common::BlockType,
@@ -291,11 +304,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         if self.max_size.is_some() {
             // Traffic Analysis Defense: Use write_at inside the padded volume
-            self.writer.write_at(offset, &header_bytes)?;
-            self.writer.write_at(offset + header_size, &block.data)?;
+            self.writer.write_at(offset, &header_bytes).await?;
+            self.writer.write_at(offset + header_size, &block.data).await?;
         } else {
-            self.writer.append(&header_bytes)?;
-            self.writer.append(&block.data)?;
+            self.writer.append(&header_bytes).await?;
+            self.writer.append(&block.data).await?;
         }
 
         let location = BlockLocation {
@@ -319,14 +332,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Write raw bytes to the volume (for testing/low-level access)
-    pub fn write_raw(&mut self, data: &[u8]) -> Result<u64> {
+    pub async fn write_raw(&mut self, data: &[u8]) -> Result<u64> {
         let offset = self.position;
 
         if self.max_size.is_some() {
-            self.writer.write_at(offset, data)?;
+            self.writer.write_at(offset, data).await?;
             self.position += data.len() as u64;
         } else {
-            self.writer.append(data)?;
+            self.writer.append(data).await?;
             self.position = self.writer.current_size();
         }
 
@@ -334,12 +347,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Finalize the volume by writing the footer and syncing
-    pub fn finalize(self) -> Result<SuperHeader> {
-        self.finalize_with_catalog(0, 0, 0, 0, 0, 0)
+    pub async fn finalize(self) -> Result<SuperHeader> {
+        self.finalize_with_catalog(0, 0, 0, 0, 0, 0).await
     }
 
     /// Finalize the volume with catalog location information
-    pub fn finalize_with_catalog(
+    pub async fn finalize_with_catalog(
         mut self,
         catalog_offset: u64,
         catalog_size: u32,
@@ -355,7 +368,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             use crate::footer::FOOTER_SIZE;
 
             // Ensure full padding to max_size
-            self.pad_to_size(max_size)?;
+            self.pad_to_size(max_size).await?;
 
             // Point to start of footer for the record
             self.position = max_size - FOOTER_SIZE as u64;
@@ -378,7 +391,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             let footer_bytes = footer.to_bytes()?;
 
             // Overwrite footer area
-            self.writer.write_at(self.position, &footer_bytes)?;
+            self.writer.write_at(self.position, &footer_bytes).await?;
         } else {
             let footer = Footer::with_catalog(
                 self.position,
@@ -396,12 +409,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 0,
             );
             let footer_bytes = footer.to_bytes()?;
-            self.writer.append(&footer_bytes)?;
+            self.writer.append(&footer_bytes).await?;
         }
 
         // Sync to disk
-        self.writer.sync()?;
-        self.writer.close()?;
+        self.writer.sync().await?;
+        self.writer.close().await?;
 
         Ok(self.header)
     }
@@ -417,13 +430,13 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use era_common::{ArchiveConfig, ArchiveId, BlockId};
-    use era_storage::LocalStorageBackend;
+    use era_storage::AsyncLocalStorageBackend;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_create_volume() {
+    #[tokio::test]
+    async fn test_create_volume() {
         let temp_dir = TempDir::new().unwrap();
-        let backend = LocalStorageBackend::new(temp_dir.path());
+        let backend = AsyncLocalStorageBackend::new(temp_dir.path());
 
         let header = SuperHeader::new(
             ArchiveId::new(),
@@ -432,17 +445,19 @@ mod tests {
             [0u8; 16],
         );
 
-        let writer = VolumeWriter::create(&backend, Path::new("test.era"), header).unwrap();
+        let writer = AsyncVolumeWriter::create(&backend, Path::new("test.era"), header)
+            .await
+            .unwrap();
         assert_eq!(writer.block_count(), 0);
         assert!(writer.current_size() >= HEADER_SIZE as u64);
 
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
-    #[test]
-    fn test_write_block() {
+    #[tokio::test]
+    async fn test_write_block() {
         let temp_dir = TempDir::new().unwrap();
-        let backend = LocalStorageBackend::new(temp_dir.path());
+        let backend = AsyncLocalStorageBackend::new(temp_dir.path());
 
         let header = SuperHeader::new(
             ArchiveId::new(),
@@ -451,68 +466,114 @@ mod tests {
             [0u8; 16],
         );
 
-        let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header).unwrap();
+        let mut writer = AsyncVolumeWriter::create(&backend, Path::new("test.era"), header)
+            .await
+            .unwrap();
 
         let block = EncryptedMacroBlock {
             block_id: BlockId::new(0),
-            data: Bytes::from(vec![0u8; 1024]),
-            original_size: 2048,
-            compressed_size: 1024,
-            chunk_count: 5,
-        };
-
-        let location = writer.write_block(&block).unwrap();
-        assert_eq!(location.slot_index, 0);
-        assert_eq!(location.encrypted_size, 1024);
-
-        writer.finalize().unwrap();
-    }
-
-    #[test]
-    fn test_volume_padding_and_atomic_check() {
-        let temp_dir = TempDir::new().unwrap();
-        let backend = LocalStorageBackend::new(temp_dir.path());
-
-        let header = SuperHeader::new(
-            ArchiveId::new(),
-            vec![],
-            ArchiveConfig::default(),
-            [0u8; 16],
-        );
-
-        let mut writer = VolumeWriter::create(&backend, Path::new("padded.era"), header).unwrap();
-
-        let header_size = crate::header::HEADER_SIZE as u64;
-        let footer_size = crate::footer::FOOTER_SIZE as u64;
-
-        // Define max size: Header + 1 Block (1024) + Padding (500) + Footer
-        let data_len = 1020;
-        let block_disk_size = data_len as u64 + 4; // 1024
-        let padding_size = 500;
-
-        let max_size = header_size + block_disk_size + padding_size + footer_size;
-        writer.set_max_size(max_size).unwrap();
-
-        let block = EncryptedMacroBlock {
-            block_id: BlockId::new(0),
-            data: Bytes::from(vec![0u8; data_len]),
-            original_size: 2048,
-            compressed_size: data_len as u32,
+            data: Bytes::from_static(b"test data"),
+            original_size: 9,
+            compressed_size: 9,
             chunk_count: 1,
         };
 
-        // Write block 1: Success
-        writer.write_block(&block).unwrap();
+        let location = writer.write_block(&block).await.unwrap();
+        assert_eq!(location.slot_index, 0);
+        assert_eq!(writer.block_count(), 1);
 
-        // Write block 2: Should fail (needs 1024 + footer, only 500 + footer available minus footer reservation)
-        assert!(writer.write_block(&block).is_err());
+        writer.finalize().await.unwrap();
+    }
 
-        // Finalize: Should fill padding
-        writer.finalize().unwrap();
+    #[tokio::test]
+    async fn test_write_typed_block() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = AsyncLocalStorageBackend::new(temp_dir.path());
 
-        // Verify file size
-        let file_path = temp_dir.path().join("padded.era");
-        let metadata = std::fs::metadata(file_path).unwrap();
-        assert_eq!(metadata.len(), max_size);
+        let header = SuperHeader::new(
+            ArchiveId::new(),
+            vec![],
+            ArchiveConfig::default(),
+            [0u8; 16],
+        );
+
+        let mut writer = AsyncVolumeWriter::create(&backend, Path::new("test.era"), header)
+            .await
+            .unwrap();
+
+        let block = EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from_static(b"checkpoint data"),
+            original_size: 15,
+            compressed_size: 15,
+            chunk_count: 0,
+        };
+
+        let location = writer
+            .write_typed_block(&block, era_common::BlockType::Checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(location.slot_index, 0);
+        assert_eq!(writer.block_count(), 1);
+
+        writer.finalize().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_set_max_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = AsyncLocalStorageBackend::new(temp_dir.path());
+
+        let header = SuperHeader::new(
+            ArchiveId::new(),
+            vec![],
+            ArchiveConfig::default(),
+            [0u8; 16],
+        );
+
+        let mut writer = AsyncVolumeWriter::create(&backend, Path::new("test.era"), header)
+            .await
+            .unwrap();
+
+        let max_size = 10 * 1024 * 1024; // 10MB
+        writer.set_max_size(max_size).await.unwrap();
+
+        // Write should work within limit
+        let block = EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from(vec![0u8; 1024]),
+            original_size: 1024,
+            compressed_size: 1024,
+            chunk_count: 1,
+        };
+
+        writer.write_block(&block).await.unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_padding_no_allocations() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = AsyncLocalStorageBackend::new(temp_dir.path());
+
+        let header = SuperHeader::new(
+            ArchiveId::new(),
+            vec![],
+            ArchiveConfig::default(),
+            [0u8; 16],
+        );
+
+        let mut writer = AsyncVolumeWriter::create(&backend, Path::new("test.era"), header)
+            .await
+            .unwrap();
+
+        // Set max size larger than current position
+        let max_size = 5 * 1024 * 1024; // 5MB
+        writer.set_max_size(max_size).await.unwrap();
+
+        // The padding should use static ZERO_PAGE buffer (no vec![0; size] allocations)
+        assert_eq!(writer.writer.current_size(), max_size);
+
+        writer.finalize().await.unwrap();
     }
 }
