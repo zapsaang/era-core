@@ -147,6 +147,7 @@ pub enum ChunkIndexBackend {
 ///
 /// NOTE: Only Memory backend is supported after V2.1 migration.
 /// LSM backends will fall back to Memory with a warning.
+#[allow(deprecated)] // Intentional: handling deprecated variants for backward compatibility
 pub fn create_chunk_index(backend: ChunkIndexBackend) -> EraResult<Arc<dyn ChunkIndex>> {
     match backend {
         ChunkIndexBackend::Memory => Ok(Arc::new(MemoryChunkIndex::new())),

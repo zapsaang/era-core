@@ -141,6 +141,8 @@ message Footer {
   uint64 index_root_offset = 15;
   uint32 index_root_size = 16;
   uint32 index_root_block_id = 17;
+  // V6 addition for direct checkpoint decryption (eliminates brute-force)
+  uint32 last_checkpoint_block_id = 18;
 }
 
 message ChunkRef {

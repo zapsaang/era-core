@@ -4,6 +4,8 @@
 //!
 //! Run with: cargo bench -p era-engine --features lsm
 
+#![allow(deprecated)] // Benchmarks intentionally test deprecated LSM backend
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use era_common::{BlockLocation, ChunkHash, VolumeId};
 use era_engine::chunk_index::{ChunkIndex, MemoryChunkIndex};

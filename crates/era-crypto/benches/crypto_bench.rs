@@ -224,6 +224,54 @@ fn bench_key_exchange_vs_argon2(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark Hybrid KEM (X25519 + Kyber-768) operations
+///
+/// This measures the performance overhead of post-quantum cryptography:
+/// - Keypair generation: ~2-5ms expected
+/// - Encapsulation: ~0.5ms expected
+/// - Decapsulation: ~0.5ms expected
+fn bench_hybrid_kem(c: &mut Criterion) {
+    use era_crypto::hybrid_kem::{decapsulate, encapsulate, generate_keypair};
+
+    let mut group = c.benchmark_group("hybrid_kem");
+
+    // Keypair generation (includes both X25519 and Kyber-768)
+    group.bench_function("keypair_generation", |b| b.iter(generate_keypair));
+
+    // Prepare test data for encapsulation/decapsulation
+    let (recipient_pk, recipient_sk) = generate_keypair();
+
+    // Encapsulation (sender side)
+    group.bench_function("encapsulate", |b| {
+        b.iter(|| encapsulate(black_box(&recipient_pk)).unwrap())
+    });
+
+    // Prepare ciphertext for decapsulation benchmark
+    let (ciphertext, _) = encapsulate(&recipient_pk).unwrap();
+
+    // Decapsulation (recipient side)
+    group.bench_function("decapsulate", |b| {
+        b.iter(|| {
+            decapsulate(
+                black_box(&recipient_sk),
+                black_box(&recipient_pk),
+                black_box(&ciphertext),
+            )
+            .unwrap()
+        })
+    });
+
+    // Full round-trip (encapsulate + decapsulate)
+    group.bench_function("full_roundtrip", |b| {
+        b.iter(|| {
+            let (ct, _encap_key) = encapsulate(black_box(&recipient_pk)).unwrap();
+            decapsulate(black_box(&recipient_sk), black_box(&recipient_pk), &ct).unwrap()
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_blake3_hash,
@@ -232,6 +280,7 @@ criterion_group!(
     bench_kdf_derive,
     bench_password_verification,
     bench_hkdf_key_derivation,
-    bench_key_exchange_vs_argon2
+    bench_key_exchange_vs_argon2,
+    bench_hybrid_kem
 );
 criterion_main!(benches);

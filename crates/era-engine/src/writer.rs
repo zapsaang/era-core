@@ -194,6 +194,7 @@ pub struct ArchiveWriterBuilder {
 
 impl ArchiveWriterBuilder {
     /// Create a new builder with the output path
+    #[allow(deprecated)] // EmbeddedLsm is deprecated but still used as default for backward compatibility
     pub fn new(output_path: impl Into<PathBuf>) -> Self {
         let output_path = output_path.into();
 
@@ -247,6 +248,7 @@ impl ArchiveWriterBuilder {
     /// - Incremental backups
     /// - Large-scale data (>100GB)
     /// - Memory-constrained environments
+    #[allow(deprecated)] // Lsm variant is deprecated but kept for backward compatibility
     pub fn with_lsm_index(mut self, path: impl Into<PathBuf>) -> Self {
         self.index_backend = ChunkIndexBackend::Lsm { path: path.into() };
         self
@@ -644,6 +646,8 @@ impl ArchiveWriterBuilder {
         // Restore embedded LSM index if present (self-contained resume)
         // Note: This must be done BEFORE creating VolumePool, as VolumePool::open_append
         // might truncate the file (removing the footer/LSM manifest).
+        #[allow(deprecated)]
+        // EmbeddedLsm is deprecated but still supported for backward compatibility
         if let ChunkIndexBackend::EmbeddedLsm { path } = &self.index_backend {
             if self.output_path.exists() {
                 let parent_dir = self.output_path.parent().unwrap_or(Path::new("."));
@@ -883,6 +887,8 @@ impl ArchiveWriterBuilder {
         // Create chunk index with configured backend
         let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index(self.index_backend.clone())?;
         let mut embedded_index: HashMap<ChunkHash, BlockLocation> = HashMap::new();
+        #[allow(deprecated)]
+        // EmbeddedLsm is deprecated but still supported for backward compatibility
         let embedded_lsm_path = match &self.index_backend {
             ChunkIndexBackend::EmbeddedLsm { path } => Some(path.clone()),
             _ => None,
@@ -1007,6 +1013,7 @@ impl ArchiveWriterBuilder {
 pub struct ArchiveWriter {
     archive_id: ArchiveId,
     /// Output path for the archive
+    #[allow(dead_code)] // Kept for future use in recovery/diagnostics
     output_path: PathBuf,
 
     // Key Session (security-critical, mlock-protected)
@@ -1998,17 +2005,9 @@ impl ArchiveWriter {
             pool_stats.total_blocks_written
         );
 
-        // Delete checkpoint after successful completion
-        if self.checkpoint_manager.is_some() {
-            let checkpoint_path = self.output_path.with_extension("checkpoint");
-            if checkpoint_path.exists() {
-                if let Err(e) = std::fs::remove_file(&checkpoint_path) {
-                    warn!("Failed to remove checkpoint file: {}", e);
-                } else {
-                    debug!("Checkpoint file removed after successful archive creation");
-                }
-            }
-        }
+        // NOTE: Sidecar checkpoint files are no longer used (v2.2+).
+        // Checkpoints are now stored as typed blocks inside the .era volume.
+        // Legacy sidecar deletion code removed per CLAUDE.md Phase 2.5.
 
         // Calculate total blocks written using our counter
         let blocks_written = self.next_block_id.load(Ordering::SeqCst);

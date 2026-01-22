@@ -156,10 +156,7 @@ impl Checkpoint {
 
     /// Get completed files as PathBuf vector (helper for recovery module)
     pub fn get_completed_files(&self) -> Vec<PathBuf> {
-        self.completed_files
-            .iter()
-            .map(|s| PathBuf::from(s))
-            .collect()
+        self.completed_files.iter().map(PathBuf::from).collect()
     }
 
     /// Check if a file has been completed (for tests)
@@ -184,6 +181,7 @@ pub struct CheckpointManager {
     /// Current checkpoint state
     checkpoint: Checkpoint,
     /// Archive output path (for compatibility with old API)
+    #[allow(dead_code)] // Kept for future use in recovery path
     archive_path: PathBuf,
 }
 
@@ -438,12 +436,22 @@ pub fn write_checkpoint<W: StorageWriter>(
 ///
 /// Given the checkpoint's physical offset (from footer or previous checkpoint),
 /// this reads and decrypts the checkpoint block.
+///
+/// # Arguments
+/// * `volume_reader` - The volume reader to read from
+/// * `session` - Key session for decryption
+/// * `volume_key` - Volume encryption key
+/// * `nonce_context` - Nonce context for encryption
+/// * `checkpoint_offset` - Physical offset of the checkpoint block
+/// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to brute-force search (legacy volumes).
+#[allow(dead_code)] // Will be used by cold recovery path
 pub fn read_checkpoint<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
     session: &KeySession,
     volume_key: &VolumeKey,
     nonce_context: [u8; 16],
     checkpoint_offset: u64,
+    checkpoint_block_id: Option<u32>,
 ) -> Result<Checkpoint> {
     use era_common::BlockId;
 
@@ -469,8 +477,31 @@ pub fn read_checkpoint<R: era_storage::StorageReader>(
         )));
     }
 
-    // Try to decrypt with various block IDs (since we don't know the exact ID)
-    // In production, the block ID would be stored in the footer
+    // If block_id is provided, try direct decryption first
+    if let Some(id) = checkpoint_block_id {
+        let block_id = BlockId::new(id as u64);
+        let block_key = session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
+        let derived_key = block_key.to_derived_key();
+
+        if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
+            &derived_key,
+            &nonce_context,
+            block_id,
+            &encrypted_block.data,
+        ) {
+            if let Ok(checkpoint) = Checkpoint::from_bytes(&decrypted_data) {
+                tracing::info!(
+                    "Checkpoint recovered with block_id {}: {} chunks, {} files",
+                    id,
+                    checkpoint.chunks_written,
+                    checkpoint.total_files_processed
+                );
+                return Ok(checkpoint);
+            }
+        }
+    }
+
+    // Fall back to brute-force for legacy volumes (block_id = 0 or decryption failed)
     for candidate_id in 0..100u64 {
         let block_id = BlockId::new(candidate_id);
         let block_key = session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
@@ -485,7 +516,8 @@ pub fn read_checkpoint<R: era_storage::StorageReader>(
             // Try to deserialize as Checkpoint
             if let Ok(checkpoint) = Checkpoint::from_bytes(&decrypted_data) {
                 tracing::info!(
-                    "Checkpoint recovered: {} chunks, {} files",
+                    "Checkpoint recovered (brute-force id {}): {} chunks, {} files",
+                    candidate_id,
                     checkpoint.chunks_written,
                     checkpoint.total_files_processed
                 );
@@ -503,6 +535,12 @@ pub fn read_checkpoint<R: era_storage::StorageReader>(
 ///
 /// This walks backwards from the footer's last_checkpoint_offset,
 /// following the chain of checkpoints to reconstruct the full index.
+///
+/// # Note
+/// Currently only recovers the last checkpoint. A full implementation
+/// would traverse the checkpoint chain if previous checkpoint offsets
+/// were stored in each checkpoint.
+#[allow(dead_code)] // Will be used by cold recovery path
 pub fn recover_all_checkpoints<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
     session: &KeySession,
@@ -511,34 +549,39 @@ pub fn recover_all_checkpoints<R: era_storage::StorageReader>(
 ) -> Result<Vec<Checkpoint>> {
     let mut checkpoints = Vec::new();
 
-    // Get initial checkpoint offset from footer
+    // Get initial checkpoint offset and block_id from footer
     if let Some(footer) = volume_reader.footer() {
-        let current_offset = footer.last_checkpoint_offset;
+        let checkpoint_offset = footer.last_checkpoint_offset;
+        let checkpoint_block_id = footer.last_checkpoint_block_id;
 
-        // Walk backwards through checkpoint chain
-        // Note: In a full implementation, each checkpoint would store
-        // a pointer to the previous checkpoint
-        while current_offset > 0 {
+        // Only attempt recovery if there's a checkpoint
+        if checkpoint_offset > 0 {
+            // Use block_id if available (V6+), otherwise fall back to brute-force
+            let block_id_opt = if checkpoint_block_id > 0 {
+                Some(checkpoint_block_id)
+            } else {
+                None
+            };
+
             match read_checkpoint(
                 volume_reader,
                 session,
                 volume_key,
                 nonce_context,
-                current_offset,
+                checkpoint_offset,
+                block_id_opt,
             ) {
                 Ok(checkpoint) => {
                     checkpoints.push(checkpoint);
-                    // For now, we only recover the last checkpoint
-                    // A full implementation would chain them
-                    break;
+                    // TODO: In a full implementation, each checkpoint would store
+                    // a pointer to the previous checkpoint for chain traversal
                 }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to read checkpoint at offset {}: {}",
-                        current_offset,
+                        checkpoint_offset,
                         e
                     );
-                    break;
                 }
             }
         }

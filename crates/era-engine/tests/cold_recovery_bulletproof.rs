@@ -140,7 +140,7 @@ async fn test_cold_recovery_basic() {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let path = e.path();
-            path.is_file() && path.extension().map_or(false, |ext| ext == "era")
+            path.is_file() && path.extension().is_some_and(|ext| ext == "era")
         })
         .collect();
 

@@ -11,7 +11,7 @@ pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
 pub const FOOTER_SIZE: usize = 128;
 
 /// Current footer version
-pub const FOOTER_VERSION: u16 = 5;
+pub const FOOTER_VERSION: u16 = 6;
 
 /// Volume footer - stored at the end of each volume
 ///
@@ -39,6 +39,8 @@ pub struct Footer {
     pub catalog_block_id: u32,
     /// Offset of the last checkpoint (for atomic updates)
     pub last_checkpoint_offset: u64,
+    /// Block ID of the last checkpoint (V6+, for direct decryption)
+    pub last_checkpoint_block_id: u32,
     /// Offset of embedded LSM manifest block
     pub lsm_manifest_offset: u64,
     /// Size of embedded LSM manifest block
@@ -72,6 +74,7 @@ impl Footer {
             0,
             0,
             0,
+            0,
         )
     }
 
@@ -85,6 +88,7 @@ impl Footer {
         catalog_size: u32,
         catalog_block_id: u32,
         last_checkpoint_offset: u64,
+        last_checkpoint_block_id: u32,
         lsm_manifest_offset: u64,
         lsm_manifest_size: u32,
         lsm_manifest_block_id: u32,
@@ -103,6 +107,7 @@ impl Footer {
             catalog_size,
             catalog_block_id,
             last_checkpoint_offset,
+            last_checkpoint_block_id,
             lsm_manifest_offset,
             lsm_manifest_size,
             lsm_manifest_block_id,
@@ -143,6 +148,7 @@ impl Footer {
             catalog_size: self.catalog_size,
             catalog_block_id: self.catalog_block_id,
             last_checkpoint_offset: self.last_checkpoint_offset,
+            last_checkpoint_block_id: self.last_checkpoint_block_id,
             lsm_manifest_offset: self.lsm_manifest_offset,
             lsm_manifest_size: self.lsm_manifest_size,
             lsm_manifest_block_id: self.lsm_manifest_block_id,
@@ -168,6 +174,7 @@ impl Footer {
             catalog_size: proto.catalog_size,
             catalog_block_id: proto.catalog_block_id,
             last_checkpoint_offset: proto.last_checkpoint_offset,
+            last_checkpoint_block_id: proto.last_checkpoint_block_id,
             lsm_manifest_offset: proto.lsm_manifest_offset,
             lsm_manifest_size: proto.lsm_manifest_size,
             lsm_manifest_block_id: proto.lsm_manifest_block_id,

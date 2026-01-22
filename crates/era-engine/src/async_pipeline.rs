@@ -260,12 +260,14 @@ impl ChunkPipeline {
     /// Returns:
     /// - `Ok(Some(chunk))` if a chunk is available
     /// - `Ok(None)` if no chunks are currently available
-    /// - `Err(())` if all senders have been dropped
-    pub fn try_recv(&mut self) -> std::result::Result<Option<ProcessedChunk>, ()> {
+    /// - `Err(EraError::ChannelClosed)` if all senders have been dropped
+    pub fn try_recv(&mut self) -> Result<Option<ProcessedChunk>> {
         match self.receiver.try_recv() {
             Ok(chunk) => Ok(Some(chunk)),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::error::TryRecvError::Disconnected) => Err(()),
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                Err(EraError::ChannelClosed("Pipeline senders dropped".into()))
+            }
         }
     }
 

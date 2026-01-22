@@ -318,6 +318,7 @@ mod lsm_tests {
 
     /// Test LSM persistence across sessions
     #[tokio::test]
+    #[allow(deprecated)] // Intentionally testing deprecated LSM backend
     async fn test_lsm_persistence() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let index_path = temp_dir.path().join("persistent_index");
@@ -361,6 +362,7 @@ mod lsm_tests {
 
     /// Test batch operations with LSM
     #[tokio::test]
+    #[allow(deprecated)] // Intentionally testing deprecated LSM backend
     async fn test_lsm_batch_operations() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let index_path = temp_dir.path().join("batch_index");

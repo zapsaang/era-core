@@ -29,6 +29,8 @@ pub struct VolumeWriter<W: StorageWriter> {
     max_size: Option<u64>,
     /// Last checkpoint offset
     last_checkpoint_offset: u64,
+    /// Last checkpoint block ID (V6+, for direct decryption)
+    last_checkpoint_block_id: u32,
 }
 
 impl<W: StorageWriter> VolumeWriter<W> {
@@ -52,6 +54,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             sequence: 0,
             max_size: None,
             last_checkpoint_offset: 0,
+            last_checkpoint_block_id: 0,
         })
     }
 
@@ -73,6 +76,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             sequence: footer.sequence_number,
             max_size: None,
             last_checkpoint_offset: footer.last_checkpoint_offset,
+            last_checkpoint_block_id: footer.last_checkpoint_block_id,
         })
     }
 
@@ -85,6 +89,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// Update the last checkpoint offset
     pub fn set_last_checkpoint(&mut self, offset: u64) {
         self.last_checkpoint_offset = offset;
+    }
+
+    /// Update the last checkpoint offset and block ID (V6+)
+    pub fn set_last_checkpoint_with_block_id(&mut self, offset: u64, block_id: u32) {
+        self.last_checkpoint_offset = offset;
+        self.last_checkpoint_block_id = block_id;
     }
 
     /// Internal helper to pad the volume with zeros up to target_size
@@ -126,6 +136,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 0,
                 0,
                 self.last_checkpoint_offset,
+                self.last_checkpoint_block_id,
                 0,
                 0,
                 0,
@@ -160,6 +171,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 0,
                 0,
                 self.last_checkpoint_offset,
+                self.last_checkpoint_block_id,
                 0,
                 0,
                 0,
@@ -368,6 +380,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 catalog_size,
                 catalog_block_id,
                 self.last_checkpoint_offset,
+                self.last_checkpoint_block_id,
                 lsm_manifest_offset,
                 lsm_manifest_size,
                 lsm_manifest_block_id,
@@ -388,6 +401,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 catalog_size,
                 catalog_block_id,
                 self.last_checkpoint_offset,
+                self.last_checkpoint_block_id,
                 lsm_manifest_offset,
                 lsm_manifest_size,
                 lsm_manifest_block_id,

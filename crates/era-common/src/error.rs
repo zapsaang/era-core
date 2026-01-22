@@ -120,6 +120,9 @@ pub enum EraError {
     #[error("Lock poisoned: {0}")]
     LockPoisoned(String),
 
+    #[error("Channel closed: {0}")]
+    ChannelClosed(String),
+
     // Async operation error
     #[error("Async operation error: {0}")]
     AsyncError(String),
