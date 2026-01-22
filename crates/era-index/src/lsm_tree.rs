@@ -195,7 +195,10 @@ impl LsmTree {
         }
 
         // STEP 2: Merge all spill segments using TieredMerger
-        tracing::info!("Merging {} spill segments", builder.spilled_segments().len());
+        tracing::info!(
+            "Merging {} spill segments",
+            builder.spilled_segments().len()
+        );
         let merged_entries: Vec<IndexEntry> = if !builder.spilled_segments().is_empty() {
             let merger = crate::merger::TieredMerger::new(
                 builder.spilled_segments().to_vec(),
@@ -213,10 +216,9 @@ impl LsmTree {
         // STEP 4: Create IndexReader with Bloom filter
         // Serialize the Bloom filter
         let config = bincode::config::standard();
-        let bloom_bytes =
-            bincode::serde::encode_to_vec(builder.bloom(), config).map_err(|e| {
-                era_common::EraError::Serialization(format!("Failed to serialize bloom: {}", e))
-            })?;
+        let bloom_bytes = bincode::serde::encode_to_vec(builder.bloom(), config).map_err(|e| {
+            era_common::EraError::Serialization(format!("Failed to serialize bloom: {}", e))
+        })?;
 
         let mut meta_with_bloom = meta;
         meta_with_bloom.set_bloom_filter(bloom_bytes);
@@ -236,10 +238,7 @@ impl LsmTree {
             }
         }
 
-        tracing::info!(
-            "Index finalized: {} total entries",
-            entries_count
-        );
+        tracing::info!("Index finalized: {} total entries", entries_count);
 
         self.reader = Some(Arc::new(RwLock::new(reader)));
         self.state = TreeState::Finalized;

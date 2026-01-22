@@ -71,7 +71,10 @@ impl RecoveryManager {
         let checkpoint = manager.checkpoint();
 
         let completed_files = checkpoint.get_completed_files();
-        let in_progress_file = checkpoint.in_progress_file.as_ref().map(|f| PathBuf::from(&f.path));
+        let in_progress_file = checkpoint
+            .in_progress_file
+            .as_ref()
+            .map(|f| PathBuf::from(&f.path));
         let chunks_written = checkpoint.written_chunks.len();
         let bytes_written = checkpoint.total_bytes_written;
 

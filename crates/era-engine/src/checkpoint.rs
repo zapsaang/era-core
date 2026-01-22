@@ -164,7 +164,8 @@ impl Checkpoint {
 
     /// Check if a file has been completed (for tests)
     pub fn is_file_completed(&self, path: &Path) -> bool {
-        self.completed_files.contains(&path.to_string_lossy().to_string())
+        self.completed_files
+            .contains(&path.to_string_lossy().to_string())
     }
 
     /// Get chunk location from checkpoint (for tests)
@@ -245,7 +246,13 @@ impl CheckpointManager {
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
     ) -> Result<u64> {
-        write_checkpoint(volume_writer, session, volume_key, nonce_context, &self.checkpoint)
+        write_checkpoint(
+            volume_writer,
+            session,
+            volume_key,
+            nonce_context,
+            &self.checkpoint,
+        )
     }
 
     /// Delete checkpoint (no-op in new implementation)
@@ -310,12 +317,16 @@ impl CheckpointManager {
 
     /// Check if a file has been completed (backward compatibility)
     pub fn is_file_completed(&self, path: &Path) -> bool {
-        self.checkpoint.completed_files.contains(&path.to_string_lossy().to_string())
+        self.checkpoint
+            .completed_files
+            .contains(&path.to_string_lossy().to_string())
     }
 
     /// Mark a file as completed (backward compatibility)
     pub fn mark_file_completed(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        self.checkpoint.completed_files.insert(path.as_ref().to_string_lossy().to_string());
+        self.checkpoint
+            .completed_files
+            .insert(path.as_ref().to_string_lossy().to_string());
         self.checkpoint.in_progress_file = None;
         self.checkpoint.total_files_processed += 1;
         Ok(())
@@ -333,7 +344,11 @@ impl CheckpointManager {
     }
 
     /// Update file processing progress (backward compatibility)
-    pub fn update_file_progress(&mut self, bytes_processed: u64, chunks_written: u32) -> Result<()> {
+    pub fn update_file_progress(
+        &mut self,
+        bytes_processed: u64,
+        chunks_written: u32,
+    ) -> Result<()> {
         if let Some(ref mut in_progress) = self.checkpoint.in_progress_file {
             in_progress.bytes_processed = bytes_processed;
             in_progress.chunks_written = chunks_written;
@@ -359,9 +374,7 @@ impl CheckpointManager {
     /// **DEPRECATED:** Checkpoints are now written via commit_to_volume().
     /// This method exists for backward compatibility with tests.
     pub fn save(&self) -> Result<()> {
-        tracing::warn!(
-            "CheckpointManager::save() is deprecated - use commit_to_volume() instead"
-        );
+        tracing::warn!("CheckpointManager::save() is deprecated - use commit_to_volume() instead");
         Ok(())
     }
 }
@@ -402,7 +415,7 @@ pub fn write_checkpoint<W: StorageWriter>(
         data: encrypted_data,
         original_size: checkpoint_bytes.len() as u32,
         compressed_size: checkpoint_bytes.len() as u32, // No compression for checkpoints
-        chunk_count: 0,                                  // Metadata block
+        chunk_count: 0,                                 // Metadata block
     };
 
     // Write as typed block
@@ -506,8 +519,13 @@ pub fn recover_all_checkpoints<R: era_storage::StorageReader>(
         // Note: In a full implementation, each checkpoint would store
         // a pointer to the previous checkpoint
         while current_offset > 0 {
-            match read_checkpoint(volume_reader, session, volume_key, nonce_context, current_offset)
-            {
+            match read_checkpoint(
+                volume_reader,
+                session,
+                volume_key,
+                nonce_context,
+                current_offset,
+            ) {
                 Ok(checkpoint) => {
                     checkpoints.push(checkpoint);
                     // For now, we only recover the last checkpoint
@@ -515,7 +533,11 @@ pub fn recover_all_checkpoints<R: era_storage::StorageReader>(
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to read checkpoint at offset {}: {}", current_offset, e);
+                    tracing::warn!(
+                        "Failed to read checkpoint at offset {}: {}",
+                        current_offset,
+                        e
+                    );
                     break;
                 }
             }
@@ -573,7 +595,11 @@ mod tests {
 
         assert_eq!(deserialized.written_chunks.len(), 1);
         assert_eq!(
-            deserialized.written_chunks.get(&hash).unwrap().physical_offset,
+            deserialized
+                .written_chunks
+                .get(&hash)
+                .unwrap()
+                .physical_offset,
             1024
         );
     }
@@ -601,8 +627,18 @@ mod tests {
         assert!(checkpoint.in_progress_file.is_some());
 
         checkpoint.update_progress(512, 5);
-        assert_eq!(checkpoint.in_progress_file.as_ref().unwrap().bytes_processed, 512);
-        assert_eq!(checkpoint.in_progress_file.as_ref().unwrap().chunks_written, 5);
+        assert_eq!(
+            checkpoint
+                .in_progress_file
+                .as_ref()
+                .unwrap()
+                .bytes_processed,
+            512
+        );
+        assert_eq!(
+            checkpoint.in_progress_file.as_ref().unwrap().chunks_written,
+            5
+        );
 
         checkpoint.mark_file_complete();
         assert!(checkpoint.in_progress_file.is_none());

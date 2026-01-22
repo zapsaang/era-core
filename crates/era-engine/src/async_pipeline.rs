@@ -142,12 +142,10 @@ impl ChunkPipeline {
     /// ```
     pub async fn process_chunk(&self, data: Bytes) -> Result<ChunkHash> {
         // Acquire permit (blocks if at concurrency limit)
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| EraError::AsyncError(format!("Semaphore acquisition failed: {}", e)))?;
+        let permit =
+            self.semaphore.clone().acquire_owned().await.map_err(|e| {
+                EraError::AsyncError(format!("Semaphore acquisition failed: {}", e))
+            })?;
 
         let sender = self.sender.clone();
         let original_size = data.len();
@@ -200,12 +198,10 @@ impl ChunkPipeline {
         data: Bytes,
         compression_level: i32,
     ) -> Result<ChunkHash> {
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| EraError::AsyncError(format!("Semaphore acquisition failed: {}", e)))?;
+        let permit =
+            self.semaphore.clone().acquire_owned().await.map_err(|e| {
+                EraError::AsyncError(format!("Semaphore acquisition failed: {}", e))
+            })?;
 
         let sender = self.sender.clone();
         let original_size = data.len();

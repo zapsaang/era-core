@@ -1,8 +1,8 @@
 //! MacroBlock-related types.
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
 
 use super::{BlockId, ChunkHash, VolumeId};
 
@@ -50,7 +50,9 @@ impl EncryptedMacroBlock {
 }
 
 /// Location of a block in the archive
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize,
+)]
 #[archive(check_bytes)]
 pub struct BlockLocation {
     /// Volume containing this block
@@ -74,7 +76,18 @@ pub struct BlockLocation {
 }
 
 /// Information about an erasure-coded block
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+)]
 #[archive(check_bytes)]
 pub struct ErasureBlockInfo {
     /// Number of data shards

@@ -249,7 +249,9 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
         if self.max_size.is_some() {
             // Traffic Analysis Defense: Use write_at inside the padded volume
             self.writer.write_at(offset, &header_bytes).await?;
-            self.writer.write_at(offset + header_size, &block.data).await?;
+            self.writer
+                .write_at(offset + header_size, &block.data)
+                .await?;
         } else {
             self.writer.append(&header_bytes).await?;
             self.writer.append(&block.data).await?;
@@ -305,7 +307,9 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
         if self.max_size.is_some() {
             // Traffic Analysis Defense: Use write_at inside the padded volume
             self.writer.write_at(offset, &header_bytes).await?;
-            self.writer.write_at(offset + header_size, &block.data).await?;
+            self.writer
+                .write_at(offset + header_size, &block.data)
+                .await?;
         } else {
             self.writer.append(&header_bytes).await?;
             self.writer.append(&block.data).await?;

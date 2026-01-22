@@ -188,7 +188,8 @@ impl IndexReader {
                 ) {
                     // Try to deserialize as MetaIndex
                     let config = bincode::config::standard();
-                    let result: std::result::Result<(MetaIndex, usize), _> = bincode::serde::decode_from_slice(&decrypted_data, config);
+                    let result: std::result::Result<(MetaIndex, usize), _> =
+                        bincode::serde::decode_from_slice(&decrypted_data, config);
                     if let Ok((meta_candidate, _len)) = result {
                         // Verify this looks like a valid MetaIndex
                         if !meta_candidate.pages.is_empty() {
@@ -238,7 +239,8 @@ impl IndexReader {
                     &encrypted_block.data,
                 ) {
                     let config = bincode::config::standard();
-                    let result: std::result::Result<(IndexPage, usize), _> = bincode::serde::decode_from_slice(&decrypted_data, config);
+                    let result: std::result::Result<(IndexPage, usize), _> =
+                        bincode::serde::decode_from_slice(&decrypted_data, config);
                     if let Ok((page, _len)) = result {
                         // Verify this is the right page by checking hash range
                         if page.min_hash == page_ptr.min_hash && page.max_hash == page_ptr.max_hash

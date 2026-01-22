@@ -111,9 +111,18 @@ async fn test_cold_recovery_basic() {
             .unwrap();
 
         // Add files
-        writer.add_file(&source_dir.join("random.bin")).await.unwrap();
-        writer.add_file(&source_dir.join("pattern1.bin")).await.unwrap();
-        writer.add_file(&source_dir.join("pattern2.bin")).await.unwrap();
+        writer
+            .add_file(&source_dir.join("random.bin"))
+            .await
+            .unwrap();
+        writer
+            .add_file(&source_dir.join("pattern1.bin"))
+            .await
+            .unwrap();
+        writer
+            .add_file(&source_dir.join("pattern2.bin"))
+            .await
+            .unwrap();
 
         println!("  Added 3 files to archive");
 
@@ -275,7 +284,10 @@ async fn test_cold_recovery_large_dataset() {
             }
         }
 
-        println!("Ingestion completed in {:.2}s", start.elapsed().as_secs_f64());
+        println!(
+            "Ingestion completed in {:.2}s",
+            start.elapsed().as_secs_f64()
+        );
         // Drop without finalize (kill -9)
     }
 
