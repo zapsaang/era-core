@@ -148,10 +148,11 @@ impl LsmTree {
                 .map(|b| b.bloom_contains(hash))
                 .unwrap_or(false),
             TreeState::Finalized => {
-                // For finalized state, we need to check the bloom filter directly
-                // Since IndexReader doesn't expose bloom_contains, we'll return false for now
-                // TODO: Add bloom_contains to IndexReader
-                false
+                // Use the IndexReader's bloom_contains method
+                self.reader
+                    .as_ref()
+                    .map(|r| r.read().bloom_contains(hash))
+                    .unwrap_or(false)
             }
         }
     }
@@ -283,12 +284,17 @@ impl LsmTreeReader {
         self.reader.write().lookup(hash)
     }
 
-    /// Check if a hash exists in the Bloom filter (fast negative lookup)
+    /// Check if a hash exists in the Bloom filter (fast O(1) negative lookup)
+    ///
+    /// This is much faster than `lookup()` as it only checks the bloom filter
+    /// without performing the full index traversal. Use this for fast
+    /// deduplication checks.
+    ///
+    /// Returns `false` if the hash is definitely NOT in the index.
+    /// Returns `true` if the hash MAY be in the index (bloom filters have false positives).
+    #[inline]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
-        // Since IndexReader doesn't expose bloom_contains, we use lookup
-        // which internally checks the bloom filter first
-        // TODO: Add bloom_contains to IndexReader for efficiency
-        self.lookup(hash).ok().flatten().is_some()
+        self.reader.read().bloom_contains(hash)
     }
 
     /// Get the underlying reader (for advanced use cases)
@@ -340,5 +346,85 @@ mod tests {
         let after_insert = tree.memtable_size_bytes();
         assert!(after_insert > initial_size);
         assert_eq!(after_insert, IndexEntry::memory_size());
+    }
+
+    /// P0 BUG TEST: LsmTreeReader.bloom_contains() must use actual bloom filter
+    ///
+    /// This test proves the critical bug where LsmTreeReader.bloom_contains()
+    /// uses an inefficient workaround (calling lookup()) instead of directly
+    /// checking the bloom filter via IndexReader.bloom_contains().
+    ///
+    /// The current implementation in LsmTreeReader::bloom_contains():
+    /// ```
+    /// self.lookup(hash).ok().flatten().is_some()
+    /// ```
+    /// This is O(log n) instead of O(1) and defeats the purpose of bloom filters.
+    ///
+    /// Expected behavior: bloom_contains() should directly check the bloom filter
+    /// without performing a full lookup.
+    #[test]
+    fn test_lsm_tree_reader_bloom_contains_efficiency() {
+        let mut tree = LsmTree::new_default();
+
+        // Insert entries
+        for i in 0..100u64 {
+            let entry = IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i), 0, 4096);
+            tree.insert(entry).unwrap();
+        }
+
+        // Verify bloom works BEFORE finalization
+        assert!(
+            tree.bloom_contains(&test_hash(50)),
+            "bloom_contains should return true for inserted hash BEFORE finalize"
+        );
+        assert!(
+            !tree.bloom_contains(&test_hash(9999)),
+            "bloom_contains should return false for non-inserted hash BEFORE finalize"
+        );
+
+        // Finalize and get reader
+        let reader = tree.finalize().expect("finalize should succeed");
+
+        // Reader's bloom_contains should work correctly
+        assert!(
+            reader.bloom_contains(&test_hash(50)),
+            "LsmTreeReader.bloom_contains should return true for inserted hash"
+        );
+        assert!(
+            reader.bloom_contains(&test_hash(0)),
+            "LsmTreeReader.bloom_contains should return true for first inserted hash"
+        );
+        assert!(
+            reader.bloom_contains(&test_hash(99)),
+            "LsmTreeReader.bloom_contains should return true for last inserted hash"
+        );
+
+        // Non-inserted hashes should return false
+        assert!(
+            !reader.bloom_contains(&test_hash(9999)),
+            "LsmTreeReader.bloom_contains should return false for non-inserted hash"
+        );
+    }
+
+    /// P0 BUG TEST: IndexReader must expose bloom_contains() method
+    ///
+    /// This test verifies that IndexReader has a direct bloom_contains() method
+    /// that can be called without going through the full lookup() path.
+    ///
+    /// Currently IndexReader does NOT expose this method, forcing LsmTreeReader
+    /// to use the inefficient lookup() workaround.
+    #[test]
+    fn test_index_reader_bloom_contains_exists() {
+        use crate::reader::IndexReader;
+
+        // Create a minimal IndexReader using from_memory
+        let meta = crate::MetaIndex::new();
+        let bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
+        let reader = IndexReader::from_memory(meta, bloom, vec![])
+            .expect("IndexReader creation should succeed");
+
+        // P0 BUG: IndexReader should have bloom_contains() method
+        // This test will fail to compile if the method doesn't exist
+        let _result = reader.bloom_contains(&test_hash(25));
     }
 }

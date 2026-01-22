@@ -13,18 +13,16 @@
 //! ```rust,ignore
 //! // OLD (sync):
 //! let mut writer = VolumeWriter::create(&backend, path, header)?;
-//! writer.write_block(&block)?;
+//! writer.write_typed_block(&block, BlockType::Data)?;
 //! writer.finalize()?;
 //!
 //! // NEW (async):
 //! let mut writer = AsyncVolumeWriter::create(&backend, path, header).await?;
-//! writer.write_block(&block).await?;
+//! writer.write_typed_block(&block, BlockType::Data).await?;
 //! writer.finalize().await?;
 //! ```
 
-use era_common::{
-    compute_shard_crc, BlockLocation, EncryptedMacroBlock, Result, ShardHeader, VolumeId,
-};
+use era_common::{compute_shard_crc, BlockLocation, EncryptedMacroBlock, Result, VolumeId};
 use era_storage::{AsyncStorageBackend, AsyncStorageWriter};
 use std::path::Path;
 
@@ -235,60 +233,6 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
         self.block_count
     }
 
-    /// Write an encrypted macro block to the volume
-    pub async fn write_block(&mut self, block: &EncryptedMacroBlock) -> Result<BlockLocation> {
-        // Legacy format: Write ShardHeader + Data (for backward compatibility)
-        let offset = self.position;
-        let block_len = block.data.len() as u32;
-        let header_size = ShardHeader::SIZE as u64;
-        let total_len = block_len as u64 + header_size;
-
-        // Check availability if max_size is set
-        if let Some(max_size) = self.max_size {
-            let footer_size = crate::footer::FOOTER_SIZE as u64;
-            if offset + total_len + footer_size > max_size {
-                return Err(era_common::EraError::Io(std::io::Error::other(
-                    "Volume full",
-                )));
-            }
-        }
-
-        // Construct ShardHeader (legacy 8-byte format)
-        let crc = compute_shard_crc(&block.data);
-        let header = ShardHeader::new(block_len, crc);
-        let header_bytes = header.to_bytes();
-
-        if self.max_size.is_some() {
-            // Traffic Analysis Defense: Use write_at inside the padded volume
-            self.writer.write_at(offset, &header_bytes).await?;
-            self.writer
-                .write_at(offset + header_size, &block.data)
-                .await?;
-        } else {
-            self.writer.append(&header_bytes).await?;
-            self.writer.append(&block.data).await?;
-        }
-
-        let location = BlockLocation {
-            volume_id: self.header.volume_id,
-            slot_index: self.block_count,
-            physical_offset: offset,
-            encrypted_size: block_len,
-            erasure_info: None, // Standard blocks are not erasure-coded
-            shard_offsets: None,
-            shard_volumes: None,
-        };
-
-        if self.max_size.is_some() {
-            self.position += total_len;
-        } else {
-            self.position = self.writer.current_size();
-        }
-        self.block_count += 1;
-
-        Ok(location)
-    }
-
     /// Write a typed block with explicit BlockType (V5 format)
     pub async fn write_typed_block(
         &mut self,
@@ -496,7 +440,10 @@ mod tests {
             chunk_count: 1,
         };
 
-        let location = writer.write_block(&block).await.unwrap();
+        let location = writer
+            .write_typed_block(&block, era_common::BlockType::Data)
+            .await
+            .unwrap();
         assert_eq!(location.slot_index, 0);
         assert_eq!(writer.block_count(), 1);
 
@@ -565,7 +512,10 @@ mod tests {
             chunk_count: 1,
         };
 
-        writer.write_block(&block).await.unwrap();
+        writer
+            .write_typed_block(&block, era_common::BlockType::Data)
+            .await
+            .unwrap();
         writer.finalize().await.unwrap();
     }
 

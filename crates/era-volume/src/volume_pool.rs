@@ -5,8 +5,9 @@
 //! when volumes reach their size limit.
 
 use era_common::{
-    compute_shard_crc, ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig,
-    MatrixShardEntry, Result, ShardHeader, VolumeId,
+    compute_shard_crc, BlockHeader, BlockLocation, BlockType, EncryptedMacroBlock,
+    ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig, MatrixShardEntry, Result,
+    ShardHeader, VolumeId,
 };
 use era_storage::StorageBackend;
 use std::path::{Path, PathBuf};
@@ -469,6 +470,63 @@ impl<B: StorageBackend> VolumePool<B> {
             MatrixShardEntry::new(volume_sequence, offset, shard_data.len() as u32, crc),
             volume_id,
         ))
+    }
+
+    /// Write a typed block (V5 BlockHeader format) to the pool.
+    ///
+    /// This method writes blocks using the V5 BlockHeader format (16 bytes)
+    /// instead of the legacy ShardHeader format (8 bytes).
+    ///
+    /// # Arguments
+    /// * `block` - The encrypted block to write
+    /// * `block_type` - The type of block (Data, Catalog, etc.)
+    ///
+    /// # Returns
+    /// A `BlockLocation` containing the location information.
+    pub fn write_typed_block(
+        &mut self,
+        block: &EncryptedMacroBlock,
+        block_type: BlockType,
+    ) -> Result<(BlockLocation, VolumeId)> {
+        let preferred_slot = 0; // For non-erasure, always use first volume
+
+        let block_size = block.data.len() as u64;
+        let total_size = BlockHeader::SIZE as u64 + block_size;
+
+        // Try preferred slot first, then find any available volume
+        let slot = if self.volume_can_fit(preferred_slot, total_size) {
+            preferred_slot
+        } else {
+            // Find any volume with enough space
+            let mut found_slot = None;
+            for i in 0..self.writers.len() {
+                let candidate = (preferred_slot + i) % self.writers.len();
+                if self.volume_can_fit(candidate, total_size) {
+                    found_slot = Some(candidate);
+                    break;
+                }
+            }
+            match found_slot {
+                Some(s) => s,
+                None => {
+                    // All volumes are full - rotate volumes
+                    self.rotate_volumes()?;
+                    preferred_slot
+                }
+            }
+        };
+
+        let writer = &mut self.writers[slot];
+        let volume_id = writer.volume_id();
+
+        // Write using V5 BlockHeader format
+        let location = writer.write_typed_block(block, block_type)?;
+
+        // Update stats
+        self.stats.total_bytes_written += total_size;
+        self.stats.total_blocks_written += 1;
+
+        Ok((location, volume_id))
     }
 
     /// Write a complete erasure-coded block with matrix distribution.

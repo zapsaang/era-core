@@ -16,8 +16,8 @@
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig};
 use era_common::{
-    BlockId, BlockLocation, ChunkVec, EraError, ErasureBlockInfo, MatrixDistributionStrategy,
-    Result, ShardHeader,
+    BlockHeader, BlockId, BlockLocation, ChunkVec, EraError, ErasureBlockInfo,
+    MatrixDistributionStrategy, Result, ShardHeader,
 };
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker};
@@ -116,24 +116,38 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             return None;
         }
 
-        // Read block length prefix
-        let len_bytes = match self.volume_reader.read_raw(self.current_offset, 4) {
-            Ok(bytes) if bytes.len() == 4 => bytes,
+        // Read BlockHeader (V5 format: 16 bytes)
+        let header_bytes = match self
+            .volume_reader
+            .read_raw(self.current_offset, BlockHeader::SIZE)
+        {
+            Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
             Ok(_) => return None,
             Err(e) => return Some(Err(e)),
         };
 
-        let block_size =
-            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+        let header = match BlockHeader::from_bytes(&header_bytes) {
+            Some(h) => h,
+            None => {
+                self.stats.blocks_failed += 1;
+                self.current_offset += BlockHeader::SIZE as u64;
+                return Some(Err(EraError::CorruptedHeader(format!(
+                    "Invalid BlockHeader at offset {}",
+                    self.current_offset - BlockHeader::SIZE as u64
+                ))));
+            }
+        };
+
+        let block_size = header.length;
 
         // Validate block size
         if block_size == 0 {
             self.stats.blocks_failed += 1;
             // Advance offset to avoid infinite loop
-            self.current_offset += 4;
+            self.current_offset += BlockHeader::SIZE as u64;
             return Some(Err(EraError::CorruptedHeader(format!(
                 "Zero-length block at offset {}",
-                self.current_offset - 4
+                self.current_offset - BlockHeader::SIZE as u64
             ))));
         }
         if block_size > MAX_BLOCK_SIZE {
@@ -178,8 +192,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             }
         };
 
-        // Advance to next block
-        self.current_offset += ShardHeader::SIZE as u64 + block_size as u64;
+        // Advance to next block (BlockHeader::SIZE + data)
+        self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
         self.block_index += 1;
 
         Some(result)
@@ -531,24 +545,38 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             return None;
         }
 
-        // Read block length prefix
-        let len_bytes = match self.volume_reader.read_raw(self.current_offset, 4) {
-            Ok(bytes) if bytes.len() == 4 => bytes,
+        // Read BlockHeader (V5 format: 16 bytes)
+        let header_bytes = match self
+            .volume_reader
+            .read_raw(self.current_offset, BlockHeader::SIZE)
+        {
+            Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
             Ok(_) => return None,
             Err(e) => return Some(Err(e)),
         };
 
-        let block_size =
-            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]);
+        let header = match BlockHeader::from_bytes(&header_bytes) {
+            Some(h) => h,
+            None => {
+                self.stats.blocks_failed += 1;
+                self.current_offset += BlockHeader::SIZE as u64;
+                return Some(Err(EraError::CorruptedHeader(format!(
+                    "Invalid BlockHeader at offset {}",
+                    self.current_offset - BlockHeader::SIZE as u64
+                ))));
+            }
+        };
+
+        let block_size = header.length;
 
         // Validate block size
         if block_size == 0 {
             self.stats.blocks_failed += 1;
             // Advance offset to avoid infinite loop
-            self.current_offset += 4;
+            self.current_offset += BlockHeader::SIZE as u64;
             return Some(Err(EraError::CorruptedHeader(format!(
                 "Zero-length block at offset {}",
-                self.current_offset - 4
+                self.current_offset - BlockHeader::SIZE as u64
             ))));
         }
         if block_size > MAX_BLOCK_SIZE {
@@ -593,8 +621,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             }
         };
 
-        // Advance to next block
-        self.current_offset += ShardHeader::SIZE as u64 + block_size as u64;
+        // Advance to next block (BlockHeader::SIZE + data)
+        self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
         self.block_index += 1;
 
         Some(result)

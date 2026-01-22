@@ -27,8 +27,7 @@ use era_crypto::{AeadContext, XChaCha20Poly1305Context};
 use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{
-    BlockMeta, PackedBlock, PackedChunk, SessionBlockBuilder, SessionBlockUnpacker, StagingPool,
-    Stripe, StripeBuffer,
+    BlockMeta, PackedBlock, PackedChunk, SessionBlockBuilder, StagingPool, Stripe, StripeBuffer,
 };
 use era_storage::LocalStorageBackend;
 use era_volume::{
@@ -37,7 +36,6 @@ use era_volume::{
 };
 use rand::RngCore;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -97,69 +95,6 @@ fn chunker_config_from_archive(config: &ArchiveConfig) -> Result<ChunkerConfig> 
     ))
 }
 
-fn create_embedded_lsm_path() -> PathBuf {
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 8];
-    rng.fill_bytes(&mut bytes);
-    let suffix = u64::from_le_bytes(bytes);
-
-    let mut path = std::env::temp_dir();
-    path.push(format!("era_lsm_embedded_{:016x}", suffix));
-    let _ = std::fs::create_dir_all(&path);
-    path
-}
-
-fn create_compressor_with_config(config: &era_common::CompressionConfig) -> Box<dyn Compressor> {
-    match config.algorithm {
-        CompressionAlgorithm::None => Box::new(NoCompressor),
-        CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new(config.level)),
-        CompressionAlgorithm::LZ4 => Box::new(era_codec::LZ4Compressor::new(config.level)),
-    }
-}
-
-fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
-    let mut cursor = std::io::Cursor::new(data);
-    let mut count_bytes = [0u8; 4];
-    cursor
-        .read_exact(&mut count_bytes)
-        .map_err(era_common::EraError::Io)?;
-    let count = u32::from_le_bytes(count_bytes) as usize;
-
-    for _ in 0..count {
-        let mut len_bytes = [0u8; 4];
-        cursor
-            .read_exact(&mut len_bytes)
-            .map_err(era_common::EraError::Io)?;
-        let path_len = u32::from_le_bytes(len_bytes) as usize;
-
-        let mut path_buf = vec![0u8; path_len];
-        cursor
-            .read_exact(&mut path_buf)
-            .map_err(era_common::EraError::Io)?;
-        let rel_path = String::from_utf8(path_buf)
-            .map_err(|e| era_common::EraError::Deserialization(e.to_string()))?;
-
-        let mut size_bytes = [0u8; 8];
-        cursor
-            .read_exact(&mut size_bytes)
-            .map_err(era_common::EraError::Io)?;
-        let data_len = u64::from_le_bytes(size_bytes) as usize;
-
-        let mut file_data = vec![0u8; data_len];
-        cursor
-            .read_exact(&mut file_data)
-            .map_err(era_common::EraError::Io)?;
-
-        let file_path = path.join(rel_path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).map_err(era_common::EraError::Io)?;
-        }
-        std::fs::write(file_path, file_data).map_err(era_common::EraError::Io)?;
-    }
-
-    Ok(())
-}
-
 /// Builder for creating an ArchiveWriter
 pub struct ArchiveWriterBuilder {
     output_path: PathBuf,
@@ -194,14 +129,9 @@ pub struct ArchiveWriterBuilder {
 
 impl ArchiveWriterBuilder {
     /// Create a new builder with the output path
-    #[allow(deprecated)] // EmbeddedLsm is deprecated but still used as default for backward compatibility
     pub fn new(output_path: impl Into<PathBuf>) -> Self {
-        let output_path = output_path.into();
-
-        let embedded_lsm_path = create_embedded_lsm_path();
-
         Self {
-            output_path,
+            output_path: output_path.into(),
             auth_mode: AuthMode::default(),
             config: ArchiveConfig::default(),
             enable_cdc: true, // MANDATORY DEFAULT: CDC enabled for k-Bounded Best-Fit
@@ -213,9 +143,7 @@ impl ArchiveWriterBuilder {
             volume_count: 1,
             enable_matrix_distribution: false,
             max_volume_size: None,
-            index_backend: ChunkIndexBackend::EmbeddedLsm {
-                path: embedded_lsm_path,
-            },
+            index_backend: ChunkIndexBackend::Memory,
             target_block_size: None,
             enable_small_file_packing: true,
             append_existing: false,
@@ -224,33 +152,18 @@ impl ArchiveWriterBuilder {
 
     /// Set the chunk index backend.
     ///
-    /// **EmbeddedLsm** (default): RocksDB-based LSM-Tree stored inside the archive.
-    /// **Lsm**: RocksDB-based LSM-Tree stored at an external path.
-    /// **Memory**: In-memory HashMap, no persistence, not recommended for production.
+    /// Currently only **Memory** backend is supported.
+    /// For persistent indexing, use era_index::v2 APIs directly.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // For production: use LSM-Tree backend (default)
     /// let writer = ArchiveWriterBuilder::new("archive.era")
     ///     .password("secret")
-    ///     // .index_backend(...) // No need to set, LSM is default
     ///     .build()?;
     /// ```
     pub fn index_backend(mut self, backend: ChunkIndexBackend) -> Self {
         self.index_backend = backend;
-        self
-    }
-
-    /// Use LSM-Tree index backend at an external path.
-    ///
-    /// This enables persistent chunk deduplication, which is essential for:
-    /// - Incremental backups
-    /// - Large-scale data (>100GB)
-    /// - Memory-constrained environments
-    #[allow(deprecated)] // Lsm variant is deprecated but kept for backward compatibility
-    pub fn with_lsm_index(mut self, path: impl Into<PathBuf>) -> Self {
-        self.index_backend = ChunkIndexBackend::Lsm { path: path.into() };
         self
     }
 
@@ -643,55 +556,6 @@ impl ArchiveWriterBuilder {
         // Store nonce context (salt) for block encryption
         let nonce_context = *archive_salt.as_bytes();
 
-        // Restore embedded LSM index if present (self-contained resume)
-        // Note: This must be done BEFORE creating VolumePool, as VolumePool::open_append
-        // might truncate the file (removing the footer/LSM manifest).
-        #[allow(deprecated)]
-        // EmbeddedLsm is deprecated but still supported for backward compatibility
-        if let ChunkIndexBackend::EmbeddedLsm { path } = &self.index_backend {
-            if self.output_path.exists() {
-                let parent_dir = self.output_path.parent().unwrap_or(Path::new("."));
-                let backend = LocalStorageBackend::new(parent_dir);
-                let volume_path = self.output_path.file_name().unwrap_or_default();
-
-                // Open for READ only (no truncate)
-                if let Ok(reader) = VolumeReader::open(&backend, Path::new(volume_path)) {
-                    if let Some(footer) = reader.footer() {
-                        if footer.has_lsm_manifest() {
-                            let location = BlockLocation {
-                                volume_id: reader.header().volume_id,
-                                slot_index: footer.lsm_manifest_block_id,
-                                physical_offset: footer.lsm_manifest_offset,
-                                encrypted_size: footer.lsm_manifest_size,
-                                erasure_info: None,
-                                shard_offsets: None,
-                                shard_volumes: None,
-                            };
-
-                            let encrypted_block = reader.read_block(&location)?;
-                            let compressor =
-                                create_compressor_with_config(&reader.header().config.compression);
-                            let unpacker = SessionBlockUnpacker::new(
-                                &session,
-                                &volume_key,
-                                nonce_context,
-                                compressor,
-                            );
-                            let unpacked = unpacker.unpack(&encrypted_block)?;
-                            if let Some(first_entry) = unpacked.index.entries.first() {
-                                let start = first_entry.offset as usize;
-                                let end = start + first_entry.length as usize;
-                                if end <= unpacked.data.len() {
-                                    let data = unpacked.data.slice(start..end);
-                                    restore_lsm_dir_from_manifest(path, &data)?;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // Build config with erasure setting
         if !self.append_existing && enable_erasure {
             config.erasure = Some(self.erasure_config);
@@ -887,12 +751,6 @@ impl ArchiveWriterBuilder {
         // Create chunk index with configured backend
         let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index(self.index_backend.clone())?;
         let mut embedded_index: HashMap<ChunkHash, BlockLocation> = HashMap::new();
-        #[allow(deprecated)]
-        // EmbeddedLsm is deprecated but still supported for backward compatibility
-        let embedded_lsm_path = match &self.index_backend {
-            ChunkIndexBackend::EmbeddedLsm { path } => Some(path.clone()),
-            _ => None,
-        };
 
         // Load existing chunk locations from checkpoint if resuming
         if let Some(ref mgr) = checkpoint_manager {
@@ -988,7 +846,6 @@ impl ArchiveWriterBuilder {
             max_buffered_files: 1000,
             enable_small_file_packing: self.enable_small_file_packing,
             embedded_index,
-            embedded_lsm_path,
         })
     }
 }
@@ -1047,8 +904,6 @@ pub struct ArchiveWriter {
     chunk_index: Arc<dyn ChunkIndex>,
     /// Embedded snapshot of chunk index for self-contained recovery
     embedded_index: HashMap<ChunkHash, BlockLocation>,
-    /// Path to embedded LSM working directory (if enabled)
-    embedded_lsm_path: Option<PathBuf>,
 
     // File reading
     file_reader: FileReader,
@@ -1619,19 +1474,10 @@ impl ArchiveWriter {
             }
         } else {
             // Non-erasure path (Direct Write)
-            // Write standard blocks via VolumePool
-            let (entry, volume_id) =
-                self.volume_pool
-                    .write_shard(0, &encrypted_block.data, false, 0, None)?;
-            let location = BlockLocation {
-                volume_id,
-                slot_index: encrypted_block.block_id.0 as u32,
-                physical_offset: entry.physical_offset,
-                encrypted_size: entry.shard_size,
-                erasure_info: None,
-                shard_offsets: None,
-                shard_volumes: None,
-            };
+            // Write standard blocks via VolumePool using V5 BlockHeader format
+            let (location, _volume_id) = self
+                .volume_pool
+                .write_typed_block(&encrypted_block, era_common::BlockType::Data)?;
 
             // Update index
             for hash in hashes {
@@ -1897,29 +1743,6 @@ impl ArchiveWriter {
             debug!("Checkpoint synced before catalog write");
         }
 
-        // Prepare embedded LSM manifest block (if enabled)
-        let lsm_locations = if let Some(lsm_path) = self.embedded_lsm_path.clone() {
-            self.chunk_index.flush()?;
-            let manifest_block_id = self.next_block_id();
-            let compression_config = self.compression_config.clone();
-            let session = self.session.clone();
-            let volume_key = self.volume_key.clone();
-            let nonce_context = self.nonce_context;
-            let pool = &mut self.volume_pool;
-
-            Some(Self::write_lsm_manifest_with(
-                pool,
-                &lsm_path,
-                &session,
-                &volume_key,
-                nonce_context,
-                &compression_config,
-                manifest_block_id,
-            )?)
-        } else {
-            None
-        };
-
         // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
         let catalog_hash = era_crypto::hash(&catalog_bytes);
@@ -1962,12 +1785,14 @@ impl ArchiveWriter {
 
         for slot in 0..volume_count {
             if let Some(writer) = self.volume_pool.get_writer_mut(slot) {
-                let mut location = writer.write_block(&catalog_block)?;
+                let mut location =
+                    writer.write_typed_block(&catalog_block, era_common::BlockType::Catalog)?;
                 // Override slot_index with actual block_id for correct key derivation during read
                 location.slot_index = catalog_block_id;
 
                 if let Some(ref backup) = backup_block {
-                    let _backup_location = writer.write_block(backup)?;
+                    let _backup_location =
+                        writer.write_typed_block(backup, era_common::BlockType::Catalog)?;
                     debug!(
                         "Volume {}: Catalog written with backup at offset {}",
                         slot, location.physical_offset
@@ -1996,7 +1821,7 @@ impl ArchiveWriter {
         // Finalize the pool with per-volume catalog offsets
         let pool_stats = self
             .volume_pool
-            .finalize_with_catalogs(&catalog_locations, lsm_locations.as_deref())?;
+            .finalize_with_catalogs(&catalog_locations, None)?;
 
         info!(
             "VolumePool finalized: {} volumes, {} total bytes, {} blocks",
@@ -2030,10 +1855,6 @@ impl ArchiveWriter {
             blocks_written,
         };
 
-        if let Some(path) = &self.embedded_lsm_path {
-            let _ = std::fs::remove_dir_all(path);
-        }
-
         info!(
             "Archive finalized: {} files, {} bytes, {} blocks",
             stats.total_files, stats.total_size, stats.blocks_written
@@ -2065,73 +1886,6 @@ impl ArchiveWriter {
         }
 
         Ok(())
-    }
-
-    fn write_lsm_manifest_with(
-        pool: &mut VolumePool<era_storage::LocalStorageBackend>,
-        lsm_path: &Path,
-        session: &KeySession,
-        volume_key: &VolumeKey,
-        nonce_context: [u8; 16],
-        compression_config: &era_common::CompressionConfig,
-        block_id: u64,
-    ) -> Result<Vec<(u64, u32, u32)>> {
-        let manifest_bytes = Self::serialize_lsm_dir(lsm_path)?;
-        let manifest_hash = era_crypto::hash(&manifest_bytes);
-        let manifest_chunk = UniqueChunk::new(Bytes::from(manifest_bytes), manifest_hash);
-
-        let compressor = create_compressor_with_config(compression_config);
-        let builder = SessionBlockBuilder::new(session, volume_key, nonce_context, compressor)
-            .with_starting_block_id(block_id);
-
-        let manifest_block = builder.pack_single(manifest_chunk)?;
-        let manifest_block_id = manifest_block.block_id.sequence() as u32;
-
-        let volume_count = pool.volume_count();
-        let mut locations: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
-
-        for slot in 0..volume_count {
-            if let Some(writer) = pool.get_writer_mut(slot) {
-                let mut location = writer.write_block(&manifest_block)?;
-                location.slot_index = manifest_block_id;
-                locations.push((
-                    location.physical_offset,
-                    location.encrypted_size,
-                    manifest_block_id,
-                ));
-            }
-        }
-
-        Ok(locations)
-    }
-
-    fn serialize_lsm_dir(path: &Path) -> Result<Vec<u8>> {
-        let mut entries: Vec<PathBuf> = Vec::new();
-        for entry in walkdir::WalkDir::new(path) {
-            let entry = entry.map_err(std::io::Error::other)?;
-            if entry.file_type().is_file() {
-                entries.push(entry.path().to_path_buf());
-            }
-        }
-
-        entries.sort_by_key(|p| p.strip_prefix(path).unwrap_or(p).to_path_buf());
-
-        let mut out = Vec::new();
-        out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-
-        for file_path in entries {
-            let rel = file_path.strip_prefix(path).unwrap_or(&file_path);
-            let rel_str = rel.to_string_lossy();
-            let rel_bytes = rel_str.as_bytes();
-            let data = std::fs::read(&file_path)?;
-
-            out.extend_from_slice(&(rel_bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(rel_bytes);
-            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            out.extend_from_slice(&data);
-        }
-
-        Ok(out)
     }
 }
 
@@ -2605,7 +2359,9 @@ pub mod generic {
             .with_starting_block_id(self.next_block_id());
 
             let encrypted_block = block_builder.pack_chunks(packed.chunks)?;
-            let location = self.volume_writer.write_block(&encrypted_block)?;
+            let location = self
+                .volume_writer
+                .write_typed_block(&encrypted_block, era_common::BlockType::Data)?;
 
             for hash in hashes {
                 self.chunk_index.put(hash, location.clone())?;
@@ -2648,7 +2404,9 @@ pub mod generic {
 
             let catalog_block = catalog_builder.pack_single(catalog_chunk)?;
             let catalog_block_id = catalog_block.block_id.sequence() as u32;
-            let catalog_location = self.volume_writer.write_block(&catalog_block)?;
+            let catalog_location = self
+                .volume_writer
+                .write_typed_block(&catalog_block, era_common::BlockType::Catalog)?;
 
             // Finalize volume
             let _header = self.volume_writer.finalize_with_catalog(

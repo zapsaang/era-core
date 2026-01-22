@@ -35,7 +35,9 @@ fn test_volume_traffic_fingerprint_padding() {
         compressed_size: 1024,
         chunk_count: 1,
     };
-    writer.write_block(&block).unwrap();
+    writer
+        .write_typed_block(&block, era_common::BlockType::Data)
+        .unwrap();
 
     // 4. Finalize
     writer.finalize().unwrap();
@@ -111,7 +113,9 @@ fn test_checkpoint_traffic_safety() {
         compressed_size: 1024,
         chunk_count: 1,
     };
-    writer.write_block(&block).unwrap();
+    writer
+        .write_typed_block(&block, era_common::BlockType::Data)
+        .unwrap();
 
     // 4. Commit Checkpoint (mid-stream)
     // This should trigger padding to max_size if we are to prevent traffic analysis

@@ -137,44 +137,11 @@ impl<R: StorageReader> VolumeReader<R> {
         self.footer.as_ref().map(|f| f.block_count).unwrap_or(0)
     }
 
-    /// Read a block at the given location
+    /// Read a block at the given location (V5 BlockHeader format)
     pub fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
-        // Unified format: [ShardHeader][Data]
-        // Skip ShardHeader to get to data
-        let header_size = ShardHeader::SIZE as u64;
-        let header_bytes = self
-            .reader
-            .read_at(location.physical_offset, ShardHeader::SIZE)?;
-        let header = ShardHeader::from_bytes(&header_bytes)
-            .ok_or_else(|| EraError::IntegrityError("Invalid shard header".into()))?;
-
-        if header.length != location.encrypted_size {
-            return Err(EraError::IntegrityError(format!(
-                "Shard length mismatch: header={} location={}",
-                header.length, location.encrypted_size
-            )));
-        }
-
-        let offset = location.physical_offset + header_size;
-        let len = header.length as usize;
-
-        // Read block data
-        let data = self.reader.read_at(offset, len)?;
-
-        // Read-time CRC validation for lowest-level integrity
-        if !header.verify(&data) {
-            return Err(EraError::IntegrityError(
-                "Shard CRC verification failed".into(),
-            ));
-        }
-
-        Ok(EncryptedMacroBlock {
-            block_id: BlockId::new(location.slot_index as u64),
-            data,
-            original_size: 0, // Will be set during decryption
-            compressed_size: len as u32,
-            chunk_count: 0, // Will be set during unpacking
-        })
+        // Delegate to read_typed_block and discard the block type
+        let (_block_type, block) = self.read_typed_block(location)?;
+        Ok(block)
     }
 
     /// Read raw data at the given offset
@@ -430,7 +397,9 @@ mod tests {
             chunk_count: 2,
         };
 
-        let location = writer.write_block(&block).unwrap();
+        let location = writer
+            .write_typed_block(&block, era_common::BlockType::Data)
+            .unwrap();
         writer.finalize().unwrap();
 
         // Read back

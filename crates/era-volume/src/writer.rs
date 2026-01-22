@@ -1,8 +1,6 @@
 //! Volume writer for creating and appending to volumes.
 
-use era_common::{
-    compute_shard_crc, BlockLocation, EncryptedMacroBlock, Result, ShardHeader, VolumeId,
-};
+use era_common::{compute_shard_crc, BlockLocation, EncryptedMacroBlock, Result, VolumeId};
 use era_storage::{StorageBackend, StorageWriter};
 use std::path::Path;
 
@@ -222,58 +220,6 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.block_count
     }
 
-    /// Write an encrypted macro block to the volume
-    pub fn write_block(&mut self, block: &EncryptedMacroBlock) -> Result<BlockLocation> {
-        // Legacy format: Write ShardHeader + Data (for backward compatibility)
-        let offset = self.position;
-        let block_len = block.data.len() as u32;
-        let header_size = ShardHeader::SIZE as u64;
-        let total_len = block_len as u64 + header_size;
-
-        // Check availability if max_size is set
-        if let Some(max_size) = self.max_size {
-            let footer_size = crate::footer::FOOTER_SIZE as u64;
-            if offset + total_len + footer_size > max_size {
-                return Err(era_common::EraError::Io(std::io::Error::other(
-                    "Volume full",
-                )));
-            }
-        }
-
-        // Construct ShardHeader (legacy 8-byte format)
-        let crc = compute_shard_crc(&block.data);
-        let header = ShardHeader::new(block_len, crc);
-        let header_bytes = header.to_bytes();
-
-        if self.max_size.is_some() {
-            // Traffic Analysis Defense: Use write_at inside the padded volume
-            self.writer.write_at(offset, &header_bytes)?;
-            self.writer.write_at(offset + header_size, &block.data)?;
-        } else {
-            self.writer.append(&header_bytes)?;
-            self.writer.append(&block.data)?;
-        }
-
-        let location = BlockLocation {
-            volume_id: self.header.volume_id,
-            slot_index: self.block_count,
-            physical_offset: offset,
-            encrypted_size: block_len,
-            erasure_info: None, // Standard blocks are not erasure-coded
-            shard_offsets: None,
-            shard_volumes: None,
-        };
-
-        if self.max_size.is_some() {
-            self.position += total_len;
-        } else {
-            self.position = self.writer.current_size();
-        }
-        self.block_count += 1;
-
-        Ok(location)
-    }
-
     /// Write a typed block with explicit BlockType (V5 format)
     pub fn write_typed_block(
         &mut self,
@@ -475,7 +421,9 @@ mod tests {
             chunk_count: 5,
         };
 
-        let location = writer.write_block(&block).unwrap();
+        let location = writer
+            .write_typed_block(&block, era_common::BlockType::Data)
+            .unwrap();
         assert_eq!(location.slot_index, 0);
         assert_eq!(location.encrypted_size, 1024);
 
@@ -499,9 +447,11 @@ mod tests {
         let header_size = crate::header::HEADER_SIZE as u64;
         let footer_size = crate::footer::FOOTER_SIZE as u64;
 
-        // Define max size: Header + 1 Block (1024) + Padding (500) + Footer
-        let data_len = 1020;
-        let block_disk_size = data_len as u64 + 4; // 1024
+        // Define max size: Header + 1 Block (data + BlockHeader) + Padding (500) + Footer
+        // V5 format uses BlockHeader::SIZE (16 bytes) instead of ShardHeader::SIZE (8 bytes)
+        let data_len = 1008; // Adjusted for 16-byte header
+        let block_header_size = era_common::BlockHeader::SIZE as u64;
+        let block_disk_size = data_len as u64 + block_header_size; // 1024 total
         let padding_size = 500;
 
         let max_size = header_size + block_disk_size + padding_size + footer_size;
@@ -516,10 +466,14 @@ mod tests {
         };
 
         // Write block 1: Success
-        writer.write_block(&block).unwrap();
+        writer
+            .write_typed_block(&block, era_common::BlockType::Data)
+            .unwrap();
 
         // Write block 2: Should fail (needs 1024 + footer, only 500 + footer available minus footer reservation)
-        assert!(writer.write_block(&block).is_err());
+        assert!(writer
+            .write_typed_block(&block, era_common::BlockType::Data)
+            .is_err());
 
         // Finalize: Should fill padding
         writer.finalize().unwrap();

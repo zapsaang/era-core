@@ -1,34 +1,42 @@
+//! Tests for mandatory default configurations in ERA v2.2+
+//!
+//! These tests verify that the default builder configuration produces
+//! correct archives with expected properties.
+
 use era_engine::ArchiveWriter;
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use tempfile::TempDir;
 
 #[test]
-fn test_mandatory_lsm_index_creation() {
+fn test_mandatory_memory_index_default() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test_mandatory.era");
 
     // Create writer with absolute defaults
     // We expect:
-    // 1. LSM Index to be used (creates a directory)
+    // 1. Memory Index to be used (no external LSM directory)
     // 2. CDC to be enabled
+    // 3. No LSM manifest in footer (LSM backend removed in v2.2)
     let writer = ArchiveWriter::builder(&archive_path)
         .password("test1234")
         .build()
         .expect("Failed to build writer");
 
-    // Close writer to flush everything and embed the LSM manifest
+    // Close writer to flush everything
     writer.finalize().expect("Finalize failed");
 
-    // Check 1: Embedded LSM manifest is written by default
+    // Check: No LSM manifest in footer (Memory backend is default)
     let backend = LocalStorageBackend::new(temp_dir.path());
     let file_name = archive_path.file_name().unwrap();
     let reader = VolumeReader::open(&backend, std::path::Path::new(file_name))
         .expect("Failed to open volume");
     let footer = reader.footer().expect("Missing footer");
+
+    // LSM manifest should NOT be present (Memory backend is default in v2.2+)
     assert!(
-        footer.has_lsm_manifest(),
-        "Embedded LSM manifest should be present by default"
+        !footer.has_lsm_manifest(),
+        "LSM manifest should NOT be present (Memory backend is default)"
     );
 }
 

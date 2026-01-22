@@ -305,6 +305,18 @@ impl IndexReader {
         }
     }
 
+    /// Check if a hash might exist in the index (fast O(1) bloom filter check)
+    ///
+    /// This is a fast negative lookup - if this returns `false`, the hash
+    /// is definitely NOT in the index. If it returns `true`, the hash
+    /// MAY be in the index (bloom filters have false positives).
+    ///
+    /// Use this for fast deduplication checks before performing a full lookup.
+    #[inline]
+    pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
+        self.bloom.check(hash)
+    }
+
     /// Load an L2 page (with caching)
     fn load_page(&mut self, block_id: BlockId) -> Result<&IndexPage> {
         // Check embedded pages first (cold recovery mode)

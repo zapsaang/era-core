@@ -1,19 +1,13 @@
 //! Performance benchmarks for ChunkIndex backends.
 //!
-//! Compares Memory vs LSM (RocksDB) backends for different workloads.
+//! Benchmarks the Memory backend for different workloads.
 //!
-//! Run with: cargo bench -p era-engine --features lsm
-
-#![allow(deprecated)] // Benchmarks intentionally test deprecated LSM backend
+//! Run with: cargo bench -p era-engine
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use era_common::{BlockLocation, ChunkHash, VolumeId};
 use era_engine::chunk_index::{ChunkIndex, MemoryChunkIndex};
-#[cfg(feature = "lsm")]
-use era_engine::{create_chunk_index, ChunkIndexBackend};
 use std::sync::Arc;
-#[cfg(feature = "lsm")]
-use tempfile::TempDir;
 
 /// Create a test BlockLocation
 fn test_location(slot: u32) -> BlockLocation {
@@ -50,23 +44,6 @@ fn bench_put_single(c: &mut Criterion) {
         });
     });
 
-    #[cfg(feature = "lsm")]
-    {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("bench_put_single");
-        let index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-
-        group.bench_function("lsm", |b| {
-            let mut i = 0usize;
-            b.iter(|| {
-                let hash = hash_from_index(i);
-                let loc = test_location(i as u32);
-                index.put(black_box(hash), black_box(loc)).unwrap();
-                i += 1;
-            });
-        });
-    }
-
     group.finish();
 }
 
@@ -91,30 +68,6 @@ fn bench_put_batch(c: &mut Criterion) {
                 });
             },
         );
-
-        #[cfg(feature = "lsm")]
-        {
-            group.bench_with_input(
-                BenchmarkId::new("lsm", batch_size),
-                batch_size,
-                |b, &size| {
-                    b.iter(|| {
-                        let temp_dir = TempDir::new().unwrap();
-                        let path = temp_dir.path().join("bench");
-                        let index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-
-                        index.start_batch();
-                        for i in 0..size {
-                            let hash = hash_from_index(i);
-                            let loc = test_location(i as u32);
-                            index.put(hash, loc).unwrap();
-                        }
-                        index.commit_batch().unwrap();
-                        black_box(index.len())
-                    });
-                },
-            );
-        }
     }
 
     group.finish();
@@ -144,32 +97,6 @@ fn bench_contains(c: &mut Criterion) {
         });
     });
 
-    #[cfg(feature = "lsm")]
-    {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("bench_contains");
-        let lsm_index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-
-        lsm_index.start_batch();
-        for i in 0..populate_size {
-            let hash = hash_from_index(i);
-            let loc = test_location(i as u32);
-            lsm_index.put(hash, loc).unwrap();
-        }
-        lsm_index.commit_batch().unwrap();
-        lsm_index.flush().unwrap();
-
-        group.bench_function("lsm", |b| {
-            let mut i = 0usize;
-            b.iter(|| {
-                let hash = hash_from_index(i % populate_size);
-                let result = lsm_index.contains(black_box(&hash)).unwrap();
-                i += 1;
-                black_box(result)
-            });
-        });
-    }
-
     group.finish();
 }
 
@@ -196,32 +123,6 @@ fn bench_get(c: &mut Criterion) {
             black_box(result)
         });
     });
-
-    #[cfg(feature = "lsm")]
-    {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("bench_get");
-        let lsm_index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-
-        lsm_index.start_batch();
-        for i in 0..populate_size {
-            let hash = hash_from_index(i);
-            let loc = test_location(i as u32);
-            lsm_index.put(hash, loc).unwrap();
-        }
-        lsm_index.commit_batch().unwrap();
-        lsm_index.flush().unwrap();
-
-        group.bench_function("lsm", |b| {
-            let mut i = 0usize;
-            b.iter(|| {
-                let hash = hash_from_index(i % populate_size);
-                let result = lsm_index.get(black_box(&hash)).unwrap();
-                i += 1;
-                black_box(result)
-            });
-        });
-    }
 
     group.finish();
 }
@@ -260,43 +161,6 @@ fn bench_mixed_workload(c: &mut Criterion) {
             op += 1;
         });
     });
-
-    #[cfg(feature = "lsm")]
-    {
-        let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("bench_mixed");
-        let lsm_index = create_chunk_index(ChunkIndexBackend::Lsm { path }).unwrap();
-
-        lsm_index.start_batch();
-        for i in 0..initial_size {
-            let hash = hash_from_index(i);
-            let loc = test_location(i as u32);
-            lsm_index.put(hash, loc).unwrap();
-        }
-        lsm_index.commit_batch().unwrap();
-        lsm_index.flush().unwrap();
-
-        group.bench_function("lsm", |b| {
-            let mut read_i = 0usize;
-            let mut write_i = initial_size;
-            let mut op = 0usize;
-            b.iter(|| {
-                if op.is_multiple_of(5) {
-                    // Write (20%)
-                    let hash = hash_from_index(write_i);
-                    let loc = test_location(write_i as u32);
-                    lsm_index.put(hash, loc).unwrap();
-                    write_i += 1;
-                } else {
-                    // Read (80%)
-                    let hash = hash_from_index(read_i % initial_size);
-                    black_box(lsm_index.contains(&hash).unwrap());
-                    read_i += 1;
-                }
-                op += 1;
-            });
-        });
-    }
 
     group.finish();
 }

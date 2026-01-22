@@ -16,6 +16,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Init env
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo 'DPkg::Post-Invoke { "rm -f /var/lib/dpkg/triggers/* 2>/dev/null || true"; };' \
+            | sudo tee /etc/apt/apt.conf.d/99no-triggers > /dev/null
+          echo 'DPkg::TriggersPending "false";' \
+            | sudo tee -a /etc/apt/apt.conf.d/99no-triggers > /dev/null
+    
+          sudo -E apt-get -qq update
+    
+          sudo -E apt-get install -y --no-install-recommends \
+              build-essential \
+              protobuf-c-compiler
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
