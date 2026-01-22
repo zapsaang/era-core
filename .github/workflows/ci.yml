@@ -29,7 +29,7 @@ jobs:
     
           sudo -E apt-get install -y --no-install-recommends \
               build-essential \
-              protobuf-c-compiler
+              protobuf-compiler
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
