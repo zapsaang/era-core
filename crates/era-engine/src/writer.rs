@@ -1462,13 +1462,9 @@ impl ArchiveWriter {
 
         let encrypted_block = builder.pack_chunks(chunks)?;
 
-        if self.stripe_buffer.is_some() {
+        if let Some(stripe_buffer) = &mut self.stripe_buffer {
             // Erasure Coding Path
-            let maybe_stripe = self
-                .stripe_buffer
-                .as_mut()
-                .unwrap()
-                .push(encrypted_block, block_meta)?;
+            let maybe_stripe = stripe_buffer.push(encrypted_block, block_meta)?;
             if let Some(stripe) = maybe_stripe {
                 self.flush_stripe(stripe)?;
             }

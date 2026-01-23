@@ -611,8 +611,8 @@ impl ArchiveReader {
     /// Load the catalog from any available volume
     /// Each volume contains a copy of the catalog, enabling recovery from any volume
     pub fn load_catalog(&mut self) -> Result<&Catalog> {
-        if self.catalog.is_some() {
-            return Ok(self.catalog.as_ref().unwrap());
+        if let Some(ref catalog) = self.catalog {
+            return Ok(catalog);
         }
 
         // Find the first volume that has a valid catalog
