@@ -158,10 +158,16 @@ impl<W: StorageWriter> VolumeWriter<W> {
         // 3. Update state
         self.set_last_checkpoint(checkpoint_offset);
 
-        // 4. Calculate backup header offset (where backup header will be written on finalize)
+        // 4. Calculate backup header offset
         let backup_header_offset = pad_target;
 
-        // 5. Construct footer with backup_header_offset
+        // 5. CRITICAL: Write backup header NOW (not just on finalize)
+        //    This ensures true redundancy at every checkpoint, not just at finalization.
+        //    If the primary header gets corrupted, the Reader can recover using this backup.
+        let header_bytes = self.header.to_bytes()?;
+        self.writer.write_at(backup_header_offset, &header_bytes)?;
+
+        // 6. Construct footer with backup_header_offset
         let footer = crate::Footer::with_catalog(
             self.position,
             self.block_count,
@@ -182,14 +188,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         let footer_bytes = footer.to_bytes()?;
 
-        // 6. Write primary footer at end (after backup header position)
+        // 7. Write primary footer at end (after backup header position)
         let footer_offset = backup_header_offset + HEADER_SIZE as u64;
         self.writer.write_at(footer_offset, &footer_bytes)?;
 
-        // 7. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
+        // 8. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
         self.writer.write_at(HEADER_SIZE as u64, &footer_bytes)?;
 
-        // 8. Final sync to ensure footer is persisted
+        // 9. Final sync to ensure both header and footer are persisted
         self.writer.sync()?;
 
         Ok(())
@@ -449,6 +455,69 @@ mod tests {
         assert_eq!(location.encrypted_size, 1024);
 
         writer.finalize().unwrap();
+    }
+
+    /// Test that commit_checkpoint writes the backup header for true redundancy.
+    /// Verifies that the volume can be recovered even if the primary header is corrupted.
+    #[test]
+    fn test_checkpoint_writes_backup_header() {
+        use era_storage::LocalStorageBackend;
+        use std::io::{Seek, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let volume_path = Path::new("test_backup.era");
+
+        let header = SuperHeader::new(
+            ArchiveId::new(),
+            vec![],
+            ArchiveConfig::default(),
+            [0u8; 16],
+        );
+
+        // Create volume and write some data
+        let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+        let max_size = 10 * 1024 * 1024; // 10MB
+        writer.set_max_size(max_size).unwrap();
+
+        let block = EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from(vec![0x42; 1024]),
+            original_size: 2048,
+            compressed_size: 1024,
+            chunk_count: 1,
+        };
+
+        writer
+            .write_canonical_block(&block, era_common::BlockType::Data)
+            .unwrap();
+
+        // Commit checkpoint (should write backup header)
+        let checkpoint_offset = writer.current_size();
+        writer.commit_checkpoint(checkpoint_offset).unwrap();
+
+        // DO NOT call finalize - we want to test checkpoint redundancy alone
+        drop(writer);
+
+        // Corrupt the primary header (byte 0) to simulate header failure
+        let file_path = temp_dir.path().join(volume_path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file_path)
+            .unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xFF]).unwrap(); // Corrupt magic number
+        drop(file);
+
+        // Try to open the volume - should succeed using backup header
+        let result = crate::VolumeReader::open(&backend, volume_path);
+        assert!(
+            result.is_ok(),
+            "Volume should open using backup header after primary header corruption"
+        );
+
+        let reader = result.unwrap();
+        assert_eq!(reader.block_count(), 1, "Should have 1 block");
     }
 
     /// Test that writing a block larger than MAX_SHARD_SIZE (16MB) fails.

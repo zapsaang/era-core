@@ -423,8 +423,14 @@ pub fn write_checkpoint<W: StorageWriter>(
     let checkpoint_block_id = block_id.sequence() as u32;
     volume_writer.set_last_checkpoint_with_block_id(location.physical_offset, checkpoint_block_id);
 
+    // CRITICAL: Atomically commit the checkpoint to disk
+    // This persists the footer (primary + backup) so that if power is lost after this point,
+    // the checkpoint can be recovered. Without this call, the checkpoint data would be written
+    // but the footer wouldn't point to it, making recovery impossible.
+    volume_writer.commit_checkpoint(location.physical_offset)?;
+
     tracing::info!(
-        "Checkpoint written: {} chunks, {} files at offset {} (block_id={})",
+        "Checkpoint committed: {} chunks, {} files at offset {} (block_id={})",
         checkpoint.chunks_written,
         checkpoint.total_files_processed,
         location.physical_offset,
