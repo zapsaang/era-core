@@ -211,11 +211,25 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Write a canonical block with explicit BlockType (v8.1 format)
+    ///
+    /// # Security
+    ///
+    /// Enforces symmetric validation with the Reader by rejecting blocks
+    /// larger than `MAX_SHARD_SIZE` (16MB). This prevents creating
+    /// "write-only" archives that cannot be read back.
     pub fn write_canonical_block(
         &mut self,
         block: &EncryptedMacroBlock,
         block_type: era_common::BlockType,
     ) -> Result<BlockLocation> {
+        // SECURITY: Enforce symmetric bounds with Reader - reject oversized blocks
+        if block.data.len() > crate::MAX_SHARD_SIZE {
+            return Err(era_common::EraError::BlockTooLarge {
+                size: block.data.len(),
+                max_size: crate::MAX_SHARD_SIZE,
+            });
+        }
+
         // v8.1 Format: Write BlockHeader + Data
         let offset = self.position;
         let block_len = block.data.len() as u32;
@@ -435,6 +449,43 @@ mod tests {
         assert_eq!(location.encrypted_size, 1024);
 
         writer.finalize().unwrap();
+    }
+
+    /// Test that writing a block larger than MAX_SHARD_SIZE (16MB) fails.
+    /// This ensures symmetric validation with the Reader.
+    #[test]
+    fn test_write_oversized_block_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+
+        let header = SuperHeader::new(
+            ArchiveId::new(),
+            vec![],
+            ArchiveConfig::default(),
+            [0u8; 16],
+        );
+
+        let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header).unwrap();
+
+        // Create a 17MB block (exceeds 16MB MAX_SHARD_SIZE)
+        let oversized_data = vec![0u8; 17 * 1024 * 1024];
+        let block = EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from(oversized_data),
+            original_size: 17 * 1024 * 1024,
+            compressed_size: 17 * 1024 * 1024,
+            chunk_count: 1,
+        };
+
+        let result = writer.write_canonical_block(&block, era_common::BlockType::Data);
+        assert!(result.is_err(), "Writing 17MB block should fail");
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, era_common::EraError::BlockTooLarge { .. }),
+            "Error should be BlockTooLarge, got: {:?}",
+            err
+        );
     }
 
     #[test]

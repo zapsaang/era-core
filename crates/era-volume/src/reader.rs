@@ -10,11 +10,7 @@ use std::path::Path;
 
 use crate::footer::FOOTER_SIZE;
 use crate::header::{DATA_REGION_START, HEADER_SIZE};
-use crate::{Footer, SuperHeader};
-
-/// Maximum allowed shard/block size (16MB) - Anti-DoS protection.
-/// Any length field exceeding this limit is treated as corruption.
-pub const MAX_SHARD_SIZE: usize = 16 * 1024 * 1024;
+use crate::{Footer, SuperHeader, MAX_SHARD_SIZE};
 
 /// Reader for a single volume
 pub struct VolumeReader<R: StorageReader> {
