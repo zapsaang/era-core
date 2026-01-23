@@ -11,8 +11,8 @@
 //!
 //! ## Matrix Distribution Support
 //!
-//! This module supports both legacy (single-volume) and matrix-distributed archives:
-//! - Legacy: All shards in a single volume using `shard_idx % volume_count`
+//! This module supports both single-volume and matrix-distributed archives:
+//! - Single-volume: All shards in a single volume using `shard_idx % volume_count`
 //! - Matrix: Shards distributed using `(shard_idx + block_sequence) % volume_count`
 
 use crate::reader::ArchiveReader;

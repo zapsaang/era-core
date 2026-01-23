@@ -669,7 +669,7 @@ impl ArchiveWriterBuilder {
 
         // Apply correct distribution strategy
         if !enable_matrix_distribution {
-            // Force Striped (Legacy) behavior
+            // Force Striped behavior (non-matrix distribution)
             let mut dist_config = pool_config.distribution.clone();
             dist_config.strategy = MatrixDistributionStrategy::Striped;
             pool_config = pool_config.with_distribution(dist_config);
@@ -1091,7 +1091,7 @@ impl ArchiveWriter {
             // Use CDC chunking for large files
             self.add_file_chunked(disk_path, relative_path).await
         } else {
-            // Legacy: single chunk per file
+            // Non-CDC mode: single chunk per file
             self.add_file_single(disk_path, relative_path).await
         }
     }
@@ -1485,10 +1485,10 @@ impl ArchiveWriter {
             }
         } else {
             // Non-erasure path (Direct Write)
-            // Write standard blocks via VolumePool using V5 BlockHeader format
+            // Write standard blocks via VolumePool using v8.1 BlockHeader format
             let (location, _volume_id) = self
                 .volume_pool
-                .write_typed_block(&encrypted_block, era_common::BlockType::Data)?;
+                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)?;
 
             // Update index
             for hash in hashes {
@@ -1797,13 +1797,13 @@ impl ArchiveWriter {
         for slot in 0..volume_count {
             if let Some(writer) = self.volume_pool.get_writer_mut(slot) {
                 let mut location =
-                    writer.write_typed_block(&catalog_block, era_common::BlockType::Catalog)?;
+                    writer.write_canonical_block(&catalog_block, era_common::BlockType::Catalog)?;
                 // Override slot_index with actual block_id for correct key derivation during read
                 location.slot_index = catalog_block_id;
 
                 if let Some(ref backup) = backup_block {
                     let _backup_location =
-                        writer.write_typed_block(backup, era_common::BlockType::Catalog)?;
+                        writer.write_canonical_block(backup, era_common::BlockType::Catalog)?;
                     debug!(
                         "Volume {}: Catalog written with backup at offset {}",
                         slot, location.physical_offset
@@ -1843,7 +1843,6 @@ impl ArchiveWriter {
 
         // NOTE: Sidecar checkpoint files are no longer used (v2.2+).
         // Checkpoints are now stored as typed blocks inside the .era volume.
-        // Legacy sidecar deletion code removed per CLAUDE.md Phase 2.5.
 
         // Calculate total blocks written using our counter
         let blocks_written = self.next_block_id.load(Ordering::SeqCst);
@@ -2372,7 +2371,7 @@ pub mod generic {
             let encrypted_block = block_builder.pack_chunks(packed.chunks)?;
             let location = self
                 .volume_writer
-                .write_typed_block(&encrypted_block, era_common::BlockType::Data)?;
+                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)?;
 
             for hash in hashes {
                 self.chunk_index.put(hash, location.clone())?;
@@ -2417,7 +2416,7 @@ pub mod generic {
             let catalog_block_id = catalog_block.block_id.sequence() as u32;
             let catalog_location = self
                 .volume_writer
-                .write_typed_block(&catalog_block, era_common::BlockType::Catalog)?;
+                .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)?;
 
             // Finalize volume
             let _header = self.volume_writer.finalize_with_catalog(

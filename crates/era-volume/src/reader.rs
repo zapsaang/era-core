@@ -12,6 +12,10 @@ use crate::footer::FOOTER_SIZE;
 use crate::header::{DATA_REGION_START, HEADER_SIZE};
 use crate::{Footer, SuperHeader};
 
+/// Maximum allowed shard/block size (16MB) - Anti-DoS protection.
+/// Any length field exceeding this limit is treated as corruption.
+pub const MAX_SHARD_SIZE: usize = 16 * 1024 * 1024;
+
 /// Reader for a single volume
 pub struct VolumeReader<R: StorageReader> {
     /// Underlying storage reader
@@ -203,7 +207,7 @@ impl<R: StorageReader> VolumeReader<R> {
         self.footer.as_ref().map(|f| f.block_count).unwrap_or(0)
     }
 
-    /// Read a block at the given location (V5 BlockHeader format)
+    /// Read a block at the given location (v8.1 BlockHeader format)
     pub fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
         // Delegate to read_typed_block and discard the block type
         let (_block_type, block) = self.read_typed_block(location)?;
@@ -219,6 +223,10 @@ impl<R: StorageReader> VolumeReader<R> {
     ///
     /// Returns a vector of (shard_index, shard_data) pairs for all available shards.
     /// If a shard read fails, it returns None in place of the data.
+    ///
+    /// # Security
+    /// All length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks
+    /// via malicious headers with huge length values.
     pub fn read_erasure_shards(
         &self,
         location: &BlockLocation,
@@ -248,6 +256,19 @@ impl<R: StorageReader> VolumeReader<R> {
                 }
             };
 
+            // SECURITY: Validate length against MAX_SHARD_SIZE to prevent DoS
+            if header.length as usize > MAX_SHARD_SIZE {
+                tracing::warn!(
+                    "Shard {} has invalid length {} (max: {}), marking as corrupted",
+                    idx,
+                    header.length,
+                    MAX_SHARD_SIZE
+                );
+                shards.push((idx, None));
+                offset += ShardHeader::SIZE as u64 + erasure_info.shard_size as u64;
+                continue;
+            }
+
             // Read shard data
             let shard_data = match self
                 .reader
@@ -276,9 +297,12 @@ impl<R: StorageReader> VolumeReader<R> {
         (start, end)
     }
 
-    /// Read a typed block (V5 format with BlockHeader)
+    /// Read a typed block (v8.1 format with BlockHeader)
     ///
     /// Returns the block type and encrypted data
+    ///
+    /// # Security
+    /// Length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks.
     pub fn read_typed_block(
         &self,
         location: &BlockLocation,
@@ -289,6 +313,14 @@ impl<R: StorageReader> VolumeReader<R> {
             .read_at(location.physical_offset, BlockHeader::SIZE)?;
         let header = BlockHeader::from_bytes(&header_bytes)
             .ok_or_else(|| EraError::InvalidFormat("Invalid BlockHeader".into()))?;
+
+        // SECURITY: Validate length against MAX_SHARD_SIZE to prevent DoS
+        if header.length as usize > MAX_SHARD_SIZE {
+            return Err(EraError::IntegrityError(format!(
+                "Block length {} exceeds maximum allowed size {}",
+                header.length, MAX_SHARD_SIZE
+            )));
+        }
 
         // Read encrypted data
         let data_offset = location.physical_offset + BlockHeader::SIZE as u64;
@@ -317,6 +349,9 @@ impl<R: StorageReader> VolumeReader<R> {
     /// **CRITICAL FOR COLD RECOVERY:** This performs a raw linear scan to find
     /// orphaned index blocks when the footer is lost or corrupted.
     ///
+    /// # Security
+    /// Length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks.
+    ///
     /// Returns a vector of BlockLocations for all matching blocks.
     pub fn scan_for_typed_blocks(&self, target_type: BlockType) -> Result<Vec<BlockLocation>> {
         let (start_offset, end_offset) = self.data_region();
@@ -335,9 +370,20 @@ impl<R: StorageReader> VolumeReader<R> {
             match self.reader.read_at(current_offset, BlockHeader::SIZE) {
                 Ok(header_bytes) => {
                     if let Some(header) = BlockHeader::from_bytes(&header_bytes) {
-                        // Check if this is a typed block (V5 format)
+                        // Check if this is a typed block (v8.1 format)
                         if header.version == BlockHeader::VERSION {
                             let data_len = header.length as u64;
+
+                            // SECURITY: Validate length against MAX_SHARD_SIZE to prevent DoS
+                            if data_len > MAX_SHARD_SIZE as u64 {
+                                tracing::warn!(
+                                    "Block at offset {} has invalid length {}, skipping",
+                                    current_offset,
+                                    data_len
+                                );
+                                current_offset += 1;
+                                continue;
+                            }
 
                             // Verify we have enough space for the full block
                             if current_offset + BlockHeader::SIZE as u64 + data_len <= end_offset {
@@ -350,7 +396,7 @@ impl<R: StorageReader> VolumeReader<R> {
                                         // Valid typed block found
                                         if header.block_type == target_type {
                                             found_blocks.push(BlockLocation {
-                                                volume_id: era_common::VolumeId::new(), // Will be set by caller
+                                                volume_id: era_common::VolumeId::new(),
                                                 slot_index: found_blocks.len() as u32,
                                                 physical_offset: current_offset,
                                                 encrypted_size: (BlockHeader::SIZE as u32
@@ -382,13 +428,17 @@ impl<R: StorageReader> VolumeReader<R> {
                         self.reader.read_at(current_offset, ShardHeader::SIZE)
                     {
                         if let Some(shard_header) = ShardHeader::from_bytes(&shard_header_bytes) {
-                            // Valid legacy block - skip it
-                            current_offset += ShardHeader::SIZE as u64 + shard_header.length as u64;
-                            continue;
+                            // SECURITY: Validate shard length too
+                            if (shard_header.length as usize) <= MAX_SHARD_SIZE {
+                                // Valid shard header - skip it
+                                current_offset +=
+                                    ShardHeader::SIZE as u64 + shard_header.length as u64;
+                                continue;
+                            }
                         }
                     }
 
-                    // Unknown format - advance 1 byte and continue scanning
+                    // Unknown format or invalid length - advance 1 byte and continue scanning
                     current_offset += 1;
                 }
                 Err(_) => {
@@ -465,7 +515,7 @@ mod tests {
         };
 
         let location = writer
-            .write_typed_block(&block, era_common::BlockType::Data)
+            .write_canonical_block(&block, era_common::BlockType::Data)
             .unwrap();
         writer.finalize().unwrap();
 

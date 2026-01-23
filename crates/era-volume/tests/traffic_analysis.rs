@@ -36,7 +36,7 @@ fn test_volume_traffic_fingerprint_padding() {
         chunk_count: 1,
     };
     writer
-        .write_typed_block(&block, era_common::BlockType::Data)
+        .write_canonical_block(&block, era_common::BlockType::Data)
         .unwrap();
 
     // 4. Finalize
@@ -114,7 +114,7 @@ fn test_checkpoint_traffic_safety() {
         chunk_count: 1,
     };
     writer
-        .write_typed_block(&block, era_common::BlockType::Data)
+        .write_canonical_block(&block, era_common::BlockType::Data)
         .unwrap();
 
     // 4. Commit Checkpoint (mid-stream)

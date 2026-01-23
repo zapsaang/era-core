@@ -43,7 +43,7 @@ pub struct Footer {
     pub catalog_block_id: u32,
     /// Offset of the last checkpoint (for atomic updates)
     pub last_checkpoint_offset: u64,
-    /// Block ID of the last checkpoint (V6+, for direct decryption)
+    /// Block ID of the last checkpoint (for direct decryption)
     pub last_checkpoint_block_id: u32,
     /// Offset of embedded LSM manifest block
     pub lsm_manifest_offset: u64,
@@ -51,13 +51,13 @@ pub struct Footer {
     pub lsm_manifest_size: u32,
     /// Block ID of embedded LSM manifest
     pub lsm_manifest_block_id: u32,
-    /// Offset of the V2.1 index manifest root block (V5+)
+    /// Offset of the index manifest root block
     pub index_root_offset: u64,
-    /// Size of the index manifest root block (V5+)
+    /// Size of the index manifest root block
     pub index_root_size: u32,
-    /// Block ID of the index manifest root (V5+)
+    /// Block ID of the index manifest root
     pub index_root_block_id: u32,
-    /// Offset of the backup header (V7+, for v8.1 redundancy layout)
+    /// Offset of the backup header (for v8.1 redundancy layout)
     pub backup_header_offset: u64,
     /// Blake3 checksum of the footer (excluding this field)
     pub checksum: [u8; 32],

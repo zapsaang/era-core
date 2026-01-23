@@ -111,12 +111,12 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         backend: &B,
         block: &EncryptedMacroBlock,
     ) -> Result<BlockLocation> {
-        // Default to Data block type for backward compatibility
-        self.write_typed_block(backend, block, era_common::BlockType::Data)
+        // Default to Data block type
+        self.write_canonical_block(backend, block, era_common::BlockType::Data)
     }
 
-    /// Write a typed block, automatically switching volumes if needed
-    pub fn write_typed_block<B: StorageBackend<Writer = W>>(
+    /// Write a canonical block, automatically switching volumes if needed
+    pub fn write_canonical_block<B: StorageBackend<Writer = W>>(
         &mut self,
         backend: &B,
         block: &EncryptedMacroBlock,
@@ -137,9 +137,9 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
             ))
         })?;
 
-        let location = writer.write_typed_block(block, block_type)?;
+        let location = writer.write_canonical_block(block, block_type)?;
         self.stats.total_blocks += 1;
-        // V5 format uses BlockHeader::SIZE (16 bytes) instead of 4 bytes
+        // v8.1 format uses BlockHeader::SIZE (16 bytes) instead of 4 bytes
         self.stats.total_bytes += block.data.len() as u64 + era_common::BlockHeader::SIZE as u64;
 
         Ok(location)

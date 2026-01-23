@@ -18,7 +18,7 @@ pub use multi_volume::{
     MultiVolumeConfig, MultiVolumeReader, MultiVolumeStats, MultiVolumeWriter,
     DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE,
 };
-pub use reader::VolumeReader;
+pub use reader::{VolumeReader, MAX_SHARD_SIZE};
 pub use volume_pool::{VolumePool, VolumePoolConfig, VolumePoolStats};
 pub use writer::VolumeWriter;
 pub use writer_async::AsyncVolumeWriter;

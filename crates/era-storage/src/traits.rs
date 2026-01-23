@@ -51,8 +51,15 @@ pub trait StorageWriter: Send {
     /// Write data at a specific offset
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
 
-    /// Force data to be written to persistent storage
+    /// Force data to be written to persistent storage (sync_all)
     fn sync(&mut self) -> Result<()>;
+
+    /// Force data to be written to persistent storage without metadata (fdatasync)
+    /// More efficient than sync() when metadata changes are not critical.
+    /// Default implementation falls back to sync().
+    fn sync_data(&mut self) -> Result<()> {
+        self.sync()
+    }
 
     /// Get the current size of the storage object
     fn current_size(&self) -> u64;
@@ -90,8 +97,15 @@ pub trait AsyncStorageWriter: Send {
     /// Write data at a specific offset
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
 
-    /// Force data to be written to persistent storage
+    /// Force data to be written to persistent storage (sync_all)
     async fn sync(&mut self) -> Result<()>;
+
+    /// Force data to be written to persistent storage without metadata (fdatasync)
+    /// More efficient than sync() when metadata changes are not critical.
+    /// Default implementation falls back to sync().
+    async fn sync_data(&mut self) -> Result<()> {
+        self.sync().await
+    }
 
     /// Get the current size of the storage object
     fn current_size(&self) -> u64;

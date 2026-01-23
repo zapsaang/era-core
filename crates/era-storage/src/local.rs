@@ -159,6 +159,13 @@ impl StorageWriter for LocalStorageWriter {
         Ok(())
     }
 
+    fn sync_data(&mut self) -> Result<()> {
+        // Use fdatasync (sync_data) which only syncs file data, not metadata.
+        // This is more efficient when we don't need to persist metadata changes.
+        self.file.sync_data()?;
+        Ok(())
+    }
+
     fn current_size(&self) -> u64 {
         self.size
     }

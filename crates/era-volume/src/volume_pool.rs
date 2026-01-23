@@ -472,10 +472,10 @@ impl<B: StorageBackend> VolumePool<B> {
         ))
     }
 
-    /// Write a typed block (V5 BlockHeader format) to the pool.
+    /// Write a canonical block (v8.1 BlockHeader format) to the pool.
     ///
-    /// This method writes blocks using the V5 BlockHeader format (16 bytes)
-    /// instead of the legacy ShardHeader format (8 bytes).
+    /// This method writes blocks using the v8.1 BlockHeader format (16 bytes)
+    /// instead of the ShardHeader format (8 bytes).
     ///
     /// # Arguments
     /// * `block` - The encrypted block to write
@@ -483,7 +483,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Returns
     /// A `BlockLocation` containing the location information.
-    pub fn write_typed_block(
+    pub fn write_canonical_block(
         &mut self,
         block: &EncryptedMacroBlock,
         block_type: BlockType,
@@ -519,8 +519,8 @@ impl<B: StorageBackend> VolumePool<B> {
         let writer = &mut self.writers[slot];
         let volume_id = writer.volume_id();
 
-        // Write using V5 BlockHeader format
-        let location = writer.write_typed_block(block, block_type)?;
+        // Write using v8.1 BlockHeader format
+        let location = writer.write_canonical_block(block, block_type)?;
 
         // Update stats
         self.stats.total_bytes_written += total_size;

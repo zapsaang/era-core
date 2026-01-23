@@ -302,8 +302,8 @@ impl BlockType {
     }
 }
 
-/// Block header for self-identifying blocks (V5 format)
-/// Replaces legacy ShardHeader with type discrimination
+/// Block header for self-identifying blocks (v8.1 format)
+/// Replaces ShardHeader with type discrimination
 #[derive(Debug, Clone, Copy)]
 pub struct BlockHeader {
     /// Block format version (current: 1)

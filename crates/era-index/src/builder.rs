@@ -241,9 +241,9 @@ impl IndexBuilder {
                 chunk_count: page_entries.len() as u16,
             };
 
-            // Write as typed block to volume
+            // Write as canonical block to volume
             let _location =
-                volume_writer.write_typed_block(&encrypted_block, BlockType::IndexPage)?;
+                volume_writer.write_canonical_block(&encrypted_block, BlockType::IndexPage)?;
 
             // Add PagePointer to L1
             meta.add_page(page.min_hash, page.max_hash, block_id);
@@ -282,12 +282,12 @@ impl IndexBuilder {
 
         // Write MetaIndex as IndexManifest block
         let manifest_location =
-            volume_writer.write_typed_block(&manifest_encrypted_block, BlockType::IndexManifest)?;
+            volume_writer.write_canonical_block(&manifest_encrypted_block, BlockType::IndexManifest)?;
 
         Ok((meta, manifest_location))
     }
 
-    /// Legacy finalize for external file storage (DEPRECATED)
+    /// Finalize for external file storage (DEPRECATED)
     ///
     /// **WARNING:** This creates "Zombie Archives" - DO NOT USE in production
     #[deprecated(

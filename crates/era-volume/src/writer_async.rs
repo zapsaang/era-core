@@ -13,12 +13,12 @@
 //! ```rust,ignore
 //! // OLD (sync):
 //! let mut writer = VolumeWriter::create(&backend, path, header)?;
-//! writer.write_typed_block(&block, BlockType::Data)?;
+//! writer.write_canonical_block(&block, BlockType::Data)?;
 //! writer.finalize()?;
 //!
 //! // NEW (async):
 //! let mut writer = AsyncVolumeWriter::create(&backend, path, header).await?;
-//! writer.write_typed_block(&block, BlockType::Data).await?;
+//! writer.write_canonical_block(&block, BlockType::Data).await?;
 //! writer.finalize().await?;
 //! ```
 
@@ -47,7 +47,7 @@ pub struct AsyncVolumeWriter<W: AsyncStorageWriter> {
     max_size: Option<u64>,
     /// Last checkpoint offset
     last_checkpoint_offset: u64,
-    /// Last checkpoint block ID (V6+, for direct decryption)
+    /// Last checkpoint block ID (for direct decryption)
     last_checkpoint_block_id: u32,
 }
 
@@ -120,7 +120,7 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
         self.last_checkpoint_offset = offset;
     }
 
-    /// Update the last checkpoint offset and block ID (V6+)
+    /// Update the last checkpoint offset and block ID (for direct decryption)
     pub fn set_last_checkpoint_with_block_id(&mut self, offset: u64, block_id: u32) {
         self.last_checkpoint_offset = offset;
         self.last_checkpoint_block_id = block_id;
@@ -147,7 +147,18 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
 
     /// Commit a checkpoint by updating the footer atomically
     ///
-    /// V8.1: max_size is required for proper backup header/footer layout
+    /// v8.1: max_size is required for proper backup header/footer layout
+    ///
+    /// # Crash Safety Protocol
+    ///
+    /// This function ensures crash-safe checkpoint commits:
+    /// 1. Padding is written and synced to disk BEFORE footer update
+    /// 2. Footer is written to both primary and backup locations
+    /// 3. Final sync ensures footer is persisted
+    ///
+    /// On power loss, the volume will either have:
+    /// - Old footer (checkpoint not committed) - safe
+    /// - New footer with valid padding - safe
     pub async fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
         let max_size = self.max_size.ok_or_else(|| {
             era_common::EraError::InvalidConfig("max_size required for v8.1 volumes".into())
@@ -160,8 +171,11 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
         let pad_target = max_size.saturating_sub(reserved_end);
         self.pad_to_size(pad_target).await?;
 
-        // 2. Sync data
-        self.writer.sync().await?;
+        // 2. CRITICAL: Sync padding data to disk BEFORE updating footer
+        //    Uses fdatasync for efficiency (metadata sync not required here)
+        //    This prevents "garbage tail" on power loss - the padding zeros
+        //    must be physically on disk before we update the footer pointer.
+        self.writer.sync_data().await?;
 
         // 3. Update state
         self.set_last_checkpoint(checkpoint_offset);
@@ -185,7 +199,7 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
             0,
             0,
             0,
-            backup_header_offset, // V7: backup_header_offset
+            backup_header_offset,
         );
 
         let footer_bytes = footer.to_bytes()?;
@@ -199,6 +213,7 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
             .write_at(HEADER_SIZE as u64, &footer_bytes)
             .await?;
 
+        // 8. Final sync to ensure footer is persisted
         self.writer.sync().await?;
 
         Ok(())
@@ -219,13 +234,13 @@ impl<W: AsyncStorageWriter> AsyncVolumeWriter<W> {
         self.block_count
     }
 
-    /// Write a typed block with explicit BlockType (V5 format)
-    pub async fn write_typed_block(
+    /// Write a canonical block with explicit BlockType (v8.1 format)
+    pub async fn write_canonical_block(
         &mut self,
         block: &EncryptedMacroBlock,
         block_type: era_common::BlockType,
     ) -> Result<BlockLocation> {
-        // V5 Format: Write BlockHeader + Data
+        // v8.1 Format: Write BlockHeader + Data
         let offset = self.position;
         let block_len = block.data.len() as u32;
         let header_size = era_common::BlockHeader::SIZE as u64;
@@ -450,7 +465,7 @@ mod tests {
         };
 
         let location = writer
-            .write_typed_block(&block, era_common::BlockType::Data)
+            .write_canonical_block(&block, era_common::BlockType::Data)
             .await
             .unwrap();
         assert_eq!(location.slot_index, 0);
@@ -460,7 +475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_typed_block() {
+    async fn test_write_canonical_block() {
         let temp_dir = TempDir::new().unwrap();
         let backend = AsyncLocalStorageBackend::new(temp_dir.path());
 
@@ -484,7 +499,7 @@ mod tests {
         };
 
         let location = writer
-            .write_typed_block(&block, era_common::BlockType::Checkpoint)
+            .write_canonical_block(&block, era_common::BlockType::Checkpoint)
             .await
             .unwrap();
         assert_eq!(location.slot_index, 0);
@@ -522,7 +537,7 @@ mod tests {
         };
 
         writer
-            .write_typed_block(&block, era_common::BlockType::Data)
+            .write_canonical_block(&block, era_common::BlockType::Data)
             .await
             .unwrap();
         writer.finalize().await.unwrap();

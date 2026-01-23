@@ -25,7 +25,7 @@ pub struct VolumeWriter<W: StorageWriter> {
     max_size: Option<u64>,
     /// Last checkpoint offset
     last_checkpoint_offset: u64,
-    /// Last checkpoint block ID (V6+, for direct decryption)
+    /// Last checkpoint block ID (for direct decryption)
     last_checkpoint_block_id: u32,
 }
 
@@ -98,7 +98,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.last_checkpoint_offset = offset;
     }
 
-    /// Update the last checkpoint offset and block ID (V6+)
+    /// Update the last checkpoint offset and block ID (for direct decryption)
     pub fn set_last_checkpoint_with_block_id(&mut self, offset: u64, block_id: u32) {
         self.last_checkpoint_offset = offset;
         self.last_checkpoint_block_id = block_id;
@@ -125,7 +125,18 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Commit a checkpoint by updating the footer atomically
     ///
-    /// V8.1: max_size is required for proper backup header/footer layout
+    /// v8.1: max_size is required for proper backup header/footer layout
+    ///
+    /// # Crash Safety Protocol
+    ///
+    /// This function ensures crash-safe checkpoint commits:
+    /// 1. Padding is written and synced to disk BEFORE footer update
+    /// 2. Footer is written to both primary and backup locations
+    /// 3. Final sync ensures footer is persisted
+    ///
+    /// On power loss, the volume will either have:
+    /// - Old footer (checkpoint not committed) - safe
+    /// - New footer with valid padding - safe
     pub fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
         let max_size = self.max_size.ok_or_else(|| {
             era_common::EraError::InvalidConfig("max_size required for v8.1 volumes".into())
@@ -138,8 +149,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
         let pad_target = max_size.saturating_sub(reserved_end);
         self.pad_to_size(pad_target)?;
 
-        // 2. Sync data
-        self.writer.sync()?;
+        // 2. CRITICAL: Sync padding data to disk BEFORE updating footer
+        //    Uses fdatasync for efficiency (metadata sync not required here)
+        //    This prevents "garbage tail" on power loss - the padding zeros
+        //    must be physically on disk before we update the footer pointer.
+        self.writer.sync_data()?;
 
         // 3. Update state
         self.set_last_checkpoint(checkpoint_offset);
@@ -163,7 +177,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             0,
             0,
             0,
-            backup_header_offset, // V7: backup_header_offset
+            backup_header_offset,
         );
 
         let footer_bytes = footer.to_bytes()?;
@@ -175,6 +189,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         // 7. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
         self.writer.write_at(HEADER_SIZE as u64, &footer_bytes)?;
 
+        // 8. Final sync to ensure footer is persisted
         self.writer.sync()?;
 
         Ok(())
@@ -195,13 +210,13 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.block_count
     }
 
-    /// Write a typed block with explicit BlockType (V5 format)
-    pub fn write_typed_block(
+    /// Write a canonical block with explicit BlockType (v8.1 format)
+    pub fn write_canonical_block(
         &mut self,
         block: &EncryptedMacroBlock,
         block_type: era_common::BlockType,
     ) -> Result<BlockLocation> {
-        // V5 Format: Write BlockHeader + Data
+        // v8.1 Format: Write BlockHeader + Data
         let offset = self.position;
         let block_len = block.data.len() as u32;
         let header_size = era_common::BlockHeader::SIZE as u64;
@@ -414,7 +429,7 @@ mod tests {
         };
 
         let location = writer
-            .write_typed_block(&block, era_common::BlockType::Data)
+            .write_canonical_block(&block, era_common::BlockType::Data)
             .unwrap();
         assert_eq!(location.slot_index, 0);
         assert_eq!(location.encrypted_size, 1024);
@@ -440,7 +455,7 @@ mod tests {
         let footer_size = crate::footer::FOOTER_SIZE as u64;
 
         // Define max size: Header + 1 Block (data + BlockHeader) + Padding (500) + Footer
-        // V5 format uses BlockHeader::SIZE (16 bytes) instead of ShardHeader::SIZE (8 bytes)
+        // v8.1 format uses BlockHeader::SIZE (16 bytes) instead of ShardHeader::SIZE (8 bytes)
         let data_len = 1008; // Adjusted for 16-byte header
         let block_header_size = era_common::BlockHeader::SIZE as u64;
         let block_disk_size = data_len as u64 + block_header_size; // 1024 total
@@ -459,12 +474,12 @@ mod tests {
 
         // Write block 1: Success
         writer
-            .write_typed_block(&block, era_common::BlockType::Data)
+            .write_canonical_block(&block, era_common::BlockType::Data)
             .unwrap();
 
         // Write block 2: Should fail (needs 1024 + footer, only 500 + footer available minus footer reservation)
         assert!(writer
-            .write_typed_block(&block, era_common::BlockType::Data)
+            .write_canonical_block(&block, era_common::BlockType::Data)
             .is_err());
 
         // Finalize: Should fill padding

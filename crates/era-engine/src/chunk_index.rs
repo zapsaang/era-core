@@ -4,7 +4,7 @@
 //! either in-memory HashMap (for backward compatibility) or persistent LSM-Tree
 //! storage (recommended for production).
 //!
-//! NOTE: V8.1 Legacy Purge - MemoryChunkIndex is now internal only.
+//! NOTE: MemoryChunkIndex is now internal only.
 //! For production use, migrate to era_index::v2 APIs directly.
 
 use std::collections::HashMap;

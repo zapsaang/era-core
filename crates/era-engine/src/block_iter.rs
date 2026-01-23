@@ -10,8 +10,8 @@
 //! - Each block is decrypted with a unique key derived from the volume key
 //! - This provides forward and backward security isolation
 //!
-//! Legacy iterators (`StandardBlockIterator`, `ErasureBlockIterator`) use a single
-//! key for all blocks and are kept for backward compatibility.
+//! Basic iterators (`StandardBlockIterator`, `ErasureBlockIterator`) use a single
+//! key for all blocks and are provided for simpler use cases.
 
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig};
@@ -116,7 +116,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             return None;
         }
 
-        // Read BlockHeader (V5 format: 16 bytes)
+        // Read BlockHeader (v8.1 format: 16 bytes)
         let header_bytes = match self
             .volume_reader
             .read_raw(self.current_offset, BlockHeader::SIZE)
@@ -545,7 +545,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             return None;
         }
 
-        // Read BlockHeader (V5 format: 16 bytes)
+        // Read BlockHeader (v8.1 format: 16 bytes)
         let header_bytes = match self
             .volume_reader
             .read_raw(self.current_offset, BlockHeader::SIZE)

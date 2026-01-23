@@ -300,7 +300,7 @@ impl FileReader {
         Ok(Box::pin(streaming.into_stream()))
     }
 
-    /// Legacy compatible async method returning Vec
+    /// Async method returning Vec (for compatibility)
     pub async fn read_file_chunked(&self, path: &Path) -> Result<Vec<UniqueChunk>> {
         let mut stream = self.read_file_chunked_stream(path).await?;
         let mut chunks = Vec::new();

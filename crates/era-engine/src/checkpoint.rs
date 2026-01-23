@@ -416,8 +416,8 @@ pub fn write_checkpoint<W: StorageWriter>(
         chunk_count: 0,                                 // Metadata block
     };
 
-    // Write as typed block
-    let location = volume_writer.write_typed_block(&encrypted_block, BlockType::Checkpoint)?;
+    // Write as canonical block
+    let location = volume_writer.write_canonical_block(&encrypted_block, BlockType::Checkpoint)?;
 
     // Update footer's last_checkpoint_offset and block_id for direct decryption
     let checkpoint_block_id = block_id.sequence() as u32;
@@ -558,7 +558,7 @@ pub fn recover_all_checkpoints<R: era_storage::StorageReader>(
 
         // Only attempt recovery if there's a checkpoint
         if checkpoint_offset > 0 {
-            // Use block_id if available (V6+), otherwise fall back to brute-force
+            // Use block_id if available, otherwise fall back to brute-force search
             let block_id_opt = if checkpoint_block_id > 0 {
                 Some(checkpoint_block_id)
             } else {
