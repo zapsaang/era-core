@@ -1,7 +1,7 @@
 use era_common::ErasureCodeConfig;
 use era_common::ShardHeader;
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
-use era_volume::HEADER_SIZE;
+use era_volume::DATA_REGION_START;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -150,7 +150,7 @@ async fn aware_read_recovers_aead_corruption() {
         .write(true)
         .open(target)
         .unwrap();
-    let mut offset = HEADER_SIZE as u64;
+    let mut offset = DATA_REGION_START;
 
     // Read prefix (stripe lengths)
     let mut prefix = vec![0u8; header_prefix_len];

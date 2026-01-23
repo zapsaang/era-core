@@ -29,7 +29,7 @@ impl Saboteur {
             .write(true)
             .open(&self.file_path)
             .expect("Failed to open file for bit rot");
-        
+
         // Read byte
         file.seek(SeekFrom::Start(offset)).unwrap();
         let mut byte = [0u8; 1];
@@ -41,7 +41,11 @@ impl Saboteur {
         // Write back
         file.seek(SeekFrom::Start(offset)).unwrap();
         file.write_all(&byte).unwrap();
-        println!("😈 [SABOTAGE] Bit flipped at offset {} in {:?}", offset, self.file_path.file_name().unwrap());
+        println!(
+            "😈 [SABOTAGE] Bit flipped at offset {} in {:?}",
+            offset,
+            self.file_path.file_name().unwrap()
+        );
     }
 
     /// Attack Type 2: Large Segment Wipe (Sector Death)
@@ -51,11 +55,16 @@ impl Saboteur {
             .write(true)
             .open(&self.file_path)
             .expect("Failed to open file for nuking");
-        
+
         file.seek(SeekFrom::Start(offset)).unwrap();
         let trash = vec![0xFFu8; len]; // Fill with 0xFF garbage
         file.write_all(&trash).unwrap();
-        println!("😈 [SABOTAGE] Nuked {} bytes at offset {} in {:?}", len, offset, self.file_path.file_name().unwrap());
+        println!(
+            "😈 [SABOTAGE] Nuked {} bytes at offset {} in {:?}",
+            len,
+            offset,
+            self.file_path.file_name().unwrap()
+        );
     }
 
     /// Attack Type 3: Header Corruption
@@ -65,11 +74,14 @@ impl Saboteur {
             .write(true)
             .open(&self.file_path)
             .expect("Failed to open file for header corruption");
-        
+
         file.seek(SeekFrom::Start(0)).unwrap();
         let garbage = [0xDEu8; 16]; // Corrupt the first 16 bytes
         file.write_all(&garbage).unwrap();
-        println!("😈 [SABOTAGE] Corrupted HEADER in {:?}", self.file_path.file_name().unwrap());
+        println!(
+            "😈 [SABOTAGE] Corrupted HEADER in {:?}",
+            self.file_path.file_name().unwrap()
+        );
     }
 
     /// Attack Type 4: Footer/Index Corruption
@@ -80,20 +92,27 @@ impl Saboteur {
             .write(true)
             .open(&self.file_path)
             .expect("Failed to open file for footer corruption");
-        
+
         // Assume Footer is within the last 4KB
         if file_len > 100 {
             file.seek(SeekFrom::Start(file_len - 100)).unwrap();
-            let garbage = [0xADu8; 50]; 
+            let garbage = [0xADu8; 50];
             file.write_all(&garbage).unwrap();
-            println!("😈 [SABOTAGE] Corrupted FOOTER in {:?}", self.file_path.file_name().unwrap());
+            println!(
+                "😈 [SABOTAGE] Corrupted FOOTER in {:?}",
+                self.file_path.file_name().unwrap()
+            );
         }
     }
 }
 
 /// Helper function: Creates a standard test archive
 /// Configuration: 4 Data + 2 Parity (6 volumes total), Zstd compression, Matrix distribution
-async fn create_test_archive(repo_dir: &Path, source_dir: &Path, original_data: &[u8]) -> Result<PathBuf, Box<dyn std::error::Error>> {
+async fn create_test_archive(
+    repo_dir: &Path,
+    source_dir: &Path,
+    original_data: &[u8],
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let config = ArchiveConfig {
         erasure: Some(ErasureCodeConfig {
             data_shards: 4,
@@ -120,17 +139,17 @@ async fn create_test_archive(repo_dir: &Path, source_dir: &Path, original_data: 
 
     let payload_path = source_dir.join("payload.bin");
     fs::write(&payload_path, original_data)?;
-    
+
     writer.add_file(&payload_path).await?;
     let _stats = writer.finalize()?;
-    
+
     Ok(archive_path)
 }
 
 #[tokio::test]
 async fn test_extreme_resilience_recovery() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== TEST: Extreme Resilience (Recovering from 2/6 Volume Loss) ===");
-    
+
     // 1. Environment preparation
     let temp_dir = TempDir::new()?;
     let repo_dir = temp_dir.path().join("repo");
@@ -150,36 +169,36 @@ async fn test_extreme_resilience_recovery() -> Result<(), Box<dyn std::error::Er
 
     // 3. 💀 Initiate attack: Simultaneously corrupt 2 volumes (Volume 2 and Volume 5)
     // A 4+2 scheme should theoretically tolerate the loss of 2 volumes. We test if this holds true.
-    
+
     let vol2 = repo_dir.join("backup.era.002");
     let vol5 = repo_dir.join("backup.era.005");
-    
+
     let saboteur2 = Saboteur::new(&vol2);
     let saboteur5 = Saboteur::new(&vol5);
 
     // Mixed attack on Vol 2: Header corruption + random bit flip
-    saboteur2.corrupt_header(); 
+    saboteur2.corrupt_header();
     saboteur2.induce_bit_rot(1024 * 1024); // Flip at 1MB
-    
+
     // Heavy damage on Vol 5: Footer corruption + large segment wipe
     saboteur5.corrupt_footer();
     saboteur5.nuke_segment(5 * 1024 * 1024, 64 * 1024); // Wipe 64KB at 5MB
 
     println!("🏥 Starting recovery logic...");
-    
+
     // 4. Attempt recovery
     let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
     let options = ExtractOptions::new(&restore_dir);
-    
+
     // This step should succeed, despite massive error logs
     reader.extract_all(&options)?;
-    
+
     // 5. Verify data integrity
     let restored_path = restore_dir.join("payload.bin");
     assert!(restored_path.exists(), "Restored file missing!");
-    
+
     let restored_data = fs::read(restored_path)?;
-    
+
     if original_data == restored_data {
         println!("🎉 SUCCESS: Data recovered perfectly despite losing 2 volumes!");
     } else {
@@ -202,14 +221,14 @@ async fn test_impossible_recovery_rejection() -> Result<(), Box<dyn std::error::
     fs::create_dir_all(&source_dir)?;
     fs::create_dir_all(&restore_dir)?;
 
-    let mut original_data = vec![0u8; 5 * 1024 * 1024]; 
+    let mut original_data = vec![0u8; 5 * 1024 * 1024];
     rand::thread_rng().fill_bytes(&mut original_data);
 
     let archive_path = create_test_archive(&repo_dir, &source_dir, &original_data).await?;
 
     // 2. 💀 Initiate devastating attack: Corrupt 3 volumes (exceeding Parity threshold)
     // A 4+2 scheme cannot recover from 3 bad volumes.
-    
+
     let targets = vec![
         repo_dir.join("backup.era.001"),
         repo_dir.join("backup.era.003"),
@@ -219,14 +238,14 @@ async fn test_impossible_recovery_rejection() -> Result<(), Box<dyn std::error::
     for path in targets {
         let s = Saboteur::new(path);
         s.nuke_segment(0, 200_000); // Wipe first 200KB, including Header
-        s.corrupt_footer();         // Wipe Footer
+        s.corrupt_footer(); // Wipe Footer
     }
 
     println!("🏥 Attempting impossible recovery (Should Fail)...");
 
     let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
     let options = ExtractOptions::new(&restore_dir);
-    
+
     let result = reader.extract_all(&options);
 
     // 3. Verify correct error reporting
@@ -234,9 +253,12 @@ async fn test_impossible_recovery_rejection() -> Result<(), Box<dyn std::error::
         Ok(_) => {
             // If this succeeds, the system might have returned incorrect/padded data, which is extremely dangerous
             panic!("❌ SAFETY FAILURE: System claimed success when recovery was mathematically impossible!");
-        },
+        }
         Err(e) => {
-            println!("✅ SUCCESS: System correctly refused to restore corrupted data. Error caught: {}", e);
+            println!(
+                "✅ SUCCESS: System correctly refused to restore corrupted data. Error caught: {}",
+                e
+            );
         }
     }
 

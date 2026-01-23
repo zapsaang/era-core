@@ -9,7 +9,7 @@ use era_storage::{StorageBackend, StorageReader};
 use std::path::Path;
 
 use crate::footer::FOOTER_SIZE;
-use crate::header::HEADER_SIZE;
+use crate::header::{DATA_REGION_START, HEADER_SIZE};
 use crate::{Footer, SuperHeader};
 
 /// Reader for a single volume
@@ -24,6 +24,13 @@ pub struct VolumeReader<R: StorageReader> {
 
 impl<R: StorageReader> VolumeReader<R> {
     /// Open an existing volume for reading
+    ///
+    /// V8.1 Recovery Chain:
+    /// 1. Try primary header at offset 0
+    /// 2. If primary header fails, try to read backup footer to find backup_header_offset
+    /// 3. Read backup header from backup_header_offset
+    /// 4. Try primary footer at end of file
+    /// 5. If primary footer fails, try backup footer at offset HEADER_SIZE (4096)
     pub fn open<B: StorageBackend<Reader = R>>(backend: &B, path: &Path) -> Result<Self> {
         let reader = backend.open_read(path)?;
         let size = reader.size();
@@ -32,86 +39,68 @@ impl<R: StorageReader> VolumeReader<R> {
             return Err(EraError::CorruptedHeader("Volume too small".to_string()));
         }
 
-        // Read header
-        let header_bytes = reader.read_at(0, HEADER_SIZE)?;
-        let header = SuperHeader::from_bytes(&header_bytes)?;
+        // === HEADER RECOVERY ===
+        let header = Self::try_read_header(&reader, 0).or_else(|primary_err| {
+            tracing::warn!(
+                "Primary header corrupted: {}. Attempting backup recovery...",
+                primary_err
+            );
+
+            // Try to read backup footer first to get backup_header_offset
+            Self::try_read_footer_at(&reader, HEADER_SIZE as u64)
+                .and_then(|backup_footer| {
+                    if backup_footer.backup_header_offset > 0 {
+                        tracing::info!(
+                            "Found backup footer with backup_header_offset: {}",
+                            backup_footer.backup_header_offset
+                        );
+                        Self::try_read_header(&reader, backup_footer.backup_header_offset)
+                    } else {
+                        Err(EraError::CorruptedHeader(
+                            "Backup footer has no backup_header_offset".into(),
+                        ))
+                    }
+                })
+                .or_else(|_| {
+                    // Last resort: try primary footer to find backup header
+                    Self::try_read_footer(&reader, size).and_then(|primary_footer| {
+                        if primary_footer.backup_header_offset > 0 {
+                            Self::try_read_header(&reader, primary_footer.backup_header_offset)
+                        } else {
+                            Err(EraError::CorruptedHeader(
+                                "No backup header location available".into(),
+                            ))
+                        }
+                    })
+                })
+        })?;
 
         // Check if erasure coding is likely enabled
         let erasure_enabled = header.config.erasure.is_some();
 
-        // 1. Try to read standard footer (from the end of the file)
-        let mut footer = None;
-        if size >= (HEADER_SIZE + FOOTER_SIZE) as u64 {
-            let footer_offset = size - FOOTER_SIZE as u64;
-            if let Ok(bytes) = reader.read_at(footer_offset, FOOTER_SIZE) {
-                if let Ok(f) = Footer::from_bytes(&bytes) {
-                    footer = Some(f);
-                }
-            }
-        }
+        // === FOOTER RECOVERY ===
+        // 1. Try primary footer (at end of file)
+        let footer = Self::try_read_footer(&reader, size)
+            .or_else(|primary_err| {
+                tracing::warn!(
+                    "Primary footer corrupted: {}. Attempting backup recovery...",
+                    primary_err
+                );
+                // 2. Try backup footer at offset HEADER_SIZE (4096)
+                Self::try_read_footer_at(&reader, HEADER_SIZE as u64)
+            })
+            .ok();
 
-        // 2. If standard footer missing, try Floating Footer Recovery (Reverse Scan)
-        if footer.is_none() {
-            // Scan the last 1MB (or full file if smaller) for footer magic
-            // Pattern: 0x0A (Field 1) 0x04 (Len) "ERAF"
-            let scan_size = 1024 * 1024; // 1MB scan window
-            let start_offset = if size > scan_size {
-                size - scan_size
-            } else {
-                HEADER_SIZE as u64
-            };
-            let scan_len = (size - start_offset) as usize;
-
-            if scan_len > 6 {
-                if let Ok(data) = reader.read_at(start_offset, scan_len) {
-                    // Search backwards
-                    // Pattern: [0x0A, 0x04, 'E', 'R', 'A', 'F']
-                    let pattern = [0x0A, 0x04, 0x45, 0x52, 0x41, 0x46];
-
-                    // We iterate backwards to find the *last* valid footer
-                    for i in (0..data.len() - 5).rev() {
-                        if data[i..i + 6] == pattern {
-                            // Possible match found at offset `start_offset + i`
-                            // This corresponds to the `magic` field in Proto.
-                            // The Footer struct (with length prefix) starts 6 bytes before?
-                            // No, format is [u32 len] [proto bytes].
-                            // The `magic` is the first field of proto bytes.
-                            // So `len` is 4 bytes before proto bytes.
-                            // If `data[i]` is start of magic (0x0A), then proto starts at `i`.
-                            // So Footer starts at `i - 4`.
-
-                            if i < 4 {
-                                continue;
-                            } // Can't be valid if no space for length
-
-                            let candidate_start = i - 4;
-                            // Check if we have enough bytes for full footer reading (128 bytes)
-                            // Even if we don't have 128 bytes in `data`, the file might have it?
-                            // But we are scanning `data`.
-                            // Let's rely on `read_at` from disk to be safe, or use `data` if it contains it.
-
-                            let footer_file_offset = start_offset + candidate_start as u64;
-
-                            // Try to read footer from this offset
-                            if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE) {
-                                if let Ok(f) = Footer::from_bytes(&bytes) {
-                                    tracing::warn!(
-                                        "Recovered floating footer at offset {}",
-                                        footer_file_offset
-                                    );
-                                    footer = Some(f);
-                                    break; // Found the last valid footer
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // 3. If still no footer, try Floating Footer Recovery (Reverse Scan) for legacy volumes
+        let footer = if footer.is_none() {
+            Self::try_floating_footer_recovery(&reader, size)?
+        } else {
+            footer
+        };
 
         if footer.is_none() && !erasure_enabled {
             return Err(EraError::CorruptedHeader(
-                "Volume too small for footer and no floating footer found".to_string(),
+                "Volume too small for footer and no backup/floating footer found".to_string(),
             ));
         }
 
@@ -120,6 +109,83 @@ impl<R: StorageReader> VolumeReader<R> {
             header,
             footer,
         })
+    }
+
+    /// Try to read header at a specific offset
+    fn try_read_header(reader: &R, offset: u64) -> Result<SuperHeader> {
+        let header_bytes = reader.read_at(offset, HEADER_SIZE)?;
+        SuperHeader::from_bytes(&header_bytes)
+    }
+
+    /// Try to read footer from end of file
+    fn try_read_footer(reader: &R, file_size: u64) -> Result<Footer> {
+        if file_size < (HEADER_SIZE + FOOTER_SIZE) as u64 {
+            return Err(EraError::CorruptedFooter(
+                "File too small for footer".into(),
+            ));
+        }
+        let footer_offset = file_size - FOOTER_SIZE as u64;
+        Self::try_read_footer_at(reader, footer_offset)
+    }
+
+    /// Try to read footer at a specific offset
+    fn try_read_footer_at(reader: &R, offset: u64) -> Result<Footer> {
+        let bytes = reader.read_at(offset, FOOTER_SIZE)?;
+        Footer::from_bytes(&bytes)
+    }
+
+    /// Try floating footer recovery (reverse scan) for legacy volumes
+    fn try_floating_footer_recovery(reader: &R, size: u64) -> Result<Option<Footer>> {
+        // Scan the last 1MB (or full file if smaller) for footer magic
+        // Pattern: 0x0A (Field 1) 0x04 (Len) "ERAF"
+        let scan_size = 1024 * 1024; // 1MB scan window
+        let start_offset = if size > scan_size {
+            size - scan_size
+        } else {
+            HEADER_SIZE as u64
+        };
+        let scan_len = (size - start_offset) as usize;
+
+        if scan_len <= 6 {
+            return Ok(None);
+        }
+
+        let data = match reader.read_at(start_offset, scan_len) {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+
+        // Search backwards for footer pattern
+        // Pattern: [0x0A, 0x04, 'E', 'R', 'A', 'F']
+        let pattern = [0x0A, 0x04, 0x45, 0x52, 0x41, 0x46];
+
+        // Iterate backwards to find the *last* valid footer
+        for i in (0..data.len().saturating_sub(5)).rev() {
+            if data[i..i + 6] == pattern {
+                // Possible match found
+                // Footer format: [u32 len] [proto bytes]
+                // The magic is the first field of proto bytes, so footer starts at i - 4
+                if i < 4 {
+                    continue;
+                }
+
+                let candidate_start = i - 4;
+                let footer_file_offset = start_offset + candidate_start as u64;
+
+                // Try to read footer from this offset
+                if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE) {
+                    if let Ok(f) = Footer::from_bytes(&bytes) {
+                        tracing::warn!(
+                            "Recovered floating footer at offset {}",
+                            footer_file_offset
+                        );
+                        return Ok(Some(f));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Get the volume header
@@ -198,9 +264,10 @@ impl<R: StorageReader> VolumeReader<R> {
         Ok(shards)
     }
 
-    /// Get the data region (after header, before footer)
+    /// Get the data region (after header + backup footer gap, before backup header)
+    /// V8.1 layout: Data starts at DATA_REGION_START (4224)
     pub fn data_region(&self) -> (u64, u64) {
-        let start = HEADER_SIZE as u64;
+        let start = DATA_REGION_START;
         let end = self
             .footer
             .as_ref()

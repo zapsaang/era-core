@@ -19,8 +19,12 @@
 //! - ✅ No sidecar files (.checkpoint, .index, .meta)
 //! - ✅ Data can be extracted after kill -9
 //! - ✅ Archive opens without errors
+//!
+//! NOTE: These tests explicitly disable EC to test single-volume cold recovery.
+//! EC-enabled cold recovery is tested separately.
 
 use bytes::Bytes;
+use era_common::ArchiveConfig;
 use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use std::fs;
 use std::path::Path;
@@ -28,6 +32,14 @@ use tempfile::TempDir;
 
 /// Size constants for test data
 const MB: usize = 1024 * 1024;
+
+/// Helper: Create a config with EC disabled for single-volume cold recovery tests
+fn config_no_ec() -> ArchiveConfig {
+    ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    }
+}
 
 /// Generate random data
 fn generate_random_data(size: usize) -> Bytes {
@@ -107,6 +119,7 @@ async fn test_cold_recovery_basic() {
 
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .password(password)
+            .config(config_no_ec())
             .build()
             .unwrap();
 
@@ -218,6 +231,7 @@ async fn test_no_sidecar_files_after_normal_finalize() {
     {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .password("test")
+            .config(config_no_ec())
             .build()
             .unwrap();
 
@@ -272,6 +286,7 @@ async fn test_cold_recovery_large_dataset() {
     {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .password("large_test")
+            .config(config_no_ec())
             .build()
             .unwrap();
 

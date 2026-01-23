@@ -1,10 +1,19 @@
 //! Tests for batch file operations
 
+use era_common::ArchiveConfig;
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use tempfile::TempDir;
+
+/// Helper: Create a config with EC disabled for single-volume tests
+fn test_config_no_ec() -> ArchiveConfig {
+    ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    }
+}
 
 /// Create a test file with the given content
 fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
@@ -31,10 +40,11 @@ async fn test_batch_add_files() {
         })
         .collect();
 
-    // Create archive using batch API
+    // Create archive using batch API (EC disabled for single-volume test)
     let archive_path = temp_dir.path().join("test.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_password")
+        .config(test_config_no_ec())
         .build()
         .unwrap();
 
@@ -75,10 +85,11 @@ async fn test_batch_vs_individual_equivalence() {
         })
         .collect();
 
-    // Create archive with batch API
+    // Create archive with batch API (EC disabled for single-volume test)
     let archive_batch = temp_dir.path().join("batch.era");
     let mut writer_batch = ArchiveWriter::builder(&archive_batch)
         .password("test_password")
+        .config(test_config_no_ec())
         .build()
         .unwrap();
 
@@ -86,10 +97,11 @@ async fn test_batch_vs_individual_equivalence() {
     writer_batch.add_files(&file_refs).await.unwrap();
     let stats_batch = writer_batch.finalize().unwrap();
 
-    // Create archive with individual adds
+    // Create archive with individual adds (EC disabled for single-volume test)
     let archive_individual = temp_dir.path().join("individual.era");
     let mut writer_individual = ArchiveWriter::builder(&archive_individual)
         .password("test_password")
+        .config(test_config_no_ec())
         .build()
         .unwrap();
 
@@ -133,6 +145,7 @@ async fn test_batch_empty() {
 
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_password")
+        .config(test_config_no_ec())
         .build()
         .unwrap();
 
@@ -164,6 +177,7 @@ async fn test_batch_large_number_of_files() {
     let archive_path = temp_dir.path().join("test.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_password")
+        .config(test_config_no_ec())
         .build()
         .unwrap();
 
@@ -195,6 +209,7 @@ async fn test_mixed_batch_and_individual() {
     let archive_path = temp_dir.path().join("test.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_password")
+        .config(test_config_no_ec())
         .build()
         .unwrap();
 

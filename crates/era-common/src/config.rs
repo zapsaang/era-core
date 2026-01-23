@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use crate::{ErasureCodeConfig, MatrixDistributionConfig};
 
 /// Main archive configuration
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveConfig {
     /// Compression configuration
     pub compression: CompressionConfig,
-    /// Encryption configuration  
+    /// Encryption configuration
     pub encryption: EncryptionConfig,
     /// Volume configuration
     pub volume: VolumeConfig,
@@ -22,10 +22,30 @@ pub struct ArchiveConfig {
     #[serde(default)]
     pub packing: PackingConfig,
     /// Erasure coding configuration (None = disabled)
+    /// Default: 4 data shards + 1 parity shard for single-drive bit-rot protection
     pub erasure: Option<ErasureCodeConfig>,
     /// Matrix distribution configuration
     #[serde(default)]
     pub distribution: MatrixDistributionConfig,
+}
+
+impl Default for ArchiveConfig {
+    fn default() -> Self {
+        Self {
+            compression: CompressionConfig::default(),
+            encryption: EncryptionConfig::default(),
+            volume: VolumeConfig::default(),
+            block: BlockConfig::default(),
+            chunking: ChunkingConfig::default(),
+            packing: PackingConfig::default(),
+            // V8.1: EC is ON by default (4+1) for single-drive bit-rot protection
+            erasure: Some(ErasureCodeConfig {
+                data_shards: 4,
+                parity_shards: 1,
+            }),
+            distribution: MatrixDistributionConfig::default(),
+        }
+    }
 }
 
 /// Compression algorithm selection

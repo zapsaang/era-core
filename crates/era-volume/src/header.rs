@@ -12,6 +12,10 @@ pub const HEADER_VERSION: u16 = 2;
 /// Size of the header region (4KB aligned)
 pub const HEADER_SIZE: usize = 4096;
 
+/// Data region start offset (after header + backup footer gap)
+/// V8.1 layout: [Header 4096] [Backup Footer Gap 128] [Data Region...]
+pub const DATA_REGION_START: u64 = (HEADER_SIZE + crate::footer::BACKUP_FOOTER_GAP) as u64; // 4224
+
 /// Recipient type for the multi-recipient envelope
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecipientType {

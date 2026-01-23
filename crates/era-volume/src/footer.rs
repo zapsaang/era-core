@@ -10,8 +10,12 @@ pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
 /// Footer size (128 bytes for atomic write)
 pub const FOOTER_SIZE: usize = 128;
 
-/// Current footer version
-pub const FOOTER_VERSION: u16 = 6;
+/// Current footer version (V7 for v8.1 redundancy layout)
+pub const FOOTER_VERSION: u16 = 7;
+
+/// Backup footer gap size (reserved after header for backup footer)
+/// V8.1 layout: [Header 4096] [Backup Footer Gap 128] [Data...] [Backup Header 4096] [Primary Footer 128]
+pub const BACKUP_FOOTER_GAP: usize = FOOTER_SIZE;
 
 /// Volume footer - stored at the end of each volume
 ///
@@ -53,6 +57,8 @@ pub struct Footer {
     pub index_root_size: u32,
     /// Block ID of the index manifest root (V5+)
     pub index_root_block_id: u32,
+    /// Offset of the backup header (V7+, for v8.1 redundancy layout)
+    pub backup_header_offset: u64,
     /// Blake3 checksum of the footer (excluding this field)
     pub checksum: [u8; 32],
 }
@@ -75,6 +81,7 @@ impl Footer {
             0,
             0,
             0,
+            0, // backup_header_offset
         )
     }
 
@@ -95,6 +102,7 @@ impl Footer {
         index_root_offset: u64,
         index_root_size: u32,
         index_root_block_id: u32,
+        backup_header_offset: u64,
     ) -> Self {
         let mut footer = Self {
             magic: FOOTER_MAGIC,
@@ -114,6 +122,7 @@ impl Footer {
             index_root_offset,
             index_root_size,
             index_root_block_id,
+            backup_header_offset,
             checksum: [0u8; 32],
         };
 
@@ -155,6 +164,7 @@ impl Footer {
             index_root_offset: self.index_root_offset,
             index_root_size: self.index_root_size,
             index_root_block_id: self.index_root_block_id,
+            backup_header_offset: self.backup_header_offset,
             checksum: self.checksum.to_vec(),
         }
     }
@@ -181,6 +191,7 @@ impl Footer {
             index_root_offset: proto.index_root_offset,
             index_root_size: proto.index_root_size,
             index_root_block_id: proto.index_root_block_id,
+            backup_header_offset: proto.backup_header_offset,
             checksum,
         })
     }

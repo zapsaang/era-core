@@ -1,4 +1,4 @@
-use era_common::{ErasureCodeConfig, ShardHeader};
+use era_common::{ArchiveConfig, ErasureCodeConfig, ShardHeader};
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
@@ -75,8 +75,15 @@ fn test_standard_block_crc_detection() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("standard_crc.era");
 
+    // Explicitly disable EC to test standard block CRC detection
+    let config_no_ec = ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    };
+
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("crc_test")
+        .config(config_no_ec)
         .enable_small_file_packing(false)
         .build()
         .unwrap();

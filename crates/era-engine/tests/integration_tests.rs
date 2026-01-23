@@ -2,11 +2,20 @@
 //!
 //! These tests verify end-to-end functionality of archive creation and extraction.
 
+use era_common::ArchiveConfig;
 use era_engine::{repair_archive, ArchiveReader, ArchiveWriter, ExtractOptions, RepairOptions};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use tempfile::TempDir;
+
+/// Helper: Create a config with EC disabled for specific tests that need non-EC archives
+fn config_no_ec() -> ArchiveConfig {
+    ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    }
+}
 
 /// Create a test file with the given content
 fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
@@ -449,11 +458,12 @@ async fn test_multifile_packing_efficiency() {
 
     // With 100 files of 1KB each = 100KB total
     // Should be packed into just a few blocks (not 100 blocks!).
-    // Target block size is 4MB, so data should fit in 1 block, plus
-    // overhead blocks for catalog + embedded metadata/LSM manifest.
+    // With default EC 4+1, we have 5 volumes, each getting catalog blocks.
+    // Data fits in ~1 stripe, but with overhead for catalog + metadata per volume.
+    // Allow up to 15 blocks total (data stripe + catalog/metadata per volume).
     assert!(
-        stats.blocks_written <= 4,
-        "Expected <=4 blocks for 100KB, got {}",
+        stats.blocks_written <= 15,
+        "Expected <=15 blocks for 100KB with EC, got {}",
         stats.blocks_written
     );
 
@@ -696,10 +706,11 @@ async fn test_repair_healthy_archive() {
 async fn test_repair_non_erasure_archive() {
     let temp_dir = TempDir::new().unwrap();
 
-    // Create a standard archive without erasure coding
+    // Create a standard archive without erasure coding (explicitly disabled)
     let archive_path = temp_dir.path().join("standard.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_pass")
+        .config(config_no_ec())
         .build()
         .unwrap();
 

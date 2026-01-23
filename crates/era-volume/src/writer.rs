@@ -4,7 +4,8 @@ use era_common::{compute_shard_crc, BlockLocation, EncryptedMacroBlock, Result, 
 use era_storage::{StorageBackend, StorageWriter};
 use std::path::Path;
 
-use crate::header::HEADER_SIZE;
+use crate::footer::{BACKUP_FOOTER_GAP, FOOTER_SIZE};
+use crate::header::{DATA_REGION_START, HEADER_SIZE};
 use crate::{Footer, SuperHeader};
 use rand::RngCore;
 
@@ -30,6 +31,11 @@ pub struct VolumeWriter<W: StorageWriter> {
 
 impl<W: StorageWriter> VolumeWriter<W> {
     /// Create a new volume with the given header
+    ///
+    /// V8.1 Layout on create:
+    /// - Write primary header at offset 0 (4096 bytes)
+    /// - Reserve backup footer gap at offset 4096 (128 bytes of zeros)
+    /// - Data region starts at offset 4224 (DATA_REGION_START)
     pub fn create<B: StorageBackend<Writer = W>>(
         backend: &B,
         path: &Path,
@@ -37,14 +43,20 @@ impl<W: StorageWriter> VolumeWriter<W> {
     ) -> Result<Self> {
         let mut writer = backend.create(path)?;
 
-        // Write header
+        // Write primary header
         let header_bytes = header.to_bytes()?;
         writer.append(&header_bytes)?;
 
+        // Reserve backup footer gap (128 bytes of zeros)
+        // This will be filled with the backup footer on finalize
+        let backup_footer_gap = [0u8; BACKUP_FOOTER_GAP];
+        writer.append(&backup_footer_gap)?;
+
+        // Position now at DATA_REGION_START (4224)
         Ok(Self {
             writer,
             header,
-            position: HEADER_SIZE as u64,
+            position: DATA_REGION_START,
             block_count: 0,
             sequence: 0,
             max_size: None,
@@ -112,97 +124,60 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Commit a checkpoint by updating the footer atomically
+    ///
+    /// V8.1: max_size is required for proper backup header/footer layout
     pub fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
-        if let Some(max_size) = self.max_size {
-            // Fixed Size Mode: Update footer at fixed location
+        let max_size = self.max_size.ok_or_else(|| {
+            era_common::EraError::InvalidConfig("max_size required for v8.1 volumes".into())
+        })?;
 
-            // 1. Ensure padding
-            self.pad_to_size(max_size)?;
+        // Fixed Size Mode: Update footer at fixed location
 
-            // 2. Sync data
-            self.writer.sync()?;
+        // 1. Ensure padding (leave space for backup header + footer at end)
+        let reserved_end = (HEADER_SIZE + FOOTER_SIZE) as u64;
+        let pad_target = max_size.saturating_sub(reserved_end);
+        self.pad_to_size(pad_target)?;
 
-            // 3. Update state
-            self.set_last_checkpoint(checkpoint_offset);
+        // 2. Sync data
+        self.writer.sync()?;
 
-            // 4. Construct footer
-            let footer = crate::Footer::with_catalog(
-                self.position,
-                self.block_count,
-                self.sequence,
-                0,
-                0,
-                0,
-                self.last_checkpoint_offset,
-                self.last_checkpoint_block_id,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            );
+        // 3. Update state
+        self.set_last_checkpoint(checkpoint_offset);
 
-            let footer_bytes = footer.to_bytes()?;
+        // 4. Calculate backup header offset (where backup header will be written on finalize)
+        let backup_header_offset = pad_target;
 
-            // 5. Overwrite
-            use crate::footer::FOOTER_SIZE;
-            let footer_offset = max_size - FOOTER_SIZE as u64;
-            self.writer.write_at(footer_offset, &footer_bytes)?;
-            self.writer.sync()?;
-        } else {
-            // Dynamic/Store Mode: Append floating footer (inline checkpoint)
-            // This enables "Journaling" where we have a stream of [Data...][Footer][Data...][Footer]
+        // 5. Construct footer with backup_header_offset
+        let footer = crate::Footer::with_catalog(
+            self.position,
+            self.block_count,
+            self.sequence,
+            0,
+            0,
+            0,
+            self.last_checkpoint_offset,
+            self.last_checkpoint_block_id,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            backup_header_offset, // V7: backup_header_offset
+        );
 
-            // 1. Sync data
-            self.writer.sync()?;
+        let footer_bytes = footer.to_bytes()?;
 
-            // 2. Update state
-            self.set_last_checkpoint(checkpoint_offset);
+        // 6. Write primary footer at end (after backup header position)
+        let footer_offset = backup_header_offset + HEADER_SIZE as u64;
+        self.writer.write_at(footer_offset, &footer_bytes)?;
 
-            // 3. Construct footer pointing to current data end
-            let footer = crate::Footer::with_catalog(
-                self.position,
-                self.block_count,
-                self.sequence,
-                0,
-                0,
-                0,
-                self.last_checkpoint_offset,
-                self.last_checkpoint_block_id,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            );
+        // 7. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
+        self.writer.write_at(HEADER_SIZE as u64, &footer_bytes)?;
 
-            let footer_bytes = footer.to_bytes()?;
-
-            // 4. Append footer
-            let offset = self.writer.append(&footer_bytes)?;
-            self.writer.sync()?;
-
-            // 5. Advance position (Footer is now part of the stream)
-            // Note: This means subsequent blocks will be shifted.
-            // The Reader must be able to handle scanning or use the Index which we aren't persisting here yet.
-            // But for "Atomic Checkpoint" of the *Stream*, this is correct.
-            self.position += footer_bytes.len() as u64;
-
-            // Update last_checkpoint to point to this footer?
-            // The previous logic `self.set_last_checkpoint(checkpoint_offset)` sets the `last_checkpoint_offset` field *inside* the footer.
-            // But `self.last_checkpoint_offset` struct field tracks the *location of the footer itself* for the *next* footer to reference?
-            // Yes, usually a linked list.
-            self.write_floating_checkpoint_internal(offset);
-        }
+        self.writer.sync()?;
 
         Ok(())
-    }
-
-    fn write_floating_checkpoint_internal(&mut self, offset: u64) {
-        self.last_checkpoint_offset = offset;
-        self.sequence += 1;
     }
 
     /// Get the volume ID
@@ -297,6 +272,21 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Finalize the volume with catalog location information
+    ///
+    /// V8.1 Layout on finalize:
+    /// 1. Write backup header (copy of primary) at current position
+    /// 2. Write primary footer after backup header
+    /// 3. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
+    ///
+    /// Final layout:
+    /// ```text
+    /// [0]           Primary Header (4096 bytes)
+    /// [4096]        Backup Footer (128 bytes)
+    /// [4224]        Data Region Start
+    /// ...           Blocks / Shards
+    /// [N]           Backup Header (4096 bytes) - copy of primary
+    /// [N+4096]      Primary Footer (128 bytes)
+    /// ```
     pub fn finalize_with_catalog(
         mut self,
         catalog_offset: u64,
@@ -310,54 +300,56 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         // Random padding if max_size is set
         if let Some(max_size) = self.max_size {
-            use crate::footer::FOOTER_SIZE;
+            // Ensure full padding to max_size minus space for backup header + footer
+            let reserved_end = (HEADER_SIZE + FOOTER_SIZE) as u64; // 4224 bytes for backup header + primary footer
+            let pad_target = max_size.saturating_sub(reserved_end);
+            self.pad_to_size(pad_target)?;
+            self.position = pad_target;
+        }
 
-            // Ensure full padding to max_size
-            self.pad_to_size(max_size)?;
+        // 1. Write backup header (copy of primary) at current position
+        let backup_header_offset = self.position;
+        let header_bytes = self.header.to_bytes()?;
 
-            // Point to start of footer for the record
-            self.position = max_size - FOOTER_SIZE as u64;
-
-            let footer = Footer::with_catalog(
-                self.position,
-                self.block_count,
-                self.sequence,
-                catalog_offset,
-                catalog_size,
-                catalog_block_id,
-                self.last_checkpoint_offset,
-                self.last_checkpoint_block_id,
-                lsm_manifest_offset,
-                lsm_manifest_size,
-                lsm_manifest_block_id,
-                0,
-                0,
-                0,
-            );
-            let footer_bytes = footer.to_bytes()?;
-
-            // Overwrite footer area
-            self.writer.write_at(self.position, &footer_bytes)?;
+        if self.max_size.is_some() {
+            self.writer.write_at(backup_header_offset, &header_bytes)?;
         } else {
-            let footer = Footer::with_catalog(
-                self.position,
-                self.block_count,
-                self.sequence,
-                catalog_offset,
-                catalog_size,
-                catalog_block_id,
-                self.last_checkpoint_offset,
-                self.last_checkpoint_block_id,
-                lsm_manifest_offset,
-                lsm_manifest_size,
-                lsm_manifest_block_id,
-                0,
-                0,
-                0,
-            );
-            let footer_bytes = footer.to_bytes()?;
+            self.writer.append(&header_bytes)?;
+        }
+
+        // 2. Calculate data_end_offset (where data region ends, before backup header)
+        let data_end_offset = backup_header_offset;
+
+        // 3. Create footer with backup_header_offset
+        let footer = Footer::with_catalog(
+            data_end_offset,
+            self.block_count,
+            self.sequence,
+            catalog_offset,
+            catalog_size,
+            catalog_block_id,
+            self.last_checkpoint_offset,
+            self.last_checkpoint_block_id,
+            lsm_manifest_offset,
+            lsm_manifest_size,
+            lsm_manifest_block_id,
+            0,                    // index_root_offset
+            0,                    // index_root_size
+            0,                    // index_root_block_id
+            backup_header_offset, // V7: backup_header_offset
+        );
+        let footer_bytes = footer.to_bytes()?;
+
+        // 4. Write primary footer after backup header
+        let primary_footer_offset = backup_header_offset + HEADER_SIZE as u64;
+        if self.max_size.is_some() {
+            self.writer.write_at(primary_footer_offset, &footer_bytes)?;
+        } else {
             self.writer.append(&footer_bytes)?;
         }
+
+        // 5. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
+        self.writer.write_at(HEADER_SIZE as u64, &footer_bytes)?;
 
         // Sync to disk
         self.writer.sync()?;

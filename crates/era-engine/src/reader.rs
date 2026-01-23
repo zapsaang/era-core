@@ -1196,7 +1196,16 @@ fn is_internal_entry(entry: &FileEntry) -> bool {
 mod tests {
     use super::*;
     use crate::ArchiveWriter;
+    use era_common::ArchiveConfig;
     use tempfile::TempDir;
+
+    /// Helper: Create a config with EC disabled for single-volume tests
+    fn test_config_no_ec() -> ArchiveConfig {
+        ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_roundtrip() {
@@ -1204,9 +1213,10 @@ mod tests {
         let archive_path = temp_dir.path().join("test.era");
         let password = "test_password";
 
-        // Create archive
+        // Create archive (EC disabled for single-volume test)
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
 
@@ -1240,9 +1250,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("secure.era");
 
-        // Create archive with password
+        // Create archive with password (EC disabled for single-volume test)
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("correct_password")
+            .config(test_config_no_ec())
             .build()
             .unwrap();
 
@@ -1260,9 +1271,10 @@ mod tests {
         let archive_path = temp_dir.path().join("empty.era");
         let password = "test";
 
-        // Create empty archive
+        // Create empty archive (EC disabled for single-volume test)
         let writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
         writer.finalize().unwrap();
@@ -1279,10 +1291,11 @@ mod tests {
         let archive_path = temp_dir.path().join("large.era");
         let password = "test";
 
-        // Create archive with large file
+        // Create archive with large file (EC disabled for single-volume test)
         let large_data = vec![b'X'; 512 * 1024]; // 512KB
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
         writer.add_bytes("large.bin", &large_data).unwrap();
@@ -1307,9 +1320,10 @@ mod tests {
         let archive_path = temp_dir.path().join("unicode.era");
         let password = "密码";
 
-        // Create archive with unicode content
+        // Create archive with unicode content (EC disabled for single-volume test)
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
         writer
@@ -1333,9 +1347,10 @@ mod tests {
         let archive_path = temp_dir.path().join("test.era");
         let password = "test";
 
-        // Create archive
+        // Create archive (EC disabled for single-volume test)
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
         writer.add_bytes("file.txt", b"new content").unwrap();
@@ -1365,9 +1380,10 @@ mod tests {
         let archive_path = temp_dir.path().join("test.era");
         let password = "test";
 
-        // Create archive
+        // Create archive (EC disabled for single-volume test)
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
         writer.add_bytes("file.txt", b"new content").unwrap();
@@ -1396,9 +1412,10 @@ mod tests {
         let archive_path = temp_dir.path().join("nested.era");
         let password = "test";
 
-        // Create archive with nested structure
+        // Create archive with nested structure (EC disabled for single-volume test)
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
         writer.add_bytes("a/b/c/deep.txt", b"deep content").unwrap();
@@ -1425,9 +1442,10 @@ mod tests {
         let archive_path = temp_dir.path().join("verify.era");
         let password = "test";
 
-        // Create archive with multiple files
+        // Create archive with multiple files (EC disabled for single-volume test)
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
 
@@ -1454,10 +1472,11 @@ mod tests {
         let archive_path = temp_dir.path().join("chunked.era");
         let password = "test";
 
-        // Create archive with large file that gets chunked
+        // Create archive with large file that gets chunked (EC disabled for single-volume test)
         let large_data = vec![b'A'; 512 * 1024]; // 512KB
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
 
@@ -1478,9 +1497,10 @@ mod tests {
         let archive_path = temp_dir.path().join("empty.era");
         let password = "test";
 
-        // Create empty archive
+        // Create empty archive (EC disabled for single-volume test)
         let writer = ArchiveWriter::builder(&archive_path)
             .password(password)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
         writer.finalize().unwrap();

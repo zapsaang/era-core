@@ -3,9 +3,18 @@
 //! These tests verify that X25519 key exchange works correctly as an alternative
 //! to Argon2 password-based key derivation.
 
+use era_common::ArchiveConfig;
 use era_engine::{ArchiveReader, ArchiveWriterBuilder, EraKeyPair};
 use std::fs;
 use tempfile::TempDir;
+
+/// Helper: Create a config with EC disabled for single-volume tests
+fn test_config_no_ec() -> ArchiveConfig {
+    ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    }
+}
 
 /// Test that certificate mode creates an archive successfully.
 #[tokio::test]
@@ -21,9 +30,10 @@ async fn test_certificate_mode_creates_archive() {
     let keypair = EraKeyPair::generate().unwrap();
     let cert = keypair.certificate();
 
-    // Create archive using certificate mode
+    // Create archive using certificate mode (EC disabled for single-volume test)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .certificate(cert)
+        .config(test_config_no_ec())
         .build()
         .expect("Failed to create writer with certificate mode");
 
@@ -65,10 +75,11 @@ async fn test_certificate_mode_roundtrip() {
     let keypair = EraKeyPair::generate().unwrap();
     let cert = keypair.certificate();
 
-    // Create archive
+    // Create archive (EC disabled for single-volume test)
     {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .certificate(cert)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
 
@@ -124,10 +135,11 @@ async fn test_password_archive_rejects_keypair() {
 
     fs::write(&test_file, "password protected").unwrap();
 
-    // Create with password mode
+    // Create with password mode (EC disabled for single-volume test)
     {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .password("test123")
+            .config(test_config_no_ec())
             .build()
             .unwrap();
 
@@ -164,13 +176,14 @@ async fn test_wrong_keypair_rejected() {
 
     fs::write(&test_file, "secret data").unwrap();
 
-    // Create with one keypair
+    // Create with one keypair (EC disabled for single-volume test)
     let correct_keypair = EraKeyPair::generate().unwrap();
     let cert = correct_keypair.certificate();
 
     {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .certificate(cert)
+            .config(test_config_no_ec())
             .build()
             .unwrap();
 
@@ -207,26 +220,28 @@ async fn test_certificate_mode_performance() {
     let keypair = EraKeyPair::generate().unwrap();
     let cert = keypair.certificate();
 
-    // Measure certificate mode
+    // Measure certificate mode (EC disabled for single-volume test)
     let cert_times: Vec<_> = (0..5)
         .map(|i| {
             let archive_path = temp_dir.path().join(format!("cert_{}.era", i));
             let start = Instant::now();
             let _writer = ArchiveWriterBuilder::new(&archive_path)
                 .certificate(cert.clone())
+                .config(test_config_no_ec())
                 .build()
                 .unwrap();
             start.elapsed()
         })
         .collect();
 
-    // Measure password mode (with fast KDF params to not wait forever)
+    // Measure password mode (with fast KDF params to not wait forever) (EC disabled for single-volume test)
     let password_times: Vec<_> = (0..5)
         .map(|i| {
             let archive_path = temp_dir.path().join(format!("pass_{}.era", i));
             let start = Instant::now();
             let _writer = ArchiveWriterBuilder::new(&archive_path)
                 .password("test_password")
+                .config(test_config_no_ec())
                 .build()
                 .unwrap();
             start.elapsed()
@@ -262,9 +277,10 @@ async fn test_key_encapsulation_roundtrip() {
     let keypair = EraKeyPair::generate().unwrap();
     let cert = keypair.certificate();
 
-    // Create archive
+    // Create archive (EC disabled for single-volume test)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .certificate(cert)
+        .config(test_config_no_ec())
         .build()
         .unwrap();
 

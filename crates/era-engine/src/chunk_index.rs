@@ -3,6 +3,9 @@
 //! This module provides a unified interface for chunk deduplication that can use
 //! either in-memory HashMap (for backward compatibility) or persistent LSM-Tree
 //! storage (recommended for production).
+//!
+//! NOTE: V8.1 Legacy Purge - MemoryChunkIndex is now internal only.
+//! For production use, migrate to era_index::v2 APIs directly.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,7 +17,8 @@ use parking_lot::RwLock;
 ///
 /// Both HashMap and LsmChunkIndex implement this trait, allowing
 /// ArchiveWriter to use either backend.
-pub trait ChunkIndex: Send + Sync {
+#[allow(dead_code)]
+pub(crate) trait ChunkIndex: Send + Sync {
     /// Check if a chunk exists in the index.
     fn contains(&self, hash: &ChunkHash) -> EraResult<bool>;
 
@@ -53,10 +57,14 @@ pub trait ChunkIndex: Send + Sync {
 /// - Memory efficiency for large archives
 ///
 /// Use `LsmChunkIndex` for production workloads.
-pub struct MemoryChunkIndex {
+///
+/// NOTE: V8.1 - This is now internal only. Use era_index::v2 APIs for production.
+#[allow(dead_code)]
+pub(crate) struct MemoryChunkIndex {
     inner: RwLock<HashMap<ChunkHash, BlockLocation>>,
 }
 
+#[allow(dead_code)]
 impl MemoryChunkIndex {
     /// Create a new empty in-memory index.
     pub fn new() -> Self {
@@ -122,26 +130,11 @@ impl ChunkIndex for MemoryChunkIndex {
     }
 }
 
-// NOTE: Legacy LsmChunkIndex trait implementation removed during V2.1 migration.
-// The V2 index uses a different architecture (IndexBuilder/IndexReader) that doesn't
-// implement the ChunkIndex trait. For production use, migrate to V2 APIs directly.
-
-/// Chunk index backend selection.
+/// Create a chunk index (internal use only).
 ///
-/// NOTE: LSM backends have been removed during V2.1 migration. Only Memory backend
-/// is supported. For persistent indexing, use era_index::v2 APIs directly.
-#[derive(Debug, Clone, Default)]
-pub enum ChunkIndexBackend {
-    /// In-memory HashMap (default)
-    #[default]
-    Memory,
-}
-
-/// Create a chunk index with the specified backend.
-pub fn create_chunk_index(backend: ChunkIndexBackend) -> EraResult<Arc<dyn ChunkIndex>> {
-    match backend {
-        ChunkIndexBackend::Memory => Ok(Arc::new(MemoryChunkIndex::new())),
-    }
+/// NOTE: V8.1 - This is now internal only.
+pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
+    Ok(Arc::new(MemoryChunkIndex::new()))
 }
 
 #[cfg(test)]

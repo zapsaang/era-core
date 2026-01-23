@@ -48,7 +48,7 @@ const EMBEDDED_INDEX_VERSION: u32 = 1;
 const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
 use crate::checkpoint::CheckpointManager;
-use crate::chunk_index::{create_chunk_index, ChunkIndex, ChunkIndexBackend};
+use crate::chunk_index::{create_chunk_index, ChunkIndex};
 use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 
@@ -107,8 +107,8 @@ pub struct ArchiveWriterBuilder {
     enable_checkpoint: bool,
     /// Recovery options when checkpoint is enabled
     recovery_options: RecoveryOptions,
-    /// Enable erasure coding for redundancy
-    enable_erasure: bool,
+    /// Enable erasure coding for redundancy (None = use config default)
+    enable_erasure: Option<bool>,
     /// Erasure coding configuration
     erasure_config: ErasureCodeConfig,
     /// Number of storage volumes to distribute data across
@@ -117,8 +117,6 @@ pub struct ArchiveWriterBuilder {
     enable_matrix_distribution: bool,
     /// Maximum volume size for fixed-size splitting (bytes)
     max_volume_size: Option<u64>,
-    /// Chunk index backend configuration (LSM-Tree recommended for production)
-    index_backend: ChunkIndexBackend,
     /// Target size for encrypted blocks (default: 4MB)
     target_block_size: Option<usize>,
     /// Enable packing of multiple small files into a single chunk
@@ -138,33 +136,15 @@ impl ArchiveWriterBuilder {
             chunker_config: None,
             enable_checkpoint: false,
             recovery_options: RecoveryOptions::default(),
-            enable_erasure: false,
+            enable_erasure: None,
             erasure_config: ErasureCodeConfig::default(),
             volume_count: 1,
             enable_matrix_distribution: false,
             max_volume_size: None,
-            index_backend: ChunkIndexBackend::Memory,
             target_block_size: None,
             enable_small_file_packing: true,
             append_existing: false,
         }
-    }
-
-    /// Set the chunk index backend.
-    ///
-    /// Currently only **Memory** backend is supported.
-    /// For persistent indexing, use era_index::v2 APIs directly.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let writer = ArchiveWriterBuilder::new("archive.era")
-    ///     .password("secret")
-    ///     .build()?;
-    /// ```
-    pub fn index_backend(mut self, backend: ChunkIndexBackend) -> Self {
-        self.index_backend = backend;
-        self
     }
 
     /// Set the encryption password (password mode).
@@ -250,8 +230,10 @@ impl ArchiveWriterBuilder {
     ///
     /// When enabled, blocks are encoded with Reed-Solomon erasure coding,
     /// allowing recovery from up to `parity_shards` lost shards.
+    ///
+    /// Pass `false` to explicitly disable EC even if the config has it enabled.
     pub fn enable_erasure(mut self, enable: bool) -> Self {
-        self.enable_erasure = enable;
+        self.enable_erasure = Some(enable);
         self
     }
 
@@ -261,7 +243,7 @@ impl ArchiveWriterBuilder {
     /// This allows recovery from loss of any 2 shards.
     pub fn erasure_config(mut self, config: ErasureCodeConfig) -> Self {
         self.erasure_config = config;
-        self.enable_erasure = true;
+        self.enable_erasure = Some(true);
         self
     }
 
@@ -286,7 +268,7 @@ impl ArchiveWriterBuilder {
     pub fn enable_matrix_distribution(mut self, enable: bool) -> Self {
         self.enable_matrix_distribution = enable;
         if enable {
-            self.enable_erasure = true;
+            self.enable_erasure = Some(true);
         }
         self
     }
@@ -342,7 +324,21 @@ impl ArchiveWriterBuilder {
         let mut key_encapsulation: Option<KeyEncapsulation> = None;
 
         let mut config = self.config.clone();
-        let enable_erasure = self.enable_erasure;
+        // Determine erasure settings: explicit builder setting takes precedence over config default
+        let enable_erasure = match self.enable_erasure {
+            Some(explicit) => explicit, // Explicit .enable_erasure(true/false) call
+            None => self.config.erasure.is_some(), // Fall back to config default
+        };
+        let erasure_config = if self.enable_erasure == Some(true) {
+            // Explicit builder setting takes precedence
+            self.erasure_config
+        } else if let Some(cfg) = self.config.erasure {
+            // Use config's erasure setting (e.g., default 4+1)
+            cfg
+        } else {
+            // Fallback (shouldn't reach here if enable_erasure is false)
+            self.erasure_config
+        };
         let enable_matrix_distribution = self.enable_matrix_distribution;
         let volume_count = self.volume_count;
         let enable_cdc = self.enable_cdc;
@@ -557,8 +553,13 @@ impl ArchiveWriterBuilder {
         let nonce_context = *archive_salt.as_bytes();
 
         // Build config with erasure setting
-        if !self.append_existing && enable_erasure {
-            config.erasure = Some(self.erasure_config);
+        if !self.append_existing {
+            if enable_erasure {
+                config.erasure = Some(erasure_config);
+            } else {
+                // Explicitly disable EC even if config default has it enabled
+                config.erasure = None;
+            }
         }
 
         // Set distribution strategy in config, to match VolumePool behavior
@@ -588,8 +589,7 @@ impl ArchiveWriterBuilder {
 
         // Determine volume count based on erasure config if matrix distribution is enabled
         let resolved_volume_count = if enable_matrix_distribution && enable_erasure {
-            let erasure = self.erasure_config;
-            let total_shards = (erasure.data_shards + erasure.parity_shards) as usize;
+            let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
 
             // For matrix distribution, recommend total_shards volumes for optimal fault tolerance
             // This allows tolerating up to parity_shards volume failures
@@ -600,25 +600,28 @@ impl ArchiveWriterBuilder {
                 info!(
                     "Matrix distribution: automatically using {} volumes \
                      for optimal fault tolerance (can tolerate {} volume failures)",
-                    recommended_volumes, erasure.parity_shards
+                    recommended_volumes, erasure_config.parity_shards
                 );
                 recommended_volumes
             } else if volume_count < recommended_volumes {
                 // User specified fewer volumes than optimal
-                let min_viable = (erasure.parity_shards as usize + 1).max(2);
+                let min_viable = (erasure_config.parity_shards as usize + 1).max(2);
                 if volume_count >= min_viable {
                     warn!(
                         "Using {} volumes for matrix distribution. \
                          Note: will tolerate at most 1 volume failure \
                          (recommended: {} volumes for up to {} volume failures)",
-                        volume_count, recommended_volumes, erasure.parity_shards
+                        volume_count, recommended_volumes, erasure_config.parity_shards
                     );
                     volume_count
                 } else {
                     warn!(
                         "Insufficient volumes: {} specified, but {} minimum required \
                          for {},{} erasure. Adjusting to minimum.",
-                        volume_count, min_viable, erasure.data_shards, erasure.parity_shards
+                        volume_count,
+                        min_viable,
+                        erasure_config.data_shards,
+                        erasure_config.parity_shards
                     );
                     min_viable
                 }
@@ -627,9 +630,21 @@ impl ArchiveWriterBuilder {
                 info!(
                     "Using {} volumes for matrix distribution \
                      (will tolerate up to {} volume failures)",
-                    volume_count, erasure.parity_shards
+                    volume_count, erasure_config.parity_shards
                 );
                 volume_count
+            }
+        } else if enable_erasure {
+            // EC enabled without matrix distribution: auto-adjust volume count
+            let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
+            if volume_count <= 1 {
+                info!(
+                    "Erasure coding enabled: automatically using {} volumes for {} data + {} parity shards",
+                    total_shards, erasure_config.data_shards, erasure_config.parity_shards
+                );
+                total_shards
+            } else {
+                volume_count.max(total_shards)
             }
         } else {
             volume_count
@@ -645,7 +660,7 @@ impl ArchiveWriterBuilder {
         let mut pool_config = VolumePoolConfig::new(&base_path, resolved_volume_count);
 
         if enable_erasure {
-            pool_config = pool_config.for_erasure(self.erasure_config);
+            pool_config = pool_config.for_erasure(erasure_config);
         }
 
         if let Some(max_size) = max_volume_size {
@@ -748,8 +763,8 @@ impl ArchiveWriterBuilder {
             None
         };
 
-        // Create chunk index with configured backend
-        let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index(self.index_backend.clone())?;
+        // Create chunk index (V8.1: internal memory-based index)
+        let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index()?;
         let mut embedded_index: HashMap<ChunkHash, BlockLocation> = HashMap::new();
 
         // Load existing chunk locations from checkpoint if resuming
@@ -784,7 +799,7 @@ impl ArchiveWriterBuilder {
 
         if let Some(max_volume_size) = max_volume_size {
             if enable_erasure {
-                let prefix_len = self.erasure_config.data_shards as usize * 4;
+                let prefix_len = erasure_config.data_shards as usize * 4;
                 let reserved =
                     era_volume::FOOTER_SIZE + 4096 + era_common::ShardHeader::SIZE + prefix_len;
                 if max_volume_size as usize > reserved {
@@ -808,7 +823,7 @@ impl ArchiveWriterBuilder {
             nonce_context,
             compression_config: config.compression.clone(),
             erasure_config: if enable_erasure {
-                Some(self.erasure_config)
+                Some(erasure_config)
             } else {
                 None
             },
@@ -819,7 +834,7 @@ impl ArchiveWriterBuilder {
             file_reader,
             enable_cdc,
             stripe_buffer: if enable_erasure {
-                Some(StripeBuffer::new(self.erasure_config))
+                Some(StripeBuffer::new(erasure_config))
             } else {
                 None
             },
@@ -2243,7 +2258,7 @@ pub mod generic {
             // Store compression config for creating compressors on demand
             let compression_config = self.config.compression.clone();
 
-            let chunk_index = create_chunk_index(ChunkIndexBackend::Memory)?;
+            let chunk_index = create_chunk_index()?;
 
             Ok(GenericArchiveWriter {
                 archive_id,
