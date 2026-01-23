@@ -460,37 +460,6 @@ mod tests {
         assert!(status.in_progress_file.is_none());
     }
 
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    /// Checkpoints are now stored as typed blocks inside the .era volume.
-    /// See `cold_recovery_bulletproof` integration test for V2.2 checkpoint testing.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_analyze_with_checkpoint() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-
-        // Create a checkpoint with some progress
-        {
-            let mut manager = CheckpointManager::new(&archive_path);
-            manager.mark_file_completed("/file1.txt").unwrap();
-            manager.mark_file_completed("/file2.txt").unwrap();
-            manager.start_file("/file3.txt", 10000).unwrap();
-            manager
-                .record_chunk(test_hash(1), test_location(100, 50))
-                .unwrap();
-            manager.save().unwrap();
-        }
-
-        let status = RecoveryManager::analyze(&archive_path).unwrap();
-
-        assert!(status.checkpoint_exists);
-        assert!(!status.archive_exists);
-        assert!(status.recovery_needed);
-        assert_eq!(status.completed_files.len(), 2);
-        assert!(status.in_progress_file.is_some());
-        assert_eq!(status.chunks_written, 1);
-    }
-
     // ============ RecoveryManager Tests ============
 
     #[test]
@@ -503,54 +472,6 @@ mod tests {
         assert!(!manager.can_recover());
         assert!(!manager.is_file_completed(Path::new("/any/file.txt")));
         assert!(manager.completed_files().is_empty());
-    }
-
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_recovery_manager_with_checkpoint() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-
-        // Create checkpoint
-        {
-            let mut cp = CheckpointManager::new(&archive_path);
-            cp.mark_file_completed("/completed.txt").unwrap();
-            cp.record_chunk(test_hash(42), test_location(1000, 500))
-                .unwrap();
-            cp.save().unwrap();
-        }
-
-        let manager = RecoveryManager::new(&archive_path).unwrap();
-
-        assert!(manager.can_recover());
-        assert!(manager.is_file_completed(Path::new("/completed.txt")));
-        assert!(!manager.is_file_completed(Path::new("/not_completed.txt")));
-
-        let loc = manager.get_chunk_location(&test_hash(42));
-        assert!(loc.is_some());
-        assert_eq!(loc.unwrap().physical_offset, 1000);
-    }
-
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_recovery_manager_cleanup() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-
-        // Create checkpoint
-        {
-            let cp = CheckpointManager::new(&archive_path);
-            cp.save().unwrap();
-        }
-
-        assert!(CheckpointManager::exists(&archive_path));
-
-        let manager = RecoveryManager::new(&archive_path).unwrap();
-        manager.cleanup().unwrap();
-
-        assert!(!CheckpointManager::exists(&archive_path));
     }
 
     // ============ RecoveryOptions Tests ============
@@ -589,28 +510,6 @@ mod tests {
         assert!(writer.get_existing_chunk(&test_hash(1)).is_none());
     }
 
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_recoverable_writer_abort_with_checkpoint() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-
-        // Create checkpoint
-        {
-            let cp = CheckpointManager::new(&archive_path);
-            cp.save().unwrap();
-        }
-
-        // Abort strategy should return error when checkpoint exists
-        let opts = RecoveryOptions {
-            strategy: RecoveryStrategy::Abort,
-            ..Default::default()
-        };
-        let result = RecoverableWriter::new(&archive_path, opts);
-        assert!(result.is_err());
-    }
-
     #[test]
     fn test_recoverable_writer_abort_without_checkpoint() {
         let temp = TempDir::new().unwrap();
@@ -624,55 +523,6 @@ mod tests {
         // This will still fail because Abort + no checkpoint leads to unreachable
         // Actually, when there's no checkpoint, Abort should work like StartFresh
         // Let's check the actual behavior - it seems the logic needs adjustment
-    }
-
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_recoverable_writer_resume() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-
-        // Create checkpoint with progress
-        {
-            let mut cp = CheckpointManager::new(&archive_path);
-            cp.mark_file_completed("/done.txt").unwrap();
-            cp.record_chunk(test_hash(1), test_location(100, 50))
-                .unwrap();
-            cp.save().unwrap();
-        }
-
-        let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::resume()).unwrap();
-
-        assert!(writer.should_skip_file(Path::new("/done.txt")));
-        assert!(!writer.should_skip_file(Path::new("/not_done.txt")));
-
-        let loc = writer.get_existing_chunk(&test_hash(1));
-        assert!(loc.is_some());
-        assert_eq!(loc.unwrap().physical_offset, 100);
-    }
-
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_recoverable_writer_start_fresh_deletes_checkpoint() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-
-        // Create checkpoint
-        {
-            let mut cp = CheckpointManager::new(&archive_path);
-            cp.mark_file_completed("/file.txt").unwrap();
-            cp.save().unwrap();
-        }
-
-        assert!(CheckpointManager::exists(&archive_path));
-
-        // Start fresh should delete the checkpoint
-        let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
-
-        // Checkpoint should be deleted, so no files should be skipped
-        assert!(!writer.should_skip_file(Path::new("/file.txt")));
     }
 
     #[test]
@@ -708,99 +558,5 @@ mod tests {
 
         // V2.2: Checkpoint is no longer a sidecar file, so this check is no longer valid
         // assert!(!CheckpointManager::exists(&archive_path));
-    }
-
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_recoverable_writer_with_hmac() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-        let key = [42u8; 32];
-
-        // Create with HMAC
-        {
-            let mut writer =
-                RecoverableWriter::new(&archive_path, RecoveryOptions::resume().with_hmac_key(key))
-                    .unwrap();
-            writer
-                .mark_file_completed(Path::new("/secure.txt"))
-                .unwrap();
-            writer.sync().unwrap();
-        }
-
-        // Resume with correct key should work
-        {
-            let writer =
-                RecoverableWriter::new(&archive_path, RecoveryOptions::resume().with_hmac_key(key))
-                    .unwrap();
-            assert!(writer.should_skip_file(Path::new("/secure.txt")));
-            writer.finalize().unwrap();
-        }
-    }
-
-    /// V2.2: This test is ignored because sidecar checkpoints are no longer supported.
-    #[test]
-    #[ignore = "V2.2: Sidecar checkpoints replaced by volume-embedded checkpoints"]
-    fn test_recoverable_writer_simulated_crash_recovery() {
-        let temp = TempDir::new().unwrap();
-        let archive_path = temp.path().join("test.era");
-
-        // First run: process some files, then "crash"
-        {
-            let mut writer =
-                RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
-
-            writer.start_file(Path::new("/file1.txt"), 1000).unwrap();
-            writer
-                .record_chunk(test_hash(1), test_location(0, 500))
-                .unwrap();
-            writer
-                .record_chunk(test_hash(2), test_location(500, 500))
-                .unwrap();
-            writer.mark_file_completed(Path::new("/file1.txt")).unwrap();
-
-            writer.start_file(Path::new("/file2.txt"), 2000).unwrap();
-            writer
-                .record_chunk(test_hash(3), test_location(1000, 1000))
-                .unwrap();
-            writer.update_progress(1000, 1).unwrap();
-
-            // Sync but don't finalize (simulating crash)
-            writer.sync().unwrap();
-            // Drop without finalize
-        }
-
-        // Second run: resume from checkpoint
-        {
-            let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::resume()).unwrap();
-
-            // File 1 should be skipped
-            assert!(writer.should_skip_file(Path::new("/file1.txt")));
-
-            // File 2 should not be skipped (was in progress)
-            assert!(!writer.should_skip_file(Path::new("/file2.txt")));
-
-            // Chunks 1 and 2 should exist
-            assert!(writer.get_existing_chunk(&test_hash(1)).is_some());
-            assert!(writer.get_existing_chunk(&test_hash(2)).is_some());
-
-            // Chunk 3 from file2 should also exist
-            assert!(writer.get_existing_chunk(&test_hash(3)).is_some());
-
-            // New chunks should not exist
-            assert!(writer.get_existing_chunk(&test_hash(99)).is_none());
-
-            // Can verify in-progress state
-            let cp = writer.checkpoint();
-            let in_progress = cp.in_progress_file.as_ref().unwrap();
-            assert_eq!(in_progress.path, PathBuf::from("/file2.txt"));
-            assert_eq!(in_progress.bytes_processed, 1000);
-
-            writer.finalize().unwrap();
-        }
-
-        // Verify checkpoint is cleaned up
-        assert!(!CheckpointManager::exists(&archive_path));
     }
 }

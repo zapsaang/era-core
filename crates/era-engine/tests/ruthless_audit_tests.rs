@@ -5,15 +5,20 @@
 #[cfg(test)]
 mod ruthless_audit_tests {
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::Instant;
 
-    const TEST_DATA_DIR: &str = "test_shell/test_data";
-    const RESULTS_DIR: &str = "test_shell/results";
+    fn get_test_data_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_shell/test_data")
+    }
+
+    fn get_results_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_shell/results")
+    }
 
     fn setup() {
-        let _ = fs::create_dir_all(TEST_DATA_DIR);
-        let _ = fs::create_dir_all(RESULTS_DIR);
+        let _ = fs::create_dir_all(get_test_data_dir());
+        let _ = fs::create_dir_all(get_results_dir());
     }
 
     /// Verify that kernel copies are truly identical (byte-for-byte)
@@ -24,7 +29,7 @@ mod ruthless_audit_tests {
 
         println!("\n[RUTHLESS AUDIT] Test: Kernel Copy Identity Verification");
 
-        let copies_dir = Path::new(TEST_DATA_DIR).join("duplicates");
+        let copies_dir = get_test_data_dir().join("duplicates");
         assert!(copies_dir.exists(), "Test data directory not found");
 
         // Read copy 1
@@ -57,7 +62,7 @@ mod ruthless_audit_tests {
         // - With perfect CDC: ~1.5GB output (10:1 ratio)
         // - With CDC + compression: ~500MB output (30:1 ratio)
 
-        let test_dir = Path::new(TEST_DATA_DIR).join("duplicates");
+        let test_dir = get_test_data_dir().join("duplicates");
         if !test_dir.exists() {
             println!("  ⚠️  Test data not found");
             return;
@@ -294,7 +299,7 @@ mod ruthless_audit_tests {
         report.push_str("✓ FastCDC integration solid\n");
         report.push_str("✓ Footer atomicity verified\n\n");
 
-        let report_path = PathBuf::from(RESULTS_DIR).join("ruthless_audit_report.md");
+        let report_path = get_results_dir().join("ruthless_audit_report.md");
         fs::write(&report_path, report).expect("Failed to write report");
 
         println!("✓ Report saved to: {}", report_path.display());

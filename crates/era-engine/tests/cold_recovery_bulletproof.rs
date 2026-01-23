@@ -237,7 +237,6 @@ async fn test_no_sidecar_files_after_normal_finalize() {
 }
 
 #[tokio::test]
-#[ignore] // Expensive test, run with --ignored
 async fn test_cold_recovery_large_dataset() {
     println!("\n=== Large Dataset Cold Recovery Test ===");
     println!("This test creates 100MB of data to simulate realistic scenario");
