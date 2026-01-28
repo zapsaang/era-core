@@ -119,7 +119,11 @@ impl std::fmt::Display for VolumeId {
     Deserialize,
     bincode::Encode,
     bincode::Decode,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
 )]
+#[archive(check_bytes)]
 pub struct BlockId(pub u64);
 
 impl BlockId {

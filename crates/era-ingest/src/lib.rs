@@ -13,6 +13,7 @@
 //! - Streaming chunker for large files
 //! - Configurable chunk sizes
 
+pub mod acl;
 mod chunker;
 mod chunker_zerocopy;
 mod entry;

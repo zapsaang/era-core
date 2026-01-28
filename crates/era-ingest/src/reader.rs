@@ -185,6 +185,7 @@ impl DirectoryScanner {
 
     /// Extract Access Control Lists (ACLs)
     fn extract_acls(&self, path: &Path) -> Option<Vec<u8>> {
+        use crate::acl::AclData;
         use exacl::{getfacl, AclOption};
 
         // Use getfacl which is the high-level API for exacl
@@ -193,7 +194,7 @@ impl DirectoryScanner {
                 if entries.is_empty() {
                     return None;
                 }
-                serde_json::to_vec(&entries).ok()
+                AclData::from_exacl(&entries).to_bytes()
             }
             Err(_) => None,
         }

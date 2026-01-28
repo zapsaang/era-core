@@ -29,7 +29,6 @@ tokio = { workspace = true, features = [
 ] }
 zstd = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 prost = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

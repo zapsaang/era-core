@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use rand::RngCore;
+use rkyv::Deserialize;
 use zeroize::Zeroize;
 
 use era_common::{EraError, Result};
@@ -67,9 +68,9 @@ impl Spiller {
         // Generate unique nonce
         let nonce = self.generate_nonce();
 
-        // Serialize entries
-        let config = bincode::config::standard();
-        let plaintext = bincode::serde::encode_to_vec(entries, config)
+        // Serialize entries using rkyv (zero-copy)
+        let entries_vec = entries.to_vec();
+        let plaintext = rkyv::to_bytes::<_, 4096>(&entries_vec)
             .map_err(|e| EraError::Serialization(e.to_string()))?;
 
         // Encrypt payload
@@ -115,11 +116,12 @@ impl Spiller {
             .decrypt(&self.key, &nonce, &ciphertext)
             .map_err(|e| EraError::Decryption(format!("Failed to decrypt spill file: {}", e)))?;
 
-        // Deserialize
-        let config = bincode::config::standard();
-        let entries: Vec<IndexEntry> = bincode::serde::decode_from_slice(&plaintext, config)
-            .map_err(|e| EraError::Deserialization(e.to_string()))?
-            .0;
+        // Deserialize using rkyv (zero-copy)
+        let archived = rkyv::check_archived_root::<Vec<IndexEntry>>(&plaintext)
+            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        let entries: Vec<IndexEntry> = archived
+            .deserialize(&mut rkyv::Infallible)
+            .map_err(|e| EraError::Deserialization(format!("{:?}", e)))?;
 
         Ok(entries)
     }

@@ -61,6 +61,7 @@ pub use spiller::Spiller;
 // Re-export for convenience
 pub use era_common::{BlockId, BlockLocation, ChunkHash, VolumeId};
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 /// Number of entries per L2 Index Page
@@ -68,7 +69,21 @@ use serde::{Deserialize, Serialize};
 pub const ENTRIES_PER_PAGE: usize = 8192;
 
 /// A single entry mapping a chunk hash to its physical location
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+)]
+#[archive(check_bytes)]
 pub struct IndexEntry {
     /// Hash of the chunk (primary key)
     pub hash: ChunkHash,
@@ -107,7 +122,8 @@ impl IndexEntry {
 }
 
 /// An L2 Index Page (fundamental unit of storage)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
 pub struct IndexPage {
     /// Minimum hash in this page (for range queries)
     pub min_hash: ChunkHash,
@@ -148,7 +164,8 @@ impl IndexPage {
 }
 
 /// A pointer to an L2 Index Page
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
 pub struct PagePointer {
     /// Minimum hash in the target page
     pub min_hash: ChunkHash,
@@ -159,7 +176,8 @@ pub struct PagePointer {
 }
 
 /// The L1 Meta-Index (root directory)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
 pub struct MetaIndex {
     /// Sparse index of L2 pages
     pub pages: Vec<PagePointer>,
