@@ -607,8 +607,8 @@ pub fn repair_archive_matrix(
                 } else {
                     end
                 };
-                if f.has_lsm_manifest() && f.lsm_manifest_offset < limit {
-                    limit = f.lsm_manifest_offset;
+                if f.has_index() && f.index_offset < limit {
+                    limit = f.index_offset;
                 }
                 limit
             } else {

@@ -422,8 +422,9 @@ pub fn list(
         info!("{}", "-".repeat(60));
         for entry in &files {
             let hash_str = entry
-                .content_hash
-                .map(|h| format!("{:.16}", h))
+                .chunks
+                .first()
+                .map(|c| format!("{:.16}", c.hash))
                 .unwrap_or_else(|| "-".to_string());
             info!(
                 "{:<12} {:<20} {}",

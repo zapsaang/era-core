@@ -61,12 +61,8 @@ async fn dedup_audit_small_files() {
         {
             continue;
         }
-        if entry.is_chunked() {
-            for chunk in &entry.chunks {
-                unique_hashes.insert(chunk.hash);
-            }
-        } else if let Some(hash) = entry.content_hash {
-            unique_hashes.insert(hash);
+        for chunk in &entry.chunks {
+            unique_hashes.insert(chunk.hash);
         }
     }
 

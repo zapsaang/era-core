@@ -26,17 +26,17 @@ fn test_mandatory_memory_index_default() {
     // Close writer to flush everything
     writer.finalize().expect("Finalize failed");
 
-    // Check: No LSM manifest in footer (Memory backend is default)
+    // Check: No index in footer (Memory backend is default)
     let backend = LocalStorageBackend::new(temp_dir.path());
     let file_name = archive_path.file_name().unwrap();
     let reader = VolumeReader::open(&backend, std::path::Path::new(file_name))
         .expect("Failed to open volume");
     let footer = reader.footer().expect("Missing footer");
 
-    // LSM manifest should NOT be present (Memory backend is default in v2.2+)
+    // Index should NOT be present (Memory backend is default in v2.2+)
     assert!(
-        !footer.has_lsm_manifest(),
-        "LSM manifest should NOT be present (Memory backend is default)"
+        !footer.has_index(),
+        "Index should NOT be present (Memory backend is default)"
     );
 }
 

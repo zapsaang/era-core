@@ -163,11 +163,7 @@ pub struct FileEntry {
     /// Access Control List (Platform specific)
     #[serde(default)]
     pub acl: Option<Vec<u8>>,
-    /// Hash of the file content (for single-chunk files only)
-    /// Deprecated: Use `chunks` for new archives
-    pub content_hash: Option<ChunkHash>,
-    /// List of chunks for multi-chunk files (CDC)
-    /// Empty for single-chunk files (backward compatibility)
+    /// List of chunks for file content
     #[serde(default)]
     pub chunks: Vec<ChunkRef>,
 }
@@ -236,7 +232,6 @@ impl FileEntry {
             gid,
             xattrs: BTreeMap::new(),
             acl: None,
-            content_hash: None,
             chunks: Vec::new(),
         })
     }
@@ -254,39 +249,24 @@ impl FileEntry {
             gid: None,
             xattrs: BTreeMap::new(),
             acl: None,
-            content_hash: None,
             chunks: Vec::new(),
         }
     }
 
-    /// Set the content hash (for single-chunk files)
-    pub fn with_hash(mut self, hash: ChunkHash) -> Self {
-        self.content_hash = Some(hash);
-        self
-    }
-
-    /// Set the chunk list (for multi-chunk files)
+    /// Set the chunk list
     pub fn with_chunks(mut self, chunks: Vec<ChunkRef>) -> Self {
         self.chunks = chunks;
         self
     }
 
-    /// Check if this file uses multi-chunk storage
+    /// Check if this file has chunks
     pub fn is_chunked(&self) -> bool {
         !self.chunks.is_empty()
     }
 
     /// Get all chunk hashes for this file
-    ///
-    /// Returns content_hash for single-chunk files, or all chunk hashes for multi-chunk files.
     pub fn all_chunk_hashes(&self) -> Vec<ChunkHash> {
-        if self.is_chunked() {
-            self.chunks.iter().map(|c| c.hash).collect()
-        } else if let Some(hash) = self.content_hash {
-            vec![hash]
-        } else {
-            vec![]
-        }
+        self.chunks.iter().map(|c| c.hash).collect()
     }
 
     /// Check if this is a regular file
@@ -320,7 +300,6 @@ impl From<&FileEntry> for ProtoFileEntry {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             acl: e.acl.clone(),
-            content_hash: e.content_hash.map(|h| h.into()),
             chunks: e.chunks.iter().map(|c| c.into()).collect(),
         }
     }
@@ -343,7 +322,6 @@ impl TryFrom<ProtoFileEntry> for FileEntry {
             gid: p.gid,
             xattrs: p.xattrs.into_iter().collect(),
             acl: p.acl,
-            content_hash: p.content_hash.map(|h| h.try_into()).transpose()?,
             chunks: p
                 .chunks
                 .into_iter()

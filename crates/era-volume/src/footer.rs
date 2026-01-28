@@ -10,11 +10,8 @@ pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
 /// Footer size (128 bytes for atomic write)
 pub const FOOTER_SIZE: usize = 128;
 
-/// Current footer version (V7 for v8.1 redundancy layout)
-pub const FOOTER_VERSION: u16 = 7;
-
 /// Backup footer gap size (reserved after header for backup footer)
-/// V8.1 layout: [Header 4096] [Backup Footer Gap 128] [Data...] [Backup Header 4096] [Primary Footer 128]
+/// Layout: [Header 4096] [Backup Footer Gap 128] [Data...] [Backup Header 4096] [Primary Footer 128]
 pub const BACKUP_FOOTER_GAP: usize = FOOTER_SIZE;
 
 /// Volume footer - stored at the end of each volume
@@ -25,8 +22,6 @@ pub const BACKUP_FOOTER_GAP: usize = FOOTER_SIZE;
 pub struct Footer {
     /// Magic bytes: "ERAF"
     pub magic: [u8; 4],
-    /// Footer version
-    pub version: u16,
     /// Status flags
     pub flags: u16,
     /// Offset of the data region end
@@ -45,19 +40,13 @@ pub struct Footer {
     pub last_checkpoint_offset: u64,
     /// Block ID of the last checkpoint (for direct decryption)
     pub last_checkpoint_block_id: u32,
-    /// Offset of embedded LSM manifest block
-    pub lsm_manifest_offset: u64,
-    /// Size of embedded LSM manifest block
-    pub lsm_manifest_size: u32,
-    /// Block ID of embedded LSM manifest
-    pub lsm_manifest_block_id: u32,
-    /// Offset of the index manifest root block
-    pub index_root_offset: u64,
-    /// Size of the index manifest root block
-    pub index_root_size: u32,
-    /// Block ID of the index manifest root
-    pub index_root_block_id: u32,
-    /// Offset of the backup header (for v8.1 redundancy layout)
+    /// Offset of the index block
+    pub index_offset: u64,
+    /// Size of the index block
+    pub index_size: u32,
+    /// Block ID of the index
+    pub index_block_id: u32,
+    /// Offset of the backup header (for redundancy layout)
     pub backup_header_offset: u64,
     /// Blake3 checksum of the footer (excluding this field)
     pub checksum: [u8; 32],
@@ -70,9 +59,6 @@ impl Footer {
             data_end_offset,
             block_count,
             sequence_number,
-            0,
-            0,
-            0,
             0,
             0,
             0,
@@ -96,17 +82,13 @@ impl Footer {
         catalog_block_id: u32,
         last_checkpoint_offset: u64,
         last_checkpoint_block_id: u32,
-        lsm_manifest_offset: u64,
-        lsm_manifest_size: u32,
-        lsm_manifest_block_id: u32,
-        index_root_offset: u64,
-        index_root_size: u32,
-        index_root_block_id: u32,
+        index_offset: u64,
+        index_size: u32,
+        index_block_id: u32,
         backup_header_offset: u64,
     ) -> Self {
         let mut footer = Self {
             magic: FOOTER_MAGIC,
-            version: FOOTER_VERSION,
             flags: 0,
             data_end_offset,
             block_count,
@@ -116,12 +98,9 @@ impl Footer {
             catalog_block_id,
             last_checkpoint_offset,
             last_checkpoint_block_id,
-            lsm_manifest_offset,
-            lsm_manifest_size,
-            lsm_manifest_block_id,
-            index_root_offset,
-            index_root_size,
-            index_root_block_id,
+            index_offset,
+            index_size,
+            index_block_id,
             backup_header_offset,
             checksum: [0u8; 32],
         };
@@ -135,20 +114,14 @@ impl Footer {
         self.catalog_offset > 0 && self.catalog_size > 0
     }
 
-    /// Check if embedded LSM manifest location is available
-    pub fn has_lsm_manifest(&self) -> bool {
-        self.lsm_manifest_offset > 0 && self.lsm_manifest_size > 0
-    }
-
-    /// Check if V2.1 index root location is available
-    pub fn has_index_root(&self) -> bool {
-        self.index_root_offset > 0 && self.index_root_size > 0
+    /// Check if index location is available
+    pub fn has_index(&self) -> bool {
+        self.index_offset > 0 && self.index_size > 0
     }
 
     fn to_proto(&self) -> ProtoFooter {
         ProtoFooter {
             magic: self.magic.to_vec(),
-            version: self.version as u32,
             flags: self.flags as u32,
             data_end_offset: self.data_end_offset,
             block_count: self.block_count,
@@ -158,14 +131,11 @@ impl Footer {
             catalog_block_id: self.catalog_block_id,
             last_checkpoint_offset: self.last_checkpoint_offset,
             last_checkpoint_block_id: self.last_checkpoint_block_id,
-            lsm_manifest_offset: self.lsm_manifest_offset,
-            lsm_manifest_size: self.lsm_manifest_size,
-            lsm_manifest_block_id: self.lsm_manifest_block_id,
-            index_root_offset: self.index_root_offset,
-            index_root_size: self.index_root_size,
-            index_root_block_id: self.index_root_block_id,
-            backup_header_offset: self.backup_header_offset,
             checksum: self.checksum.to_vec(),
+            index_offset: self.index_offset,
+            index_size: self.index_size,
+            index_block_id: self.index_block_id,
+            backup_header_offset: self.backup_header_offset,
         }
     }
 
@@ -175,7 +145,6 @@ impl Footer {
 
         Ok(Self {
             magic,
-            version: proto.version as u16,
             flags: proto.flags as u16,
             data_end_offset: proto.data_end_offset,
             block_count: proto.block_count,
@@ -185,12 +154,9 @@ impl Footer {
             catalog_block_id: proto.catalog_block_id,
             last_checkpoint_offset: proto.last_checkpoint_offset,
             last_checkpoint_block_id: proto.last_checkpoint_block_id,
-            lsm_manifest_offset: proto.lsm_manifest_offset,
-            lsm_manifest_size: proto.lsm_manifest_size,
-            lsm_manifest_block_id: proto.lsm_manifest_block_id,
-            index_root_offset: proto.index_root_offset,
-            index_root_size: proto.index_root_size,
-            index_root_block_id: proto.index_root_block_id,
+            index_offset: proto.index_offset,
+            index_size: proto.index_size,
+            index_block_id: proto.index_block_id,
             backup_header_offset: proto.backup_header_offset,
             checksum,
         })

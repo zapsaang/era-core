@@ -265,8 +265,8 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             };
 
             if let Some(f) = footer {
-                if f.has_lsm_manifest() && f.lsm_manifest_offset < limit {
-                    limit = f.lsm_manifest_offset;
+                if f.has_index() && f.index_offset < limit {
+                    limit = f.index_offset;
                 }
             }
             current_offsets.push(start);
@@ -724,8 +724,8 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             };
 
             if let Some(f) = footer {
-                if f.has_lsm_manifest() && f.lsm_manifest_offset < limit {
-                    limit = f.lsm_manifest_offset;
+                if f.has_index() && f.index_offset < limit {
+                    limit = f.index_offset;
                 }
             }
             current_offsets.push(start);

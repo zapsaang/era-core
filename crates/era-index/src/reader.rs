@@ -102,21 +102,21 @@ impl IndexReader {
 
         // Step 1: Try to read MetaIndex from footer (fast path)
         let meta = if let Some(footer) = volume_reader.footer() {
-            if footer.has_index_root() {
-                // Footer has index root location
+            if footer.has_index() {
+                // Footer has index location
                 let location = BlockLocation {
                     volume_id: era_common::VolumeId::new(),
-                    slot_index: footer.index_root_block_id,
-                    physical_offset: footer.index_root_offset,
-                    encrypted_size: footer.index_root_size,
+                    slot_index: footer.index_block_id,
+                    physical_offset: footer.index_offset,
+                    encrypted_size: footer.index_size,
                     erasure_info: None,
                     shard_offsets: None,
                     shard_volumes: None,
                 };
 
                 tracing::info!(
-                    "Found index root in footer at offset {}",
-                    footer.index_root_offset
+                    "Found index in footer at offset {}",
+                    footer.index_offset
                 );
 
                 // Read and decrypt MetaIndex
@@ -129,7 +129,7 @@ impl IndexReader {
                 }
 
                 // Decrypt MetaIndex
-                let block_id = BlockId::new(footer.index_root_block_id as u64);
+                let block_id = BlockId::new(footer.index_block_id as u64);
                 let block_key =
                     session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
                 let derived_key = block_key.to_derived_key();

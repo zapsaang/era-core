@@ -44,14 +44,6 @@ fn test_footer_supports_checkpoint_block_id() {
 
     let footer = reader.footer().expect("Missing footer");
 
-    // Verify footer version is 6+ (supports block_id)
-    assert!(
-        footer.version >= 6,
-        "Footer version should be >= 6, got {}",
-        footer.version
-    );
-
-    println!("Footer version: {}", footer.version);
     println!(
         "Checkpoint offset: {}, block_id: {}",
         footer.last_checkpoint_offset, footer.last_checkpoint_block_id
@@ -60,10 +52,7 @@ fn test_footer_supports_checkpoint_block_id() {
     // Note: For normal archives without explicit checkpoint commit,
     // last_checkpoint_offset will be 0. The important thing is that
     // the footer structure supports the field.
-    println!(
-        "✓ Footer supports checkpoint block_id field (version {})",
-        footer.version
-    );
+    println!("✓ Footer supports checkpoint block_id field");
 }
 
 /// Test that no sidecar checkpoint files are created
@@ -101,11 +90,11 @@ fn test_no_sidecar_checkpoint_files() {
     println!("✓ No sidecar checkpoint files created");
 }
 
-/// Test footer has_lsm_manifest returns false (Memory backend is default)
+/// Test footer has_index returns false (Memory backend is default)
 #[test]
-fn test_footer_no_lsm_manifest() {
+fn test_footer_no_index() {
     let temp_dir = TempDir::new().unwrap();
-    let archive_path = temp_dir.path().join("no_lsm.era");
+    let archive_path = temp_dir.path().join("no_index.era");
 
     // Create archive with defaults (Memory backend)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
@@ -123,13 +112,13 @@ fn test_footer_no_lsm_manifest() {
 
     let footer = reader.footer().expect("Missing footer");
 
-    // LSM manifest should NOT be present (Memory backend is default in v2.2+)
+    // Index should NOT be present (Memory backend is default in v2.2+)
     assert!(
-        !footer.has_lsm_manifest(),
-        "LSM manifest should NOT be present (Memory backend is default)"
+        !footer.has_index(),
+        "Index should NOT be present (Memory backend is default)"
     );
 
-    println!("✓ No LSM manifest in footer (Memory backend confirmed)");
+    println!("✓ No index in footer (Memory backend confirmed)");
 }
 
 /// Test that checkpoint detection uses volume footer, not sidecar files

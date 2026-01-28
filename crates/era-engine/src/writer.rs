@@ -1186,8 +1186,9 @@ impl ArchiveWriter {
             self.add_to_pending(chunk)?;
         }
 
-        // Create catalog entry
-        let entry = FileEntry::file(relative_path, size).with_hash(hash);
+        // Create catalog entry with single chunk
+        let chunk_ref = era_ingest::ChunkRef::new(hash, 0, size as u32);
+        let entry = FileEntry::file(relative_path, size).with_chunks(vec![chunk_ref]);
         self.catalog.add(entry);
 
         Ok(())
@@ -1710,8 +1711,9 @@ impl ArchiveWriter {
             self.add_to_pending(chunk)?;
         }
 
-        // Create catalog entry
-        let entry = FileEntry::file(PathBuf::from(name), data.len() as u64).with_hash(hash);
+        // Create catalog entry with single chunk
+        let chunk_ref = era_ingest::ChunkRef::new(hash, 0, data.len() as u32);
+        let entry = FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(vec![chunk_ref]);
         self.catalog.add(entry);
 
         Ok(())
@@ -2336,7 +2338,8 @@ pub mod generic {
                 self.add_to_pending(chunk)?;
             }
 
-            let entry = FileEntry::file(PathBuf::from(name), data.len() as u64).with_hash(hash);
+            let chunk_ref = era_ingest::ChunkRef::new(hash, 0, data.len() as u32);
+            let entry = FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(vec![chunk_ref]);
             self.catalog.add(entry);
 
             Ok(())

@@ -532,29 +532,29 @@ impl ArchiveReader {
         )
     }
 
-    /// Metadata-first preflight: restore embedded LSM (if present) and load catalog.
+    /// Metadata-first preflight: restore embedded index (if present) and load catalog.
     pub fn preflight_metadata_recovery(&mut self) -> Result<()> {
-        self.restore_embedded_lsm_manifest()?;
+        self.restore_embedded_index()?;
         self.load_catalog()?;
         Ok(())
     }
 
-    fn restore_embedded_lsm_manifest(&mut self) -> Result<()> {
+    fn restore_embedded_index(&mut self) -> Result<()> {
         if self.embedded_lsm_dir.is_some() {
             return Ok(());
         }
 
-        let mut manifest_reader_idx = None;
+        let mut index_reader_idx = None;
         for (i, reader) in self.volume_readers.iter().enumerate() {
             if let Some(footer) = reader.footer() {
-                if footer.has_lsm_manifest() {
-                    manifest_reader_idx = Some(i);
+                if footer.has_index() {
+                    index_reader_idx = Some(i);
                     break;
                 }
             }
         }
 
-        let reader_idx = match manifest_reader_idx {
+        let reader_idx = match index_reader_idx {
             Some(idx) => idx,
             None => return Ok(()),
         };
@@ -562,13 +562,13 @@ impl ArchiveReader {
         let reader = &self.volume_readers[reader_idx];
         let footer = reader
             .footer()
-            .expect("Manifest volume must have valid footer");
+            .expect("Index volume must have valid footer");
 
         let location = BlockLocation {
             volume_id: reader.header().volume_id,
-            slot_index: footer.lsm_manifest_block_id,
-            physical_offset: footer.lsm_manifest_offset,
-            encrypted_size: footer.lsm_manifest_size,
+            slot_index: footer.index_block_id,
+            physical_offset: footer.index_offset,
+            encrypted_size: footer.index_size,
             erasure_info: None,
             shard_offsets: None,
             shard_volumes: None,
@@ -586,7 +586,7 @@ impl ArchiveReader {
         let end = start + first_entry.length as usize;
         if end > unpacked.data.len() {
             return Err(EraError::decompression(
-                "LSM manifest chunk offset exceeds data size",
+                "Index chunk offset exceeds data size",
             ));
         }
 
@@ -906,12 +906,6 @@ impl ArchiveReader {
                             .push((file_idx, chunk_idx, chunk_ref.offset));
                     }
                 }
-            } else if let Some(content_hash) = entry.content_hash {
-                context
-                    .single_chunk_pending
-                    .entry(content_hash)
-                    .or_default()
-                    .push((file_idx, output_path));
             }
         }
 
@@ -997,13 +991,6 @@ impl ArchiveReader {
                             .push((file_idx, chunk_idx, chunk_ref.length as u64));
                     }
                 }
-            } else if let Some(content_hash) = entry.content_hash {
-                context.file_chunk_counts.push(1);
-                context
-                    .expected_chunks
-                    .entry(content_hash)
-                    .or_default()
-                    .push((file_idx, 0, entry.size));
             } else {
                 context.file_chunk_counts.push(0);
             }

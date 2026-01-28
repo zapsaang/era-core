@@ -180,9 +180,6 @@ impl<W: StorageWriter> VolumeWriter<W> {
             0,
             0,
             0,
-            0,
-            0,
-            0,
             backup_header_offset,
         );
 
@@ -327,9 +324,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
         catalog_offset: u64,
         catalog_size: u32,
         catalog_block_id: u32,
-        lsm_manifest_offset: u64,
-        lsm_manifest_size: u32,
-        lsm_manifest_block_id: u32,
+        index_offset: u64,
+        index_size: u32,
+        index_block_id: u32,
     ) -> Result<SuperHeader> {
         self.sequence += 1;
 
@@ -365,13 +362,10 @@ impl<W: StorageWriter> VolumeWriter<W> {
             catalog_block_id,
             self.last_checkpoint_offset,
             self.last_checkpoint_block_id,
-            lsm_manifest_offset,
-            lsm_manifest_size,
-            lsm_manifest_block_id,
-            0,                    // index_root_offset
-            0,                    // index_root_size
-            0,                    // index_root_block_id
-            backup_header_offset, // V7: backup_header_offset
+            index_offset,
+            index_size,
+            index_block_id,
+            backup_header_offset,
         );
         let footer_bytes = footer.to_bytes()?;
 
