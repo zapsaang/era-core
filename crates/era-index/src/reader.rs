@@ -41,9 +41,8 @@ pub struct IndexReader {
 impl IndexReader {
     /// Open an index from a directory
     pub fn open(index_dir: &Path, meta: MetaIndex) -> Result<Self> {
-        // Deserialize Bloom filter
-        let config = bincode::config::standard();
-        let (bloom, _len) = bincode::serde::decode_from_slice(&meta.bloom_filter, config)
+        // Deserialize Bloom filter using rmp-serde
+        let bloom = rmp_serde::from_slice(&meta.bloom_filter)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         Ok(Self {
@@ -137,8 +136,8 @@ impl IndexReader {
                     &encrypted_block.data,
                 )?;
 
-                let config = bincode::config::standard();
-                let (meta, _len) = bincode::serde::decode_from_slice(&decrypted_data, config)
+                // Deserialize MetaIndex using rkyv
+                let meta = rkyv::from_bytes::<MetaIndex>(&decrypted_data)
                     .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
                 Some(meta)
@@ -183,11 +182,8 @@ impl IndexReader {
                     block_id,
                     &encrypted_block.data,
                 ) {
-                    // Try to deserialize as MetaIndex
-                    let config = bincode::config::standard();
-                    let result: std::result::Result<(MetaIndex, usize), _> =
-                        bincode::serde::decode_from_slice(&decrypted_data, config);
-                    if let Ok((meta_candidate, _len)) = result {
+                    // Try to deserialize as MetaIndex using rkyv
+                    if let Ok(meta_candidate) = rkyv::from_bytes::<MetaIndex>(&decrypted_data) {
                         // Verify this looks like a valid MetaIndex
                         if !meta_candidate.pages.is_empty() {
                             tracing::info!(
@@ -235,10 +231,8 @@ impl IndexReader {
                     block_id,
                     &encrypted_block.data,
                 ) {
-                    let config = bincode::config::standard();
-                    let result: std::result::Result<(IndexPage, usize), _> =
-                        bincode::serde::decode_from_slice(&decrypted_data, config);
-                    if let Ok((page, _len)) = result {
+                    // Try to deserialize as IndexPage using rkyv
+                    if let Ok(page) = rkyv::from_bytes::<IndexPage>(&decrypted_data) {
                         // Verify this is the right page by checking hash range
                         if page.min_hash == page_ptr.min_hash && page.max_hash == page_ptr.max_hash
                         {
@@ -256,9 +250,8 @@ impl IndexReader {
             }
         }
 
-        // Step 5: Deserialize Bloom filter
-        let config = bincode::config::standard();
-        let (bloom, _len) = bincode::serde::decode_from_slice(&meta.bloom_filter, config)
+        // Step 5: Deserialize Bloom filter using rmp-serde
+        let bloom = rmp_serde::from_slice(&meta.bloom_filter)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         tracing::info!(
@@ -335,8 +328,8 @@ impl IndexReader {
                 EraError::InvalidFormat(format!("Failed to read page {:?}: {}", page_path, e))
             })?;
 
-            let config = bincode::config::standard();
-            let (page, _len) = bincode::serde::decode_from_slice(&page_bytes, config)
+            // Deserialize IndexPage using rkyv
+            let page = rkyv::from_bytes::<IndexPage>(&page_bytes)
                 .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
             self.page_cache.insert(block_id, page);
@@ -376,9 +369,9 @@ mod tests {
             .collect();
 
         let page = IndexPage::new(entries.clone());
-        let config = bincode::config::standard();
-        let page_bytes = bincode::serde::encode_to_vec(&page, config).unwrap();
-        fs::write(index_dir.join("page_0.bin"), page_bytes).unwrap();
+        // Serialize page using rkyv
+        let page_bytes = rkyv::to_bytes::<_, 4096>(&page).unwrap();
+        fs::write(index_dir.join("page_0.bin"), &page_bytes).unwrap();
 
         // Create meta-index
         let mut meta = MetaIndex::new();
@@ -389,8 +382,8 @@ mod tests {
         for entry in &entries {
             bloom.set(&entry.hash);
         }
-        let config = bincode::config::standard();
-        let bloom_bytes = bincode::serde::encode_to_vec(&bloom, config).unwrap();
+        // Serialize bloom filter using rmp-serde
+        let bloom_bytes = rmp_serde::to_vec(&bloom).unwrap();
         meta.set_bloom_filter(bloom_bytes);
 
         // Create reader

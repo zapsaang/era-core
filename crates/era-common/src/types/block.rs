@@ -64,7 +64,6 @@ pub struct BlockLocation {
     /// Size of the encrypted block (or first shard if erasure-coded)
     pub encrypted_size: u32,
     /// Erasure coding info (None = not erasure-coded)
-    /// Note: Do NOT use skip_serializing_if with bincode - it's position-based
     pub erasure_info: Option<ErasureBlockInfo>,
     /// Offsets for additional shards in distributed storage
     /// (Shard 0 is at physical_offset, Shard 1 at offsets[0], etc.)

@@ -266,10 +266,9 @@ impl CheckpointManager {
         Ok(())
     }
 
-    /// Serialize checkpoint for storage (backward compatibility)
+    /// Serialize checkpoint for storage
     ///
-    /// **NOTE:** In the new implementation, this returns the rkyv-serialized
-    /// checkpoint bytes. The old implementation returned serde bincode bytes.
+    /// Returns the rkyv-serialized checkpoint bytes.
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>> {
         self.checkpoint.to_bytes()
     }

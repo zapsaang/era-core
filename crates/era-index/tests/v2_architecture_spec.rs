@@ -237,12 +237,12 @@ fn test_index_page_layout() {
     }
 
     // Verify serialization size is reasonable
-    // Note: bincode with serde is compact binary format
-    let serialized = bincode::serde::encode_to_vec(&page, bincode::config::standard()).unwrap();
+    // Note: rkyv is a zero-copy binary format
+    let serialized = rkyv::to_bytes::<_, 4096>(&page).unwrap();
     let size_kb = serialized.len() / 1024;
     assert!(
         (50..=1000).contains(&size_kb),
-        "IndexPage serialized size out of range: {}KB (expected 50-1000KB for bincode)",
+        "IndexPage serialized size out of range: {}KB (expected 50-1000KB for rkyv)",
         size_kb
     );
 }
@@ -454,7 +454,7 @@ fn test_index_page_compression_and_encryption() {
     let page = IndexPage::new(entries);
 
     // Serialize and measure uncompressed size
-    let uncompressed = bincode::serde::encode_to_vec(&page, bincode::config::standard()).unwrap();
+    let uncompressed = rkyv::to_bytes::<_, 4096>(&page).unwrap();
     let uncompressed_size = uncompressed.len();
 
     // NOTE: This will fail initially until we integrate with era-packing

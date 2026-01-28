@@ -387,17 +387,14 @@ impl ArchiveWriterBuilder {
                     RecipientType::ScryptPassword,
                 ) = (&self.auth_mode, slot.r_type)
                 {
-                    if let Ok((params, _)) =
-                        bincode::serde::decode_from_slice::<PasswordSlotParams, _>(
-                            &slot.params,
-                            bincode::config::standard(),
-                        )
+                    if let Ok(archived) =
+                        rkyv::check_archived_root::<PasswordSlotParams>(&slot.params)
                     {
-                        let salt = Salt::from_bytes(params.salt);
+                        let salt = Salt::from_bytes(archived.salt);
                         let kdf_params = KdfParams {
-                            memory_cost: params.kdf_memory_cost,
-                            time_cost: params.kdf_time_cost,
-                            parallelism: params.kdf_parallelism,
+                            memory_cost: archived.kdf_memory_cost,
+                            time_cost: archived.kdf_time_cost,
+                            parallelism: archived.kdf_parallelism,
                         };
                         if let Ok(kek) = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)
                         {
@@ -456,10 +453,7 @@ impl ArchiveWriterBuilder {
                     if let Ok(catalog_bytes) =
                         last_valid_reader.read_raw(f.catalog_offset, f.catalog_size as usize)
                     {
-                        if let Ok((catalog, _)) = bincode::serde::decode_from_slice::<Catalog, _>(
-                            &catalog_bytes,
-                            bincode::config::standard(),
-                        ) {
+                        if let Ok(catalog) = Catalog::from_bytes(&catalog_bytes) {
                             append_catalog = Some(catalog);
                         }
                     }
@@ -513,8 +507,9 @@ impl ArchiveWriterBuilder {
                 recipients.push(RecipientSlot {
                     r_type: RecipientType::ScryptPassword,
                     key_id: None,
-                    params: bincode::serde::encode_to_vec(&p_params, bincode::config::standard())
-                        .map_err(|e| era_common::EraError::Serialization(e.to_string()))?,
+                    params: rkyv::to_bytes::<_, 64>(&p_params)
+                        .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
+                        .to_vec(),
                     encrypted_master_key: combined,
                 });
             }
@@ -763,7 +758,7 @@ impl ArchiveWriterBuilder {
             None
         };
 
-        // Create chunk index (V8.1: internal memory-based index)
+        // Create chunk index (internal memory-based index)
         let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index()?;
         let mut embedded_index: HashMap<ChunkHash, BlockLocation> = HashMap::new();
 
@@ -956,7 +951,8 @@ pub struct ArchiveWriter {
     enable_small_file_packing: bool,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
+#[archive(check_bytes)]
 struct EmbeddedIndexSnapshot {
     version: u32,
     entries: Vec<(ChunkHash, BlockLocation)>,
@@ -1888,7 +1884,7 @@ impl ArchiveWriter {
     fn write_internal_metadata(&mut self) -> Result<()> {
         if !self.embedded_index.is_empty() {
             let snapshot = EmbeddedIndexSnapshot::from_map(&self.embedded_index);
-            let data = bincode::serde::encode_to_vec(snapshot, bincode::config::standard())
+            let data = rkyv::to_bytes::<_, 4096>(&snapshot)
                 .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
             self.add_bytes(INTERNAL_INDEX_NAME, &data)?;
         }
@@ -2229,8 +2225,9 @@ pub mod generic {
             let slot = RecipientSlot {
                 r_type: RecipientType::ScryptPassword,
                 key_id: None,
-                params: bincode::serde::encode_to_vec(&p_params, bincode::config::standard())
-                    .map_err(|e| era_common::EraError::Serialization(e.to_string()))?,
+                params: rkyv::to_bytes::<_, 64>(&p_params)
+                    .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
+                    .to_vec(),
                 encrypted_master_key: combined,
             };
 

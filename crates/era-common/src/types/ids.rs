@@ -58,34 +58,6 @@ impl<D: rkyv::Fallible + ?Sized> RkyvDeserialize<VolumeId, D> for [u8; 16] {
     }
 }
 
-// Manual bincode implementation for VolumeId (Uuid doesn't implement bincode traits)
-impl bincode::Encode for VolumeId {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        bincode::Encode::encode(self.0.as_bytes(), encoder)
-    }
-}
-
-impl bincode::Decode<()> for VolumeId {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bytes: [u8; 16] = bincode::Decode::decode(decoder)?;
-        Ok(VolumeId(Uuid::from_bytes(bytes)))
-    }
-}
-
-impl<'de> bincode::BorrowDecode<'de, ()> for VolumeId {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bytes: [u8; 16] = bincode::BorrowDecode::borrow_decode(decoder)?;
-        Ok(VolumeId(Uuid::from_bytes(bytes)))
-    }
-}
-
 impl VolumeId {
     /// Generate a new random volume ID
     pub fn new() -> Self {
@@ -117,8 +89,6 @@ impl std::fmt::Display for VolumeId {
     Ord,
     Serialize,
     Deserialize,
-    bincode::Encode,
-    bincode::Decode,
     Archive,
     RkyvDeserialize,
     RkyvSerialize,
@@ -155,8 +125,6 @@ impl std::fmt::Display for BlockId {
     Ord,
     Serialize,
     Deserialize,
-    bincode::Encode,
-    bincode::Decode,
     Archive,
     RkyvDeserialize,
     RkyvSerialize,

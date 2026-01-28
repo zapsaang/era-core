@@ -191,6 +191,3 @@ impl EraError {
         Self::WalError(msg.into())
     }
 }
-
-// impl From<bincode::error::EncodeError> for EraError { ... } moved/removed for Bincode removal
-// impl From<bincode::error::DecodeError> for EraError { ... } moved/removed for Bincode removal

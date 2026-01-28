@@ -131,10 +131,9 @@ impl IndexBuilder {
 
     /// Snapshot the Bloom filter to disk (for crash recovery)
     pub fn snapshot_bloom(&self, path: &Path) -> Result<()> {
-        // Serialize Bloom filter using bincode (bloomfilter crate uses serde)
-        let config = bincode::config::standard();
-        let bloom_bytes = bincode::serde::encode_to_vec(&self.bloom, config)
-            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Serialize Bloom filter using rmp-serde (bloomfilter crate uses serde)
+        let bloom_bytes =
+            rmp_serde::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
 
         // Write to file
         let mut file = File::create(path).map_err(EraError::Io)?;
@@ -151,8 +150,7 @@ impl IndexBuilder {
         let mut bloom_bytes = Vec::new();
         file.read_to_end(&mut bloom_bytes).map_err(EraError::Io)?;
 
-        let config = bincode::config::standard();
-        let (bloom, _len) = bincode::serde::decode_from_slice(&bloom_bytes, config)
+        let bloom = rmp_serde::from_slice(&bloom_bytes)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         tracing::info!("Restored Bloom filter from snapshot: {:?}", path);
@@ -215,9 +213,8 @@ impl IndexBuilder {
             // Create IndexPage
             let page = IndexPage::new(page_entries.to_vec());
 
-            // Serialize page to bincode
-            let config = bincode::config::standard();
-            let page_bytes = bincode::serde::encode_to_vec(&page, config)
+            // Serialize page to rkyv (zero-copy)
+            let page_bytes = rkyv::to_bytes::<_, 4096>(&page)
                 .map_err(|e| EraError::Serialization(e.to_string()))?;
 
             // Encrypt page with session keys
@@ -251,15 +248,14 @@ impl IndexBuilder {
             block_id_counter += 1;
         }
 
-        // Serialize Bloom filter
-        let config = bincode::config::standard();
-        let bloom_bytes = bincode::serde::encode_to_vec(&self.bloom, config)
-            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Serialize Bloom filter using rmp-serde (external crate uses serde)
+        let bloom_bytes =
+            rmp_serde::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
         meta.set_bloom_filter(bloom_bytes);
 
-        // Encrypt and write MetaIndex as IndexManifest block
-        let meta_bytes = bincode::serde::encode_to_vec(&meta, config)
-            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Encrypt and write MetaIndex as IndexManifest block (using rkyv)
+        let meta_bytes =
+            rkyv::to_bytes::<_, 4096>(&meta).map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let manifest_block_id = BlockId::new(block_id_counter);
         let manifest_key =
@@ -323,8 +319,7 @@ impl IndexBuilder {
             }
 
             let page = IndexPage::new(page_entries.to_vec());
-            let config = bincode::config::standard();
-            let page_bytes = bincode::serde::encode_to_vec(&page, config)
+            let page_bytes = rkyv::to_bytes::<_, 4096>(&page)
                 .map_err(|e| EraError::Serialization(e.to_string()))?;
             let page_path = output_dir.join(format!("page_{}.bin", block_id_counter));
             fs::write(&page_path, &page_bytes).map_err(EraError::Io)?;
@@ -338,9 +333,8 @@ impl IndexBuilder {
             block_id_counter += 1;
         }
 
-        let config = bincode::config::standard();
-        let bloom_bytes = bincode::serde::encode_to_vec(&self.bloom, config)
-            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        let bloom_bytes =
+            rmp_serde::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
         meta.set_bloom_filter(bloom_bytes);
 
         Ok(meta)

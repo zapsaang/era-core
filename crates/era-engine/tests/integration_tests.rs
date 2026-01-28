@@ -763,5 +763,5 @@ async fn test_repair_wrong_password() {
 }
 
 // TODO: Add real corruption tests that manipulate shard data correctly
-// Current file-level corruption affects catalog/footer and causes bincode errors
+// Current file-level corruption affects catalog/footer and causes deserialization errors
 // Need to implement precise shard-level corruption after understanding exact archive layout

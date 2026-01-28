@@ -17,7 +17,7 @@
 //!
 //! ## Chunk Index Backend
 //!
-//! V8.1: The chunk index is now internal. For production workloads with
+//! The chunk index is internal. For production workloads with
 //! incremental backups, use era_index::v2 APIs directly.
 
 pub mod async_pipeline;
@@ -38,7 +38,6 @@ pub use block_iter::{
     SessionErasureBlockIterator, StandardBlockIterator,
 };
 pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_VERSION};
-// V8.1: Removed public chunk_index exports (legacy purge)
 // Re-export KeySession for convenient access
 pub use era_crypto::KeySession;
 // Re-export certificate types for convenient access

@@ -58,7 +58,7 @@ pub(crate) trait ChunkIndex: Send + Sync {
 ///
 /// Use `LsmChunkIndex` for production workloads.
 ///
-/// NOTE: V8.1 - This is now internal only. Use era_index::v2 APIs for production.
+/// This is internal only. Use era_index::v2 APIs for production.
 #[allow(dead_code)]
 pub(crate) struct MemoryChunkIndex {
     inner: RwLock<HashMap<ChunkHash, BlockLocation>>,
@@ -131,8 +131,6 @@ impl ChunkIndex for MemoryChunkIndex {
 }
 
 /// Create a chunk index (internal use only).
-///
-/// NOTE: V8.1 - This is now internal only.
 pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
     Ok(Arc::new(MemoryChunkIndex::new()))
 }

@@ -3,7 +3,7 @@ use era_crypto::certificate::{EraKeyPair, KeyEncapsulation};
 use era_crypto::{AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_crypto::{KdfParams, Salt};
 use era_volume::{RecipientSlot, RecipientType};
-use serde::{Deserialize, Serialize};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Abstract identity provider for authentication
 pub trait AuthProvider: Send + Sync {
@@ -12,7 +12,8 @@ pub trait AuthProvider: Send + Sync {
     fn try_unlock(&self, slot: &RecipientSlot) -> Result<Option<Vec<u8>>>;
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
 pub struct PasswordSlotParams {
     pub salt: [u8; 16],
     pub kdf_memory_cost: u32,
@@ -36,20 +37,19 @@ impl AuthProvider for PasswordProvider {
             return Ok(None);
         }
 
-        // Deserialize parameters
-        let (params, _): (PasswordSlotParams, usize) =
-            bincode::serde::decode_from_slice(&slot.params, bincode::config::standard())
-                .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        // Deserialize parameters using rkyv zero-copy
+        let archived = rkyv::check_archived_root::<PasswordSlotParams>(&slot.params)
+            .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         // Derive KEK (Key Encryption Key)
         let kdf_params = KdfParams {
-            memory_cost: params.kdf_memory_cost,
-            time_cost: params.kdf_time_cost,
-            parallelism: params.kdf_parallelism,
+            memory_cost: archived.kdf_memory_cost,
+            time_cost: archived.kdf_time_cost,
+            parallelism: archived.kdf_parallelism,
             // Output length is implicit 32
         };
 
-        let salt = Salt::from_bytes(params.salt);
+        let salt = Salt::from_bytes(archived.salt);
 
         let derived_key = era_crypto::derive_key(self.password.as_bytes(), &salt, &kdf_params)?;
 

@@ -215,9 +215,8 @@ impl LsmTree {
         let meta = MetaIndex::new();
 
         // STEP 4: Create IndexReader with Bloom filter
-        // Serialize the Bloom filter
-        let config = bincode::config::standard();
-        let bloom_bytes = bincode::serde::encode_to_vec(builder.bloom(), config).map_err(|e| {
+        // Serialize the Bloom filter using rmp-serde
+        let bloom_bytes = rmp_serde::to_vec(builder.bloom()).map_err(|e| {
             era_common::EraError::Serialization(format!("Failed to serialize bloom: {}", e))
         })?;
 

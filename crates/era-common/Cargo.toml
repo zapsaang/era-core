@@ -16,7 +16,6 @@ crc32fast = { workspace = true }
 smallvec = { workspace = true }
 hex = { workspace = true }
 prost = { workspace = true }
-bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 rkyv = { workspace = true }
 
 [dev-dependencies]
