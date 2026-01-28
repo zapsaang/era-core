@@ -150,30 +150,6 @@ impl V81Saboteur {
     }
 }
 
-/// Helper: Create a test archive with default EC (should be 4+1 after implementation)
-async fn create_test_archive_default_ec(
-    repo_dir: &Path,
-    source_dir: &Path,
-    original_data: &[u8],
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    // Use default config - after Phase 2, this should have EC 4+1 enabled
-    let config = ArchiveConfig::default();
-
-    let archive_path = repo_dir.join("backup.era");
-    let mut writer = ArchiveWriter::builder(&archive_path)
-        .config(config)
-        .password("testpass")
-        .build()?;
-
-    let payload_path = source_dir.join("payload.bin");
-    fs::write(&payload_path, original_data)?;
-
-    writer.add_file(&payload_path).await?;
-    let _stats = writer.finalize()?;
-
-    Ok(archive_path)
-}
-
 /// Helper: Create a test archive with explicit EC 4+1
 async fn create_test_archive_ec_4_1(
     repo_dir: &Path,

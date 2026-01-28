@@ -114,10 +114,7 @@ impl IndexReader {
                     shard_volumes: None,
                 };
 
-                tracing::info!(
-                    "Found index in footer at offset {}",
-                    footer.index_offset
-                );
+                tracing::info!("Found index in footer at offset {}", footer.index_offset);
 
                 // Read and decrypt MetaIndex
                 let (block_type, encrypted_block) = volume_reader.read_typed_block(&location)?;

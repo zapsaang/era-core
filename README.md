@@ -1,42 +1,41 @@
-# ERA (Encrypted Redundant Archiver) Core v2.2
+# ERA (Encrypted Redundant Archiver) Core
 
-Current Status: **STABLE** (Post-Audit Remediation)
+**Architecture**: v0.1.0 (Pre-Release / Unstable)
 
-ERA is a high-performance, deduplicating, encrypted archival storage engine.
+A next-generation encrypted storage engine with content-defined chunking, erasure coding, and post-quantum cryptography support.
 
-## 🚨 V2.2 Remediation Update
+## Features
 
-This version addresses critical security vulnerabilities identified in the "Evisceration" audit.
-
-### 🛡️ Security Fixes
-- **Traffic Analysis Resistance (CWE-201)**: Previous versions used zero-filled padding for block alignment, allowing size-channel attacks.
-  - **Fix**: Both `AsyncWriter` and `SyncWriter` now employ cryptographically secure randomized padding (CSPRNG) for all alignment operations.
-  - **Verification**: `traffic_analysis_resistance` test suite now passes (entropy check > 7.5 bits/byte).
-
-### 🛠️ Stability Improvements
-- **Zero-Drift Deduplication**: Refactored config propagation for append-only operations.
-  - *Note*: Physical index persistence layer is currently disabled pending V3 upgrade. Related tests are marked `#[ignore]`.
+- **Content-Defined Chunking (CDC)**: FastCDC algorithm for deduplication
+- **Erasure Coding**: Reed-Solomon with configurable data/parity shards (default: 4+1)
+- **Encryption**: XChaCha20-Poly1305 AEAD with context-bound key derivation
+- **Post-Quantum**: Hybrid KEM (X25519 + Kyber-768) for key encapsulation
+- **Multi-Volume**: Distributed storage across multiple volume files with fault tolerance
+- **Traffic Analysis Resistance**: CSPRNG padding to prevent size-channel attacks
 
 ## Build Status
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| `era-volume` | ✅ Passing | Randomized padding active |
-| `era-engine` | ✅ Passing | Pipeline flush fixed |
-| `era-codec` | ✅ Passing | |
-| `era-crypto` | ✅ Passing | AEAD implementation verified |
+| Component | Status |
+|-----------|--------|
+| `era-crypto` | ✅ |
+| `era-codec` | ✅ |
+| `era-storage` | ✅ |
+| `era-volume` | ✅ |
+| `era-packing` | ✅ |
+| `era-ingest` | ✅ |
+| `era-index` | ✅ |
+| `era-engine` | ✅ |
+| `era-cli` | ✅ |
 
 ## Quick Start
 
 ### Prerequisites
 - Rust 1.75+ (2021 Edition)
-- OpenSSL (optional, default features use `ring`)
 
 ### Running Tests
-All critical paths are now green.
 
 ```bash
-cargo test --workspace --release
+cargo test --workspace
 ```
 
 ### Installation
@@ -45,17 +44,37 @@ cargo test --workspace --release
 cargo install --path bins/era-cli
 ```
 
-## Architecture Notes
+### Basic Usage
 
-### Volume Layout (v2.2)
-To mitigate traffic analysis, the volume writer no longer outputs deterministic `0x00` bytes for alignment.
-- **Old Behavior**: `[Chunk Data] | [00 00 00...] | [Header]`
-- **New Behavior**: `[Chunk Data] | [Rnd Rnd Rnd...] | [Header]`
+```bash
+# Create an encrypted archive
+era create archive.era --password "secret" /path/to/files
 
-This prevents an attacker from determining chunk boundaries solely by measuring compression ratios or timing side-channels on the encrypted stream.
+# Extract an archive
+era extract archive.era --password "secret" --output /path/to/output
 
-## Known Issues
-- **Index Persistence**: The `zero_drift_append_tests` are temporarily disabled. Persistence logic is being rewritten for the upcoming V3 stateless indexer.
+# List contents
+era list archive.era --password "secret"
+```
+
+## Architecture
+
+Layered architecture with strict dependency ordering:
+
+```
+L5: era-cli (Binary)
+L4: era-engine (Orchestration)
+L3: era-index, era-ingest (Features)
+L2: era-packing, era-volume (Processing)
+L1: era-codec, era-storage (I/O)
+L0: era-crypto, era-common (Foundation)
+```
+
+## Known Limitations
+
+- **Pre-release**: API is not stable. Breaking changes expected.
+- **Index Persistence**: Physical index persistence layer is WIP. `zero_drift_append_tests` marked `#[ignore]`.
 
 ## License
+
 MIT / Apache-2.0

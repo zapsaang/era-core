@@ -281,8 +281,8 @@ impl IndexBuilder {
         };
 
         // Write MetaIndex as IndexManifest block
-        let manifest_location =
-            volume_writer.write_canonical_block(&manifest_encrypted_block, BlockType::IndexManifest)?;
+        let manifest_location = volume_writer
+            .write_canonical_block(&manifest_encrypted_block, BlockType::IndexManifest)?;
 
         Ok((meta, manifest_location))
     }

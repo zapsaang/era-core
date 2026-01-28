@@ -1713,7 +1713,8 @@ impl ArchiveWriter {
 
         // Create catalog entry with single chunk
         let chunk_ref = era_ingest::ChunkRef::new(hash, 0, data.len() as u32);
-        let entry = FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(vec![chunk_ref]);
+        let entry =
+            FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(vec![chunk_ref]);
         self.catalog.add(entry);
 
         Ok(())
@@ -2339,7 +2340,8 @@ pub mod generic {
             }
 
             let chunk_ref = era_ingest::ChunkRef::new(hash, 0, data.len() as u32);
-            let entry = FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(vec![chunk_ref]);
+            let entry = FileEntry::file(PathBuf::from(name), data.len() as u64)
+                .with_chunks(vec![chunk_ref]);
             self.catalog.add(entry);
 
             Ok(())

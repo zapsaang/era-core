@@ -49,13 +49,11 @@ fn test_malicious_block_header_huge_length_returns_error() {
     // 2. Corrupt the block header with a huge length (4GB)
     let file_path = temp_dir.path().join(volume_path);
     {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&file_path)
-            .unwrap();
+        let mut file = OpenOptions::new().write(true).open(&file_path).unwrap();
 
         // Seek to the block's physical offset
-        file.seek(SeekFrom::Start(location.physical_offset)).unwrap();
+        file.seek(SeekFrom::Start(location.physical_offset))
+            .unwrap();
 
         // Write a malicious BlockHeader with length = u32::MAX (4GB)
         let malicious_header = BlockHeader::new(BlockType::Data, u32::MAX, 0xDEADBEEF);
@@ -105,10 +103,7 @@ fn test_malicious_shard_header_huge_length_marks_corrupted() {
     let data_region_start = 4224u64; // DATA_REGION_START
 
     {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&file_path)
-            .unwrap();
+        let mut file = OpenOptions::new().write(true).open(&file_path).unwrap();
 
         file.seek(SeekFrom::Start(data_region_start)).unwrap();
 
@@ -200,12 +195,10 @@ fn test_scan_handles_malicious_length_gracefully() {
     // 2. Corrupt the first block header with a huge length
     let file_path = temp_dir.path().join(volume_path);
     {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&file_path)
-            .unwrap();
+        let mut file = OpenOptions::new().write(true).open(&file_path).unwrap();
 
-        file.seek(SeekFrom::Start(location.physical_offset)).unwrap();
+        file.seek(SeekFrom::Start(location.physical_offset))
+            .unwrap();
 
         // Write a malicious BlockHeader with length = 1GB (exceeds MAX_SHARD_SIZE)
         let malicious_header = BlockHeader::new(BlockType::Data, 1024 * 1024 * 1024, 0xDEADBEEF);

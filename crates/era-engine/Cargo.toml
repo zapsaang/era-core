@@ -67,7 +67,3 @@ harness = false
 [[bench]]
 name = "small_file_packing_bench"
 harness = false
-
-[[bench]]
-name = "chunk_index_bench"
-harness = false
