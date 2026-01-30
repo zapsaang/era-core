@@ -215,10 +215,8 @@ impl LsmTree {
         let meta = MetaIndex::new();
 
         // STEP 4: Create IndexReader with Bloom filter
-        // Serialize the Bloom filter using rmp-serde
-        let bloom_bytes = rmp_serde::to_vec(builder.bloom()).map_err(|e| {
-            era_common::EraError::Serialization(format!("Failed to serialize bloom: {}", e))
-        })?;
+        // Serialize the Bloom filter using rkyv via bloom_serde
+        let bloom_bytes = crate::serialize_bloom(builder.bloom())?;
 
         let mut meta_with_bloom = meta;
         meta_with_bloom.set_bloom_filter(bloom_bytes);
@@ -252,14 +250,15 @@ impl LsmTree {
     ///
     /// This enables zero-knowledge recovery from an orphaned .era file
     /// with no external metadata.
-    pub fn recover_from_volume<R: StorageReader>(
+    pub async fn recover_from_volume<R: StorageReader>(
         volume_reader: &VolumeReader<R>,
         session: &KeySession,
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
     ) -> Result<LsmTreeReader> {
         let reader =
-            IndexReader::recover_from_volume(volume_reader, session, volume_key, nonce_context)?;
+            IndexReader::recover_from_volume(volume_reader, session, volume_key, nonce_context)
+                .await?;
 
         Ok(LsmTreeReader {
             reader: Arc::new(RwLock::new(reader)),

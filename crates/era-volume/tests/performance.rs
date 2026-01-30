@@ -6,8 +6,8 @@ use era_volume::{MultiVolumeConfig, MultiVolumeWriter};
 use std::time::Instant;
 use tempfile::tempdir;
 
-#[test]
-fn test_rotation_latency_under_load() {
+#[tokio::test]
+async fn test_rotation_latency_under_load() {
     let dir = tempdir().unwrap();
     let base_path = dir.path().join("bench_volume");
 
@@ -25,6 +25,7 @@ fn test_rotation_latency_under_load() {
     let template_header = SuperHeader::new(ArchiveId::new(), recipients, archive_config, salt);
 
     let mut writer = MultiVolumeWriter::create(&backend, config, template_header)
+        .await
         .expect("Failed to create writer");
 
     let block_size = 4096;
@@ -47,6 +48,7 @@ fn test_rotation_latency_under_load() {
         let start = Instant::now();
         writer
             .write_block(&backend, &block)
+            .await
             .expect("Failed to append block");
         let duration = start.elapsed();
 

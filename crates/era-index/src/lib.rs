@@ -40,6 +40,7 @@
 //! # }
 //! ```
 
+mod bloom_serde;
 mod builder;
 mod config;
 mod error;
@@ -49,6 +50,7 @@ mod metrics;
 mod reader;
 mod spiller;
 
+pub use bloom_serde::{deserialize_bloom, serialize_bloom, BloomFilterData};
 pub use builder::IndexBuilder;
 pub use config::{IndexConfig, IndexConfigBuilder};
 pub use error::IndexError;

@@ -8,8 +8,8 @@ use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use tempfile::TempDir;
 
-#[test]
-fn test_mandatory_memory_index_default() {
+#[tokio::test]
+async fn test_mandatory_memory_index_default() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test_mandatory.era");
 
@@ -21,15 +21,17 @@ fn test_mandatory_memory_index_default() {
     let writer = ArchiveWriter::builder(&archive_path)
         .password("test1234")
         .build()
+        .await
         .expect("Failed to build writer");
 
     // Close writer to flush everything
-    writer.finalize().expect("Finalize failed");
+    writer.finalize().await.expect("Finalize failed");
 
     // Check: No index in footer (Memory backend is default)
     let backend = LocalStorageBackend::new(temp_dir.path());
     let file_name = archive_path.file_name().unwrap();
     let reader = VolumeReader::open(&backend, std::path::Path::new(file_name))
+        .await
         .expect("Failed to open volume");
     let footer = reader.footer().expect("Missing footer");
 

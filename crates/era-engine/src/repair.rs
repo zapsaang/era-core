@@ -3,7 +3,7 @@
 //! This module provides the ability to repair damaged ERA archives
 //! by using RS decoding to reconstruct corrupted shards.
 //!
-//! ## Security (ERA v8.1)
+//! ## Security
 //!
 //! This module uses the HKDF "Onion Model" for per-block key derivation:
 //! - Each block is decrypted/re-encrypted with a unique key derived from the volume key
@@ -45,9 +45,9 @@ pub struct RepairStats {
     pub errors: Vec<String>,
 }
 
-fn preflight_metadata_recovery(path: &Path, password: &str) -> Result<()> {
-    let mut reader = ArchiveReader::open(path, password)?;
-    reader.preflight_metadata_recovery()
+async fn preflight_metadata_recovery(path: &Path, password: &str) -> Result<()> {
+    let mut reader = ArchiveReader::open(path, password).await?;
+    reader.preflight_metadata_recovery().await
 }
 
 impl RepairStats {
@@ -87,7 +87,7 @@ impl Default for RepairOptions {
 /// 4. Re-encodes and writes repaired shards back to the file
 ///
 /// Returns RepairStats with details about what was repaired.
-pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Result<RepairStats> {
+pub async fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Result<RepairStats> {
     info!("Starting archive repair: {}", path.display());
 
     // Open archive for reading first
@@ -95,7 +95,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
     let backend = LocalStorageBackend::new(parent_dir);
     let volume_path = path.file_name().unwrap_or_default();
 
-    let volume_reader = VolumeReader::open(&backend, Path::new(volume_path))?;
+    let volume_reader = VolumeReader::open(&backend, Path::new(volume_path)).await?;
 
     // Verify erasure coding is enabled
     let header = volume_reader.header();
@@ -105,7 +105,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
 
     // If the archive is multi-volume, use matrix-aware repair
     if header.total_volumes > 1 {
-        return repair_archive_matrix(path, password, options);
+        return Box::pin(repair_archive_matrix(path, password, options)).await;
     }
 
     info!(
@@ -133,7 +133,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
     let _session = KeySession::from_master_key(&mk_array)?;
 
     // Metadata-first preflight: restore embedded LSM and catalog before repair
-    preflight_metadata_recovery(path, password)?;
+    preflight_metadata_recovery(path, password).await?;
 
     // Create compressor (kept for future decode-based validation if needed)
     let _compressor: Box<dyn era_codec::Compressor> =
@@ -178,7 +178,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
         for shard_idx in 0..total_shards {
             let shard_header_offset = offset;
 
-            let prefix_bytes = match volume_reader.read_raw(offset, header_prefix_len) {
+            let prefix_bytes = match volume_reader.read_raw(offset, header_prefix_len).await {
                 Ok(bytes) if bytes.len() == header_prefix_len => bytes,
                 _ => {
                     // End of data region
@@ -196,6 +196,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
 
             let header_bytes = match volume_reader
                 .read_raw(offset + header_prefix_len as u64, ShardHeader::SIZE)
+                .await
             {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 _ => {
@@ -230,7 +231,7 @@ pub fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Re
             match volume_reader.read_raw(
                 offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
                 shard_len,
-            ) {
+            ).await {
                 Ok(shard_data) => {
                     if shard_header.verify(&shard_data) {
                         shards.push((shard_idx, shard_data));
@@ -453,7 +454,7 @@ fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
 ///
 /// # Returns
 /// RepairStats with details about what was repaired across all volumes.
-pub fn repair_archive_matrix(
+pub async fn repair_archive_matrix(
     path: &Path,
     password: &str,
     options: RepairOptions,
@@ -464,7 +465,7 @@ pub fn repair_archive_matrix(
     );
 
     // Metadata-first preflight: restore embedded LSM and catalog before repair
-    preflight_metadata_recovery(path, password)?;
+    preflight_metadata_recovery(path, password).await?;
 
     let parent_dir = path.parent().unwrap_or(Path::new("."));
     let backend = LocalStorageBackend::new(parent_dir);
@@ -476,7 +477,7 @@ pub fn repair_archive_matrix(
 
     // Open first volume
     let volume_filename = path.file_name().unwrap_or_default();
-    let first_reader = VolumeReader::open(&backend, Path::new(volume_filename))?;
+    let first_reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
     let archive_id = first_reader.header().archive_id;
     let header = first_reader.header().clone();
     let total_volumes = first_reader.header().total_volumes;
@@ -495,7 +496,7 @@ pub fn repair_archive_matrix(
         let next_path = base_path.with_extension(&ext);
         let next_filename = next_path.file_name().unwrap_or_default();
 
-        match VolumeReader::open(&backend, Path::new(next_filename)) {
+        match VolumeReader::open(&backend, Path::new(next_filename)).await {
             Ok(reader) => {
                 if reader.header().archive_id != archive_id {
                     break;
@@ -523,7 +524,7 @@ pub fn repair_archive_matrix(
     if volume_count < 2 {
         // Fall back to single-volume repair
         info!("Single volume detected, using legacy repair");
-        return repair_archive(path, password, options);
+        return repair_archive(path, password, options).await;
     }
 
     // Verify erasure coding is enabled
@@ -649,7 +650,7 @@ pub fn repair_archive_matrix(
                     continue;
                 }
 
-                let prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len) {
+                let prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len).await {
                     Ok(bytes) if bytes.len() == header_prefix_len => bytes,
                     _ => {
                         if shard_idx == 0 {
@@ -670,7 +671,7 @@ pub fn repair_archive_matrix(
                 }
 
                 let header_bytes = match reader
-                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE)
+                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE).await
                 {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                     _ => {
@@ -704,7 +705,7 @@ pub fn repair_archive_matrix(
                 match reader.read_raw(
                     shard_offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
                     shard_len,
-                ) {
+                ).await {
                     Ok(shard_data) => {
                         if shard_header.verify(&shard_data) {
                             shards.push((shard_idx, shard_data));

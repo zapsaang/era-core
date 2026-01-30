@@ -11,8 +11,8 @@ use tempfile::TempDir;
 /// 1. Shards are distributed across volumes using the rotating offset algorithm
 /// 2. Each block uses a different starting volume (block_sequence rotation)
 /// 3. Fault tolerance improves with matrix distribution vs striped
-#[test]
-fn test_matrix_distribution_algorithm_correctness() {
+#[tokio::test]
+async fn test_matrix_distribution_algorithm_correctness() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("matrix_algo_test.era");
 
@@ -37,8 +37,7 @@ fn test_matrix_distribution_algorithm_correctness() {
         .erasure_config(erasure_config)
         .volume_count(6)
         .enable_matrix_distribution(true)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     // Create 3 files of different sizes to generate multiple blocks
     let file_sizes = [
@@ -53,11 +52,11 @@ fn test_matrix_distribution_algorithm_correctness() {
             *item = ((i + file_idx * 10000).wrapping_mul(7).wrapping_add(13)) as u8;
         }
         let filename = format!("file_{:02}.bin", file_idx);
-        writer.add_bytes(&filename, &data).unwrap();
+        writer.add_bytes(&filename, &data).await.unwrap();
     }
 
     // Finalize and check volumes were created
-    writer.finalize().unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Verify all 6 volumes exist
     for i in 0..6 {
@@ -74,8 +73,8 @@ fn test_matrix_distribution_algorithm_correctness() {
     }
 
     // Read archive metadata to verify shard distribution
-    let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
-    let files = reader.list_files().expect("Failed to list files");
+    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 3, "Should have 3 files");
 
     println!("✅ Algorithm correctness test passed!");
@@ -92,8 +91,8 @@ fn test_matrix_distribution_algorithm_correctness() {
 /// - All blocks use same shard-to-volume mapping
 /// - Volume 0 always has shards 0,2,4; Volume 1 has 1,3,5
 /// - Losing Volume 0 means all blocks lose shards 0,2,4 (3 shards!)
-#[test]
-fn test_matrix_vs_striped_fault_tolerance() {
+#[tokio::test]
+async fn test_matrix_vs_striped_fault_tolerance() {
     // Configuration: 4+2 erasure (can handle 2 shard losses)
     let _erasure_config = ErasureCodeConfig {
         data_shards: 4,
@@ -178,8 +177,8 @@ fn test_matrix_vs_striped_fault_tolerance() {
 }
 
 /// Verify that with matrix distribution, we can recover after volume loss
-#[test]
-fn test_matrix_recovery_scenario() {
+#[tokio::test]
+async fn test_matrix_recovery_scenario() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("recovery_test.era");
 
@@ -202,12 +201,11 @@ fn test_matrix_recovery_scenario() {
         .erasure_config(erasure_config)
         .volume_count(6)
         .enable_matrix_distribution(true)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     let data = vec![0xAB; 256 * 1024]; // 256KB
-    writer.add_bytes("recovery_test.bin", &data).unwrap();
-    writer.finalize().unwrap();
+    writer.add_bytes("recovery_test.bin", &data).await.unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Simulate losing 3 volumes (worse than parity count)
     println!("\nTesting recovery with matrix distribution:");

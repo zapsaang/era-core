@@ -135,13 +135,14 @@ async fn create_test_archive(
         .password("testpass")
         .volume_count(6) // Force generation of 6 physical files
         .enable_matrix_distribution(true)
-        .build()?;
+        .build()
+        .await?;
 
     let payload_path = source_dir.join("payload.bin");
     fs::write(&payload_path, original_data)?;
 
     writer.add_file(&payload_path).await?;
-    let _stats = writer.finalize()?;
+    let _stats = writer.finalize().await?;
 
     Ok(archive_path)
 }
@@ -187,11 +188,11 @@ async fn test_extreme_resilience_recovery() -> Result<(), Box<dyn std::error::Er
     println!("🏥 Starting recovery logic...");
 
     // 4. Attempt recovery
-    let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
+    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
     let options = ExtractOptions::new(&restore_dir);
 
     // This step should succeed, despite massive error logs
-    reader.extract_all(&options)?;
+    reader.extract_all(&options).await?;
 
     // 5. Verify data integrity
     let restored_path = restore_dir.join("payload.bin");
@@ -243,10 +244,10 @@ async fn test_impossible_recovery_rejection() -> Result<(), Box<dyn std::error::
 
     println!("🏥 Attempting impossible recovery (Should Fail)...");
 
-    let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
+    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
     let options = ExtractOptions::new(&restore_dir);
 
-    let result = reader.extract_all(&options);
+    let result = reader.extract_all(&options).await;
 
     // 3. Verify correct error reporting
     match result {

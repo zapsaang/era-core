@@ -5,8 +5,8 @@ use era_volume::{MultiVolumeConfig, MultiVolumeWriter, SuperHeader};
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_multi_volume_padding_and_atomicity() {
+#[tokio::test]
+async fn test_multi_volume_padding_and_atomicity() {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
     let base_name = "atomicity_test";
@@ -26,7 +26,7 @@ fn test_multi_volume_padding_and_atomicity() {
         [0u8; 16],
     );
 
-    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).unwrap();
+    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).await.unwrap();
 
     // 2. Write enough data to force a split
     // Each block is 32KB.
@@ -51,12 +51,12 @@ fn test_multi_volume_padding_and_atomicity() {
             compressed_size: 10 * 1024,
             chunk_count: 1,
         };
-        let loc = multi_writer.write_block(&backend, &block).unwrap();
+        let loc = multi_writer.write_block(&backend, &block).await.unwrap();
         locations.push(loc);
     }
 
     // 3. Finalize
-    let stats = multi_writer.finalize().unwrap();
+    let stats = multi_writer.finalize().await.unwrap();
 
     // 4. Verification
 

@@ -9,7 +9,7 @@ use era_crypto::{print_security_report, SecureBuffer, SecureMemoryConfig};
 
 fn main() {
     println!("═══════════════════════════════════════════════════════════");
-    println!("  ERA v8.1 - Cross-Platform Guard Pages Demonstration");
+    println!("  ERA - Cross-Platform Guard Pages Demonstration");
     println!("═══════════════════════════════════════════════════════════\n");
 
     // Print comprehensive security report

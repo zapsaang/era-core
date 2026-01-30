@@ -6,8 +6,8 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-#[test]
-fn test_volume_traffic_fingerprint_padding() {
+#[tokio::test]
+async fn test_volume_traffic_fingerprint_padding() {
     // 1. Setup
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
@@ -21,11 +21,11 @@ fn test_volume_traffic_fingerprint_padding() {
     );
 
     // 2. Create Writer
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
 
     // Set a fixed max size (e.g., 1MB)
     let max_size = 1024 * 1024; // 1MB
-    writer.set_max_size(max_size).unwrap();
+    writer.set_max_size(max_size).await.unwrap();
 
     // 3. Write a small amount of data (much less than 1MB)
     let block = era_common::EncryptedMacroBlock {
@@ -37,10 +37,11 @@ fn test_volume_traffic_fingerprint_padding() {
     };
     writer
         .write_canonical_block(&block, era_common::BlockType::Data)
+        .await
         .unwrap();
 
     // 4. Finalize
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // 5. Verify File Size
     let file_path = temp_dir.path().join(volume_path);
@@ -86,8 +87,8 @@ fn test_volume_traffic_fingerprint_padding() {
     );
 }
 
-#[test]
-fn test_checkpoint_traffic_safety() {
+#[tokio::test]
+async fn test_checkpoint_traffic_safety() {
     // 1. Setup
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
@@ -101,9 +102,9 @@ fn test_checkpoint_traffic_safety() {
     );
 
     // 2. Create Writer & Set Max Size
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
     let max_size = 1024 * 1024; // 1MB
-    writer.set_max_size(max_size).unwrap();
+    writer.set_max_size(max_size).await.unwrap();
 
     // 3. Write Data
     let block = era_common::EncryptedMacroBlock {
@@ -115,12 +116,13 @@ fn test_checkpoint_traffic_safety() {
     };
     writer
         .write_canonical_block(&block, era_common::BlockType::Data)
+        .await
         .unwrap();
 
     // 4. Commit Checkpoint (mid-stream)
     // This should trigger padding to max_size if we are to prevent traffic analysis
     // during upload of this snapshot.
-    writer.commit_checkpoint(12345).unwrap();
+    writer.commit_checkpoint(12345).await.unwrap();
 
     // 5. Verify File Size & Entropy
     let file_path = temp_dir.path().join(volume_path);

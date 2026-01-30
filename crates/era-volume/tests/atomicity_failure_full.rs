@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
+use async_trait::async_trait;
 
 // Mock Backend to simulate failures
 #[derive(Clone)]
@@ -30,11 +31,12 @@ impl FaultyBackend {
     }
 }
 
+#[async_trait]
 impl StorageBackend for FaultyBackend {
     type Writer = <LocalStorageBackend as StorageBackend>::Writer;
     type Reader = <LocalStorageBackend as StorageBackend>::Reader;
 
-    fn create(&self, path: &Path) -> Result<Self::Writer> {
+    async fn create(&self, path: &Path) -> Result<Self::Writer> {
         let should_fail = {
             let guard = self.fail_on_create.lock().unwrap();
             // Check if any registered failure path ends with the requested path
@@ -47,32 +49,32 @@ impl StorageBackend for FaultyBackend {
                 "Simulated failure on create",
             )));
         }
-        self.inner.create(path)
+        self.inner.create(path).await
     }
 
-    fn open_append(&self, path: &Path) -> Result<Self::Writer> {
-        self.inner.open_append(path)
+    async fn open_append(&self, path: &Path) -> Result<Self::Writer> {
+        self.inner.open_append(path).await
     }
 
-    fn open_read(&self, path: &Path) -> Result<Self::Reader> {
-        self.inner.open_read(path)
+    async fn open_read(&self, path: &Path) -> Result<Self::Reader> {
+        self.inner.open_read(path).await
     }
 
-    fn exists(&self, path: &Path) -> bool {
-        self.inner.exists(path)
+    async fn exists(&self, path: &Path) -> bool {
+        self.inner.exists(path).await
     }
 
-    fn delete(&self, path: &Path) -> Result<()> {
-        self.inner.delete(path)
+    async fn delete(&self, path: &Path) -> Result<()> {
+        self.inner.delete(path).await
     }
 
-    fn stat(&self, path: &Path) -> Result<StorageMetadata> {
-        self.inner.stat(path)
+    async fn stat(&self, path: &Path) -> Result<StorageMetadata> {
+        self.inner.stat(path).await
     }
 }
 
-#[test]
-fn test_atomicity_failure_recovery() {
+#[tokio::test]
+async fn test_atomicity_failure_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let backend = FaultyBackend::new(temp_dir.path());
     let base_name = "failure_test";
@@ -89,7 +91,7 @@ fn test_atomicity_failure_recovery() {
         [0u8; 16],
     );
 
-    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).unwrap();
+    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).await.unwrap();
 
     let block_data = Bytes::from(vec![0xAAu8; 1024]);
     let block = EncryptedMacroBlock {
@@ -110,7 +112,7 @@ fn test_atomicity_failure_recovery() {
         let mut b = block.clone();
         b.block_id = BlockId::new(i);
 
-        match multi_writer.write_block(&backend, &b) {
+        match multi_writer.write_block(&backend, &b).await {
             Ok(_) => {
                 last_successful_block = i;
             }
@@ -138,13 +140,13 @@ fn test_atomicity_failure_recovery() {
         chunk_count: 1,
     };
 
-    let result = multi_writer.write_block(&backend, &b_retry);
+    let result = multi_writer.write_block(&backend, &b_retry).await;
     assert!(
         result.is_ok(),
         "Retry should succeed after fixing backend issue"
     );
 
-    multi_writer.finalize().unwrap();
+    multi_writer.finalize().await.unwrap();
 
     // 3. Verify sequences
     let vol1_path = temp_dir.path().join("failure_test.era.001");
@@ -155,6 +157,7 @@ fn test_atomicity_failure_recovery() {
     let real_backend = LocalStorageBackend::new(temp_dir.path());
 
     let reader = VolumeReader::open(&real_backend, Path::new("failure_test.era.001"))
+        .await
         .expect("Should open volume 1");
 
     // BUG CHECK: If sequence is 2, it skipped 1.

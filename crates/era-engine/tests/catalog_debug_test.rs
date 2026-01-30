@@ -33,14 +33,14 @@ fn test_catalog_recovery_debug() {
         .erasure_config(erasure_config)
         .volume_count(4)
         .enable_matrix_distribution(true)
-        .build()
+        .build().await
         .expect("Failed to create writer");
 
     let data = vec![0xAB; 256 * 1024]; // 256KB
     writer
         .add_bytes("test.bin", &data)
         .expect("Failed to add file");
-    writer.finalize().expect("Failed to finalize");
+    writer.finalize().await.expect("Failed to finalize");
 
     // Check file sizes and structure
     println!("\nFiles created:");
@@ -81,7 +81,7 @@ fn test_catalog_recovery_debug() {
         Ok(mut reader) => {
             println!("✅ Successfully opened");
             let extract_dir = temp_dir.path().join("extract_vol0");
-            match reader.extract_all(&era_engine::ExtractOptions::new(&extract_dir)) {
+            match reader.extract_all(&era_engine::ExtractOptions::new(&extract_dir).await) {
                 Ok(_) => println!("✅ Successfully extracted"),
                 Err(e) => println!("❌ Failed to extract: {}", e),
             }
@@ -98,7 +98,7 @@ fn test_catalog_recovery_debug() {
         Ok(mut reader) => {
             println!("✅ Successfully opened");
             let extract_dir = temp_dir.path().join("extract_vol3");
-            match reader.extract_all(&era_engine::ExtractOptions::new(&extract_dir)) {
+            match reader.extract_all(&era_engine::ExtractOptions::new(&extract_dir).await) {
                 Ok(_) => println!("✅ Successfully extracted"),
                 Err(e) => println!("❌ Failed to extract: {}", e),
             }

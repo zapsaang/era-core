@@ -24,7 +24,7 @@ fn test_footer_supports_checkpoint_block_id() {
     // Create archive (checkpoint is embedded in volume, not sidecar)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build()
+        .build().await
         .expect("Failed to build writer");
 
     // Add some data
@@ -34,7 +34,7 @@ fn test_footer_supports_checkpoint_block_id() {
         .unwrap();
 
     // Finalize the archive
-    let stats = writer.finalize().expect("Finalize failed");
+    let stats = writer.finalize().await.expect("Finalize failed");
     assert!(stats.total_files >= 2, "Expected at least 2 files");
 
     // Open the volume and check footer
@@ -64,12 +64,12 @@ fn test_no_sidecar_checkpoint_files() {
     // Create archive (v2.2 uses embedded checkpoints, not sidecar files)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build()
+        .build().await
         .expect("Failed to build writer");
 
     // Add data
     writer.add_bytes("test.txt", b"Test data").unwrap();
-    writer.finalize().expect("Finalize failed");
+    writer.finalize().await.expect("Finalize failed");
 
     // Check that no sidecar files exist
     let forbidden_patterns = vec![".checkpoint", ".index", ".meta"];
@@ -99,11 +99,11 @@ fn test_footer_no_index() {
     // Create archive with defaults (Memory backend)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build()
+        .build().await
         .expect("Failed to build writer");
 
     writer.add_bytes("test.txt", b"Test data").unwrap();
-    writer.finalize().expect("Finalize failed");
+    writer.finalize().await.expect("Finalize failed");
 
     // Open volume and check footer
     let backend = LocalStorageBackend::new(temp_dir.path());
@@ -130,11 +130,11 @@ fn test_checkpoint_detection_via_footer() {
     // Create and finalize archive
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build()
+        .build().await
         .expect("Failed to build writer");
 
     writer.add_bytes("test.txt", b"Test data").unwrap();
-    writer.finalize().expect("Finalize failed");
+    writer.finalize().await.expect("Finalize failed");
 
     // Open volume and verify checkpoint detection method
     let backend = LocalStorageBackend::new(temp_dir.path());

@@ -12,8 +12,8 @@ use std::fs;
 use tempfile::TempDir;
 
 /// Test that matrix distribution can be enabled and writes correctly
-#[test]
-fn test_matrix_distribution_basic() {
+#[tokio::test]
+async fn test_matrix_distribution_basic() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("matrix_test.era");
 
@@ -39,6 +39,7 @@ fn test_matrix_distribution_basic() {
         .volume_count(6) // 6 volumes for 6 shards
         .enable_matrix_distribution(true)
         .build()
+        .await
         .unwrap();
 
     // Create test data
@@ -47,8 +48,8 @@ fn test_matrix_distribution_basic() {
         *item = (i.wrapping_mul(7).wrapping_add(13)) as u8;
     }
 
-    writer.add_bytes("matrix_test.bin", &data).unwrap();
-    writer.finalize().unwrap();
+    writer.add_bytes("matrix_test.bin", &data).await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify all 6 volumes exist
     let vol0 = &base_path;
@@ -59,15 +60,15 @@ fn test_matrix_distribution_basic() {
     }
 
     // Read back and verify
-    let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
-    let files = reader.list_files().expect("Failed to list files");
+    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].path.to_str().unwrap(), "matrix_test.bin");
 
     // Extract and verify content
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).expect("Failed to extract");
+    reader.extract_all(&options).await.expect("Failed to extract");
 
     let extracted_path = extract_dir.join("matrix_test.bin");
     let extracted_data = fs::read(&extracted_path).expect("Failed to read extracted file");
@@ -75,8 +76,8 @@ fn test_matrix_distribution_basic() {
 }
 
 /// Test matrix distribution with multiple blocks to verify rotating offset
-#[test]
-fn test_matrix_distribution_multiple_blocks() {
+#[tokio::test]
+async fn test_matrix_distribution_multiple_blocks() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("multi_block.era");
 
@@ -101,6 +102,7 @@ fn test_matrix_distribution_multiple_blocks() {
         .volume_count(3)
         .enable_matrix_distribution(true)
         .build()
+        .await
         .unwrap();
 
     // Create multiple smaller files to generate multiple blocks
@@ -109,10 +111,10 @@ fn test_matrix_distribution_multiple_blocks() {
         for (j, item) in data.iter_mut().enumerate() {
             *item = ((i + j).wrapping_mul(11)) as u8;
         }
-        writer.add_bytes(&format!("file_{}.bin", i), &data).unwrap();
+        writer.add_bytes(&format!("file_{}.bin", i), &data).await.unwrap();
     }
 
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify volumes exist and have reasonable sizes
     let vol0 = &base_path;
@@ -145,13 +147,13 @@ fn test_matrix_distribution_multiple_blocks() {
     );
 
     // Read and verify all files
-    let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
-    let files = reader.list_files().expect("Failed to list files");
+    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 5);
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).expect("Failed to extract");
+    reader.extract_all(&options).await.expect("Failed to extract");
 
     for i in 0..5 {
         let extracted_path = extract_dir.join(format!("file_{}.bin", i));
@@ -165,8 +167,8 @@ fn test_matrix_distribution_multiple_blocks() {
 ///
 /// This test verifies that when volumes fill up, new volumes are created.
 /// Note: Currently, the shard size must be smaller than max_volume_size.
-#[test]
-fn test_fixed_size_volume_splitting() {
+#[tokio::test]
+async fn test_fixed_size_volume_splitting() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("fixed_size.era");
 
@@ -194,6 +196,7 @@ fn test_fixed_size_volume_splitting() {
         .enable_matrix_distribution(true)
         // Use default volume size (no limit) for simpler test
         .build()
+        .await
         .unwrap();
 
     // Add a few files
@@ -202,10 +205,10 @@ fn test_fixed_size_volume_splitting() {
         for (j, item) in data.iter_mut().enumerate() {
             *item = ((i + j).wrapping_mul(17)) as u8;
         }
-        writer.add_bytes(&format!("file_{}.bin", i), &data).unwrap();
+        writer.add_bytes(&format!("file_{}.bin", i), &data).await.unwrap();
     }
 
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // Check that volumes exist
     assert!(base_path.exists());
@@ -226,13 +229,13 @@ fn test_fixed_size_volume_splitting() {
     assert_eq!(volume_count, 6);
 
     // Read back and verify
-    let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
-    let files = reader.list_files().expect("Failed to list files");
+    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 5);
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).expect("Failed to extract");
+    reader.extract_all(&options).await.expect("Failed to extract");
 
     for i in 0..5 {
         let extracted_path = extract_dir.join(format!("file_{}.bin", i));
@@ -242,8 +245,8 @@ fn test_fixed_size_volume_splitting() {
 }
 
 /// Test that legacy (non-matrix) distribution still works
-#[test]
-fn test_legacy_distribution_compatibility() {
+#[tokio::test]
+async fn test_legacy_distribution_compatibility() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("legacy.era");
 
@@ -268,20 +271,21 @@ fn test_legacy_distribution_compatibility() {
         .volume_count(3)
         // Note: NOT calling enable_matrix_distribution
         .build()
+        .await
         .unwrap();
 
     let data = vec![42u8; 512 * 1024];
-    writer.add_bytes("legacy_test.bin", &data).unwrap();
-    writer.finalize().unwrap();
+    writer.add_bytes("legacy_test.bin", &data).await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Read back
-    let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
-    let files = reader.list_files().expect("Failed to list files");
+    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 1);
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).expect("Failed to extract");
+    reader.extract_all(&options).await.expect("Failed to extract");
 
     let extracted_path = extract_dir.join("legacy_test.bin");
     let extracted_data = fs::read(&extracted_path).expect("Failed to read extracted file");
@@ -292,8 +296,8 @@ fn test_legacy_distribution_compatibility() {
 ///
 /// With 4+2 erasure coding and 6 volumes, we should be able to lose up to 2 volumes
 /// and still recover all data.
-#[test]
-fn test_matrix_distribution_fault_tolerance() {
+#[tokio::test]
+async fn test_matrix_distribution_fault_tolerance() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("fault_test.era");
 
@@ -319,6 +323,7 @@ fn test_matrix_distribution_fault_tolerance() {
         .volume_count(6)
         .enable_matrix_distribution(true)
         .build()
+        .await
         .unwrap();
 
     // Create test data
@@ -327,8 +332,8 @@ fn test_matrix_distribution_fault_tolerance() {
         *item = (i.wrapping_mul(7).wrapping_add(13)) as u8;
     }
 
-    writer.add_bytes("fault_test.bin", &data).unwrap();
-    writer.finalize().unwrap();
+    writer.add_bytes("fault_test.bin", &data).await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify all 6 volumes exist before deletion
     for i in 0..6 {
@@ -356,18 +361,18 @@ fn test_matrix_distribution_fault_tolerance() {
 
     // Attempt to read and extract - should succeed with 4 remaining volumes
     // Note: This tests the reader's ability to handle missing volumes gracefully
-    let reader_result = ArchiveReader::open(&base_path, "");
+    let reader_result = ArchiveReader::open(&base_path, "").await;
 
     // The reader should either succeed with graceful degradation or return a clear error
     match reader_result {
         Ok(mut reader) => {
-            let files = reader.list_files().expect("Failed to list files");
+            let files = reader.list_files().await.expect("Failed to list files");
             assert_eq!(files.len(), 1);
 
             let extract_dir = temp_dir.path().join("extract");
             let options = ExtractOptions::new(&extract_dir);
 
-            match reader.extract_all(&options) {
+            match reader.extract_all(&options).await {
                 Ok(_) => {
                     let extracted_path = extract_dir.join("fault_test.bin");
                     let extracted_data =
@@ -392,8 +397,8 @@ fn test_matrix_distribution_fault_tolerance() {
 }
 
 /// Test shard size validation
-#[test]
-fn test_shard_size_validation() {
+#[tokio::test]
+async fn test_shard_size_validation() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("size_test.era");
 
@@ -421,13 +426,14 @@ fn test_shard_size_validation() {
         .enable_matrix_distribution(true)
         .max_volume_size(30 * 1024) // 30KB - too small for 100KB shards
         .build()
+        .await
         .unwrap();
 
     // Try to add data - should fail with a clear error about shard size
     // With 2 data shards, 200KB data generates ~100KB shards
     let data = vec![0u8; 200 * 1024]; // 200KB - will generate ~100KB shards
     println!("Adding {} bytes of data", data.len());
-    let add_result = writer.add_bytes("test.bin", &data);
+    let add_result = writer.add_bytes("test.bin", &data).await;
 
     // Check add_bytes result first
     if let Err(e) = add_result {
@@ -446,7 +452,7 @@ fn test_shard_size_validation() {
 
     // If add_bytes succeeded, try to finalize - this should fail
     println!("add_bytes succeeded, trying finalize...");
-    let result = writer.finalize();
+    let result = writer.finalize().await;
 
     // Debug: Print result and count volumes
     match &result {
@@ -491,8 +497,8 @@ fn test_shard_size_validation() {
 }
 
 /// Test end-to-end: create archive, corrupt some shards, repair, verify
-#[test]
-fn test_matrix_distribution_repair_workflow() {
+#[tokio::test]
+async fn test_matrix_distribution_repair_workflow() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("repair_test.era");
 
@@ -518,6 +524,7 @@ fn test_matrix_distribution_repair_workflow() {
         .volume_count(6)
         .enable_matrix_distribution(true)
         .build()
+        .await
         .unwrap();
 
     // Create test data
@@ -526,8 +533,8 @@ fn test_matrix_distribution_repair_workflow() {
         *item = (i.wrapping_mul(7).wrapping_add(13)) as u8;
     }
 
-    writer.add_bytes("repair_test.bin", &data).unwrap();
-    writer.finalize().unwrap();
+    writer.add_bytes("repair_test.bin", &data).await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify archive was created with 6 volumes
     assert!(base_path.exists(), "Main volume should exist");
@@ -551,7 +558,7 @@ fn test_matrix_distribution_repair_workflow() {
     // Try to repair the archive
     let repair_options = RepairOptions::default();
 
-    match repair_archive_matrix(&base_path, "", repair_options) {
+    match repair_archive_matrix(&base_path, "", repair_options).await {
         Ok(stats) => {
             println!(
                 "Repair completed: {} blocks scanned, {} corrupted shards found, {} repaired",
@@ -565,16 +572,16 @@ fn test_matrix_distribution_repair_workflow() {
     }
 
     // Verify we can still read the archive
-    let reader_result = ArchiveReader::open(&base_path, "");
+    let reader_result = ArchiveReader::open(&base_path, "").await;
     match reader_result {
         Ok(mut reader) => {
-            let files = reader.list_files().expect("Failed to list files");
+            let files = reader.list_files().await.expect("Failed to list files");
             assert_eq!(files.len(), 1);
 
             let extract_dir = temp_dir.path().join("extract");
             let options = ExtractOptions::new(&extract_dir);
 
-            match reader.extract_all(&options) {
+            match reader.extract_all(&options).await {
                 Ok(_) => {
                     let extracted_path = extract_dir.join("repair_test.bin");
                     let extracted_data =
@@ -594,8 +601,8 @@ fn test_matrix_distribution_repair_workflow() {
 }
 
 /// Test creating a large multi-file archive with matrix distribution
-#[test]
-fn test_matrix_distribution_large_archive() {
+#[tokio::test]
+async fn test_matrix_distribution_large_archive() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("large_test.era");
 
@@ -621,6 +628,7 @@ fn test_matrix_distribution_large_archive() {
         .enable_matrix_distribution(true)
         .max_volume_size(500 * 1024) // 500KB per volume
         .build()
+        .await
         .unwrap();
 
     // Create 10 files of varying sizes
@@ -645,20 +653,20 @@ fn test_matrix_distribution_large_archive() {
             *item = ((i + idx * 1000).wrapping_mul(7).wrapping_add(13)) as u8;
         }
         let filename = format!("file_{:02}.bin", idx);
-        writer.add_bytes(&filename, &data).unwrap();
+        writer.add_bytes(&filename, &data).await.unwrap();
         all_data.push(data);
     }
 
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify extraction
-    let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
-    let files = reader.list_files().expect("Failed to list files");
+    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 10, "Should have 10 files");
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).expect("Failed to extract");
+    reader.extract_all(&options).await.expect("Failed to extract");
 
     // Verify each file
     for (idx, original) in all_data.iter().enumerate() {

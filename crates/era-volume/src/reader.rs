@@ -1,4 +1,6 @@
 //! Volume reader for reading from volumes.
+//!
+//! All I/O operations are async (non-blocking).
 
 use bytes::Bytes;
 use era_common::{
@@ -25,14 +27,14 @@ pub struct VolumeReader<R: StorageReader> {
 impl<R: StorageReader> VolumeReader<R> {
     /// Open an existing volume for reading
     ///
-    /// V8.1 Recovery Chain:
+    /// Recovery Chain:
     /// 1. Try primary header at offset 0
     /// 2. If primary header fails, try to read backup footer to find backup_header_offset
     /// 3. Read backup header from backup_header_offset
     /// 4. Try primary footer at end of file
     /// 5. If primary footer fails, try backup footer at offset HEADER_SIZE (4096)
-    pub fn open<B: StorageBackend<Reader = R>>(backend: &B, path: &Path) -> Result<Self> {
-        let reader = backend.open_read(path)?;
+    pub async fn open<B: StorageBackend<Reader = R>>(backend: &B, path: &Path) -> Result<Self> {
+        let reader = backend.open_read(path).await?;
         let size = reader.size();
 
         if size < HEADER_SIZE as u64 {
@@ -40,60 +42,80 @@ impl<R: StorageReader> VolumeReader<R> {
         }
 
         // === HEADER RECOVERY ===
-        let header = Self::try_read_header(&reader, 0).or_else(|primary_err| {
-            tracing::warn!(
-                "Primary header corrupted: {}. Attempting backup recovery...",
-                primary_err
-            );
+        let header = match Self::try_read_header(&reader, 0).await {
+            Ok(h) => h,
+            Err(primary_err) => {
+                tracing::warn!(
+                    "Primary header corrupted: {}. Attempting backup recovery...",
+                    primary_err
+                );
 
-            // Try to read backup footer first to get backup_header_offset
-            Self::try_read_footer_at(&reader, HEADER_SIZE as u64)
-                .and_then(|backup_footer| {
+                // Try to read backup footer first to get backup_header_offset
+                let backup_result = Self::try_read_footer_at(&reader, HEADER_SIZE as u64).await;
+
+                if let Ok(backup_footer) = backup_result {
                     if backup_footer.backup_header_offset > 0 {
                         tracing::info!(
                             "Found backup footer with backup_header_offset: {}",
                             backup_footer.backup_header_offset
                         );
-                        Self::try_read_header(&reader, backup_footer.backup_header_offset)
-                    } else {
-                        Err(EraError::CorruptedHeader(
-                            "Backup footer has no backup_header_offset".into(),
-                        ))
-                    }
-                })
-                .or_else(|_| {
-                    // Last resort: try primary footer to find backup header
-                    Self::try_read_footer(&reader, size).and_then(|primary_footer| {
-                        if primary_footer.backup_header_offset > 0 {
-                            Self::try_read_header(&reader, primary_footer.backup_header_offset)
+                        if let Ok(h) =
+                            Self::try_read_header(&reader, backup_footer.backup_header_offset).await
+                        {
+                            h
                         } else {
-                            Err(EraError::CorruptedHeader(
-                                "No backup header location available".into(),
-                            ))
+                            // Last resort: try primary footer to find backup header
+                            let primary_footer = Self::try_read_footer(&reader, size).await?;
+                            if primary_footer.backup_header_offset > 0 {
+                                Self::try_read_header(&reader, primary_footer.backup_header_offset)
+                                    .await?
+                            } else {
+                                return Err(EraError::CorruptedHeader(
+                                    "No backup header location available".into(),
+                                ));
+                            }
                         }
-                    })
-                })
-        })?;
+                    } else {
+                        return Err(EraError::CorruptedHeader(
+                            "Backup footer has no backup_header_offset".into(),
+                        ));
+                    }
+                } else {
+                    // Last resort: try primary footer to find backup header
+                    let primary_footer = Self::try_read_footer(&reader, size).await?;
+                    if primary_footer.backup_header_offset > 0 {
+                        Self::try_read_header(&reader, primary_footer.backup_header_offset).await?
+                    } else {
+                        return Err(EraError::CorruptedHeader(
+                            "No backup header location available".into(),
+                        ));
+                    }
+                }
+            }
+        };
 
         // Check if erasure coding is likely enabled
         let erasure_enabled = header.config.erasure.is_some();
 
         // === FOOTER RECOVERY ===
         // 1. Try primary footer (at end of file)
-        let footer = Self::try_read_footer(&reader, size)
-            .or_else(|primary_err| {
+        let footer = match Self::try_read_footer(&reader, size).await {
+            Ok(f) => Some(f),
+            Err(primary_err) => {
                 tracing::warn!(
                     "Primary footer corrupted: {}. Attempting backup recovery...",
                     primary_err
                 );
                 // 2. Try backup footer at offset HEADER_SIZE (4096)
                 Self::try_read_footer_at(&reader, HEADER_SIZE as u64)
-            })
-            .ok();
+                    .await
+                    .ok()
+            }
+        };
 
         // 3. If still no footer, try Floating Footer Recovery (Reverse Scan) for legacy volumes
         let footer = if footer.is_none() {
-            Self::try_floating_footer_recovery(&reader, size)?
+            Self::try_floating_footer_recovery(&reader, size).await?
         } else {
             footer
         };
@@ -112,30 +134,30 @@ impl<R: StorageReader> VolumeReader<R> {
     }
 
     /// Try to read header at a specific offset
-    fn try_read_header(reader: &R, offset: u64) -> Result<SuperHeader> {
-        let header_bytes = reader.read_at(offset, HEADER_SIZE)?;
+    async fn try_read_header(reader: &R, offset: u64) -> Result<SuperHeader> {
+        let header_bytes = reader.read_at(offset, HEADER_SIZE).await?;
         SuperHeader::from_bytes(&header_bytes)
     }
 
     /// Try to read footer from end of file
-    fn try_read_footer(reader: &R, file_size: u64) -> Result<Footer> {
+    async fn try_read_footer(reader: &R, file_size: u64) -> Result<Footer> {
         if file_size < (HEADER_SIZE + FOOTER_SIZE) as u64 {
             return Err(EraError::CorruptedFooter(
                 "File too small for footer".into(),
             ));
         }
         let footer_offset = file_size - FOOTER_SIZE as u64;
-        Self::try_read_footer_at(reader, footer_offset)
+        Self::try_read_footer_at(reader, footer_offset).await
     }
 
     /// Try to read footer at a specific offset
-    fn try_read_footer_at(reader: &R, offset: u64) -> Result<Footer> {
-        let bytes = reader.read_at(offset, FOOTER_SIZE)?;
+    async fn try_read_footer_at(reader: &R, offset: u64) -> Result<Footer> {
+        let bytes = reader.read_at(offset, FOOTER_SIZE).await?;
         Footer::from_bytes(&bytes)
     }
 
     /// Try floating footer recovery (reverse scan) for legacy volumes
-    fn try_floating_footer_recovery(reader: &R, size: u64) -> Result<Option<Footer>> {
+    async fn try_floating_footer_recovery(reader: &R, size: u64) -> Result<Option<Footer>> {
         // Scan the last 1MB (or full file if smaller) for footer magic
         // Pattern: 0x0A (Field 1) 0x04 (Len) "ERAF"
         let scan_size = 1024 * 1024; // 1MB scan window
@@ -150,7 +172,7 @@ impl<R: StorageReader> VolumeReader<R> {
             return Ok(None);
         }
 
-        let data = match reader.read_at(start_offset, scan_len) {
+        let data = match reader.read_at(start_offset, scan_len).await {
             Ok(d) => d,
             Err(_) => return Ok(None),
         };
@@ -173,7 +195,7 @@ impl<R: StorageReader> VolumeReader<R> {
                 let footer_file_offset = start_offset + candidate_start as u64;
 
                 // Try to read footer from this offset
-                if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE) {
+                if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE).await {
                     if let Ok(f) = Footer::from_bytes(&bytes) {
                         tracing::warn!(
                             "Recovered floating footer at offset {}",
@@ -203,16 +225,16 @@ impl<R: StorageReader> VolumeReader<R> {
         self.footer.as_ref().map(|f| f.block_count).unwrap_or(0)
     }
 
-    /// Read a block at the given location (v8.1 BlockHeader format)
-    pub fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
+    /// Read a block at the given location (BlockHeader format)
+    pub async fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
         // Delegate to read_typed_block and discard the block type
-        let (_block_type, block) = self.read_typed_block(location)?;
+        let (_block_type, block) = self.read_typed_block(location).await?;
         Ok(block)
     }
 
     /// Read raw data at the given offset
-    pub fn read_raw(&self, offset: u64, len: usize) -> Result<Bytes> {
-        self.reader.read_at(offset, len)
+    pub async fn read_raw(&self, offset: u64, len: usize) -> Result<Bytes> {
+        self.reader.read_at(offset, len).await
     }
 
     /// Read erasure-coded shards starting at the given offset
@@ -223,7 +245,7 @@ impl<R: StorageReader> VolumeReader<R> {
     /// # Security
     /// All length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks
     /// via malicious headers with huge length values.
-    pub fn read_erasure_shards(
+    pub async fn read_erasure_shards(
         &self,
         location: &BlockLocation,
         erasure_info: &ErasureBlockInfo,
@@ -234,7 +256,7 @@ impl<R: StorageReader> VolumeReader<R> {
 
         for idx in 0..total_shards {
             // Read shard header (length + CRC)
-            let header_bytes = match self.reader.read_at(offset, ShardHeader::SIZE) {
+            let header_bytes = match self.reader.read_at(offset, ShardHeader::SIZE).await {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 _ => {
                     shards.push((idx, None));
@@ -269,6 +291,7 @@ impl<R: StorageReader> VolumeReader<R> {
             let shard_data = match self
                 .reader
                 .read_at(offset + ShardHeader::SIZE as u64, header.length as usize)
+                .await
             {
                 Ok(data) if header.verify(&data) => Some(data),
                 _ => None,
@@ -282,7 +305,7 @@ impl<R: StorageReader> VolumeReader<R> {
     }
 
     /// Get the data region (after header + backup footer gap, before backup header)
-    /// V8.1 layout: Data starts at DATA_REGION_START (4224)
+    /// Layout: Data starts at DATA_REGION_START (4224)
     pub fn data_region(&self) -> (u64, u64) {
         let start = DATA_REGION_START;
         let end = self
@@ -293,20 +316,21 @@ impl<R: StorageReader> VolumeReader<R> {
         (start, end)
     }
 
-    /// Read a typed block (v8.1 format with BlockHeader)
+    /// Read a typed block (format with BlockHeader)
     ///
     /// Returns the block type and encrypted data
     ///
     /// # Security
     /// Length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks.
-    pub fn read_typed_block(
+    pub async fn read_typed_block(
         &self,
         location: &BlockLocation,
     ) -> Result<(BlockType, EncryptedMacroBlock)> {
         // Read BlockHeader (16 bytes)
         let header_bytes = self
             .reader
-            .read_at(location.physical_offset, BlockHeader::SIZE)?;
+            .read_at(location.physical_offset, BlockHeader::SIZE)
+            .await?;
         let header = BlockHeader::from_bytes(&header_bytes)
             .ok_or_else(|| EraError::InvalidFormat("Invalid BlockHeader".into()))?;
 
@@ -320,7 +344,10 @@ impl<R: StorageReader> VolumeReader<R> {
 
         // Read encrypted data
         let data_offset = location.physical_offset + BlockHeader::SIZE as u64;
-        let data = self.reader.read_at(data_offset, header.length as usize)?;
+        let data = self
+            .reader
+            .read_at(data_offset, header.length as usize)
+            .await?;
 
         // Verify CRC
         if !header.verify(&data) {
@@ -349,7 +376,10 @@ impl<R: StorageReader> VolumeReader<R> {
     /// Length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks.
     ///
     /// Returns a vector of BlockLocations for all matching blocks.
-    pub fn scan_for_typed_blocks(&self, target_type: BlockType) -> Result<Vec<BlockLocation>> {
+    pub async fn scan_for_typed_blocks(
+        &self,
+        target_type: BlockType,
+    ) -> Result<Vec<BlockLocation>> {
         let (start_offset, end_offset) = self.data_region();
         let mut current_offset = start_offset;
         let mut found_blocks = Vec::new();
@@ -363,10 +393,10 @@ impl<R: StorageReader> VolumeReader<R> {
 
         while current_offset + BlockHeader::SIZE as u64 <= end_offset {
             // Try to read BlockHeader
-            match self.reader.read_at(current_offset, BlockHeader::SIZE) {
+            match self.reader.read_at(current_offset, BlockHeader::SIZE).await {
                 Ok(header_bytes) => {
                     if let Some(header) = BlockHeader::from_bytes(&header_bytes) {
-                        // Check if this is a typed block (v8.1 format)
+                        // Check if this is a typed block (format)
                         if header.version == BlockHeader::VERSION {
                             let data_len = header.length as u64;
 
@@ -384,10 +414,14 @@ impl<R: StorageReader> VolumeReader<R> {
                             // Verify we have enough space for the full block
                             if current_offset + BlockHeader::SIZE as u64 + data_len <= end_offset {
                                 // Verify CRC by reading the data
-                                if let Ok(data) = self.reader.read_at(
-                                    current_offset + BlockHeader::SIZE as u64,
-                                    data_len as usize,
-                                ) {
+                                if let Ok(data) = self
+                                    .reader
+                                    .read_at(
+                                        current_offset + BlockHeader::SIZE as u64,
+                                        data_len as usize,
+                                    )
+                                    .await
+                                {
                                     if header.verify(&data) {
                                         // Valid typed block found
                                         if header.block_type == target_type {
@@ -421,7 +455,7 @@ impl<R: StorageReader> VolumeReader<R> {
                     // If we get here, this wasn't a valid typed block
                     // Could be legacy format (ShardHeader) - skip 8 bytes
                     if let Ok(shard_header_bytes) =
-                        self.reader.read_at(current_offset, ShardHeader::SIZE)
+                        self.reader.read_at(current_offset, ShardHeader::SIZE).await
                     {
                         if let Some(shard_header) = ShardHeader::from_bytes(&shard_header_bytes) {
                             // SECURITY: Validate shard length too
@@ -462,8 +496,8 @@ mod tests {
     use era_storage::LocalStorageBackend;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_open_volume() {
+    #[tokio::test]
+    async fn test_open_volume() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
         let path = Path::new("test.era");
@@ -477,17 +511,17 @@ mod tests {
         );
         let archive_id = header.archive_id;
 
-        let writer = VolumeWriter::create(&backend, path, header).unwrap();
-        writer.finalize().unwrap();
+        let writer = VolumeWriter::create(&backend, path, header).await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Open and verify
-        let reader = VolumeReader::open(&backend, path).unwrap();
+        let reader = VolumeReader::open(&backend, path).await.unwrap();
         assert_eq!(reader.header().archive_id.0, archive_id.0);
         assert_eq!(reader.block_count(), 0);
     }
 
-    #[test]
-    fn test_read_block() {
+    #[tokio::test]
+    async fn test_read_block() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
         let path = Path::new("test.era");
@@ -500,7 +534,7 @@ mod tests {
             [0u8; 16],
         );
 
-        let mut writer = VolumeWriter::create(&backend, path, header).unwrap();
+        let mut writer = VolumeWriter::create(&backend, path, header).await.unwrap();
 
         let block = EncryptedMacroBlock {
             block_id: BlockId::new(0),
@@ -512,14 +546,15 @@ mod tests {
 
         let location = writer
             .write_canonical_block(&block, era_common::BlockType::Data)
+            .await
             .unwrap();
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
 
         // Read back
-        let reader = VolumeReader::open(&backend, path).unwrap();
+        let reader = VolumeReader::open(&backend, path).await.unwrap();
         assert_eq!(reader.block_count(), 1);
 
-        let read_block = reader.read_block(&location).unwrap();
+        let read_block = reader.read_block(&location).await.unwrap();
         assert_eq!(read_block.data.as_ref(), &[42u8; 256]);
     }
 }

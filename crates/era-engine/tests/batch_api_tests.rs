@@ -59,7 +59,7 @@ async fn test_batch_add_files() {
     let output_dir = temp_dir.path().join("output");
     let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
     reader
-        .extract_all(&ExtractOptions::new(&output_dir))
+        .extract_all(&ExtractOptions::new(&output_dir)).await
         .unwrap();
 
     // Verify all files extracted correctly
@@ -78,7 +78,7 @@ async fn test_batch_vs_individual_equivalence() {
     fs::create_dir_all(&input_dir).unwrap();
 
     // Create test files
-    let files: Vec<_> = (0..5)
+    let files: Vec<_> = (0..5).await
         .map(|i| {
             let content = format!("Content {}", i);
             create_test_file(&input_dir, &format!("file_{}.txt", i), content.as_bytes())
@@ -121,12 +121,12 @@ async fn test_batch_vs_individual_equivalence() {
 
     let mut reader_batch = ArchiveReader::open(&archive_batch, "test_password").unwrap();
     reader_batch
-        .extract_all(&ExtractOptions::new(&output_batch))
+        .extract_all(&ExtractOptions::new(&output_batch)).await
         .unwrap();
 
     let mut reader_individual = ArchiveReader::open(&archive_individual, "test_password").unwrap();
     reader_individual
-        .extract_all(&ExtractOptions::new(&output_individual))
+        .extract_all(&ExtractOptions::new(&output_individual)).await
         .unwrap();
 
     // Verify files are identical
@@ -228,7 +228,7 @@ async fn test_mixed_batch_and_individual() {
     let output_dir = temp_dir.path().join("output");
     let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir))
+        .extract_all(&ExtractOptions::new(&output_dir)).await
         .unwrap();
 
     assert_eq!(extract_stats.extracted, 4);

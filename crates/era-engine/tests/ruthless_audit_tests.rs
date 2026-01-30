@@ -1,4 +1,4 @@
-/// ERA v8.1 Ruthless Audit Tests
+/// ERA Ruthless Audit Tests
 /// Integration test suite for comprehensive validation
 ///
 /// This test file is meant to be run as part of the era-core test suite
@@ -274,7 +274,7 @@ mod ruthless_audit_tests {
         println!("\n[RUTHLESS AUDIT] Generating Comprehensive Report");
 
         let mut report = String::new();
-        report.push_str("# ERA v8.1 Ruthless Audit Report\n\n");
+        report.push_str("# ERA Ruthless Audit Report\n\n");
         report.push_str("## Critical Findings\n\n");
 
         report.push_str("### Gap 1: L3 Packing Algorithm (CRITICAL)\n");

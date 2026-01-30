@@ -44,13 +44,13 @@ pub struct RecoveryStatus {
 }
 
 /// Check if a volume has a checkpoint by reading its footer
-fn volume_has_checkpoint(archive_path: &Path) -> bool {
+async fn volume_has_checkpoint(archive_path: &Path) -> bool {
     // Try to open the volume and check footer
     let parent_dir = archive_path.parent().unwrap_or(Path::new("."));
     let backend = LocalStorageBackend::new(parent_dir);
     let volume_name = archive_path.file_name().unwrap_or_default();
 
-    match VolumeReader::open(&backend, Path::new(volume_name)) {
+    match VolumeReader::open(&backend, Path::new(volume_name)).await {
         Ok(reader) => {
             if let Some(footer) = reader.footer() {
                 // V2.2+: Checkpoint exists if last_checkpoint_offset > 0
@@ -80,12 +80,12 @@ impl RecoveryManager {
     ///
     /// **V2.2 Change:** Now checks the volume footer for checkpoint presence
     /// instead of looking for sidecar files.
-    pub fn analyze(archive_path: &Path) -> Result<RecoveryStatus> {
+    pub async fn analyze(archive_path: &Path) -> Result<RecoveryStatus> {
         let archive_exists = archive_path.exists();
 
         // V2.2: Check volume footer for checkpoint, not sidecar files
         let checkpoint_exists = if archive_exists {
-            volume_has_checkpoint(archive_path)
+            volume_has_checkpoint(archive_path).await
         } else {
             false
         };
@@ -126,8 +126,8 @@ impl RecoveryManager {
     /// Create a recovery manager for an archive
     ///
     /// **V2.2 Change:** Now checks volume footer instead of sidecar files.
-    pub fn new(archive_path: &Path) -> Result<Self> {
-        let checkpoint_manager = if archive_path.exists() && volume_has_checkpoint(archive_path) {
+    pub async fn new(archive_path: &Path) -> Result<Self> {
+        let checkpoint_manager = if archive_path.exists() && volume_has_checkpoint(archive_path).await {
             // Note: In V2.2, the actual checkpoint data is in the volume
             // CheckpointManager is kept for API compatibility but doesn't
             // manage sidecar files anymore

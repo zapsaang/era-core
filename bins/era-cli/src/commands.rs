@@ -283,7 +283,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         builder = builder.volume_count(v);
     }
 
-    let mut writer = builder.build().context("Failed to create archive")?;
+    let mut writer = builder.build().await.context("Failed to create archive")?;
 
     info!("Creating archive: {}", output.display());
 
@@ -343,7 +343,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         HumanDuration(start_time.elapsed())
     ));
 
-    let stats = writer.finalize().context("Failed to finalize archive")?;
+    let stats = writer.finalize().await.context("Failed to finalize archive")?;
 
     info!("");
     info!("Archive created successfully!");
@@ -356,7 +356,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
 }
 
 /// Extract files from an ERA archive
-pub fn extract(
+pub async fn extract(
     input: &Path,
     output: &Path,
     password: Option<&str>,
@@ -370,10 +370,11 @@ pub fn extract(
         let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
             .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
         ArchiveReader::open_with_keypair(input, &keypair)
+            .await
             .context("Failed to open archive with key")?
     } else {
         let password = get_password(password, "Enter decryption password: ")?;
-        ArchiveReader::open(input, &password).context("Failed to open archive")?
+        ArchiveReader::open(input, &password).await.context("Failed to open archive")?
     };
 
     let options = ExtractOptions::new(output).overwrite(force);
@@ -383,6 +384,7 @@ pub fn extract(
     let start_time = Instant::now();
     let stats = reader
         .extract_all(&options)
+        .await
         .context("Failed to extract archive")?;
 
     info!("");
@@ -398,7 +400,7 @@ pub fn extract(
 }
 
 /// List contents of an ERA archive
-pub fn list(
+pub async fn list(
     archive: &Path,
     password: Option<&str>,
     key_path: Option<&Path>,
@@ -409,13 +411,14 @@ pub fn list(
         let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
             .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
         ArchiveReader::open_with_keypair(archive, &keypair)
+            .await
             .context("Failed to open archive with key")?
     } else {
         let password = get_password(password, "Enter decryption password: ")?;
-        ArchiveReader::open(archive, &password).context("Failed to open archive")?
+        ArchiveReader::open(archive, &password).await.context("Failed to open archive")?
     };
 
-    let files = reader.list_files().context("Failed to read catalog")?;
+    let files = reader.list_files().await.context("Failed to read catalog")?;
 
     if long_format {
         info!("{:<12} {:<20} PATH", "SIZE", "HASH");
@@ -450,14 +453,14 @@ pub fn list(
 }
 
 /// Show information about an ERA archive
-pub fn info(archive: &Path, password: Option<&str>) -> Result<()> {
+pub async fn info(archive: &Path, password: Option<&str>) -> Result<()> {
     let password = get_password(password, "Enter decryption password: ")?;
 
-    let mut reader = ArchiveReader::open(archive, &password).context("Failed to open archive")?;
+    let mut reader = ArchiveReader::open(archive, &password).await.context("Failed to open archive")?;
 
     // Clone header info before mutable borrow
     let header = reader.header().clone();
-    let catalog = reader.load_catalog().context("Failed to load catalog")?;
+    let catalog = reader.load_catalog().await.context("Failed to load catalog")?;
 
     // ERA version is encoded in magic bytes: magic[3] = major, magic[4] = minor
     let era_version_major = header.magic[3];
@@ -497,13 +500,13 @@ pub fn info(archive: &Path, password: Option<&str>) -> Result<()> {
 }
 
 /// Verify integrity of an ERA archive
-pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<()> {
+pub async fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<()> {
     let password = get_password(password, "Enter decryption password: ")?;
 
     info!("Verifying archive: {}", archive.display());
     info!("");
 
-    let mut reader = ArchiveReader::open(archive, &password).context("Failed to open archive")?;
+    let mut reader = ArchiveReader::open(archive, &password).await.context("Failed to open archive")?;
 
     let start_time = Instant::now();
     let pb = ProgressBar::new_spinner();
@@ -515,7 +518,7 @@ pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<(
     pb.set_message("Scanning blocks...");
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let stats = reader.verify().context("Verification failed")?;
+    let stats = reader.verify().await.context("Verification failed")?;
 
     pb.finish_and_clear();
 
@@ -559,14 +562,14 @@ pub fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<(
 }
 
 /// Repair a damaged or incomplete ERA archive
-pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool) -> Result<()> {
+pub async fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool) -> Result<()> {
     let password = get_password(password, "Enter decryption password: ")?;
 
     info!("Analyzing archive: {}", archive.display());
     info!("");
 
     // First, check recovery status
-    let status = RecoveryManager::analyze(archive).context("Failed to analyze archive")?;
+    let status = RecoveryManager::analyze(archive).await.context("Failed to analyze archive")?;
 
     info!("Recovery Analysis");
     info!("=================");
@@ -611,7 +614,7 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
         info!("");
 
         let mut reader =
-            ArchiveReader::open(archive, &password).context("Failed to open archive")?;
+            ArchiveReader::open(archive, &password).await.context("Failed to open archive")?;
 
         // Check if erasure coding is enabled
         let header = reader.header();
@@ -632,7 +635,7 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
             info!("");
         }
 
-        let verify_stats = reader.verify().context("Verification failed")?;
+        let verify_stats = reader.verify().await.context("Verification failed")?;
 
         if verify_stats.is_ok() {
             info!("✅ Archive is intact. No repair needed.");
@@ -669,9 +672,9 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
 
             let repair_result = if is_multi_volume {
                 info!("Detected multi-volume archive, using matrix-distributed repair...");
-                repair_archive_matrix(archive, &password, repair_options)
+                repair_archive_matrix(archive, &password, repair_options).await
             } else {
-                repair_archive(archive, &password, repair_options)
+                repair_archive(archive, &password, repair_options).await
             };
 
             match repair_result {
@@ -748,7 +751,7 @@ pub fn repair(archive: &Path, password: Option<&str>, force: bool, verbose: bool
     // Force flag: delete checkpoint and let user start fresh
     info!("Discarding checkpoint due to --force flag...");
 
-    let manager = RecoveryManager::new(archive).context("Failed to load recovery state")?;
+    let manager = RecoveryManager::new(archive).await.context("Failed to load recovery state")?;
     manager.cleanup().context("Failed to clean up checkpoint")?;
 
     info!("✅ Checkpoint discarded. You can now create a new archive.");

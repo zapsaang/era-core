@@ -6,8 +6,8 @@ use std::fs;
 use tempfile::TempDir;
 
 /// Test exact fault tolerance: can we lose N volumes and still recover?
-#[test]
-fn test_precise_fault_tolerance_limits() {
+#[tokio::test]
+async fn test_precise_fault_tolerance_limits() {
     println!("\n=== PRECISE FAULT TOLERANCE TEST ===\n");
 
     let erasure_config = ErasureCodeConfig {
@@ -40,11 +40,12 @@ fn test_precise_fault_tolerance_limits() {
             .volume_count(*volume_count)
             .enable_matrix_distribution(true)
             .build()
+            .await
             .unwrap();
 
         let data = vec![0xAB; 256 * 1024]; // 256KB
-        writer.add_bytes("test.bin", &data).unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("test.bin", &data).await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Test losing different numbers of volumes
         for volumes_to_lose in 1..=(*volume_count - 1) {
@@ -119,12 +120,14 @@ fn test_precise_fault_tolerance_limits() {
                 }
             }
 
-            match ArchiveReader::open(&test_path, "") {
+            match ArchiveReader::open(&test_path, "").await {
                 Ok(mut reader) => {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        reader.extract_all(&era_engine::ExtractOptions::new(
-                            test_dir.path().join("extract"),
-                        ))
+                        tokio::runtime::Handle::current().block_on(async {
+                            reader.extract_all(&era_engine::ExtractOptions::new(
+                                test_dir.path().join("extract"),
+                            )).await
+                        })
                     }));
 
                     match result {

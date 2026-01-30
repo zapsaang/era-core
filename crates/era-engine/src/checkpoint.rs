@@ -237,7 +237,7 @@ impl CheckpointManager {
     ///
     /// **NEW API:** Requires VolumeWriter to write checkpoint block.
     /// The old `commit()` method that wrote sidecar files is removed.
-    pub fn commit_to_volume<W: StorageWriter>(
+    pub async fn commit_to_volume<W: StorageWriter>(
         &self,
         volume_writer: &mut era_volume::VolumeWriter<W>,
         session: &KeySession,
@@ -250,7 +250,7 @@ impl CheckpointManager {
             volume_key,
             nonce_context,
             &self.checkpoint,
-        )
+        ).await
     }
 
     /// Delete checkpoint (no-op in new implementation)
@@ -381,7 +381,7 @@ impl CheckpointManager {
 /// The checkpoint is encrypted and written as `BlockType::Checkpoint`.
 /// The volume footer's `last_checkpoint_offset` field is updated to point
 /// to this checkpoint, creating a linked list of checkpoints for recovery.
-pub fn write_checkpoint<W: StorageWriter>(
+pub async fn write_checkpoint<W: StorageWriter>(
     volume_writer: &mut era_volume::VolumeWriter<W>,
     session: &KeySession,
     volume_key: &VolumeKey,
@@ -416,7 +416,7 @@ pub fn write_checkpoint<W: StorageWriter>(
     };
 
     // Write as canonical block
-    let location = volume_writer.write_canonical_block(&encrypted_block, BlockType::Checkpoint)?;
+    let location = volume_writer.write_canonical_block(&encrypted_block, BlockType::Checkpoint).await?;
 
     // Update footer's last_checkpoint_offset and block_id for direct decryption
     let checkpoint_block_id = block_id.sequence() as u32;
@@ -426,7 +426,7 @@ pub fn write_checkpoint<W: StorageWriter>(
     // This persists the footer (primary + backup) so that if power is lost after this point,
     // the checkpoint can be recovered. Without this call, the checkpoint data would be written
     // but the footer wouldn't point to it, making recovery impossible.
-    volume_writer.commit_checkpoint(location.physical_offset)?;
+    volume_writer.commit_checkpoint(location.physical_offset).await?;
 
     tracing::info!(
         "Checkpoint committed: {} chunks, {} files at offset {} (block_id={})",
@@ -452,7 +452,7 @@ pub fn write_checkpoint<W: StorageWriter>(
 /// * `checkpoint_offset` - Physical offset of the checkpoint block
 /// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to brute-force search (legacy volumes).
 #[allow(dead_code)] // Will be used by cold recovery path
-pub fn read_checkpoint<R: era_storage::StorageReader>(
+pub async fn read_checkpoint<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
     session: &KeySession,
     volume_key: &VolumeKey,
@@ -474,7 +474,7 @@ pub fn read_checkpoint<R: era_storage::StorageReader>(
     };
 
     // Read typed block
-    let (block_type, encrypted_block) = volume_reader.read_typed_block(&location)?;
+    let (block_type, encrypted_block) = volume_reader.read_typed_block(&location).await?;
 
     // Verify this is a checkpoint block
     if block_type != BlockType::Checkpoint {
@@ -548,7 +548,7 @@ pub fn read_checkpoint<R: era_storage::StorageReader>(
 /// would traverse the checkpoint chain if previous checkpoint offsets
 /// were stored in each checkpoint.
 #[allow(dead_code)] // Will be used by cold recovery path
-pub fn recover_all_checkpoints<R: era_storage::StorageReader>(
+pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
     session: &KeySession,
     volume_key: &VolumeKey,
@@ -577,7 +577,7 @@ pub fn recover_all_checkpoints<R: era_storage::StorageReader>(
                 nonce_context,
                 checkpoint_offset,
                 block_id_opt,
-            ) {
+            ).await {
                 Ok(checkpoint) => {
                     checkpoints.push(checkpoint);
                     // TODO: In a full implementation, each checkpoint would store

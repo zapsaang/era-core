@@ -1,4 +1,4 @@
-//! Secure Memory Management for ERA v8.1 - Optimized Version
+//! Secure Memory Management - Optimized Version
 //!
 //! This module implements system-level memory protection using industry-standard
 //! zeroize-alloc allocator from RustCrypto, eliminating ~200 lines of manual

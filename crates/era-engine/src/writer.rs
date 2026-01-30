@@ -1,6 +1,6 @@
 //! Archive writer - creates ERA archives.
 //!
-//! ## Security (ERA v8.1)
+//! ## Security Model
 //!
 //! This writer implements the HKDF "Onion Model" key derivation:
 //! - **Master Key (MK)**: Derived from password via Argon2id, or from certificate key exchange
@@ -308,7 +308,7 @@ impl ArchiveWriterBuilder {
     }
 
     /// Build the archive writer
-    pub fn build(self) -> Result<ArchiveWriter> {
+    pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
         // Create storage backend
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
@@ -363,6 +363,7 @@ impl ArchiveWriterBuilder {
                 &backend,
                 Path::new(base_filename),
             )
+            .await
             .map_err(|e| {
                 era_common::EraError::InvalidFormat(format!(
                     "Failed to open volume 0 for append (Path: {:?}): {}",
@@ -437,6 +438,7 @@ impl ArchiveWriterBuilder {
 
                 if let Ok(r) =
                     VolumeReader::<era_storage::LocalStorageReader>::open(&backend, next_filename)
+                        .await
                 {
                     last_valid_reader = r;
                     current_vol_idx = next_idx;
@@ -450,8 +452,9 @@ impl ArchiveWriterBuilder {
                 append_footer = Some(f.clone());
                 // Load catalog if present
                 if f.catalog_offset > 0 && f.catalog_size > 0 {
-                    if let Ok(catalog_bytes) =
-                        last_valid_reader.read_raw(f.catalog_offset, f.catalog_size as usize)
+                    if let Ok(catalog_bytes) = last_valid_reader
+                        .read_raw(f.catalog_offset, f.catalog_size as usize)
+                        .await
                     {
                         if let Ok(catalog) = Catalog::from_bytes(&catalog_bytes) {
                             append_catalog = Some(catalog);
@@ -675,8 +678,8 @@ impl ArchiveWriterBuilder {
         if let Some(existing) = append_catalog {
             catalog = existing;
         } else if self.append_existing {
-            let mut reader = ArchiveReader::open_with_session(&self.output_path, &session)?;
-            catalog = reader.load_catalog()?.clone();
+            let mut reader = ArchiveReader::open_with_session(&self.output_path, &session).await?;
+            catalog = reader.load_catalog().await?.clone();
         }
 
         let volume_pool = if self.append_existing {
@@ -689,9 +692,9 @@ impl ArchiveWriterBuilder {
             let footer = append_footer
                 .as_ref()
                 .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
-            VolumePool::open_append_single(backend.clone(), pool_config, header, footer)?
+            VolumePool::open_append_single(backend.clone(), pool_config, header, footer).await?
         } else {
-            VolumePool::create(backend.clone(), pool_config, header.clone())?
+            VolumePool::create(backend.clone(), pool_config, header.clone()).await?
         };
 
         info!(
@@ -863,7 +866,7 @@ impl ArchiveWriterBuilder {
 /// Writer for creating ERA archives
 /// Archive writer - creates ERA archives with security-first design
 ///
-/// ## Security Model (ERA v8.1)
+/// ## Security Model
 ///
 /// This writer implements the HKDF "Onion Model" key derivation:
 /// - **Master Key (MK)**: Derived from password via Argon2id, or from certificate key exchange
@@ -1076,7 +1079,7 @@ impl ArchiveWriter {
 
             // Check if we should flush the buffer
             if self.should_flush_pack() {
-                self.flush_packed_files()?;
+                self.flush_packed_files().await?;
             }
 
             return Ok(());
@@ -1179,7 +1182,7 @@ impl ArchiveWriter {
         // Check for dedup: skip if we already have this chunk
         if !self.chunk_index.contains(&hash)? {
             // Add to pending batch
-            self.add_to_pending(chunk)?;
+            self.add_to_pending(chunk).await?;
         }
 
         // Create catalog entry with single chunk
@@ -1210,7 +1213,7 @@ impl ArchiveWriter {
 
             // Dedup check
             if !self.chunk_index.contains(&hash)? {
-                self.add_to_pending(chunk)?;
+                self.add_to_pending(chunk).await?;
             }
 
             chunk_refs.push(ChunkRef::new(hash, offset, length));
@@ -1253,16 +1256,16 @@ impl ArchiveWriter {
     ///
     /// This method intelligently places chunks into bins for optimal packing.
     /// The staging pool will automatically flush bins when they reach 95% capacity.
-    fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
+    async fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
         // Implementation Reform: k-Bounded Best-Fit is MANDATORY for all modes.
         // We use the staging pool to aggregate small CDC chunks into 4MB MacroBlocks.
-        // This is critical for L3 Smart Packing as per ERA v8.1 architecture.
+        // This is critical for L3 Smart Packing.
 
         // Use k-Bounded Best-Fit staging pool
         // The pool will automatically handle oversized chunks and optimal bin selection
         if let Some(packed) = self.staging_pool.push(chunk) {
             // A bin reached flush threshold - write it
-            self.write_packed_block(packed)?;
+            self.write_packed_block(packed).await?;
         }
 
         Ok(())
@@ -1270,7 +1273,7 @@ impl ArchiveWriter {
 
     /// Flush all bins in the staging pool
     /// This should be called at the end of archiving to write all buffered chunks
-    fn flush_pending(&mut self) -> Result<()> {
+    async fn flush_pending(&mut self) -> Result<()> {
         let packed_blocks = self.staging_pool.flush_all();
 
         if packed_blocks.is_empty() {
@@ -1283,14 +1286,14 @@ impl ArchiveWriter {
         );
 
         for packed in packed_blocks {
-            self.write_packed_block(packed)?;
+            self.write_packed_block(packed).await?;
         }
 
         Ok(())
     }
 
     /// Write a packed block to storage
-    fn write_packed_block(&mut self, packed: PackedBlock) -> Result<()> {
+    async fn write_packed_block(&mut self, packed: PackedBlock) -> Result<()> {
         debug!(
             "Writing packed block with {} chunks ({} bytes) from bin {}",
             packed.chunks.len(),
@@ -1304,7 +1307,7 @@ impl ArchiveWriter {
 
         // Pack and write chunks (with or without erasure coding)
         // Uses process_packed_block which handles index updates internally
-        self.process_packed_block(packed.chunks, Vec::new())?;
+        self.process_packed_block(packed.chunks, Vec::new()).await?;
 
         Ok(())
     }
@@ -1316,7 +1319,7 @@ impl ArchiveWriter {
     }
 
     /// Flush buffered small files by packing them together
-    fn flush_packed_files(&mut self) -> Result<()> {
+    async fn flush_packed_files(&mut self) -> Result<()> {
         if self.small_file_buffer.is_empty() {
             return Ok(());
         }
@@ -1382,12 +1385,14 @@ impl ArchiveWriter {
                     }
                 }
             } else {
-                self.process_packed_block(vec![packed_chunk], small_file_hashes)?;
+                self.process_packed_block(vec![packed_chunk], small_file_hashes)
+                    .await?;
             }
         } else {
             // Process the packed chunk (write or buffer)
             // Pass small_file_hashes so they are associated with the block location
-            self.process_packed_block(vec![packed_chunk], small_file_hashes)?;
+            self.process_packed_block(vec![packed_chunk], small_file_hashes)
+                .await?;
         }
 
         // Note: process_packed_block handles index update for both packed_hash
@@ -1446,7 +1451,7 @@ impl ArchiveWriter {
     ///
     /// This replaces the old `pack_and_write_chunks` and handles index updates internally.
     /// If erasure coding is enabled, blocks are buffered until a full stripe is formed.
-    fn process_packed_block(
+    async fn process_packed_block(
         &mut self,
         chunks: Vec<UniqueChunk>,
         extra_hashes: Vec<ChunkHash>,
@@ -1478,14 +1483,15 @@ impl ArchiveWriter {
             // Erasure Coding Path
             let maybe_stripe = stripe_buffer.push(encrypted_block, block_meta)?;
             if let Some(stripe) = maybe_stripe {
-                self.flush_stripe(stripe)?;
+                self.flush_stripe(stripe).await?;
             }
         } else {
             // Non-erasure path (Direct Write)
-            // Write standard blocks via VolumePool using v8.1 BlockHeader format
+            // Write standard blocks via VolumePool
             let (location, _volume_id) = self
                 .volume_pool
-                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)?;
+                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)
+                .await?;
 
             // Update index
             for hash in hashes {
@@ -1496,7 +1502,7 @@ impl ArchiveWriter {
     }
 
     /// Flush a complete stripe to storage
-    fn flush_stripe(&mut self, stripe: Stripe) -> Result<()> {
+    async fn flush_stripe(&mut self, stripe: Stripe) -> Result<()> {
         // Write Data Blocks first
         let mut locations = Vec::new();
         // Use round-robin if multiple volumes available, else Volume 0
@@ -1569,13 +1575,10 @@ impl ArchiveWriter {
             if i < stripe.data_blocks.len() {
                 let block = &stripe.data_blocks[i];
                 stripe_lengths[i] = block.data.len() as u32;
-                let (entry, volume_id) = self.volume_pool.write_shard(
-                    i,
-                    &block.data,
-                    false,
-                    0,
-                    Some(&stripe_lengths),
-                )?;
+                let (entry, volume_id) = self
+                    .volume_pool
+                    .write_shard(i, &block.data, false, 0, Some(&stripe_lengths))
+                    .await?;
 
                 let loc = BlockLocation {
                     volume_id,
@@ -1593,13 +1596,10 @@ impl ArchiveWriter {
                     .take()
                     .expect("Padding block should be prepared");
 
-                let (entry, _) = self.volume_pool.write_shard(
-                    i,
-                    &encrypted_block.data,
-                    false,
-                    0,
-                    Some(&stripe_lengths),
-                )?;
+                let (entry, _) = self
+                    .volume_pool
+                    .write_shard(i, &encrypted_block.data, false, 0, Some(&stripe_lengths))
+                    .await?;
                 data_info.push((entry.volume_sequence, entry.physical_offset));
                 // Note: We don't add to `locations` as it's not a real content block,
                 // but we write it to disk to maintain stripe alignment.
@@ -1614,13 +1614,10 @@ impl ArchiveWriter {
         let data_count = stripe.config.data_shards as usize;
 
         for (i, shard) in parity_shards.iter().enumerate() {
-            let (entry, _) = self.volume_pool.write_shard(
-                data_count + i,
-                shard,
-                false,
-                0,
-                Some(&stripe_lengths),
-            )?;
+            let (entry, _) = self
+                .volume_pool
+                .write_shard(data_count + i, shard, false, 0, Some(&stripe_lengths))
+                .await?;
             parity_locations.push((entry.volume_sequence, entry.physical_offset));
         }
 
@@ -1674,7 +1671,7 @@ impl ArchiveWriter {
     }
 
     /// Add a file from memory
-    pub fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
+    pub async fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
         info!("Adding in-memory file: {} ({} bytes)", name, data.len());
 
         if data.len() > self.target_block_size {
@@ -1686,7 +1683,7 @@ impl ArchiveWriter {
 
                 if !self.chunk_index.contains(&hash)? {
                     let chunk = UniqueChunk::new(Bytes::copy_from_slice(chunk), hash);
-                    self.add_to_pending(chunk)?;
+                    self.add_to_pending(chunk).await?;
                 }
 
                 chunk_refs.push(ChunkRef::new(hash, offset, chunk.len() as u32));
@@ -1704,7 +1701,7 @@ impl ArchiveWriter {
         // Dedup check
         if !self.chunk_index.contains(&hash)? {
             let chunk = UniqueChunk::new(Bytes::copy_from_slice(data), hash);
-            self.add_to_pending(chunk)?;
+            self.add_to_pending(chunk).await?;
         }
 
         // Create catalog entry with single chunk
@@ -1717,33 +1714,33 @@ impl ArchiveWriter {
     }
 
     /// Finalize the archive
-    pub fn finalize(mut self) -> Result<ArchiveStats> {
+    pub async fn finalize(mut self) -> Result<ArchiveStats> {
         info!("Finalizing archive...");
 
         // Flush any buffered small files first
-        self.flush_packed_files()?;
+        self.flush_packed_files().await?;
 
         // Flush any remaining pending chunks
-        self.flush_pending()?;
+        self.flush_pending().await?;
 
         // Flush erasure stripe buffer if not empty
         // This ensures the last partial stripe is written (with padding)
         if let Some(ref mut buffer) = self.stripe_buffer {
             if !buffer.is_empty() {
                 let stripe = buffer.flush()?;
-                self.flush_stripe(stripe)?;
+                self.flush_stripe(stripe).await?;
             }
         }
 
         // Embed critical metadata in-archive (self-contained recovery)
-        self.write_internal_metadata()?;
+        self.write_internal_metadata().await?;
 
         // Flush any metadata chunks that were added
-        self.flush_pending()?;
+        self.flush_pending().await?;
         if let Some(ref mut buffer) = self.stripe_buffer {
             if !buffer.is_empty() {
                 let stripe = buffer.flush()?;
-                self.flush_stripe(stripe)?;
+                self.flush_stripe(stripe).await?;
             }
         }
 
@@ -1795,14 +1792,16 @@ impl ArchiveWriter {
 
         for slot in 0..volume_count {
             if let Some(writer) = self.volume_pool.get_writer_mut(slot) {
-                let mut location =
-                    writer.write_canonical_block(&catalog_block, era_common::BlockType::Catalog)?;
+                let mut location = writer
+                    .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)
+                    .await?;
                 // Override slot_index with actual block_id for correct key derivation during read
                 location.slot_index = catalog_block_id;
 
                 if let Some(ref backup) = backup_block {
-                    let _backup_location =
-                        writer.write_canonical_block(backup, era_common::BlockType::Catalog)?;
+                    let _backup_location = writer
+                        .write_canonical_block(backup, era_common::BlockType::Catalog)
+                        .await?;
                     debug!(
                         "Volume {}: Catalog written with backup at offset {}",
                         slot, location.physical_offset
@@ -1831,7 +1830,8 @@ impl ArchiveWriter {
         // Finalize the pool with per-volume catalog offsets
         let pool_stats = self
             .volume_pool
-            .finalize_with_catalogs(&catalog_locations, None)?;
+            .finalize_with_catalogs(&catalog_locations, None)
+            .await?;
 
         info!(
             "VolumePool finalized: {} volumes, {} total bytes, {} blocks",
@@ -1881,17 +1881,17 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    fn write_internal_metadata(&mut self) -> Result<()> {
+    async fn write_internal_metadata(&mut self) -> Result<()> {
         if !self.embedded_index.is_empty() {
             let snapshot = EmbeddedIndexSnapshot::from_map(&self.embedded_index);
             let data = rkyv::to_bytes::<_, 4096>(&snapshot)
                 .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
-            self.add_bytes(INTERNAL_INDEX_NAME, &data)?;
+            self.add_bytes(INTERNAL_INDEX_NAME, &data).await?;
         }
 
         if let Some(ref mgr) = self.checkpoint_manager {
             let data = mgr.snapshot_bytes()?;
-            self.add_bytes(INTERNAL_CHECKPOINT_NAME, &data)?;
+            self.add_bytes(INTERNAL_CHECKPOINT_NAME, &data).await?;
         }
 
         Ok(())
@@ -1921,19 +1921,20 @@ mod tests {
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
-    #[test]
-    fn test_create_archive() {
+    #[tokio::test]
+    async fn test_create_archive() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("test.era");
 
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("hello.txt", b"Hello, ERA!").unwrap();
+        writer.add_bytes("hello.txt", b"Hello, ERA!").await.unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 1);
         assert_eq!(stats.total_size, 11);
     }
@@ -1951,11 +1952,12 @@ mod tests {
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
         writer.add_file(test_file.path()).await.unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 1);
         assert!(stats.blocks_written >= 2); // data + catalog
     }
@@ -1975,6 +1977,7 @@ mod tests {
             .config(config)
             .enable_cdc(true)
             .build()
+            .await
             .unwrap();
 
         let mut temp_file = NamedTempFile::new().unwrap();
@@ -1994,8 +1997,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_builder_uses_packing_k_factor() {
+    #[tokio::test]
+    async fn test_builder_uses_packing_k_factor() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("packing_k.era");
 
@@ -2007,146 +2010,167 @@ mod tests {
             .password("test_password")
             .config(config)
             .build()
+            .await
             .unwrap();
 
         assert_eq!(writer.staging_pool.bin_count(), 3);
     }
 
-    #[test]
-    fn test_empty_archive() {
+    #[tokio::test]
+    async fn test_empty_archive() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("empty.era");
 
         let writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 0);
         assert_eq!(stats.total_size, 0);
     }
 
-    #[test]
-    fn test_multiple_files() {
+    #[tokio::test]
+    async fn test_multiple_files() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("multi.era");
 
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
         // Add multiple files
-        writer.add_bytes("file1.txt", b"Content 1").unwrap();
+        writer.add_bytes("file1.txt", b"Content 1").await.unwrap();
         writer
             .add_bytes("file2.txt", b"Content 2 is longer")
+            .await
             .unwrap();
         writer
             .add_bytes("dir/file3.txt", b"Nested content")
+            .await
             .unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 3);
     }
 
-    #[test]
-    fn test_large_file() {
+    #[tokio::test]
+    async fn test_large_file() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("large.era");
 
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
         // Add a larger file (1MB of compressible data)
         let large_data = vec![b'A'; 1024 * 1024];
-        writer.add_bytes("large.bin", &large_data).unwrap();
+        writer.add_bytes("large.bin", &large_data).await.unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 1);
         assert_eq!(stats.total_size, 1024 * 1024);
     }
 
-    #[test]
-    fn test_empty_file() {
+    #[tokio::test]
+    async fn test_empty_file() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("empty_file.era");
 
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("empty.txt", b"").unwrap();
+        writer.add_bytes("empty.txt", b"").await.unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 1);
         assert_eq!(stats.total_size, 0);
     }
 
-    #[test]
-    fn test_unicode_filename() {
+    #[tokio::test]
+    async fn test_unicode_filename() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("unicode.era");
 
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
         writer
             .add_bytes("中文文件名.txt", "内容".as_bytes())
+            .await
             .unwrap();
         writer
             .add_bytes("日本語.txt", "コンテンツ".as_bytes())
+            .await
             .unwrap();
-        writer.add_bytes("emoji_📁.txt", b"emoji content").unwrap();
+        writer
+            .add_bytes("emoji_📁.txt", b"emoji content")
+            .await
+            .unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 3);
     }
 
-    #[test]
-    fn test_special_characters_in_filename() {
+    #[tokio::test]
+    async fn test_special_characters_in_filename() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("special.era");
 
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
         writer
             .add_bytes("file with spaces.txt", b"content")
+            .await
             .unwrap();
         writer
             .add_bytes("file-with-dashes.txt", b"content")
+            .await
             .unwrap();
         writer
             .add_bytes("file_with_underscores.txt", b"content")
+            .await
             .unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 3);
     }
 
-    #[test]
-    fn test_binary_content() {
+    #[tokio::test]
+    async fn test_binary_content() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("binary.era");
 
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("test_password")
             .build()
+            .await
             .unwrap();
 
         // Add binary data with all byte values
         let binary_data: Vec<u8> = (0..=255).collect();
-        writer.add_bytes("all_bytes.bin", &binary_data).unwrap();
+        writer
+            .add_bytes("all_bytes.bin", &binary_data)
+            .await
+            .unwrap();
 
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 1);
         assert_eq!(stats.total_size, 256);
     }
@@ -2189,7 +2213,7 @@ pub mod generic {
         }
 
         /// Build the archive writer
-        pub fn build(self) -> Result<GenericArchiveWriter<B::Writer>> {
+        pub async fn build(self) -> Result<GenericArchiveWriter<B::Writer>> {
             let archive_id = ArchiveId::new();
             let archive_salt = era_crypto::Salt::generate();
 
@@ -2249,7 +2273,7 @@ pub mod generic {
             );
 
             let volume_writer =
-                VolumeWriter::create(&self.backend, Path::new(&self.filename), header)?;
+                VolumeWriter::create(&self.backend, Path::new(&self.filename), header).await?;
 
             // Store nonce context for block encryption
             let nonce_context = *archive_salt.as_bytes();
@@ -2277,7 +2301,7 @@ pub mod generic {
 
     /// Generic archive writer supporting any storage backend
     ///
-    /// ## Security (ERA v8.1)
+    /// ## Security Model
     ///
     /// This writer implements the HKDF "Onion Model" key derivation:
     /// - Each block is encrypted with a unique key derived via HKDF
@@ -2326,14 +2350,14 @@ pub mod generic {
         }
 
         /// Add a file from memory
-        pub fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
+        pub async fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
             info!("Adding in-memory file: {} ({} bytes)", name, data.len());
 
             let hash = era_crypto::hash(data);
 
             if !self.chunk_index.contains(&hash)? {
                 let chunk = UniqueChunk::new(Bytes::copy_from_slice(data), hash);
-                self.add_to_pending(chunk)?;
+                self.add_to_pending(chunk).await?;
             }
 
             let chunk_ref = era_ingest::ChunkRef::new(hash, 0, data.len() as u32);
@@ -2345,19 +2369,19 @@ pub mod generic {
         }
 
         /// Add chunk to staging pool using k-Bounded Best-Fit
-        fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
+        async fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
             // Use k-Bounded Best-Fit staging pool for optimal packing
             // The pool automatically handles oversized chunks and bin selection
             if let Some(packed) = self.staging_pool.push(chunk) {
                 // A bin reached flush threshold - write it
-                self.write_packed_block(packed)?;
+                self.write_packed_block(packed).await?;
             }
 
             Ok(())
         }
 
         /// Write a packed block to storage
-        fn write_packed_block(&mut self, packed: PackedBlock) -> Result<()> {
+        async fn write_packed_block(&mut self, packed: PackedBlock) -> Result<()> {
             let hashes: Vec<_> = packed.chunks.iter().map(|c| c.hash).collect();
 
             // Create session-based builder for this block
@@ -2373,7 +2397,8 @@ pub mod generic {
             let encrypted_block = block_builder.pack_chunks(packed.chunks)?;
             let location = self
                 .volume_writer
-                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)?;
+                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)
+                .await?;
 
             for hash in hashes {
                 self.chunk_index.put(hash, location.clone())?;
@@ -2383,21 +2408,21 @@ pub mod generic {
         }
 
         /// Flush all bins in the staging pool
-        fn flush_pending(&mut self) -> Result<()> {
+        async fn flush_pending(&mut self) -> Result<()> {
             let packed_blocks = self.staging_pool.flush_all();
 
             for packed in packed_blocks {
-                self.write_packed_block(packed)?;
+                self.write_packed_block(packed).await?;
             }
 
             Ok(())
         }
 
         /// Finalize the archive
-        pub fn finalize(mut self) -> Result<ArchiveStats> {
+        pub async fn finalize(mut self) -> Result<ArchiveStats> {
             info!("Finalizing archive...");
 
-            self.flush_pending()?;
+            self.flush_pending().await?;
 
             // Serialize and write catalog
             let catalog_bytes = self.catalog.to_bytes()?;
@@ -2418,17 +2443,21 @@ pub mod generic {
             let catalog_block_id = catalog_block.block_id.sequence() as u32;
             let catalog_location = self
                 .volume_writer
-                .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)?;
+                .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)
+                .await?;
 
             // Finalize volume
-            let _header = self.volume_writer.finalize_with_catalog(
-                catalog_location.physical_offset,
-                catalog_location.encrypted_size,
-                catalog_block_id,
-                0,
-                0,
-                0,
-            )?;
+            let _header = self
+                .volume_writer
+                .finalize_with_catalog(
+                    catalog_location.physical_offset,
+                    catalog_location.encrypted_size,
+                    catalog_block_id,
+                    0,
+                    0,
+                    0,
+                )
+                .await?;
 
             let blocks_written = self.next_block_id.load(Ordering::SeqCst);
 
@@ -2453,19 +2482,23 @@ pub mod generic {
         use super::*;
         use era_storage::MemoryStorageBackend;
 
-        #[test]
-        fn test_memory_backend_archive() {
+        #[tokio::test]
+        async fn test_memory_backend_archive() {
             let backend = MemoryStorageBackend::new();
 
             let mut writer = GenericArchiveWriterBuilder::new(backend.clone(), "test.era")
                 .password("test_password")
                 .build()
+                .await
                 .unwrap();
 
-            writer.add_bytes("hello.txt", b"Hello, Memory!").unwrap();
-            writer.add_bytes("world.txt", b"World!").unwrap();
+            writer
+                .add_bytes("hello.txt", b"Hello, Memory!")
+                .await
+                .unwrap();
+            writer.add_bytes("world.txt", b"World!").await.unwrap();
 
-            let stats = writer.finalize().unwrap();
+            let stats = writer.finalize().await.unwrap();
             assert_eq!(stats.total_files, 2);
             assert_eq!(stats.total_size, 20); // 14 + 6
 
@@ -2479,23 +2512,24 @@ pub mod generic {
             assert!(!data.is_empty());
         }
 
-        #[test]
-        fn test_memory_backend_multiple_files_packed() {
+        #[tokio::test]
+        async fn test_memory_backend_multiple_files_packed() {
             let backend = MemoryStorageBackend::new();
 
             let mut writer = GenericArchiveWriterBuilder::new(backend.clone(), "multi.era")
                 .password("test_password")
                 .build()
+                .await
                 .unwrap();
 
             // Add 10 small files
             for i in 0..10 {
                 let name = format!("file_{}.txt", i);
                 let content = format!("Content for file {}", i);
-                writer.add_bytes(&name, content.as_bytes()).unwrap();
+                writer.add_bytes(&name, content.as_bytes()).await.unwrap();
             }
 
-            let stats = writer.finalize().unwrap();
+            let stats = writer.finalize().await.unwrap();
             assert_eq!(stats.total_files, 10);
             // All 10 small files should fit in ~2 blocks (1 data + 1 catalog)
             assert!(

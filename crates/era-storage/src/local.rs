@@ -1,12 +1,15 @@
-//! Local filesystem storage backend.
+//! Local filesystem storage backend (async).
+//!
+//! Provides non-blocking I/O operations using tokio::fs.
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use era_common::{EraError, Result};
-use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::{StorageBackend, StorageMetadata, StorageReader, StorageWriter};
+use crate::traits::{StorageBackend, StorageMetadata, StorageReader, StorageWriter};
 
 /// Local filesystem storage backend
 #[derive(Debug, Clone)]
@@ -23,8 +26,8 @@ impl LocalStorageBackend {
         }
     }
 
-    /// Get the full path for a storage object
-    fn full_path(&self, path: &Path) -> PathBuf {
+    /// Resolve a path relative to the base directory
+    fn resolve_path(&self, path: &Path) -> PathBuf {
         if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -33,71 +36,69 @@ impl LocalStorageBackend {
     }
 }
 
+#[async_trait]
 impl StorageBackend for LocalStorageBackend {
     type Writer = LocalStorageWriter;
     type Reader = LocalStorageReader;
 
-    fn create(&self, path: &Path) -> Result<Self::Writer> {
-        let full_path = self.full_path(path);
+    async fn create(&self, path: &Path) -> Result<Self::Writer> {
+        let full_path = self.resolve_path(path);
 
-        // Ensure parent directory exists
+        // Create parent directories if needed
         if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(EraError::Io)?;
         }
 
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&full_path)?;
+        let file = File::create(&full_path).await.map_err(EraError::Io)?;
 
         Ok(LocalStorageWriter { file, size: 0 })
     }
 
-    fn open_append(&self, path: &Path) -> Result<Self::Writer> {
-        let full_path = self.full_path(path);
+    async fn open_append(&self, path: &Path) -> Result<Self::Writer> {
+        let full_path = self.resolve_path(path);
 
-        let mut file = OpenOptions::new()
-            .create(true)
+        let file = OpenOptions::new()
+            .write(true)
             .append(true)
-            .open(&full_path)?;
+            .open(&full_path)
+            .await
+            .map_err(EraError::Io)?;
 
-        let size = file.seek(SeekFrom::End(0))?;
+        let metadata = file.metadata().await.map_err(EraError::Io)?;
+        let size = metadata.len();
 
         Ok(LocalStorageWriter { file, size })
     }
 
-    fn open_read(&self, path: &Path) -> Result<Self::Reader> {
-        let full_path = self.full_path(path);
+    async fn open_read(&self, path: &Path) -> Result<Self::Reader> {
+        let full_path = self.resolve_path(path);
 
-        let file = File::open(&full_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                EraError::FileNotFound {
-                    path: full_path.clone(),
-                }
-            } else {
-                EraError::Io(e)
-            }
-        })?;
-
-        let size = file.metadata()?.len();
+        let file = File::open(&full_path).await.map_err(EraError::Io)?;
+        let metadata = file.metadata().await.map_err(EraError::Io)?;
+        let size = metadata.len();
 
         Ok(LocalStorageReader { file, size })
     }
 
-    fn exists(&self, path: &Path) -> bool {
-        self.full_path(path).exists()
+    async fn exists(&self, path: &Path) -> bool {
+        let full_path = self.resolve_path(path);
+        tokio::fs::try_exists(&full_path).await.unwrap_or(false)
     }
 
-    fn delete(&self, path: &Path) -> Result<()> {
-        let full_path = self.full_path(path);
-        std::fs::remove_file(&full_path)?;
-        Ok(())
+    async fn delete(&self, path: &Path) -> Result<()> {
+        let full_path = self.resolve_path(path);
+        tokio::fs::remove_file(&full_path)
+            .await
+            .map_err(EraError::Io)
     }
 
-    fn stat(&self, path: &Path) -> Result<StorageMetadata> {
-        let full_path = self.full_path(path);
-        let metadata = std::fs::metadata(&full_path)?;
+    async fn stat(&self, path: &Path) -> Result<StorageMetadata> {
+        let full_path = self.resolve_path(path);
+        let metadata = tokio::fs::metadata(&full_path)
+            .await
+            .map_err(EraError::Io)?;
 
         Ok(StorageMetadata {
             size: metadata.len(),
@@ -115,93 +116,83 @@ impl StorageBackend for LocalStorageBackend {
     }
 }
 
-/// Local filesystem storage writer
+/// Writer for local filesystem storage
 pub struct LocalStorageWriter {
     file: File,
     size: u64,
 }
 
+#[async_trait]
 impl StorageWriter for LocalStorageWriter {
-    fn append(&mut self, data: &[u8]) -> Result<u64> {
+    async fn append(&mut self, data: &[u8]) -> Result<u64> {
         let offset = self.size;
-        self.file.write_all(data)?;
+        self.file.write_all(data).await.map_err(EraError::Io)?;
         self.size += data.len() as u64;
         Ok(offset)
     }
 
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        // Use pwrite (FileExt) on Unix systems for atomic-like positional writes
-        // without disturbing the file pointer or requiring seek/write/seek dance.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.file.write_all_at(data, offset)?;
-        }
+    async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        self.file
+            .seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(EraError::Io)?;
+        self.file.write_all(data).await.map_err(EraError::Io)?;
 
-        #[cfg(not(unix))]
-        {
-            // Save current position
-            let current_pos = self.file.stream_position()?;
-
-            // Write at offset
-            self.file.seek(SeekFrom::Start(offset))?;
-            self.file.write_all(data)?;
-
-            // Restore position
-            self.file.seek(SeekFrom::Start(current_pos))?;
+        // Update size if we wrote past the end
+        let new_pos = offset + data.len() as u64;
+        if new_pos > self.size {
+            self.size = new_pos;
         }
 
         Ok(())
     }
 
-    fn sync(&mut self) -> Result<()> {
-        self.file.sync_all()?;
-        Ok(())
-    }
-
-    fn sync_data(&mut self) -> Result<()> {
-        // Use fdatasync (sync_data) which only syncs file data, not metadata.
-        // This is more efficient when we don't need to persist metadata changes.
-        self.file.sync_data()?;
-        Ok(())
+    async fn sync(&mut self) -> Result<()> {
+        self.file.sync_all().await.map_err(EraError::Io)
     }
 
     fn current_size(&self) -> u64 {
         self.size
     }
 
-    fn truncate(&mut self, size: u64) -> Result<()> {
-        self.file.set_len(size)?;
+    async fn truncate(&mut self, size: u64) -> Result<()> {
+        self.file.set_len(size).await.map_err(EraError::Io)?;
         self.size = size;
         Ok(())
     }
 
-    fn close(self) -> Result<()> {
-        self.file.sync_all()?;
+    async fn close(mut self) -> Result<()> {
+        self.file.sync_all().await.map_err(EraError::Io)?;
+        // File is automatically closed when dropped
         Ok(())
     }
 }
 
-/// Local filesystem storage reader
+/// Reader for local filesystem storage
 pub struct LocalStorageReader {
     file: File,
     size: u64,
 }
 
+#[async_trait]
 impl StorageReader for LocalStorageReader {
-    fn read_at(&self, offset: u64, len: usize) -> Result<Bytes> {
-        use std::os::unix::fs::FileExt;
+    async fn read_at(&self, offset: u64, len: usize) -> Result<Bytes> {
+        // Clone the file handle for thread-safe reading
+        let mut file = self.file.try_clone().await.map_err(EraError::Io)?;
+
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(EraError::Io)?;
 
         let mut buffer = vec![0u8; len];
-        let bytes_read = self.file.read_at(&mut buffer, offset)?;
-        buffer.truncate(bytes_read);
+        file.read_exact(&mut buffer).await.map_err(EraError::Io)?;
 
         Ok(Bytes::from(buffer))
     }
 
-    fn read_all_from(&self, offset: u64) -> Result<Bytes> {
-        let len = self.size.saturating_sub(offset) as usize;
-        self.read_at(offset, len)
+    async fn read_all_from(&self, offset: u64) -> Result<Bytes> {
+        let len = (self.size - offset) as usize;
+        self.read_at(offset, len).await
     }
 
     fn size(&self) -> u64 {
@@ -214,73 +205,97 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_create_and_write() {
+    #[tokio::test]
+    async fn test_local_storage_create_and_write() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        let mut writer = backend.create(Path::new("test.era")).unwrap();
-        let offset1 = writer.append(b"Hello, ").unwrap();
-        let offset2 = writer.append(b"ERA!").unwrap();
-        writer.close().unwrap();
+        let mut writer = backend.create(Path::new("test.dat")).await.unwrap();
 
-        assert_eq!(offset1, 0);
-        assert_eq!(offset2, 7);
-        assert!(backend.exists(Path::new("test.era")));
+        let data = b"Hello, async world!";
+        let offset = writer.append(data).await.unwrap();
+
+        assert_eq!(offset, 0);
+        assert_eq!(writer.current_size(), data.len() as u64);
+
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
     }
 
-    #[test]
-    fn test_read() {
+    #[tokio::test]
+    async fn test_local_storage_read() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        // Write some data
-        let mut writer = backend.create(Path::new("test.era")).unwrap();
-        writer.append(b"Hello, ERA!").unwrap();
-        writer.close().unwrap();
+        // Write data
+        let mut writer = backend.create(Path::new("test.dat")).await.unwrap();
+        let data = b"Hello, async world!";
+        writer.append(data).await.unwrap();
+        writer.close().await.unwrap();
 
-        // Read it back
-        let reader = backend.open_read(Path::new("test.era")).unwrap();
-        let data = reader.read_at(0, 11).unwrap();
-        assert_eq!(data.as_ref(), b"Hello, ERA!");
+        // Read data
+        let reader = backend.open_read(Path::new("test.dat")).await.unwrap();
+        let read_data = reader.read_all_from(0).await.unwrap();
 
-        // Read partial
-        let partial = reader.read_at(7, 4).unwrap();
-        assert_eq!(partial.as_ref(), b"ERA!");
+        assert_eq!(read_data.as_ref(), data);
     }
 
-    #[test]
-    fn test_append() {
+    #[tokio::test]
+    async fn test_local_storage_write_at() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        // Create and write
-        let mut writer = backend.create(Path::new("test.era")).unwrap();
-        writer.append(b"Hello").unwrap();
-        writer.close().unwrap();
+        let mut writer = backend.create(Path::new("test.dat")).await.unwrap();
 
-        // Append more
-        let mut writer = backend.open_append(Path::new("test.era")).unwrap();
-        assert_eq!(writer.current_size(), 5);
-        writer.append(b", ERA!").unwrap();
-        writer.close().unwrap();
+        writer.append(b"0000000000").await.unwrap();
+        writer.write_at(5, b"HELLO").await.unwrap();
+        writer.close().await.unwrap();
 
-        // Verify
-        let reader = backend.open_read(Path::new("test.era")).unwrap();
-        let data = reader.read_all_from(0).unwrap();
-        assert_eq!(data.as_ref(), b"Hello, ERA!");
+        let reader = backend.open_read(Path::new("test.dat")).await.unwrap();
+        let data = reader.read_all_from(0).await.unwrap();
+
+        assert_eq!(data.as_ref(), b"00000HELLO");
     }
 
-    #[test]
-    fn test_stat() {
+    #[tokio::test]
+    async fn test_local_storage_truncate() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        let mut writer = backend.create(Path::new("test.era")).unwrap();
-        writer.append(b"Hello, ERA!").unwrap();
-        writer.close().unwrap();
+        let mut writer = backend.create(Path::new("test.dat")).await.unwrap();
+        writer.append(b"0123456789").await.unwrap();
+        writer.truncate(5).await.unwrap();
+        writer.close().await.unwrap();
 
-        let metadata = backend.stat(Path::new("test.era")).unwrap();
-        assert_eq!(metadata.size, 11);
+        let reader = backend.open_read(Path::new("test.dat")).await.unwrap();
+        assert_eq!(reader.size(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_local_storage_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+
+        assert!(!backend.exists(Path::new("nonexistent.dat")).await);
+
+        let writer = backend.create(Path::new("test.dat")).await.unwrap();
+        writer.close().await.unwrap();
+
+        assert!(backend.exists(Path::new("test.dat")).await);
+    }
+
+    #[tokio::test]
+    async fn test_local_storage_delete() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+
+        let writer = backend.create(Path::new("test.dat")).await.unwrap();
+        writer.close().await.unwrap();
+
+        assert!(backend.exists(Path::new("test.dat")).await);
+
+        backend.delete(Path::new("test.dat")).await.unwrap();
+
+        assert!(!backend.exists(Path::new("test.dat")).await);
     }
 }

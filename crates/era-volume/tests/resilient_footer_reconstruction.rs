@@ -4,8 +4,8 @@ use era_volume::{SuperHeader, VolumeReader, VolumeWriter};
 use std::path::Path;
 use tempfile::TempDir;
 
-#[test]
-fn test_resilient_footer_open_with_erasure() -> Result<()> {
+#[tokio::test]
+async fn test_resilient_footer_open_with_erasure() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
     let path = Path::new("test_resilient.era");
@@ -22,8 +22,8 @@ fn test_resilient_footer_open_with_erasure() -> Result<()> {
     let header = SuperHeader::new(ArchiveId::new(), vec![], config, [0u8; 16]);
 
     // 2. Write a valid volume first
-    let writer = VolumeWriter::create(&backend, path, header.clone())?;
-    writer.finalize()?;
+    let writer = VolumeWriter::create(&backend, path, header.clone()).await?;
+    writer.finalize().await?;
 
     // 3. Corrupt the footer manually
     // The footer is at the end. We must corrupt the VALID part of the footer.
@@ -48,7 +48,7 @@ fn test_resilient_footer_open_with_erasure() -> Result<()> {
 
     // 4. Try to open with VolumeReader
     // This should SUCCESS now because erasure is enabled in header
-    let reader = VolumeReader::open(&backend, path);
+    let reader = VolumeReader::open(&backend, path).await;
     assert!(
         reader.is_ok(),
         "Should open successfully despite corrupted footer when erasure is enabled"
@@ -65,8 +65,8 @@ fn test_resilient_footer_open_with_erasure() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_fail_without_erasure() -> Result<()> {
+#[tokio::test]
+async fn test_fail_without_erasure() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
     let path = Path::new("test_fragile.era");
@@ -77,8 +77,8 @@ fn test_fail_without_erasure() -> Result<()> {
     let header = SuperHeader::new(ArchiveId::new(), vec![], config, [0u8; 16]);
 
     // 2. Write
-    let writer = VolumeWriter::create(&backend, path, header)?;
-    writer.finalize()?;
+    let writer = VolumeWriter::create(&backend, path, header).await?;
+    writer.finalize().await?;
 
     // 3. Corrupt footer
     {
@@ -94,7 +94,7 @@ fn test_fail_without_erasure() -> Result<()> {
     }
 
     // 4. Try to open - SHOULD FAIL
-    let reader = VolumeReader::open(&backend, path);
+    let reader = VolumeReader::open(&backend, path).await;
     assert!(
         reader.is_err(),
         "Should fail when footer is corrupted and erasure is disabled"

@@ -70,6 +70,12 @@ L1: era-codec, era-storage (I/O)
 L0: era-crypto, era-common (Foundation)
 ```
 
+### Core Design Principles
+
+- **Unified Async I/O (Tokio)**: All storage operations are asynchronous for optimal performance and scalability
+- **Zero-Copy Internal State (Rkyv)**: Serialization uses rkyv for zero-copy deserialization and improved performance
+- **Security-First**: All cryptographic operations use constant-time implementations to prevent timing attacks
+
 ## Known Limitations
 
 - **Pre-release**: API is not stable. Breaking changes expected.

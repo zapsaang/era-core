@@ -114,7 +114,7 @@ pub struct VolumePool<B: StorageBackend> {
 
 impl<B: StorageBackend> VolumePool<B> {
     /// Create a new volume pool.
-    pub fn create(
+    pub async fn create(
         backend: B,
         config: VolumePoolConfig,
         template_header: SuperHeader,
@@ -132,7 +132,7 @@ impl<B: StorageBackend> VolumePool<B> {
             let volume_path = config.volume_path(i as u16);
             let volume_filename = volume_path.file_name().unwrap_or_default();
 
-            let writer = VolumeWriter::create(&backend, Path::new(volume_filename), header)?;
+            let writer = VolumeWriter::create(&backend, Path::new(volume_filename), header).await?;
             writers.push(writer);
             sequences.push(i as u16);
         }
@@ -144,7 +144,7 @@ impl<B: StorageBackend> VolumePool<B> {
 
         let pool = Self {
             backend,
-            config: config.clone(), // Clone config here to access it below? No, need to borrow.
+            config,
             template_header,
             writers,
             sequences,
@@ -156,7 +156,7 @@ impl<B: StorageBackend> VolumePool<B> {
     }
 
     /// Open an existing volume pool for appending.
-    pub fn open_append(
+    pub async fn open_append(
         backend: B,
         mut config: VolumePoolConfig,
         template_header: SuperHeader,
@@ -177,7 +177,7 @@ impl<B: StorageBackend> VolumePool<B> {
             let volume_path = config.volume_path(seq as u16);
             let volume_filename = volume_path.file_name().unwrap_or_default();
 
-            let reader = VolumeReader::open(&backend, Path::new(volume_filename))?;
+            let reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
             let footer = reader
                 .footer()
                 .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
@@ -187,7 +187,8 @@ impl<B: StorageBackend> VolumePool<B> {
                 Path::new(volume_filename),
                 reader.header().clone(),
                 footer,
-            )?;
+            )
+            .await?;
 
             max_block_count = max_block_count.max(writer.block_count());
             writers.push(writer);
@@ -211,7 +212,7 @@ impl<B: StorageBackend> VolumePool<B> {
     }
 
     /// Open a single-volume archive for appending using a known footer.
-    pub fn open_append_single(
+    pub async fn open_append_single(
         backend: B,
         mut config: VolumePoolConfig,
         header: SuperHeader,
@@ -221,12 +222,9 @@ impl<B: StorageBackend> VolumePool<B> {
         let volume_path = config.volume_path(0);
         let volume_filename = volume_path.file_name().unwrap_or_default();
 
-        let writer = VolumeWriter::open_append(
-            &backend,
-            Path::new(volume_filename),
-            header.clone(),
-            footer,
-        )?;
+        let writer =
+            VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)
+                .await?;
         let block_sequence = writer.block_count() as u64;
 
         let stats = VolumePoolStats {
@@ -255,7 +253,7 @@ impl<B: StorageBackend> VolumePool<B> {
     }
 
     /// Rotate all volumes to a new set when full.
-    fn rotate_volumes(&mut self) -> Result<()> {
+    async fn rotate_volumes(&mut self) -> Result<()> {
         let volume_count = self.writers.len();
 
         let old_sequences = self.sequences.clone();
@@ -263,7 +261,7 @@ impl<B: StorageBackend> VolumePool<B> {
         // 1. Finalize current volumes (pad to max size and update stats)
         for (i, writer) in self.writers.iter_mut().enumerate() {
             // Force padding if max size is set
-            writer.set_max_size(self.config.max_volume_size)?;
+            writer.set_max_size(self.config.max_volume_size).await?;
 
             // Record size
             let size = writer.current_size();
@@ -287,7 +285,8 @@ impl<B: StorageBackend> VolumePool<B> {
             let volume_path = self.config.volume_path(next_sequence);
             let volume_filename = volume_path.file_name().unwrap_or_default();
 
-            let writer = VolumeWriter::create(&self.backend, Path::new(volume_filename), header)?;
+            let writer =
+                VolumeWriter::create(&self.backend, Path::new(volume_filename), header).await?;
 
             self.writers.push(writer);
             self.sequences.push(next_sequence);
@@ -390,7 +389,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Returns
     /// A `MatrixShardEntry` containing the location information.
-    pub fn write_shard(
+    pub async fn write_shard(
         &mut self,
         shard_idx: usize,
         shard_data: &[u8],
@@ -429,7 +428,7 @@ impl<B: StorageBackend> VolumePool<B> {
                 Some(s) => s,
                 None => {
                     // All volumes are full - rotate volumes
-                    self.rotate_volumes()?;
+                    self.rotate_volumes().await?;
 
                     // After rotation, write to preferred_slot which maps to new volume
                     preferred_slot
@@ -444,23 +443,23 @@ impl<B: StorageBackend> VolumePool<B> {
         // Write stripe data lengths header if provided
         if let Some(lengths) = stripe_lengths {
             for len in lengths {
-                writer.write_raw(&len.to_le_bytes())?;
+                writer.write_raw(&len.to_le_bytes()).await?;
             }
         }
 
         // Write original length header if needed
         if include_original_len_header {
             let len_bytes = original_len.to_le_bytes();
-            writer.write_raw(&len_bytes)?;
+            writer.write_raw(&len_bytes).await?;
         }
 
         // Compute CRC and write shard header
         let crc = compute_shard_crc(shard_data);
         let shard_header = ShardHeader::new(shard_data.len() as u32, crc);
-        let offset = writer.write_raw(&shard_header.to_bytes())?;
+        let offset = writer.write_raw(&shard_header.to_bytes()).await?;
 
         // Write shard data
-        writer.write_raw(shard_data)?;
+        writer.write_raw(shard_data).await?;
 
         // Update stats
         self.stats.total_bytes_written += total_size;
@@ -472,9 +471,9 @@ impl<B: StorageBackend> VolumePool<B> {
         ))
     }
 
-    /// Write a canonical block (v8.1 BlockHeader format) to the pool.
+    /// Write a canonical block (BlockHeader format) to the pool.
     ///
-    /// This method writes blocks using the v8.1 BlockHeader format (16 bytes)
+    /// This method writes blocks using the BlockHeader format (16 bytes)
     /// instead of the ShardHeader format (8 bytes).
     ///
     /// # Arguments
@@ -483,7 +482,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Returns
     /// A `BlockLocation` containing the location information.
-    pub fn write_canonical_block(
+    pub async fn write_canonical_block(
         &mut self,
         block: &EncryptedMacroBlock,
         block_type: BlockType,
@@ -510,7 +509,7 @@ impl<B: StorageBackend> VolumePool<B> {
                 Some(s) => s,
                 None => {
                     // All volumes are full - rotate volumes
-                    self.rotate_volumes()?;
+                    self.rotate_volumes().await?;
                     preferred_slot
                 }
             }
@@ -519,8 +518,8 @@ impl<B: StorageBackend> VolumePool<B> {
         let writer = &mut self.writers[slot];
         let volume_id = writer.volume_id();
 
-        // Write using v8.1 BlockHeader format
-        let location = writer.write_canonical_block(block, block_type)?;
+        // Write using BlockHeader format
+        let location = writer.write_canonical_block(block, block_type).await?;
 
         // Update stats
         self.stats.total_bytes_written += total_size;
@@ -539,7 +538,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Returns
     /// A `MatrixBlockLocation` containing all shard locations.
-    pub fn write_erasure_block(
+    pub async fn write_erasure_block(
         &mut self,
         block_id: era_common::BlockId,
         shards: &[bytes::Bytes],
@@ -563,8 +562,9 @@ impl<B: StorageBackend> VolumePool<B> {
             let slot = self.shard_volume_slot(shard_idx);
             let need_header = !volumes_with_header.contains(&slot);
 
-            let (entry, _) =
-                self.write_shard(shard_idx, shard_data, need_header, original_len, None)?;
+            let (entry, _) = self
+                .write_shard(shard_idx, shard_data, need_header, original_len, None)
+                .await?;
             location.add_shard(entry);
 
             if need_header {
@@ -580,12 +580,12 @@ impl<B: StorageBackend> VolumePool<B> {
     }
 
     /// Finalize all volumes.
-    pub fn finalize(&mut self) -> Result<VolumePoolStats> {
-        self.finalize_with_catalog(0, 0, 0, 0, 0, 0)
+    pub async fn finalize(&mut self) -> Result<VolumePoolStats> {
+        self.finalize_with_catalog(0, 0, 0, 0, 0, 0).await
     }
 
     /// Finalize all volumes with catalog information.
-    pub fn finalize_with_catalog(
+    pub async fn finalize_with_catalog(
         &mut self,
         catalog_offset: u64,
         catalog_size: u32,
@@ -600,21 +600,23 @@ impl<B: StorageBackend> VolumePool<B> {
             let size = writer.current_size();
             let sequence = self.sequences[i];
             stats.volume_sizes.push((sequence, size));
-            writer.finalize_with_catalog(
-                catalog_offset,
-                catalog_size,
-                catalog_block_id,
-                index_offset,
-                index_size,
-                index_block_id,
-            )?;
+            writer
+                .finalize_with_catalog(
+                    catalog_offset,
+                    catalog_size,
+                    catalog_block_id,
+                    index_offset,
+                    index_size,
+                    index_block_id,
+                )
+                .await?;
         }
 
         Ok(stats)
     }
 
     /// Finalize all volumes with per-volume catalog information.
-    pub fn finalize_with_catalogs(
+    pub async fn finalize_with_catalogs(
         &mut self,
         catalog_locations: &[(u64, u32, u32)],
         index_locations: Option<&[(u64, u32, u32)]>,
@@ -647,14 +649,16 @@ impl<B: StorageBackend> VolumePool<B> {
             let (idx_offset, idx_size, idx_block_id) = index_locations
                 .and_then(|idx| idx.get(i).copied())
                 .unwrap_or((0, 0, 0));
-            writer.finalize_with_catalog(
-                offset,
-                size_u32,
-                block_id,
-                idx_offset,
-                idx_size,
-                idx_block_id,
-            )?;
+            writer
+                .finalize_with_catalog(
+                    offset,
+                    size_u32,
+                    block_id,
+                    idx_offset,
+                    idx_size,
+                    idx_block_id,
+                )
+                .await?;
         }
 
         Ok(stats)
@@ -681,7 +685,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// This is called when all existing volumes are full and more space is needed.
     /// The new volume will use the next available sequence number.
-    pub fn add_volume(&mut self, backend: &B) -> Result<usize> {
+    pub async fn add_volume(&mut self, backend: &B) -> Result<usize> {
         let new_sequence = self.writers.len() as u16;
 
         let mut header = self.template_header.clone();
@@ -691,7 +695,7 @@ impl<B: StorageBackend> VolumePool<B> {
         let volume_path = self.config.volume_path(new_sequence);
         let volume_filename = volume_path.file_name().unwrap_or_default();
 
-        let writer = VolumeWriter::create(backend, Path::new(volume_filename), header)?;
+        let writer = VolumeWriter::create(backend, Path::new(volume_filename), header).await?;
 
         let slot = self.writers.len();
         self.writers.push(writer);
@@ -744,8 +748,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_volume_pool_creation() {
+    #[tokio::test]
+    async fn test_volume_pool_creation() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
@@ -753,15 +757,14 @@ mod tests {
         let config = VolumePoolConfig::new(&base_path, 3);
         let header = create_test_header();
 
-        let pool = VolumePool::create(backend, config, header).unwrap();
+        let pool = VolumePool::create(backend, config, header).await.unwrap();
 
         assert_eq!(pool.volume_count(), 3);
         assert_eq!(pool.block_sequence(), 0);
     }
 
-    // ... other tests omitted for brevity, but exist in original file ...
-    #[test]
-    fn test_matrix_distribution_shard_placement() {
+    #[tokio::test]
+    async fn test_matrix_distribution_shard_placement() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
@@ -770,7 +773,7 @@ mod tests {
         let config = VolumePoolConfig::new(&base_path, 3).for_erasure(erasure);
         let header = create_test_header();
 
-        let mut pool = VolumePool::create(backend, config, header).unwrap();
+        let mut pool = VolumePool::create(backend, config, header).await.unwrap();
 
         // Create test shards
         let shards: Vec<Bytes> = (0..6).map(|i| Bytes::from(vec![i as u8; 1024])).collect();
@@ -779,14 +782,15 @@ mod tests {
         let block_id = BlockId::new(0);
         let location = pool
             .write_erasure_block(block_id, &shards, 4096, erasure)
+            .await
             .unwrap();
 
         assert!(location.is_complete());
         assert_eq!(location.shards.len(), 6);
     }
 
-    #[test]
-    fn test_volume_pool_finalization() {
+    #[tokio::test]
+    async fn test_volume_pool_finalization() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
@@ -794,8 +798,8 @@ mod tests {
         let config = VolumePoolConfig::new(&base_path, 2);
         let header = create_test_header();
 
-        let mut pool = VolumePool::create(backend, config, header).unwrap();
-        let stats = pool.finalize().unwrap();
+        let mut pool = VolumePool::create(backend, config, header).await.unwrap();
+        let stats = pool.finalize().await.unwrap();
 
         assert_eq!(stats.volume_count, 2);
         assert_eq!(stats.volume_sizes.len(), 2);

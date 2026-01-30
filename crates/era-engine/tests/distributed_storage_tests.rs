@@ -35,6 +35,7 @@ async fn test_distributed_erasure_writing() {
         // This ensures enough blocks are created to fill the stripe (2 Data + 1 Parity)
         .enable_cdc(true)
         .build()
+        .await
         .unwrap();
 
     // Use non-repeating data to avoid CDC deduplication from reducing the size
@@ -57,7 +58,7 @@ async fn test_distributed_erasure_writing() {
         .add_file_with_path(&input_path, std::path::Path::new("test_file.bin"))
         .await
         .unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify files exist and have content
     // Vol 0: dist_test.era
@@ -84,10 +85,12 @@ async fn test_distributed_erasure_writing() {
     assert!(size2 > 200_000);
 
     // Reading Verification
-    let mut reader = ArchiveReader::open(&base_path, "").expect("Failed to open archive");
+    let mut reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open archive");
 
     // Check if the file entry exists
-    let files = reader.list_files().expect("Failed to list files");
+    let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].path.to_str().unwrap(), "test_file.bin");
     assert_eq!(files[0].size, size as u64);
@@ -97,6 +100,7 @@ async fn test_distributed_erasure_writing() {
     let options = era_engine::ExtractOptions::new(&extract_dir);
     reader
         .extract_all(&options)
+        .await
         .expect("Failed to extract files");
 
     let extracted_path = extract_dir.join("test_file.bin");

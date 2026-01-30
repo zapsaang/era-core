@@ -87,8 +87,8 @@ fn derive_session_from_header(
     KeySession::from_master_key(&mk_array)
 }
 
-#[test]
-fn test_key_session_writer_roundtrip() {
+#[tokio::test]
+async fn test_key_session_writer_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
 
@@ -98,14 +98,15 @@ fn test_key_session_writer_roundtrip() {
             .password("test_password")
             .config(fast_kdf_config())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("hello.txt", b"Hello, World!").unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("hello.txt", b"Hello, World!").await.unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Read header to get context
-    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let header = reader_for_salt.header();
 
     // Derive Session
@@ -115,22 +116,22 @@ fn test_key_session_writer_roundtrip() {
 
     // Now read with session (fast path - no KDF needed)
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).unwrap();
-        reader.load_catalog().unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
         fs::create_dir_all(&extract_dir).unwrap();
 
         let options = ExtractOptions::new(&extract_dir);
-        reader.extract_all(&options).unwrap();
+        reader.extract_all(&options).await.unwrap();
 
         let content = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
         assert_eq!(content, "Hello, World!");
     }
 }
 
-#[test]
-fn test_key_session_reader_works() {
+#[tokio::test]
+async fn test_key_session_reader_works() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
 
@@ -140,14 +141,15 @@ fn test_key_session_reader_works() {
             .password("test_password")
             .config(fast_kdf_config())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("data.bin", b"Test data content").unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("data.bin", b"Test data content").await.unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Read archive header to get salt
-    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let header = reader_for_salt.header();
 
     let session = derive_session_from_header(header, "test_password").unwrap();
@@ -155,22 +157,22 @@ fn test_key_session_reader_works() {
 
     // Open with session - should work
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).unwrap();
-        reader.load_catalog().unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
         fs::create_dir_all(&extract_dir).unwrap();
 
         let options = ExtractOptions::new(&extract_dir);
-        reader.extract_all(&options).unwrap();
+        reader.extract_all(&options).await.unwrap();
 
         let content = fs::read_to_string(extract_dir.join("data.bin")).unwrap();
         assert_eq!(content, "Test data content");
     }
 }
 
-#[test]
-fn test_key_session_wrong_password_fails() {
+#[tokio::test]
+async fn test_key_session_wrong_password_fails() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
 
@@ -180,14 +182,15 @@ fn test_key_session_wrong_password_fails() {
             .password("correct_password")
             .config(fast_kdf_config())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("secret.txt", b"Secret data").unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("secret.txt", b"Secret data").await.unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Read archive header to get salt
-    let reader_for_salt = ArchiveReader::open(&archive_path, "correct_password").unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "correct_password").await.unwrap();
     let header = reader_for_salt.header();
 
     // Create session with WRONG password - should fail at derivation stage
@@ -203,8 +206,8 @@ fn test_key_session_wrong_password_fails() {
     }
 }
 
-#[test]
-fn test_key_session_multiple_files() {
+#[tokio::test]
+async fn test_key_session_multiple_files() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("multi.era");
 
@@ -214,19 +217,21 @@ fn test_key_session_multiple_files() {
             .password("multi_password")
             .config(fast_kdf_config())
             .build()
+            .await
             .unwrap();
 
         for i in 0..10 {
             let content = format!("Content for file {}", i);
             writer
                 .add_bytes(&format!("file_{}.txt", i), content.as_bytes())
+                .await
                 .unwrap();
         }
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Get salt from archive and create session
-    let reader_for_salt = ArchiveReader::open(&archive_path, "multi_password").unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "multi_password").await.unwrap();
     let header = reader_for_salt.header();
 
     let session = derive_session_from_header(header, "multi_password").unwrap();
@@ -234,14 +239,14 @@ fn test_key_session_multiple_files() {
 
     // Verify all files using session
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).unwrap();
-        reader.load_catalog().unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
         fs::create_dir_all(&extract_dir).unwrap();
 
         let options = ExtractOptions::new(&extract_dir);
-        reader.extract_all(&options).unwrap();
+        reader.extract_all(&options).await.unwrap();
 
         for i in 0..10 {
             let content = fs::read_to_string(extract_dir.join(format!("file_{}.txt", i))).unwrap();
@@ -250,8 +255,8 @@ fn test_key_session_multiple_files() {
     }
 }
 
-#[test]
-fn test_key_session_with_erasure_coding() {
+#[tokio::test]
+async fn test_key_session_with_erasure_coding() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("erasure.era");
 
@@ -263,19 +268,20 @@ fn test_key_session_with_erasure_coding() {
             .enable_erasure(true)
             .volume_count(3)
             .build()
+            .await
             .unwrap();
 
         // Add enough data to trigger block creation
         let data = vec![0x42u8; 65536]; // 64KB
-        writer.add_bytes("large.bin", &data).unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("large.bin", &data).await.unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Verify archive exists and has multiple volumes
     assert!(archive_path.exists());
 
     // Get salt and create session
-    let reader_for_salt = ArchiveReader::open(&archive_path, "erasure_password").unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "erasure_password").await.unwrap();
     let header = reader_for_salt.header();
 
     let session = derive_session_from_header(header, "erasure_password").unwrap();
@@ -283,20 +289,20 @@ fn test_key_session_with_erasure_coding() {
 
     // Read back with session
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).unwrap();
-        reader.load_catalog().unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
         fs::create_dir_all(&extract_dir).unwrap();
 
         let options = ExtractOptions::new(&extract_dir);
-        let stats = reader.extract_all(&options).unwrap();
+        let stats = reader.extract_all(&options).await.unwrap();
         assert_eq!(stats.extracted, 1);
     }
 }
 
-#[test]
-fn test_key_session_from_derived_key() {
+#[tokio::test]
+async fn test_key_session_from_derived_key() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("derived.era");
 
@@ -306,14 +312,15 @@ fn test_key_session_from_derived_key() {
             .password("from_derived")
             .config(fast_kdf_config())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("test.txt", b"From derived key").unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("test.txt", b"From derived key").await.unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Get salt from archive
-    let reader_for_salt = ArchiveReader::open(&archive_path, "from_derived").unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "from_derived").await.unwrap();
     let header = reader_for_salt.header();
 
     // Use helper which does the derivation and unwrapping
@@ -323,14 +330,14 @@ fn test_key_session_from_derived_key() {
 
     // Use session to read archive
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).unwrap();
-        reader.load_catalog().unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
         fs::create_dir_all(&extract_dir).unwrap();
 
         let options = ExtractOptions::new(&extract_dir);
-        reader.extract_all(&options).unwrap();
+        reader.extract_all(&options).await.unwrap();
 
         let content = fs::read_to_string(extract_dir.join("test.txt")).unwrap();
         assert_eq!(content, "From derived key");

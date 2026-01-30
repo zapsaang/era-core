@@ -34,7 +34,7 @@ async fn test_certificate_mode_creates_archive() {
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .certificate(cert)
         .config(test_config_no_ec())
-        .build()
+        .build().await
         .expect("Failed to create writer with certificate mode");
 
     // Verify certificate mode is active
@@ -48,7 +48,7 @@ async fn test_certificate_mode_creates_archive() {
         .expect("Failed to add file");
 
     // Finalize
-    writer.finalize().expect("Failed to finalize");
+    writer.finalize().await.expect("Failed to finalize");
 
     // Verify archive was created
     assert!(archive_path.exists());
@@ -80,12 +80,12 @@ async fn test_certificate_mode_roundtrip() {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .certificate(cert)
             .config(test_config_no_ec())
-            .build()
+            .build().await
             .unwrap();
 
         writer.add_file(&test_file1).await.unwrap();
         writer.add_file(&test_file2).await.unwrap();
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
     println!(
@@ -95,13 +95,13 @@ async fn test_certificate_mode_roundtrip() {
 
     // Extract with keypair
     {
-        let mut reader = ArchiveReader::open_with_keypair(&archive_path, &keypair)
+        let mut reader = ArchiveReader::open_with_keypair(&archive_path, &keypair).await
             .expect("Failed to open archive with keypair");
 
-        reader.load_catalog().expect("Failed to load catalog");
+        reader.load_catalog().await.expect("Failed to load catalog");
 
         let options = era_engine::ExtractOptions::new(&output_dir);
-        let stats = reader.extract_all(&options).expect("Failed to extract");
+        let stats = reader.extract_all(&options).await.expect("Failed to extract");
 
         assert_eq!(stats.extracted, 2);
         assert!(stats.bytes_written > 0);
@@ -140,16 +140,16 @@ async fn test_password_archive_rejects_keypair() {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .password("test123")
             .config(test_config_no_ec())
-            .build()
+            .build().await
             .unwrap();
 
         writer.add_file(&test_file).await.unwrap();
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Try to open with keypair - should fail
     let keypair = EraKeyPair::generate().unwrap();
-    let result = ArchiveReader::open_with_keypair(&archive_path, &keypair);
+    let result = ArchiveReader::open_with_keypair(&archive_path, &keypair).await;
 
     assert!(
         result.is_err(),
@@ -184,16 +184,16 @@ async fn test_wrong_keypair_rejected() {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .certificate(cert)
             .config(test_config_no_ec())
-            .build()
+            .build().await
             .unwrap();
 
         writer.add_file(&test_file).await.unwrap();
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // Try to open with different keypair - should fail
     let wrong_keypair = EraKeyPair::generate().unwrap();
-    let result = ArchiveReader::open_with_keypair(&archive_path, &wrong_keypair);
+    let result = ArchiveReader::open_with_keypair(&archive_path, &wrong_keypair).await;
 
     assert!(result.is_err(), "Should reject wrong keypair");
     let err_msg = match result {
@@ -221,32 +221,30 @@ async fn test_certificate_mode_performance() {
     let cert = keypair.certificate();
 
     // Measure certificate mode (EC disabled for single-volume test)
-    let cert_times: Vec<_> = (0..5)
-        .map(|i| {
-            let archive_path = temp_dir.path().join(format!("cert_{}.era", i));
-            let start = Instant::now();
-            let _writer = ArchiveWriterBuilder::new(&archive_path)
-                .certificate(cert.clone())
-                .config(test_config_no_ec())
-                .build()
-                .unwrap();
-            start.elapsed()
-        })
-        .collect();
+    let mut cert_times = Vec::new();
+    for i in 0..5 {
+        let archive_path = temp_dir.path().join(format!("cert_{}.era", i));
+        let start = Instant::now();
+        let _writer = ArchiveWriterBuilder::new(&archive_path)
+            .certificate(cert.clone())
+            .config(test_config_no_ec())
+            .build().await
+            .unwrap();
+        cert_times.push(start.elapsed());
+    }
 
     // Measure password mode (with fast KDF params to not wait forever) (EC disabled for single-volume test)
-    let password_times: Vec<_> = (0..5)
-        .map(|i| {
-            let archive_path = temp_dir.path().join(format!("pass_{}.era", i));
-            let start = Instant::now();
-            let _writer = ArchiveWriterBuilder::new(&archive_path)
-                .password("test_password")
-                .config(test_config_no_ec())
-                .build()
-                .unwrap();
-            start.elapsed()
-        })
-        .collect();
+    let mut password_times = Vec::new();
+    for i in 0..5 {
+        let archive_path = temp_dir.path().join(format!("pass_{}.era", i));
+        let start = Instant::now();
+        let _writer = ArchiveWriterBuilder::new(&archive_path)
+            .password("test_password")
+            .config(test_config_no_ec())
+            .build().await
+            .unwrap();
+        password_times.push(start.elapsed());
+    }
 
     let cert_avg = cert_times.iter().sum::<std::time::Duration>() / cert_times.len() as u32;
     let pass_avg = password_times.iter().sum::<std::time::Duration>() / password_times.len() as u32;
@@ -281,7 +279,7 @@ async fn test_key_encapsulation_roundtrip() {
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .certificate(cert)
         .config(test_config_no_ec())
-        .build()
+        .build().await
         .unwrap();
 
     // Get the key encapsulation
@@ -302,5 +300,5 @@ async fn test_key_encapsulation_roundtrip() {
     );
 
     writer.add_file(&test_file).await.unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 }

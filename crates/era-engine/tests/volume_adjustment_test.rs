@@ -4,8 +4,8 @@ use era_common::{ArchiveConfig, CompressionAlgorithm, CompressionConfig, Erasure
 use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use tempfile::TempDir;
 
-#[test]
-fn test_volume_auto_adjustment() {
+#[tokio::test]
+async fn test_volume_auto_adjustment() {
     println!("\n=== VOLUME AUTO-ADJUSTMENT TEST ===\n");
 
     let erasure_config = ErasureCodeConfig {
@@ -34,14 +34,13 @@ fn test_volume_auto_adjustment() {
         .erasure_config(erasure_config)
         // NOTE: NOT calling .volume_count() means default = 1
         .enable_matrix_distribution(true)
-        .build()
-        .expect("Failed to create writer");
+        .build().await.expect("Failed to create writer");
 
     let data = vec![0xAB; 128 * 1024]; // 128KB
     writer
         .add_bytes("test.bin", &data)
         .expect("Failed to add file");
-    writer.finalize().expect("Failed to finalize");
+    writer.finalize().await.expect("Failed to finalize");
 
     // Check how many volumes were actually created
     let mut volume_count = 0;
@@ -77,13 +76,12 @@ fn test_volume_auto_adjustment() {
         .erasure_config(erasure_config)
         .volume_count(3) // Explicitly set to minimum viable
         .enable_matrix_distribution(true)
-        .build()
-        .expect("Failed to create writer");
+        .build().await.expect("Failed to create writer");
 
     writer
         .add_bytes("test.bin", &data)
         .expect("Failed to add file");
-    writer.finalize().expect("Failed to finalize");
+    writer.finalize().await.expect("Failed to finalize");
 
     let mut volume_count = 0;
     for i in 0..10 {
@@ -108,12 +106,12 @@ fn test_volume_auto_adjustment() {
 
     // Test 3: Verify fault tolerance improves with 6 volumes
     println!("Test 3: Fault tolerance with auto-adjusted 6 volumes");
-    let _reader = ArchiveReader::open(&base_path, "").expect("Failed to open auto archive");
+    let _reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open auto archive");
     println!("✅ Successfully opened archive with optimal volumes");
 }
 
-#[test]
-fn test_volume_specification_compliance() {
+#[tokio::test]
+async fn test_volume_specification_compliance() {
     println!("\n=== VOLUME SPECIFICATION COMPLIANCE TEST ===\n");
 
     let erasure = ErasureCodeConfig {

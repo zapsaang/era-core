@@ -264,28 +264,28 @@ async fn main() -> anyhow::Result<()> {
             password,
             key,
             force,
-        } => commands::extract(&input, &output, password.as_deref(), key.as_deref(), force),
+        } => commands::extract(&input, &output, password.as_deref(), key.as_deref(), force).await,
 
         Commands::List {
             archive,
             password,
             key,
             long,
-        } => commands::list(&archive, password.as_deref(), key.as_deref(), long),
+        } => commands::list(&archive, password.as_deref(), key.as_deref(), long).await,
 
-        Commands::Info { archive, password } => commands::info(&archive, password.as_deref()),
+        Commands::Info { archive, password } => commands::info(&archive, password.as_deref()).await,
 
         Commands::Verify {
             archive,
             password,
             verbose,
-        } => commands::verify(&archive, password.as_deref(), verbose),
+        } => commands::verify(&archive, password.as_deref(), verbose).await,
 
         Commands::Repair {
             archive,
             password,
             force,
             verbose,
-        } => commands::repair(&archive, password.as_deref(), force, verbose),
+        } => commands::repair(&archive, password.as_deref(), force, verbose).await,
     }
 }

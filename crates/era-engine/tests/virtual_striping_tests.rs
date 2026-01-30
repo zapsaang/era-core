@@ -3,8 +3,8 @@ use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_virtual_striping_end_to_end() {
+#[tokio::test]
+async fn test_virtual_striping_end_to_end() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("striped.era");
     let password = "test_password";
@@ -31,6 +31,7 @@ fn test_virtual_striping_end_to_end() {
         .erasure_config(erasure_config)
         .target_block_size(1024) // 1KB blocks to trigger striping frequently
         .build()
+        .await
         .unwrap();
 
     // Write 5 chunks of 800 bytes each.
@@ -59,11 +60,11 @@ fn test_virtual_striping_end_to_end() {
     for i in 1..=5 {
         let content = vec![i as u8; 1024]; // 1KB
         let name = format!("file_{}.bin", i);
-        writer.add_bytes(&name, &content).unwrap();
+        writer.add_bytes(&name, &content).await.unwrap();
         expected_data.push(content);
     }
 
-    let stats = writer.finalize().unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     assert_eq!(stats.total_files, 5);
 
@@ -79,8 +80,8 @@ fn test_virtual_striping_end_to_end() {
     );
 
     // 3. Read and Extract
-    let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
-    let files = reader.list_files().unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+    let files = reader.list_files().await.unwrap();
     assert_eq!(files.len(), 5);
 
     let extract_dir = temp_dir.path().join("extracted");
@@ -88,7 +89,7 @@ fn test_virtual_striping_end_to_end() {
 
     // This expects the Reader to handle the Virtual Striping layout correctly
     // i.e., skip parity blocks and read data blocks.
-    let extract_stats = reader.extract_all(&options).expect("Extraction failed");
+    let extract_stats = reader.extract_all(&options).await.expect("Extraction failed");
 
     assert_eq!(extract_stats.extracted, 5);
 

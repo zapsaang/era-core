@@ -42,13 +42,14 @@ async fn main() {
         let mut writer = ArchiveWriterBuilder::new(&archive1)
             .password("demo_password")
             .build()
+            .await
             .unwrap();
 
         for file in &files {
             writer.add_file(file).await.unwrap();
         }
 
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
     let time1 = start.elapsed();
@@ -69,13 +70,14 @@ async fn main() {
         let mut writer = ArchiveWriterBuilder::new(&archive2)
             .password("demo_password")
             .build()
+            .await
             .unwrap();
 
         // Convert to &[&Path]
         let file_refs: Vec<&std::path::Path> = files.iter().map(|p| p.as_path()).collect();
         writer.add_files(&file_refs).await.unwrap();
 
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
     let time2 = start.elapsed();

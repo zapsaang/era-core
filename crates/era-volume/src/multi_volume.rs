@@ -1,9 +1,10 @@
 //! Multi-volume management for large archives.
 //!
 //! This module provides automatic volume splitting when archives exceed a size limit.
+//! All I/O operations are async (non-blocking).
 
 use era_common::{BlockLocation, EncryptedMacroBlock, Result};
-use era_storage::{StorageBackend, StorageWriter};
+use era_storage::{StorageBackend, StorageReader, StorageWriter};
 use std::path::PathBuf;
 
 use crate::footer::FOOTER_SIZE;
@@ -75,7 +76,7 @@ pub struct MultiVolumeWriter<W: StorageWriter> {
 
 impl<W: StorageWriter> MultiVolumeWriter<W> {
     /// Create a new multi-volume writer
-    pub fn create<B: StorageBackend<Writer = W>>(
+    pub async fn create<B: StorageBackend<Writer = W>>(
         backend: &B,
         config: MultiVolumeConfig,
         header: SuperHeader,
@@ -87,9 +88,10 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
             backend,
             std::path::Path::new(volume_filename),
             header.clone(),
-        )?;
+        )
+        .await?;
 
-        volume_writer.set_max_size(config.max_volume_size)?;
+        volume_writer.set_max_size(config.max_volume_size).await?;
 
         let stats = MultiVolumeStats {
             volume_count: 1,
@@ -106,17 +108,18 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
     }
 
     /// Write a block, automatically switching volumes if needed
-    pub fn write_block<B: StorageBackend<Writer = W>>(
+    pub async fn write_block<B: StorageBackend<Writer = W>>(
         &mut self,
         backend: &B,
         block: &EncryptedMacroBlock,
     ) -> Result<BlockLocation> {
         // Default to Data block type
         self.write_canonical_block(backend, block, era_common::BlockType::Data)
+            .await
     }
 
     /// Write a canonical block, automatically switching volumes if needed
-    pub fn write_canonical_block<B: StorageBackend<Writer = W>>(
+    pub async fn write_canonical_block<B: StorageBackend<Writer = W>>(
         &mut self,
         backend: &B,
         block: &EncryptedMacroBlock,
@@ -126,7 +129,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
 
         // Check if we need to switch to a new volume
         if !self.would_fit(block_size) {
-            self.switch_volume(backend)?;
+            self.switch_volume(backend).await?;
         }
 
         // Write the block
@@ -137,21 +140,21 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
             ))
         })?;
 
-        let location = writer.write_canonical_block(block, block_type)?;
+        let location = writer.write_canonical_block(block, block_type).await?;
         self.stats.total_blocks += 1;
-        // v8.1 format uses BlockHeader::SIZE (16 bytes) instead of 4 bytes
+        // Format uses BlockHeader::SIZE (16 bytes) instead of 4 bytes
         self.stats.total_bytes += block.data.len() as u64 + era_common::BlockHeader::SIZE as u64;
 
         Ok(location)
     }
 
     /// Switch to a new volume
-    fn switch_volume<B: StorageBackend<Writer = W>>(&mut self, backend: &B) -> Result<()> {
+    async fn switch_volume<B: StorageBackend<Writer = W>>(&mut self, backend: &B) -> Result<()> {
         // Finalize current volume
         if let Some(writer) = self.current_writer.take() {
             let current_size = writer.current_size();
             let volume_path = self.config.volume_path(self.stats.volume_count - 1);
-            writer.finalize()?;
+            writer.finalize().await?;
             self.stats.volumes.push((volume_path, current_size));
         }
 
@@ -165,9 +168,12 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
             backend,
             std::path::Path::new(volume_filename),
             next_header.clone(),
-        )?;
+        )
+        .await?;
 
-        volume_writer.set_max_size(self.config.max_volume_size)?;
+        volume_writer
+            .set_max_size(self.config.max_volume_size)
+            .await?;
 
         self.current_writer = Some(volume_writer);
         // Only update template header after successful creation to ensure atomicity
@@ -178,11 +184,11 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
     }
 
     /// Finalize all volumes and return statistics
-    pub fn finalize(mut self) -> Result<MultiVolumeStats> {
+    pub async fn finalize(mut self) -> Result<MultiVolumeStats> {
         if let Some(writer) = self.current_writer.take() {
             let current_size = writer.current_size();
             let volume_path = self.config.volume_path(self.stats.volume_count - 1);
-            writer.finalize()?;
+            writer.finalize().await?;
             self.stats.volumes.push((volume_path, current_size));
         }
 
@@ -224,7 +230,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
 /// Reader for multi-volume archives
 ///
 /// Provides unified access to blocks across multiple volumes
-pub struct MultiVolumeReader<R: era_storage::StorageReader> {
+pub struct MultiVolumeReader<R: StorageReader> {
     /// Loaded volume readers by volume_id
     readers: std::collections::HashMap<era_common::VolumeId, crate::VolumeReader<R>>,
     /// Archive ID (shared across all volumes)
@@ -233,16 +239,16 @@ pub struct MultiVolumeReader<R: era_storage::StorageReader> {
     volume_paths: Vec<PathBuf>,
 }
 
-impl<R: era_storage::StorageReader> MultiVolumeReader<R> {
+impl<R: StorageReader> MultiVolumeReader<R> {
     /// Open a multi-volume archive from the first volume
-    pub fn open<B: era_storage::StorageBackend<Reader = R>>(
+    pub async fn open<B: StorageBackend<Reader = R>>(
         backend: &B,
         first_volume_path: &std::path::Path,
     ) -> Result<Self> {
         // Open the first volume
         let volume_filename = first_volume_path.file_name().unwrap_or_default();
         let first_reader =
-            crate::VolumeReader::open(backend, std::path::Path::new(volume_filename))?;
+            crate::VolumeReader::open(backend, std::path::Path::new(volume_filename)).await?;
         let archive_id = first_reader.header().archive_id;
         let first_volume_id = first_reader.header().volume_id;
 
@@ -258,7 +264,7 @@ impl<R: era_storage::StorageReader> MultiVolumeReader<R> {
             let next_path = base_path.with_extension(ext);
             let next_filename = next_path.file_name().unwrap_or_default();
 
-            match crate::VolumeReader::open(backend, std::path::Path::new(next_filename)) {
+            match crate::VolumeReader::open(backend, std::path::Path::new(next_filename)).await {
                 Ok(reader) => {
                     // Verify it belongs to the same archive
                     if reader.header().archive_id != archive_id {
@@ -285,14 +291,14 @@ impl<R: era_storage::StorageReader> MultiVolumeReader<R> {
     }
 
     /// Read a block by its location
-    pub fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
+    pub async fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
         let reader = self.readers.get(&location.volume_id).ok_or_else(|| {
             era_common::EraError::VolumeNotFound {
                 volume_id: format!("{:?}", location.volume_id),
             }
         })?;
 
-        reader.read_block(location)
+        reader.read_block(location).await
     }
 
     /// Get the header from the first volume
@@ -375,10 +381,8 @@ mod tests {
         assert!(stats.volumes.is_empty());
     }
 
-    // These tests will be implemented as we build the functionality
-
-    #[test]
-    fn test_create_multi_volume_writer() {
+    #[tokio::test]
+    async fn test_create_multi_volume_writer() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().join("multi_archive");
         let config = MultiVolumeConfig::new(&base_path, 100 * 1024).unwrap(); // 100KB volumes
@@ -386,16 +390,15 @@ mod tests {
         let header = create_test_header();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        // This will be implemented
         let writer =
-            MultiVolumeWriter::<era_storage::LocalStorageWriter>::create(&backend, config, header);
+            MultiVolumeWriter::<era_storage::LocalStorageWriter>::create(&backend, config, header)
+                .await;
 
-        // For now, just verify the test compiles
         assert!(writer.is_ok());
     }
 
-    #[test]
-    fn test_auto_volume_switch_on_size_limit() {
+    #[tokio::test]
+    async fn test_auto_volume_switch_on_size_limit() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().join("multi_archive");
 
@@ -405,17 +408,19 @@ mod tests {
         let header = create_test_header();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        let mut writer = MultiVolumeWriter::create(&backend, config, header).unwrap();
+        let mut writer = MultiVolumeWriter::create(&backend, config, header)
+            .await
+            .unwrap();
 
         // Write multiple blocks that should trigger volume switch
         // Each block is ~10KB
         for _ in 0..10 {
             let block = create_test_block(10 * 1024);
-            writer.write_block(&backend, &block).unwrap();
+            writer.write_block(&backend, &block).await.unwrap();
         }
 
         // Should have created multiple volumes
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert!(
             stats.volume_count >= 2,
             "Expected multiple volumes, got {}",
@@ -423,8 +428,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_block_location_tracks_volume() {
+    #[tokio::test]
+    async fn test_block_location_tracks_volume() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().join("multi_archive");
 
@@ -433,16 +438,18 @@ mod tests {
         let header = create_test_header();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        let mut writer = MultiVolumeWriter::create(&backend, config, header).unwrap();
+        let mut writer = MultiVolumeWriter::create(&backend, config, header)
+            .await
+            .unwrap();
 
         let mut locations = Vec::new();
         for _ in 0..6 {
             let block = create_test_block(10 * 1024);
-            let loc = writer.write_block(&backend, &block).unwrap();
+            let loc = writer.write_block(&backend, &block).await.unwrap();
             locations.push(loc);
         }
 
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
 
         // First few blocks should be in volume 0, later ones in volume 1+
         let volume_ids: Vec<_> = locations.iter().map(|l| l.volume_id).collect();
@@ -454,22 +461,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_would_fit_check() {
+    #[tokio::test]
+    async fn test_would_fit_check() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().join("multi_archive");
         let config = MultiVolumeConfig::new(&base_path, 20 * 1024).unwrap(); // 20KB limit
         let header = create_test_header();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
-        let mut writer = MultiVolumeWriter::create(&backend, config, header).unwrap();
+        let mut writer = MultiVolumeWriter::create(&backend, config, header)
+            .await
+            .unwrap();
 
         // Initially should have space
         assert!(writer.would_fit(1024)); // 1KB should fit
 
         // After writing blocks, space decreases
         let block = create_test_block(5 * 1024);
-        writer.write_block(&backend, &block).unwrap();
+        writer.write_block(&backend, &block).await.unwrap();
 
         // Large block might not fit anymore
         // This depends on remaining space calculation
@@ -477,13 +486,13 @@ mod tests {
         // Just verify the method works - actual result depends on implementation
         let _ = large_block_fits;
 
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
     }
 
     // ============ MultiVolumeReader Tests ============
 
-    #[test]
-    fn test_multi_volume_reader_open() {
+    #[tokio::test]
+    async fn test_multi_volume_reader_open() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().join("multi_archive");
         let config = MultiVolumeConfig::new(&base_path, 50 * 1024).unwrap();
@@ -491,25 +500,28 @@ mod tests {
         let backend = LocalStorageBackend::new(temp_dir.path());
 
         // Write some blocks to create multiple volumes
-        let mut writer = MultiVolumeWriter::create(&backend, config.clone(), header).unwrap();
+        let mut writer = MultiVolumeWriter::create(&backend, config.clone(), header)
+            .await
+            .unwrap();
         for _ in 0..6 {
             let block = create_test_block(10 * 1024);
-            writer.write_block(&backend, &block).unwrap();
+            writer.write_block(&backend, &block).await.unwrap();
         }
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert!(stats.volume_count >= 2);
 
         // Now open with reader
         let first_volume = config.volume_path(0);
         let reader =
             MultiVolumeReader::<era_storage::LocalStorageReader>::open(&backend, &first_volume)
+                .await
                 .unwrap();
 
         assert_eq!(reader.volume_count(), stats.volume_count as usize);
     }
 
-    #[test]
-    fn test_multi_volume_reader_read_across_volumes() {
+    #[tokio::test]
+    async fn test_multi_volume_reader_read_across_volumes() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().join("multi_archive");
         let config = MultiVolumeConfig::new(&base_path, 50 * 1024).unwrap();
@@ -517,28 +529,32 @@ mod tests {
         let backend = LocalStorageBackend::new(temp_dir.path());
 
         // Write blocks and track their locations
-        let mut writer = MultiVolumeWriter::create(&backend, config.clone(), header).unwrap();
+        let mut writer = MultiVolumeWriter::create(&backend, config.clone(), header)
+            .await
+            .unwrap();
         let mut locations = Vec::new();
         for i in 0..6 {
             let block = create_test_block(10 * 1024);
-            let loc = writer.write_block(&backend, &block).unwrap();
+            let loc = writer.write_block(&backend, &block).await.unwrap();
             locations.push((i, loc));
         }
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
 
         // Open reader
         let first_volume = config.volume_path(0);
-        let reader = MultiVolumeReader::open(&backend, &first_volume).unwrap();
+        let reader = MultiVolumeReader::open(&backend, &first_volume)
+            .await
+            .unwrap();
 
         // Read all blocks by their locations
         for (_, loc) in &locations {
-            let block = reader.read_block(loc);
+            let block = reader.read_block(loc).await;
             assert!(block.is_ok(), "Failed to read block: {:?}", block.err());
         }
     }
 
-    #[test]
-    fn test_multi_volume_reader_single_volume() {
+    #[tokio::test]
+    async fn test_multi_volume_reader_single_volume() {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path().join("single_archive");
         let config = MultiVolumeConfig::new(&base_path, 1024 * 1024).unwrap(); // Large volume
@@ -546,18 +562,22 @@ mod tests {
         let backend = LocalStorageBackend::new(temp_dir.path());
 
         // Write just one small block
-        let mut writer = MultiVolumeWriter::create(&backend, config.clone(), header).unwrap();
+        let mut writer = MultiVolumeWriter::create(&backend, config.clone(), header)
+            .await
+            .unwrap();
         let block = create_test_block(1024);
-        let loc = writer.write_block(&backend, &block).unwrap();
-        writer.finalize().unwrap();
+        let loc = writer.write_block(&backend, &block).await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Open reader
         let first_volume = config.volume_path(0);
-        let reader = MultiVolumeReader::open(&backend, &first_volume).unwrap();
+        let reader = MultiVolumeReader::open(&backend, &first_volume)
+            .await
+            .unwrap();
 
         assert_eq!(reader.volume_count(), 1);
 
-        let read_block = reader.read_block(&loc).unwrap();
+        let read_block = reader.read_block(&loc).await.unwrap();
         assert_eq!(read_block.data.len(), 1024);
     }
 }

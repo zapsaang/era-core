@@ -19,7 +19,7 @@ async fn test_native_directory_recursion() {
     fs::write(source_dir.join("file1.txt"), "File 1 Content").unwrap();
     fs::write(source_dir.join("subdir/file2.txt"), "File 2 Content").unwrap();
 
-    let mut writer = ArchiveWriterBuilder::new(&archive_path).build().unwrap();
+    let mut writer = ArchiveWriterBuilder::new(&archive_path).build().await.unwrap();
 
     // This method needs to be recursive or support directories
     // Currently, based on audit, this might fail or not exist
@@ -27,11 +27,11 @@ async fn test_native_directory_recursion() {
 
     assert!(result.is_ok(), "Adding directory should succeed");
 
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify
-    let mut reader = ArchiveReader::open(&archive_path, "").unwrap();
-    let files = reader.list_files().unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "").await.unwrap();
+    let files = reader.list_files().await.unwrap();
 
     // We expect 2 files (and maybe directory entries if supported)
     // path identifiers should be relative to the added root usually, or absolute?

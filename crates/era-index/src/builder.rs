@@ -131,9 +131,8 @@ impl IndexBuilder {
 
     /// Snapshot the Bloom filter to disk (for crash recovery)
     pub fn snapshot_bloom(&self, path: &Path) -> Result<()> {
-        // Serialize Bloom filter using rmp-serde (bloomfilter crate uses serde)
-        let bloom_bytes =
-            rmp_serde::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Serialize Bloom filter using rkyv via bloom_serde
+        let bloom_bytes = super::serialize_bloom(&self.bloom)?;
 
         // Write to file
         let mut file = File::create(path).map_err(EraError::Io)?;
@@ -150,8 +149,7 @@ impl IndexBuilder {
         let mut bloom_bytes = Vec::new();
         file.read_to_end(&mut bloom_bytes).map_err(EraError::Io)?;
 
-        let bloom = rmp_serde::from_slice(&bloom_bytes)
-            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        let bloom = super::deserialize_bloom(&bloom_bytes)?;
 
         tracing::info!("Restored Bloom filter from snapshot: {:?}", path);
 
@@ -170,7 +168,7 @@ impl IndexBuilder {
     /// not as external files. This enables cold recovery.
     ///
     /// Returns the MetaIndex and its BlockLocation in the volume
-    pub fn finalize<W: StorageWriter>(
+    pub async fn finalize<W: StorageWriter>(
         &mut self,
         volume_writer: &mut era_volume::VolumeWriter<W>,
         session: &KeySession,
@@ -239,8 +237,9 @@ impl IndexBuilder {
             };
 
             // Write as canonical block to volume
-            let _location =
-                volume_writer.write_canonical_block(&encrypted_block, BlockType::IndexPage)?;
+            let _location = volume_writer
+                .write_canonical_block(&encrypted_block, BlockType::IndexPage)
+                .await?;
 
             // Add PagePointer to L1
             meta.add_page(page.min_hash, page.max_hash, block_id);
@@ -248,9 +247,8 @@ impl IndexBuilder {
             block_id_counter += 1;
         }
 
-        // Serialize Bloom filter using rmp-serde (external crate uses serde)
-        let bloom_bytes =
-            rmp_serde::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Serialize Bloom filter using rkyv via bloom_serde
+        let bloom_bytes = super::serialize_bloom(&self.bloom)?;
         meta.set_bloom_filter(bloom_bytes);
 
         // Encrypt and write MetaIndex as IndexManifest block (using rkyv)
@@ -278,7 +276,8 @@ impl IndexBuilder {
 
         // Write MetaIndex as IndexManifest block
         let manifest_location = volume_writer
-            .write_canonical_block(&manifest_encrypted_block, BlockType::IndexManifest)?;
+            .write_canonical_block(&manifest_encrypted_block, BlockType::IndexManifest)
+            .await?;
 
         Ok((meta, manifest_location))
     }
@@ -333,8 +332,7 @@ impl IndexBuilder {
             block_id_counter += 1;
         }
 
-        let bloom_bytes =
-            rmp_serde::to_vec(&self.bloom).map_err(|e| EraError::Serialization(e.to_string()))?;
+        let bloom_bytes = super::serialize_bloom(&self.bloom)?;
         meta.set_bloom_filter(bloom_bytes);
 
         Ok(meta)

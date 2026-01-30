@@ -5,13 +5,13 @@
 //! This crate provides the L3 (Transformation & Packing) layer implementation.
 //! For MVP, we use a simplified fixed-size packing strategy.
 //!
-//! ## Session-Aware Builders (ERA v8.1)
+//! ## Session-Aware Builders
 //!
 //! For enhanced security with per-block key derivation, use `SessionBlockBuilder`
 //! and `SessionBlockUnpacker`. These implement the HKDF "Onion Model" where each
 //! block is encrypted with a unique key derived from the volume key.
 //!
-//! ## Session-Aware Erasure Builders (ERA v8.1)
+//! ## Session-Aware Erasure Builders
 //!
 //! For combined security and redundancy, use `SessionErasureBlockBuilder` which
 //! provides both per-block key derivation AND Reed-Solomon erasure coding.

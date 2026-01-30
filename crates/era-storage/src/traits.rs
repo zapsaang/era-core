@@ -1,4 +1,4 @@
-//! Storage backend traits.
+//! Storage backend traits (async-only).
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -16,80 +16,9 @@ pub struct StorageMetadata {
     pub modified: Option<u64>,
 }
 
-/// Storage backend abstraction
-pub trait StorageBackend: Send + Sync {
-    /// The writer type for this backend
-    type Writer: StorageWriter;
-    /// The reader type for this backend
-    type Reader: StorageReader;
-
-    /// Create a new storage object
-    fn create(&self, path: &Path) -> Result<Self::Writer>;
-
-    /// Open an existing storage object for appending
-    fn open_append(&self, path: &Path) -> Result<Self::Writer>;
-
-    /// Open a storage object for reading
-    fn open_read(&self, path: &Path) -> Result<Self::Reader>;
-
-    /// Check if a storage object exists
-    fn exists(&self, path: &Path) -> bool;
-
-    /// Delete a storage object
-    fn delete(&self, path: &Path) -> Result<()>;
-
-    /// Get metadata for a storage object
-    fn stat(&self, path: &Path) -> Result<StorageMetadata>;
-}
-
-/// Writer for storage objects
-pub trait StorageWriter: Send {
-    /// Append data to the end of the storage object
-    /// Returns the offset where the data was written
-    fn append(&mut self, data: &[u8]) -> Result<u64>;
-
-    /// Write data at a specific offset
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
-
-    /// Force data to be written to persistent storage (sync_all)
-    fn sync(&mut self) -> Result<()>;
-
-    /// Force data to be written to persistent storage without metadata (fdatasync)
-    /// More efficient than sync() when metadata changes are not critical.
-    /// Default implementation falls back to sync().
-    fn sync_data(&mut self) -> Result<()> {
-        self.sync()
-    }
-
-    /// Get the current size of the storage object
-    fn current_size(&self) -> u64;
-
-    /// Truncate storage to a specific size
-    fn truncate(&mut self, size: u64) -> Result<()>;
-
-    /// Close the writer
-    fn close(self) -> Result<()>;
-}
-
-/// Reader for storage objects
-pub trait StorageReader: Send {
-    /// Read data at the specified offset
-    fn read_at(&self, offset: u64, len: usize) -> Result<Bytes>;
-
-    /// Read all remaining data from the specified offset
-    fn read_all_from(&self, offset: u64) -> Result<Bytes>;
-
-    /// Get the total size of the storage object
-    fn size(&self) -> u64;
-}
-
-// ============================================================================
-// ASYNC STORAGE TRAITS (Phase 2: Zero-Blocking Mandate)
-// ============================================================================
-
-/// Async writer for storage objects (non-blocking I/O)
+/// Writer for storage objects (async, non-blocking I/O)
 #[async_trait]
-pub trait AsyncStorageWriter: Send {
+pub trait StorageWriter: Send {
     /// Append data to the end of the storage object
     /// Returns the offset where the data was written
     async fn append(&mut self, data: &[u8]) -> Result<u64>;
@@ -117,9 +46,9 @@ pub trait AsyncStorageWriter: Send {
     async fn close(self) -> Result<()>;
 }
 
-/// Async reader for storage objects (non-blocking I/O)
+/// Reader for storage objects (async, non-blocking I/O)
 #[async_trait]
-pub trait AsyncStorageReader: Send {
+pub trait StorageReader: Send {
     /// Read data at the specified offset
     async fn read_at(&self, offset: u64, len: usize) -> Result<Bytes>;
 
@@ -130,13 +59,13 @@ pub trait AsyncStorageReader: Send {
     fn size(&self) -> u64;
 }
 
-/// Async storage backend abstraction (non-blocking I/O)
+/// Storage backend abstraction (async, non-blocking I/O)
 #[async_trait]
-pub trait AsyncStorageBackend: Send + Sync {
+pub trait StorageBackend: Send + Sync {
     /// The writer type for this backend
-    type Writer: AsyncStorageWriter;
+    type Writer: StorageWriter;
     /// The reader type for this backend
-    type Reader: AsyncStorageReader;
+    type Reader: StorageReader;
 
     /// Create a new storage object
     async fn create(&self, path: &Path) -> Result<Self::Writer>;

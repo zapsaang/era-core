@@ -1,6 +1,6 @@
 //! Archive reader - extracts files from ERA archives.
 //!
-//! ## Security (ERA v8.1)
+//! ## Security
 //!
 //! This reader implements the HKDF "Onion Model" key derivation:
 //! - **Master Key (MK)**: Derived from password via Argon2id (mlock-protected)
@@ -63,7 +63,7 @@ impl ExtractOptions {
 
 /// Reader for ERA archives
 ///
-/// ## Security (ERA v8.1)
+/// ## Security
 ///
 /// This reader stores the KeySession and VolumeKey in mlock-protected memory.
 /// Each block is decrypted with a unique per-block key derived on-the-fly via HKDF.
@@ -151,12 +151,12 @@ impl ArchiveReader {
     ///
     /// This function verifies the password early using the stored verification tag,
     /// providing clear error messages for incorrect passwords.
-    pub fn open(path: &Path, password: &str) -> Result<Self> {
+    pub async fn open(path: &Path, password: &str) -> Result<Self> {
         let provider = Box::new(crate::auth::PasswordProvider::new(password.to_string()));
-        Self::open_with_providers(path, vec![provider])
+        Self::open_with_providers(path, vec![provider]).await
     }
 
-    pub fn open_with_providers(
+    pub async fn open_with_providers(
         path: &Path,
         providers: Vec<Box<dyn crate::auth::AuthProvider>>,
     ) -> Result<Self> {
@@ -167,7 +167,7 @@ impl ArchiveReader {
         let base_filename = path.file_name().unwrap_or_default();
 
         // 1. Try to open the specified file first (could be any volume)
-        let first_reader = VolumeReader::open(&backend, Path::new(base_filename))?;
+        let first_reader = VolumeReader::open(&backend, Path::new(base_filename)).await?;
 
         // Read volume metadata from header (copy values before moving reader)
         let first_vol_sequence = first_reader.header().volume_sequence as usize;
@@ -246,7 +246,7 @@ impl ArchiveReader {
 
             missing_count = 0;
 
-            match VolumeReader::open(&backend, &volume_path) {
+            match VolumeReader::open(&backend, &volume_path).await {
                 Ok(reader) => {
                     // Verify it's part of the same archive
                     if reader.header().archive_id == first_archive_id {
@@ -370,7 +370,7 @@ impl ArchiveReader {
     /// ```
     ///
     /// Note: The session is cloned internally to ensure the reader owns its key material.
-    pub fn open_with_session(path: &Path, session: &KeySession) -> Result<Self> {
+    pub async fn open_with_session(path: &Path, session: &KeySession) -> Result<Self> {
         info!("Opening archive with key session: {}", path.display());
 
         let parent_dir = path.parent().unwrap_or(Path::new("."));
@@ -378,7 +378,7 @@ impl ArchiveReader {
         let base_filename = path.file_name().unwrap_or_default();
 
         // 1. Try to open the specified file first (could be any volume)
-        let first_reader = VolumeReader::open(&backend, Path::new(base_filename))?;
+        let first_reader = VolumeReader::open(&backend, Path::new(base_filename)).await?;
 
         // Read volume metadata from header
         let first_vol_sequence = first_reader.header().volume_sequence as usize;
@@ -424,7 +424,7 @@ impl ArchiveReader {
                 PathBuf::from(name)
             };
 
-            match VolumeReader::open(&backend, &vol_path) {
+            match VolumeReader::open(&backend, &vol_path).await {
                 Ok(reader) => {
                     if reader.header().archive_id == first_archive_id {
                         let seq = reader.header().volume_sequence as usize;
@@ -489,9 +489,9 @@ impl ArchiveReader {
     /// - The archive was created with password mode (not certificate mode)
     /// - The keypair doesn't match the certificate used to create the archive
     /// - The key encapsulation data is corrupted
-    pub fn open_with_keypair(path: &Path, keypair: &EraKeyPair) -> Result<Self> {
+    pub async fn open_with_keypair(path: &Path, keypair: &EraKeyPair) -> Result<Self> {
         let provider = Box::new(crate::auth::CertificateProvider::new(keypair.clone()));
-        Self::open_with_providers(path, vec![provider])
+        Self::open_with_providers(path, vec![provider]).await
     }
 
     /// Create a fresh compressor based on configuration.
@@ -533,13 +533,13 @@ impl ArchiveReader {
     }
 
     /// Metadata-first preflight: restore embedded index (if present) and load catalog.
-    pub fn preflight_metadata_recovery(&mut self) -> Result<()> {
-        self.restore_embedded_index()?;
-        self.load_catalog()?;
+    pub async fn preflight_metadata_recovery(&mut self) -> Result<()> {
+        self.restore_embedded_index().await?;
+        self.load_catalog().await?;
         Ok(())
     }
 
-    fn restore_embedded_index(&mut self) -> Result<()> {
+    async fn restore_embedded_index(&mut self) -> Result<()> {
         if self.embedded_lsm_dir.is_some() {
             return Ok(());
         }
@@ -574,7 +574,7 @@ impl ArchiveReader {
             shard_volumes: None,
         };
 
-        let encrypted_block = reader.read_block(&location)?;
+        let encrypted_block = reader.read_block(&location).await?;
         let unpacker = self.create_unpacker();
         let unpacked = unpacker.unpack(&encrypted_block)?;
         let first_entry = unpacked
@@ -610,7 +610,7 @@ impl ArchiveReader {
 
     /// Load the catalog from any available volume
     /// Each volume contains a copy of the catalog, enabling recovery from any volume
-    pub fn load_catalog(&mut self) -> Result<&Catalog> {
+    pub async fn load_catalog(&mut self) -> Result<&Catalog> {
         if let Some(ref catalog) = self.catalog {
             return Ok(catalog);
         }
@@ -656,7 +656,7 @@ impl ArchiveReader {
             reader_idx, footer.catalog_offset, footer.catalog_size, footer.catalog_block_id
         );
 
-        let encrypted_block = self.volume_readers[reader_idx].read_block(&catalog_location)?;
+        let encrypted_block = self.volume_readers[reader_idx].read_block(&catalog_location).await?;
 
         // Create temporary session-based unpacker for decryption
         let unpacker = self.create_unpacker();
@@ -692,7 +692,7 @@ impl ArchiveReader {
     /// This is the unified entry point for reading blocks. It automatically detects
     /// whether the block is erasure-coded based on `location.erasure_info` and uses
     /// the appropriate unpacker.
-    pub fn read_and_extract_chunks(&self, location: &BlockLocation) -> Result<ChunkVec> {
+    pub async fn read_and_extract_chunks(&self, location: &BlockLocation) -> Result<ChunkVec> {
         if let Some(ref erasure_info) = location.erasure_info {
             // Erasure-coded block: read shards from multiple volumes
             let total_shards =
@@ -772,7 +772,7 @@ impl ArchiveReader {
                     // Debug info
                     // println!("Reading shard {} (my={}) from vol_idx {} offset {}", shard_idx, my_shard_idx, vol_idx, offset);
 
-                    match self.read_shard(&self.volume_readers[vol_idx], offset) {
+                    match self.read_shard(&self.volume_readers[vol_idx], offset).await {
                         Ok(shard) => {
                             available_shards.push((shard_idx, shard));
                         }
@@ -794,7 +794,7 @@ impl ArchiveReader {
             )
         } else {
             // Standard block: read and unpack directly with session-based unpacker
-            let encrypted_block = self.volume_readers[0].read_block(location)?;
+            let encrypted_block = self.volume_readers[0].read_block(location).await?;
             let unpacker = self.create_unpacker();
             let unpacked = unpacker.unpack(&encrypted_block)?;
 
@@ -803,17 +803,17 @@ impl ArchiveReader {
         }
     }
 
-    fn read_shard<R: era_storage::StorageReader>(
+    async fn read_shard<R: era_storage::StorageReader>(
         &self,
         reader: &VolumeReader<R>,
         offset: u64,
     ) -> Result<Bytes> {
-        let header_bytes = reader.read_raw(offset, era_common::ShardHeader::SIZE)?;
+        let header_bytes = reader.read_raw(offset, era_common::ShardHeader::SIZE).await?;
         if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
             let data = reader.read_raw(
                 offset + era_common::ShardHeader::SIZE as u64,
                 header.length as usize,
-            )?;
+            ).await?;
             if header.verify(&data) {
                 return Ok(data);
             }
@@ -822,8 +822,8 @@ impl ArchiveReader {
     }
 
     /// List all files in the archive
-    pub fn list_files(&mut self) -> Result<Vec<&FileEntry>> {
-        let catalog = self.load_catalog()?;
+    pub async fn list_files(&mut self) -> Result<Vec<&FileEntry>> {
+        let catalog = self.load_catalog().await?;
         Ok(catalog
             .entries
             .iter()
@@ -832,7 +832,7 @@ impl ArchiveReader {
     }
 
     /// Extract using the provided block iterator
-    fn extract_with_iterator(
+    async fn extract_with_iterator(
         catalog: &Catalog,
         iter: &mut Box<dyn BlockIterator + '_>,
         options: &ExtractOptions,
@@ -914,7 +914,7 @@ impl ArchiveReader {
             return Ok(stats);
         }
 
-        while let Some(result) = iter.next_block() {
+        while let Some(result) = iter.next_block().await {
             match result {
                 Ok(decoded) => {
                     context.process_chunks(decoded.chunks, &mut stats)?;
@@ -939,7 +939,7 @@ impl ArchiveReader {
     }
 
     /// Verify using the provided block iterator
-    fn verify_with_iterator(
+    async fn verify_with_iterator(
         catalog: &Catalog,
         iter: &mut Box<dyn BlockIterator + '_>,
     ) -> Result<VerifyStats> {
@@ -1011,7 +1011,7 @@ impl ArchiveReader {
             }
         }
 
-        while let Some(result) = iter.next_block() {
+        while let Some(result) = iter.next_block().await {
             match result {
                 Ok(decoded) => {
                     stats.blocks_verified += 1;
@@ -1070,10 +1070,10 @@ impl ArchiveReader {
     /// ## Security
     ///
     /// Each block is decrypted with a unique per-block key derived via HKDF.
-    pub fn extract_all(&mut self, options: &ExtractOptions) -> Result<ExtractStats> {
+    pub async fn extract_all(&mut self, options: &ExtractOptions) -> Result<ExtractStats> {
         info!("Extracting to: {}", options.output_dir.display());
 
-        self.preflight_metadata_recovery()?;
+        self.preflight_metadata_recovery().await?;
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
@@ -1108,7 +1108,7 @@ impl ArchiveReader {
             ))
         };
 
-        Self::extract_with_iterator(catalog, &mut iter, options)
+        Self::extract_with_iterator(catalog, &mut iter, options).await
     }
 
     /// Verify the integrity of the archive
@@ -1122,10 +1122,10 @@ impl ArchiveReader {
     /// ## Security
     ///
     /// Each block is decrypted with a unique per-block key derived via HKDF.
-    pub fn verify(&mut self) -> Result<VerifyStats> {
+    pub async fn verify(&mut self) -> Result<VerifyStats> {
         info!("Verifying archive integrity...");
 
-        self.preflight_metadata_recovery()?;
+        self.preflight_metadata_recovery().await?;
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
@@ -1160,7 +1160,7 @@ impl ArchiveReader {
             ))
         };
 
-        Self::verify_with_iterator(catalog, &mut iter)
+        Self::verify_with_iterator(catalog, &mut iter).await
     }
 }
 

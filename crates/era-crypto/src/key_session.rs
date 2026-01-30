@@ -1,4 +1,4 @@
-//! Key Session Management for ERA v8.1
+//! Key Session Management
 //!
 //! This module implements the HKDF-based multi-level key derivation system
 //! (the "Onion Model") as described in the security optimization document.
@@ -126,7 +126,7 @@ impl std::fmt::Debug for BlockKey {
 
 /// KeySession creates and manages encryption keys.
 ///
-/// # Security Policy (v8.1)
+/// # Security Policy
 /// - **Master Key Transience**: The Master Key (MK) is used ONLY during session initialization
 ///   to derive a set of Volume Keys (VK). It is then immediately dropped/zeroized.
 /// - **Volume Key Cache**: Derived VKs are stored in a single contiguous `SecureBytes` buffer.

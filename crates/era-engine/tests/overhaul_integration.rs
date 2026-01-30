@@ -38,7 +38,7 @@ async fn dedup_audit_small_files() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password(PASSWORD)
         .enable_cdc(true)
-        .build()
+        .build().await
         .unwrap();
 
     for i in 0..10 {
@@ -47,10 +47,10 @@ async fn dedup_audit_small_files() {
         writer.add_file(&file_path).await.unwrap();
     }
 
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
-    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).unwrap();
-    let catalog = reader.load_catalog().unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let catalog = reader.load_catalog().await.unwrap();
 
     let mut unique_hashes = HashSet::new();
     for entry in &catalog.entries {
@@ -90,11 +90,11 @@ async fn missing_volume_recovery_extracts_successfully() {
         .volume_count(6)
         .enable_matrix_distribution(true)
         .max_volume_size(256 * 1024)
-        .build()
+        .build().await
         .unwrap();
 
     writer.add_file(&source_path).await.unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     let mut volumes = archive_volumes(&archive_path);
     assert!(volumes.len() > 1, "Expected multi-volume archive");
@@ -102,7 +102,7 @@ async fn missing_volume_recovery_extracts_successfully() {
     fs::remove_file(&removed).unwrap();
 
     let output_dir = temp.path().join("extracted");
-    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
     let stats = reader
         .extract_all(&ExtractOptions::new(&output_dir))
         .unwrap();
@@ -129,11 +129,11 @@ async fn aware_read_recovers_aead_corruption() {
         .volume_count(3)
         .enable_matrix_distribution(false)
         .max_volume_size(256 * 1024)
-        .build()
+        .build().await
         .unwrap();
 
     writer.add_file(&source_path).await.unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     let volumes = archive_volumes(&archive_path);
     let target = volumes.first().unwrap();
@@ -178,7 +178,7 @@ async fn aware_read_recovers_aead_corruption() {
     file.flush().unwrap();
 
     let output_dir = temp.path().join("recovered");
-    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
     let stats = reader
         .extract_all(&ExtractOptions::new(&output_dir))
         .unwrap();

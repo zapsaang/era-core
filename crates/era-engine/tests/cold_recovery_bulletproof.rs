@@ -121,6 +121,7 @@ async fn test_cold_recovery_basic() {
             .password(password)
             .config(config_no_ec())
             .build()
+            .await
             .unwrap();
 
         // Add files
@@ -176,12 +177,12 @@ async fn test_cold_recovery_basic() {
 
     // Try to open the archive
     let password = "test_password_cold_recovery";
-    match ArchiveReader::open(&archive_path, password) {
+    match ArchiveReader::open(&archive_path, password).await {
         Ok(mut reader) => {
             println!("  ✓ Archive opened successfully after kill-9");
 
             // Try to list files (basic recovery test)
-            match reader.list_files() {
+            match reader.list_files().await {
                 Ok(files) => {
                     println!("  ✓ Found {} files in archive", files.len());
                     for file in &files {
@@ -233,10 +234,11 @@ async fn test_no_sidecar_files_after_normal_finalize() {
             .password("test")
             .config(config_no_ec())
             .build()
+            .await
             .unwrap();
 
         writer.add_file(&source_dir.join("test.bin")).await.unwrap();
-        writer.finalize().unwrap(); // Proper finalization
+        writer.finalize().await.unwrap(); // Proper finalization
     }
 
     // Verify no sidecar files even with proper finalization
@@ -244,8 +246,8 @@ async fn test_no_sidecar_files_after_normal_finalize() {
     println!("✓ No sidecar files after proper finalization");
 
     // Verify archive can be opened
-    let mut reader = ArchiveReader::open(&archive_path, "test").unwrap();
-    let files = reader.list_files().unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test").await.unwrap();
+    let files = reader.list_files().await.unwrap();
     assert_eq!(files.len(), 1);
     println!("✓ Archive opens and lists files correctly");
 }
@@ -288,6 +290,7 @@ async fn test_cold_recovery_large_dataset() {
             .password("large_test")
             .config(config_no_ec())
             .build()
+            .await
             .unwrap();
 
         // Add all files

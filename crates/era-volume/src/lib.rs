@@ -3,6 +3,7 @@
 //! Volume management for the ERA archive system.
 //!
 //! This crate provides the L1 (Volume Management) layer implementation.
+//! All I/O operations are async (non-blocking).
 
 /// Maximum allowed shard/block size (16MB) - Anti-DoS protection.
 /// Any length field exceeding this limit is treated as corruption.
@@ -16,7 +17,6 @@ mod multi_volume;
 mod reader;
 mod volume_pool;
 mod writer;
-mod writer_async;
 
 pub use footer::{Footer, FOOTER_MAGIC, FOOTER_SIZE};
 pub use header::{RecipientSlot, RecipientType, SuperHeader, DATA_REGION_START, HEADER_SIZE};
@@ -27,4 +27,3 @@ pub use multi_volume::{
 pub use reader::VolumeReader;
 pub use volume_pool::{VolumePool, VolumePoolConfig, VolumePoolStats};
 pub use writer::VolumeWriter;
-pub use writer_async::AsyncVolumeWriter;

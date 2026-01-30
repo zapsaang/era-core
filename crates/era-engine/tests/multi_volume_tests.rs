@@ -9,8 +9,8 @@ use std::fs;
 use tempfile::TempDir;
 
 /// Test that multi-volume mode creates separate physical files
-#[test]
-fn test_multi_volume_creates_separate_files() {
+#[tokio::test]
+async fn test_multi_volume_creates_separate_files() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("test.era");
 
@@ -23,14 +23,13 @@ fn test_multi_volume_creates_separate_files() {
             parity_shards: 1,
         })
         .volume_count(3)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     // Add some data
     writer
         .add_bytes("test.txt", b"Hello Multi-Volume ERA!")
         .unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Verify files created
     let files: Vec<_> = fs::read_dir(temp_dir.path())
@@ -59,8 +58,8 @@ fn test_multi_volume_creates_separate_files() {
 }
 
 /// Test that shards are distributed across different volumes
-#[test]
-fn test_shards_physically_distributed() {
+#[tokio::test]
+async fn test_shards_physically_distributed() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("distributed.era");
 
@@ -73,13 +72,12 @@ fn test_shards_physically_distributed() {
             parity_shards: 1,
         })
         .volume_count(3)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     // Add larger data to see distribution
     let data = vec![0u8; 100 * 1024]; // 100KB
-    writer.add_bytes("large.bin", &data).unwrap();
-    writer.finalize().unwrap();
+    writer.add_bytes("large.bin", &data).await.unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Check each volume file has data
     let vol0 = temp_dir.path().join("distributed.era");
@@ -120,8 +118,8 @@ fn test_shards_physically_distributed() {
 }
 
 /// Test that data can be recovered after losing one volume
-#[test]
-fn test_recovery_after_volume_loss() {
+#[tokio::test]
+async fn test_recovery_after_volume_loss() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("recovery.era");
 
@@ -134,12 +132,11 @@ fn test_recovery_after_volume_loss() {
             parity_shards: 1,
         })
         .volume_count(3)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     let original_data = b"This data should survive volume loss!";
-    writer.add_bytes("important.txt", original_data).unwrap();
-    writer.finalize().unwrap();
+    writer.add_bytes("important.txt", original_data).await.unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Delete one volume (simulating disk failure)
     let vol1 = temp_dir.path().join("recovery.era.001");
@@ -149,13 +146,13 @@ fn test_recovery_after_volume_loss() {
     }
 
     // Try to read the archive - should succeed with erasure recovery
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
 
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
     let options = ExtractOptions::new(&extract_dir);
-    let stats = reader.extract_all(&options).unwrap();
+    let stats = reader.extract_all(&options).await.await.unwrap();
 
     assert_eq!(stats.extracted, 1, "Should extract 1 file");
 
@@ -172,7 +169,7 @@ fn test_recovery_after_volume_loss() {
 // ============================================================================
 
 /// Helper to create a multi-volume archive with configurable erasure coding
-fn create_erasure_archive(
+async fn create_erasure_archive(
     temp_dir: &TempDir,
     name: &str,
     data_shards: u8,
@@ -190,18 +187,17 @@ fn create_erasure_archive(
             parity_shards,
         })
         .volume_count(volume_count)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     for (filename, size) in file_sizes {
         // Create deterministic data based on filename for verification
         let data: Vec<u8> = (0..*size)
             .map(|i| ((i as u32).wrapping_mul(31) ^ (filename.len() as u32)) as u8)
             .collect();
-        writer.add_bytes(filename, &data).unwrap();
+        writer.add_bytes(filename, &data).await.unwrap();
     }
 
-    writer.finalize().unwrap();
+    writer.finalize().await.await.unwrap();
     archive_path
 }
 
@@ -244,8 +240,8 @@ fn verify_extracted_content(
 }
 
 /// Test recovery with 4+2 erasure coding (can lose up to 2 volumes)
-#[test]
-fn test_e2e_recovery_4_plus_2_lose_one() {
+#[tokio::test]
+async fn test_e2e_recovery_4_plus_2_lose_one() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("data.bin", 256 * 1024)]; // 256KB file
 
@@ -257,7 +253,7 @@ fn test_e2e_recovery_4_plus_2_lose_one() {
     fs::remove_file(&vol2).unwrap();
 
     // Extraction should succeed
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -269,8 +265,8 @@ fn test_e2e_recovery_4_plus_2_lose_one() {
 }
 
 /// Test recovery with 4+2 erasure coding losing maximum allowed (2 volumes)
-#[test]
-fn test_e2e_recovery_4_plus_2_lose_two() {
+#[tokio::test]
+async fn test_e2e_recovery_4_plus_2_lose_two() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("critical.bin", 512 * 1024)]; // 512KB file
 
@@ -283,7 +279,7 @@ fn test_e2e_recovery_4_plus_2_lose_two() {
     fs::remove_file(&vol4).unwrap();
 
     // Should still recover
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -295,8 +291,8 @@ fn test_e2e_recovery_4_plus_2_lose_two() {
 }
 
 /// Test recovery with 4+2 erasure coding losing 2 consecutive volumes
-#[test]
-fn test_e2e_recovery_lose_consecutive_volumes() {
+#[tokio::test]
+async fn test_e2e_recovery_lose_consecutive_volumes() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("file1.txt", 100 * 1024), ("file2.txt", 200 * 1024)];
 
@@ -309,7 +305,7 @@ fn test_e2e_recovery_lose_consecutive_volumes() {
     fs::remove_file(&vol3).unwrap();
 
     // Should still recover
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -321,8 +317,8 @@ fn test_e2e_recovery_lose_consecutive_volumes() {
 }
 
 /// Test that losing too many volumes fails gracefully
-#[test]
-fn test_e2e_too_many_volumes_lost_should_fail() {
+#[tokio::test]
+async fn test_e2e_too_many_volumes_lost_should_fail() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("data.bin", 128 * 1024)];
 
@@ -337,12 +333,12 @@ fn test_e2e_too_many_volumes_lost_should_fail() {
     fs::remove_file(&vol3).unwrap();
 
     // Opening should succeed (we have volume 0)
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
     // Extraction should fail - not enough shards
-    let result = reader.extract_all(&ExtractOptions::new(&extract_dir));
+    let result = reader.extract_all(&ExtractOptions::new(&extract_dir).await);
     assert!(result.is_err(), "Should fail with too many volumes lost");
 
     let err = result.unwrap_err();
@@ -355,8 +351,8 @@ fn test_e2e_too_many_volumes_lost_should_fail() {
 }
 
 /// Test 2+1 minimal configuration with first volume lost
-#[test]
-fn test_e2e_recovery_2_plus_1_lose_first_data_volume() {
+#[tokio::test]
+async fn test_e2e_recovery_2_plus_1_lose_first_data_volume() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("small.txt", 1024)];
 
@@ -367,7 +363,7 @@ fn test_e2e_recovery_2_plus_1_lose_first_data_volume() {
     let vol1 = temp_dir.path().join("minimal.era.001");
     fs::remove_file(&vol1).unwrap();
 
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -379,8 +375,8 @@ fn test_e2e_recovery_2_plus_1_lose_first_data_volume() {
 }
 
 /// Test recovery with parity volume lost
-#[test]
-fn test_e2e_recovery_parity_volume_lost() {
+#[tokio::test]
+async fn test_e2e_recovery_parity_volume_lost() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("doc.pdf", 64 * 1024)];
 
@@ -392,7 +388,7 @@ fn test_e2e_recovery_parity_volume_lost() {
     fs::remove_file(&vol3).unwrap();
 
     // Should work perfectly - all data shards present
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -404,8 +400,8 @@ fn test_e2e_recovery_parity_volume_lost() {
 }
 
 /// Test verify operation with missing volumes
-#[test]
-fn test_e2e_verify_with_missing_volume() {
+#[tokio::test]
+async fn test_e2e_verify_with_missing_volume() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("verify_test.bin", 32 * 1024)];
 
@@ -416,8 +412,8 @@ fn test_e2e_verify_with_missing_volume() {
     fs::remove_file(&vol2).unwrap();
 
     // Verify should still work with recovery
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
-    let stats = reader.verify().unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
+    let stats = reader.verify().await.unwrap();
 
     println!("Verify stats: {:?}", stats);
 
@@ -432,8 +428,8 @@ fn test_e2e_verify_with_missing_volume() {
 }
 
 /// Test large file spanning many blocks across volumes
-#[test]
-fn test_e2e_large_file_multi_block_recovery() {
+#[tokio::test]
+async fn test_e2e_large_file_multi_block_recovery() {
     let temp_dir = TempDir::new().unwrap();
     // 2MB file will span multiple macro blocks
     let files = [("bigfile.dat", 2 * 1024 * 1024)];
@@ -446,7 +442,7 @@ fn test_e2e_large_file_multi_block_recovery() {
     fs::remove_file(&vol1).unwrap();
     fs::remove_file(&vol3).unwrap();
 
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -458,8 +454,8 @@ fn test_e2e_large_file_multi_block_recovery() {
 }
 
 /// Test multiple files with different sizes
-#[test]
-fn test_e2e_multi_file_various_sizes() {
+#[tokio::test]
+async fn test_e2e_multi_file_various_sizes() {
     let temp_dir = TempDir::new().unwrap();
     let files = [
         ("tiny.txt", 100),
@@ -476,7 +472,7 @@ fn test_e2e_multi_file_various_sizes() {
     fs::remove_file(&vol2).unwrap();
     fs::remove_file(&vol4).unwrap();
 
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -488,8 +484,8 @@ fn test_e2e_multi_file_various_sizes() {
 }
 
 /// Test volume corruption (partial file damage)
-#[test]
-fn test_e2e_volume_partial_corruption() {
+#[tokio::test]
+async fn test_e2e_volume_partial_corruption() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("corrupt_test.bin", 64 * 1024)];
 
@@ -508,7 +504,7 @@ fn test_e2e_volume_partial_corruption() {
     }
 
     // Should still recover thanks to erasure coding
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -520,8 +516,8 @@ fn test_e2e_volume_partial_corruption() {
 }
 
 /// Test edge case: only primary volume survives
-#[test]
-fn test_e2e_only_primary_and_last_volumes() {
+#[tokio::test]
+async fn test_e2e_only_primary_and_last_volumes() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("survivor.txt", 8 * 1024)];
 
@@ -536,12 +532,12 @@ fn test_e2e_only_primary_and_last_volumes() {
         }
     }
 
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
     // Should fail - only 2 volumes remain but need 4 data shards
-    let result = reader.extract_all(&ExtractOptions::new(&extract_dir));
+    let result = reader.extract_all(&ExtractOptions::new(&extract_dir).await);
     assert!(result.is_err(), "Should fail with only 2 of 6 volumes");
 }
 
@@ -550,8 +546,8 @@ fn test_e2e_only_primary_and_last_volumes() {
 /// To recover, we need any 2 shards (minimum = data_shards).
 /// With 6 volumes: vol0=shard0, vol1=shard1, vol2=shard2, etc.
 /// We can delete any 4 volumes and still have 2 shards for recovery.
-#[test]
-fn test_e2e_high_redundancy_2_plus_4() {
+#[tokio::test]
+async fn test_e2e_high_redundancy_2_plus_4() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("important.bin", 128 * 1024)];
 
@@ -567,7 +563,7 @@ fn test_e2e_high_redundancy_2_plus_4() {
     }
 
     // Should still work with volumes 0 and 1 (shard 0 and shard 1 = both data shards)
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -579,8 +575,8 @@ fn test_e2e_high_redundancy_2_plus_4() {
 }
 
 /// Test high redundancy with mixed data/parity shard survival
-#[test]
-fn test_e2e_high_redundancy_mixed_survival() {
+#[tokio::test]
+async fn test_e2e_high_redundancy_mixed_survival() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("mixed.bin", 64 * 1024)];
 
@@ -597,7 +593,7 @@ fn test_e2e_high_redundancy_mixed_survival() {
         }
     }
 
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -609,8 +605,8 @@ fn test_e2e_high_redundancy_mixed_survival() {
 }
 
 /// Test that volumes are correctly discovered even with gaps
-#[test]
-fn test_e2e_volume_discovery_with_gaps() {
+#[tokio::test]
+async fn test_e2e_volume_discovery_with_gaps() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("gaptest.bin", 64 * 1024)];
 
@@ -639,7 +635,7 @@ fn test_e2e_volume_discovery_with_gaps() {
     }
 
     // Reader should still find volumes 0, 2, 4, 5 (skipping gaps)
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -655,8 +651,8 @@ fn test_e2e_volume_discovery_with_gaps() {
 // ============================================================================
 
 /// Test that volume headers contain correct volume_sequence and total_volumes
-#[test]
-fn test_volume_headers_contain_correct_metadata() {
+#[tokio::test]
+async fn test_volume_headers_contain_correct_metadata() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("metadata.era");
 
@@ -668,13 +664,12 @@ fn test_volume_headers_contain_correct_metadata() {
             parity_shards: 2,
         })
         .volume_count(6)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     writer
         .add_bytes("test.txt", b"Header metadata test")
         .unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Open each volume and verify header metadata
     for i in 0..6 {
@@ -684,7 +679,7 @@ fn test_volume_headers_contain_correct_metadata() {
             temp_dir.path().join(format!("metadata.era.{:03}", i))
         };
 
-        let reader = ArchiveReader::open(&vol_path, "test_password").unwrap();
+        let reader = ArchiveReader::open(&vol_path, "test_password").await.unwrap();
         let header = reader.header();
 
         println!(
@@ -702,8 +697,8 @@ fn test_volume_headers_contain_correct_metadata() {
 }
 
 /// Test opening archive from secondary volume (not .era but .era.001)
-#[test]
-fn test_open_from_secondary_volume() {
+#[tokio::test]
+async fn test_open_from_secondary_volume() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("secondary.bin", 64 * 1024)];
 
@@ -712,7 +707,7 @@ fn test_open_from_secondary_volume() {
     // Open from volume 1 instead of volume 0
     let vol1_path = temp_dir.path().join("secondary.era.001");
 
-    let mut reader = ArchiveReader::open(&vol1_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&vol1_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -724,8 +719,8 @@ fn test_open_from_secondary_volume() {
 }
 
 /// Test opening from secondary volume when primary is missing
-#[test]
-fn test_open_from_secondary_when_primary_missing() {
+#[tokio::test]
+async fn test_open_from_secondary_when_primary_missing() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("orphan.bin", 32 * 1024)];
 
@@ -738,7 +733,7 @@ fn test_open_from_secondary_when_primary_missing() {
     // Open from volume 2 - should succeed as catalog is written to all volumes
     let vol2_path = temp_dir.path().join("orphan.era.002");
 
-    let mut reader = ArchiveReader::open(&vol2_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&vol2_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -750,8 +745,8 @@ fn test_open_from_secondary_when_primary_missing() {
 }
 
 /// Test opening from middle volume with both ends missing
-#[test]
-fn test_open_from_middle_volume() {
+#[tokio::test]
+async fn test_open_from_middle_volume() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("middle.bin", 64 * 1024)];
 
@@ -767,7 +762,7 @@ fn test_open_from_middle_volume() {
     // Open from volume 3 (middle)
     let vol3_path = temp_dir.path().join("middle.era.003");
 
-    let mut reader = ArchiveReader::open(&vol3_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&vol3_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -779,8 +774,8 @@ fn test_open_from_middle_volume() {
 }
 
 /// Test that archive_id is verified across volumes
-#[test]
-fn test_archive_id_verification() {
+#[tokio::test]
+async fn test_archive_id_verification() {
     let temp_dir = TempDir::new().unwrap();
 
     // Create first archive
@@ -806,7 +801,7 @@ fn test_archive_id_verification() {
 
     // Open should still work but only use volumes from same archive
     let archive_path = temp_dir.path().join("archive1.era");
-    let reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
 
     // The header should be from archive1, not archive2
     let header = reader.header();
@@ -816,21 +811,20 @@ fn test_archive_id_verification() {
 }
 
 /// Test without erasure coding - single volume behavior
-#[test]
-fn test_single_volume_no_erasure() {
+#[tokio::test]
+async fn test_single_volume_no_erasure() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("single.era");
 
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
         .enable_erasure(false)
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     writer
         .add_bytes("single.txt", b"Single volume test")
         .unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Verify only one file created
     let era_files: Vec<_> = fs::read_dir(temp_dir.path())
@@ -846,7 +840,7 @@ fn test_single_volume_no_erasure() {
     assert_eq!(era_files.len(), 1, "Should only have 1 volume file");
 
     // Open and verify
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let header = reader.header();
     assert_eq!(header.volume_sequence, 0);
     assert_eq!(header.total_volumes, 1);
@@ -860,8 +854,8 @@ fn test_single_volume_no_erasure() {
 }
 
 /// Test that volume_count matches erasure config total shards
-#[test]
-fn test_volume_count_matches_erasure_shards() {
+#[tokio::test]
+async fn test_volume_count_matches_erasure_shards() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("match.era");
 
@@ -875,16 +869,15 @@ fn test_volume_count_matches_erasure_shards() {
             parity_shards: 2,
         })
         .volume_count(3) // Less than total shards
-        .build()
-        .unwrap();
+        .build().await.unwrap();
 
     writer
         .add_bytes("mismatch.txt", b"Volume count mismatch test")
         .unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.await.unwrap();
 
     // Should still work - shards distributed round-robin
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
@@ -895,8 +888,8 @@ fn test_volume_count_matches_erasure_shards() {
 }
 
 /// Test discovering volumes based on total_volumes header field
-#[test]
-fn test_volume_discovery_uses_total_volumes() {
+#[tokio::test]
+async fn test_volume_discovery_uses_total_volumes() {
     let temp_dir = TempDir::new().unwrap();
     let files = [("discover.bin", 32 * 1024)];
 
@@ -911,7 +904,7 @@ fn test_volume_discovery_uses_total_volumes() {
     }
 
     // Open from volume 0 - should still find volumes 4 and 5
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
 
     // With volumes 0, 4, 5 available (3 shards), should be able to recover
     // since we need 4 data shards but have 2 parity
@@ -919,7 +912,7 @@ fn test_volume_discovery_uses_total_volumes() {
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();
 
-    let result = reader.extract_all(&ExtractOptions::new(&extract_dir));
+    let result = reader.extract_all(&ExtractOptions::new(&extract_dir).await);
     // This should fail - not enough shards
     assert!(
         result.is_err(),

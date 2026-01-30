@@ -41,9 +41,8 @@ pub struct IndexReader {
 impl IndexReader {
     /// Open an index from a directory
     pub fn open(index_dir: &Path, meta: MetaIndex) -> Result<Self> {
-        // Deserialize Bloom filter using rmp-serde
-        let bloom = rmp_serde::from_slice(&meta.bloom_filter)
-            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        // Deserialize Bloom filter using rkyv via bloom_serde
+        let bloom = super::deserialize_bloom(&meta.bloom_filter)?;
 
         Ok(Self {
             index_dir: Some(index_dir.to_path_buf()),
@@ -91,7 +90,7 @@ impl IndexReader {
     /// 3. Decrypting and loading all pages into memory
     ///
     /// This enables recovery from an orphaned .era file with NO external metadata.
-    pub fn recover_from_volume<R: StorageReader>(
+    pub async fn recover_from_volume<R: StorageReader>(
         volume_reader: &VolumeReader<R>,
         session: &KeySession,
         volume_key: &VolumeKey,
@@ -116,7 +115,8 @@ impl IndexReader {
                 tracing::info!("Found index in footer at offset {}", footer.index_offset);
 
                 // Read and decrypt MetaIndex
-                let (block_type, encrypted_block) = volume_reader.read_typed_block(&location)?;
+                let (block_type, encrypted_block) =
+                    volume_reader.read_typed_block(&location).await?;
                 if block_type != BlockType::IndexManifest {
                     return Err(EraError::InvalidFormat(format!(
                         "Expected IndexManifest, found {:?}",
@@ -154,7 +154,9 @@ impl IndexReader {
             m
         } else {
             tracing::warn!("Footer missing or no index_root - scanning for IndexManifest blocks");
-            let manifest_blocks = volume_reader.scan_for_typed_blocks(BlockType::IndexManifest)?;
+            let manifest_blocks = volume_reader
+                .scan_for_typed_blocks(BlockType::IndexManifest)
+                .await?;
 
             if manifest_blocks.is_empty() {
                 return Err(EraError::InvalidFormat(
@@ -166,7 +168,7 @@ impl IndexReader {
             // CRITICAL: We need to try possible block IDs since scanner doesn't know the encryption key
             // The manifest block ID is typically N (where there are N index pages numbered 0..N-1)
             let location = &manifest_blocks[0];
-            let (_, encrypted_block) = volume_reader.read_typed_block(location)?;
+            let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
 
             // Try decrypting with likely block IDs (0..100 should cover most cases)
             let mut manifest_data = None;
@@ -206,7 +208,9 @@ impl IndexReader {
 
         // Step 3: Scan for all IndexPage blocks
         tracing::info!("Scanning for IndexPage blocks");
-        let page_blocks = volume_reader.scan_for_typed_blocks(BlockType::IndexPage)?;
+        let page_blocks = volume_reader
+            .scan_for_typed_blocks(BlockType::IndexPage)
+            .await?;
         tracing::info!("Found {} IndexPage blocks", page_blocks.len());
 
         // Step 4: Load all pages into memory
@@ -214,7 +218,7 @@ impl IndexReader {
         let mut embedded_pages = HashMap::new();
 
         for location in &page_blocks {
-            let (_, encrypted_block) = volume_reader.read_typed_block(location)?;
+            let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
 
             // Try to decrypt with each block ID from MetaIndex
             let mut successfully_decrypted = false;
@@ -250,9 +254,8 @@ impl IndexReader {
             }
         }
 
-        // Step 5: Deserialize Bloom filter using rmp-serde
-        let bloom = rmp_serde::from_slice(&meta.bloom_filter)
-            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        // Step 5: Deserialize Bloom filter using rkyv via bloom_serde
+        let bloom = super::deserialize_bloom(&meta.bloom_filter)?;
 
         tracing::info!(
             "Cold recovery complete: {} pages loaded, bloom filter restored",
@@ -382,8 +385,8 @@ mod tests {
         for entry in &entries {
             bloom.set(&entry.hash);
         }
-        // Serialize bloom filter using rmp-serde
-        let bloom_bytes = rmp_serde::to_vec(&bloom).unwrap();
+        // Serialize bloom filter using rkyv via bloom_serde
+        let bloom_bytes = crate::serialize_bloom(&bloom).unwrap();
         meta.set_bloom_filter(bloom_bytes);
 
         // Create reader

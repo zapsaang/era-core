@@ -53,14 +53,14 @@ fn test_design_promise_verification() {
             .erasure_config(erasure)
             .volume_count(vol_count)
             .enable_matrix_distribution(true)
-            .build()
+            .build().await
             .unwrap_or_else(|_| panic!("Failed for {} volumes", vol_count));
 
         let data = vec![0xAB; 256 * 1024];
         writer
             .add_bytes("test.bin", &data)
             .expect("Failed to add file");
-        writer.finalize().expect("Failed to finalize");
+        writer.finalize().await.expect("Failed to finalize");
 
         // Test different failure scenarios
         println!("\nFailure scenarios:");
@@ -244,12 +244,12 @@ fn test_actual_implementation_behavior() {
         .erasure_config(erasure)
         // Note: omitting volume_count should auto-select
         .enable_matrix_distribution(true)
-        .build()
+        .build().await
         .expect("Failed to create writer");
 
     let data = vec![0xAB; 256 * 1024];
     writer.add_bytes("test.bin", &data).expect("Failed to add");
-    writer.finalize().expect("Failed to finalize");
+    writer.finalize().await.expect("Failed to finalize");
 
     // Check how many volumes were created
     let mut vol_count = 0;

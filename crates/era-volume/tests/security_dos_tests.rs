@@ -17,8 +17,8 @@ use tempfile::TempDir;
 
 /// Test that reading a block with a malicious length field (> MAX_SHARD_SIZE)
 /// returns an error instead of attempting to allocate huge memory.
-#[test]
-fn test_malicious_block_header_huge_length_returns_error() {
+#[tokio::test]
+async fn test_malicious_block_header_huge_length_returns_error() {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
     let volume_path = Path::new("malicious_block.era");
@@ -31,7 +31,7 @@ fn test_malicious_block_header_huge_length_returns_error() {
         [0u8; 16],
     );
 
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
 
     let block = era_common::EncryptedMacroBlock {
         block_id: BlockId::new(0),
@@ -43,8 +43,9 @@ fn test_malicious_block_header_huge_length_returns_error() {
 
     let location = writer
         .write_canonical_block(&block, BlockType::Data)
+        .await
         .unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // 2. Corrupt the block header with a huge length (4GB)
     let file_path = temp_dir.path().join(volume_path);
@@ -62,8 +63,8 @@ fn test_malicious_block_header_huge_length_returns_error() {
     }
 
     // 3. Try to read the corrupted block - should return Error, NOT panic/OOM
-    let reader = VolumeReader::open(&backend, volume_path).unwrap();
-    let result = reader.read_block(&location);
+    let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
+    let result = reader.read_block(&location).await;
 
     assert!(
         result.is_err(),
@@ -81,8 +82,8 @@ fn test_malicious_block_header_huge_length_returns_error() {
 
 /// Test that reading a shard with a malicious length field marks it as corrupted
 /// instead of attempting to allocate huge memory.
-#[test]
-fn test_malicious_shard_header_huge_length_marks_corrupted() {
+#[tokio::test]
+async fn test_malicious_shard_header_huge_length_marks_corrupted() {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
     let volume_path = Path::new("malicious_shard.era");
@@ -95,8 +96,8 @@ fn test_malicious_shard_header_huge_length_marks_corrupted() {
         [0u8; 16],
     );
 
-    let writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
-    writer.finalize().unwrap();
+    let writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
+    writer.finalize().await.unwrap();
 
     // 2. Write a malicious shard header directly to the data region
     let file_path = temp_dir.path().join(volume_path);
@@ -114,7 +115,7 @@ fn test_malicious_shard_header_huge_length_marks_corrupted() {
     }
 
     // 3. Try to read erasure shards - should mark the shard as None (corrupted)
-    let reader = VolumeReader::open(&backend, volume_path).unwrap();
+    let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
 
     let fake_location = BlockLocation {
         volume_id: era_common::VolumeId::new(),
@@ -132,7 +133,7 @@ fn test_malicious_shard_header_huge_length_marks_corrupted() {
     };
 
     let erasure_info = fake_location.erasure_info.unwrap();
-    let result = reader.read_erasure_shards(&fake_location, &erasure_info);
+    let result = reader.read_erasure_shards(&fake_location, &erasure_info).await;
 
     // Should succeed but mark the first shard as None (corrupted)
     assert!(
@@ -148,8 +149,8 @@ fn test_malicious_shard_header_huge_length_marks_corrupted() {
 }
 
 /// Test that scan_for_typed_blocks handles malicious length fields gracefully.
-#[test]
-fn test_scan_handles_malicious_length_gracefully() {
+#[tokio::test]
+async fn test_scan_handles_malicious_length_gracefully() {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
     let volume_path = Path::new("malicious_scan.era");
@@ -162,7 +163,7 @@ fn test_scan_handles_malicious_length_gracefully() {
         [0u8; 16],
     );
 
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
 
     // Write a valid block first
     let block = era_common::EncryptedMacroBlock {
@@ -175,6 +176,7 @@ fn test_scan_handles_malicious_length_gracefully() {
 
     let location = writer
         .write_canonical_block(&block, BlockType::Data)
+        .await
         .unwrap();
 
     // Write another valid block
@@ -188,9 +190,10 @@ fn test_scan_handles_malicious_length_gracefully() {
 
     let _location2 = writer
         .write_canonical_block(&block2, BlockType::Data)
+        .await
         .unwrap();
 
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // 2. Corrupt the first block header with a huge length
     let file_path = temp_dir.path().join(volume_path);
@@ -207,8 +210,8 @@ fn test_scan_handles_malicious_length_gracefully() {
     }
 
     // 3. Scan should skip the corrupted block and continue
-    let reader = VolumeReader::open(&backend, volume_path).unwrap();
-    let result = reader.scan_for_typed_blocks(BlockType::Data);
+    let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
+    let result = reader.scan_for_typed_blocks(BlockType::Data).await;
 
     assert!(
         result.is_ok(),
@@ -236,8 +239,8 @@ fn test_max_shard_size_constant() {
 }
 
 /// Test boundary condition: length exactly at MAX_SHARD_SIZE should be accepted.
-#[test]
-fn test_length_at_max_shard_size_boundary() {
+#[tokio::test]
+async fn test_length_at_max_shard_size_boundary() {
     // This test verifies that blocks with length == MAX_SHARD_SIZE are valid
     // (the check is > MAX_SHARD_SIZE, not >=)
     let temp_dir = TempDir::new().unwrap();
@@ -251,7 +254,7 @@ fn test_length_at_max_shard_size_boundary() {
         [0u8; 16],
     );
 
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
 
     // Write a block with size just under MAX_SHARD_SIZE (we can't actually write 16MB in test)
     // This just verifies the logic path works for valid sizes
@@ -265,12 +268,13 @@ fn test_length_at_max_shard_size_boundary() {
 
     let location = writer
         .write_canonical_block(&block, BlockType::Data)
+        .await
         .unwrap();
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // Read should succeed for valid sizes
-    let reader = VolumeReader::open(&backend, volume_path).unwrap();
-    let result = reader.read_block(&location);
+    let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
+    let result = reader.read_block(&location).await;
 
     assert!(
         result.is_ok(),

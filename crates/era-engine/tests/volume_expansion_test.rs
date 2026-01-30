@@ -47,7 +47,7 @@ fn test_volume_expansion_matrix_mode() -> Result<()> {
         }
     }
 
-    let _stats = writer.finalize()?;
+    let _stats = writer.finalize().await?;
 
     // If we reach here, check we have more than 6 volumes created
     // The filenames would be archive.era, archive.era.001 ... archive.era.005 (set 1)

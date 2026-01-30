@@ -3,7 +3,7 @@
 //! This module provides a common interface for iterating over blocks
 //! in both standard and erasure-coded archives, eliminating code duplication.
 //!
-//! ## Security (ERA v8.1)
+//! ## Security
 //!
 //! Session-based iterators (`SessionBlockIterator`, `SessionErasureBlockIterator`)
 //! use the HKDF "Onion Model" for per-block key derivation:
@@ -13,6 +13,7 @@
 //! Basic iterators (`StandardBlockIterator`, `ErasureBlockIterator`) use a single
 //! key for all blocks and are provided for simpler use cases.
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig};
 use era_common::{
@@ -49,10 +50,11 @@ pub struct BlockIterStats {
 }
 
 /// Common trait for block iterators
+#[async_trait(?Send)]
 pub trait BlockIterator {
     /// Get the next block's decoded chunks
     /// Returns None when iteration is complete
-    fn next_block(&mut self) -> Option<Result<DecodedBlock>>;
+    async fn next_block(&mut self) -> Option<Result<DecodedBlock>>;
 
     /// Check if there are more blocks to read
     fn has_more(&self) -> bool;
@@ -110,16 +112,18 @@ impl<'a, R: era_storage::StorageReader> StandardBlockIterator<'a, R> {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<'a, R> {
-    fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
+    async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
         if self.current_offset >= self.data_end {
             return None;
         }
 
-        // Read BlockHeader (v8.1 format: 16 bytes)
+        // Read BlockHeader (16 bytes)
         let header_bytes = match self
             .volume_reader
             .read_raw(self.current_offset, BlockHeader::SIZE)
+            .await
         {
             Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
             Ok(_) => return None,
@@ -171,7 +175,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
         };
 
         // Read and decrypt block
-        let result = match self.volume_reader.read_block(&location) {
+        let result = match self.volume_reader.read_block(&location).await {
             Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
                 Ok(chunks) => {
                     self.stats.blocks_read += 1;
@@ -301,8 +305,9 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'a, R> {
-    fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
+    async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
         // Find the first available volume to check if there's more data
         // We need to use the first reader in volume_readers (which is the lowest available volume)
         // Since each volume has original_len header for each block, we can read from any volume
@@ -312,7 +317,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 
         // Read erasure block header (4 bytes original_len) from the first available volume
         // All volumes now have this header written before their first shard of each block
-        let header_bytes = match self.volume_readers[0].read_raw(self.current_offsets[0], 4) {
+        let header_bytes = match self.volume_readers[0].read_raw(self.current_offsets[0], 4).await {
             Ok(bytes) if bytes.len() == 4 => bytes,
             Ok(_) => return None,
             Err(e) => return Some(Err(e)),
@@ -363,7 +368,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Read shard header (8 bytes: 4 length + 4 CRC)
-            let header_bytes = match reader.read_raw(offset, ShardHeader::SIZE) {
+            let header_bytes = match reader.read_raw(offset, ShardHeader::SIZE).await {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 Ok(_) => {
                     corrupted_count += 1;
@@ -393,7 +398,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Read shard data
-            match reader.read_raw(self.current_offsets[reader_idx], shard_len) {
+            match reader.read_raw(self.current_offsets[reader_idx], shard_len).await {
                 Ok(shard_data) => {
                     // Verify CRC
                     if shard_header.verify(&shard_data) {
@@ -469,7 +474,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 }
 
 // =============================================================================
-// Session-based iterators with per-block key derivation (ERA v8.1)
+// Session-based iterators with per-block key derivation
 // =============================================================================
 
 /// Iterator for standard (non-erasure) blocks with per-block key derivation.
@@ -539,16 +544,18 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'a, R> {
-    fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
+    async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
         if self.current_offset >= self.data_end {
             return None;
         }
 
-        // Read BlockHeader (v8.1 format: 16 bytes)
+        // Read BlockHeader (16 bytes)
         let header_bytes = match self
             .volume_reader
             .read_raw(self.current_offset, BlockHeader::SIZE)
+            .await
         {
             Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
             Ok(_) => return None,
@@ -600,7 +607,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
         };
 
         // Read and decrypt block with per-block key derivation
-        let result = match self.volume_reader.read_block(&location) {
+        let result = match self.volume_reader.read_block(&location).await {
             Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
                 Ok(chunks) => {
                     self.stats.blocks_read += 1;
@@ -765,8 +772,9 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
     }
 }
 
+#[async_trait(?Send)]
 impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIterator<'a, R> {
-    fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
+    async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
         if let Some(result) = self.pending_blocks.pop_front() {
             return Some(result);
         }
@@ -799,7 +807,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 }
 
                 let prefix_bytes =
-                    match reader.read_raw(self.current_offsets[idx], header_prefix_len) {
+                    match reader.read_raw(self.current_offsets[idx], header_prefix_len).await {
                         Ok(bytes) if bytes.len() == header_prefix_len => {
                             any_shard_seen = true;
                             bytes
@@ -825,7 +833,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 let header_bytes = match reader.read_raw(
                     self.current_offsets[idx] + header_prefix_len as u64,
                     ShardHeader::SIZE,
-                ) {
+                ).await {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                     Ok(_) => {
                         self.current_offsets[idx] = self.data_ends[idx];
@@ -856,7 +864,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 let shard_data = match reader.read_raw(
                     self.current_offsets[idx] + header_prefix_len as u64 + ShardHeader::SIZE as u64,
                     shard_len,
-                ) {
+                ).await {
                     Ok(data) => data,
                     Err(_) => {
                         self.current_offsets[idx] +=

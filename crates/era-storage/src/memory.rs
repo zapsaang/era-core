@@ -1,5 +1,6 @@
 //! In-memory storage backend for testing.
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use era_common::{EraError, Result};
 use parking_lot::RwLock;
@@ -43,11 +44,12 @@ impl MemoryStorageBackend {
     }
 }
 
+#[async_trait]
 impl StorageBackend for MemoryStorageBackend {
     type Writer = MemoryStorageWriter;
     type Reader = MemoryStorageReader;
 
-    fn create(&self, path: &Path) -> Result<Self::Writer> {
+    async fn create(&self, path: &Path) -> Result<Self::Writer> {
         // Initialize with empty data
         self.storage.write().insert(path.to_path_buf(), Vec::new());
 
@@ -58,7 +60,7 @@ impl StorageBackend for MemoryStorageBackend {
         })
     }
 
-    fn open_append(&self, path: &Path) -> Result<Self::Writer> {
+    async fn open_append(&self, path: &Path) -> Result<Self::Writer> {
         let buffer = self.storage.read().get(path).cloned().unwrap_or_default();
 
         Ok(MemoryStorageWriter {
@@ -68,7 +70,7 @@ impl StorageBackend for MemoryStorageBackend {
         })
     }
 
-    fn open_read(&self, path: &Path) -> Result<Self::Reader> {
+    async fn open_read(&self, path: &Path) -> Result<Self::Reader> {
         let data =
             self.storage
                 .read()
@@ -83,11 +85,11 @@ impl StorageBackend for MemoryStorageBackend {
         })
     }
 
-    fn exists(&self, path: &Path) -> bool {
+    async fn exists(&self, path: &Path) -> bool {
         self.storage.read().contains_key(path)
     }
 
-    fn delete(&self, path: &Path) -> Result<()> {
+    async fn delete(&self, path: &Path) -> Result<()> {
         self.storage
             .write()
             .remove(path)
@@ -97,7 +99,7 @@ impl StorageBackend for MemoryStorageBackend {
         Ok(())
     }
 
-    fn stat(&self, path: &Path) -> Result<StorageMetadata> {
+    async fn stat(&self, path: &Path) -> Result<StorageMetadata> {
         let data =
             self.storage
                 .read()
@@ -122,8 +124,9 @@ pub struct MemoryStorageWriter {
     buffer: Vec<u8>,
 }
 
+#[async_trait]
 impl StorageWriter for MemoryStorageWriter {
-    fn append(&mut self, data: &[u8]) -> Result<u64> {
+    async fn append(&mut self, data: &[u8]) -> Result<u64> {
         let offset = self.buffer.len() as u64;
         self.buffer.extend_from_slice(data);
         // Immediately sync to shared storage
@@ -133,7 +136,7 @@ impl StorageWriter for MemoryStorageWriter {
         Ok(offset)
     }
 
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+    async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         let start = offset as usize;
         let end = start + data.len();
 
@@ -154,7 +157,7 @@ impl StorageWriter for MemoryStorageWriter {
         Ok(())
     }
 
-    fn sync(&mut self) -> Result<()> {
+    async fn sync(&mut self) -> Result<()> {
         // Already synced on each write
         Ok(())
     }
@@ -163,7 +166,7 @@ impl StorageWriter for MemoryStorageWriter {
         self.buffer.len() as u64
     }
 
-    fn truncate(&mut self, size: u64) -> Result<()> {
+    async fn truncate(&mut self, size: u64) -> Result<()> {
         let new_len = size as usize;
         if new_len < self.buffer.len() {
             self.buffer.truncate(new_len);
@@ -177,7 +180,7 @@ impl StorageWriter for MemoryStorageWriter {
         Ok(())
     }
 
-    fn close(self) -> Result<()> {
+    async fn close(self) -> Result<()> {
         // Final sync
         self.storage.write().insert(self.path.clone(), self.buffer);
         Ok(())
@@ -189,8 +192,9 @@ pub struct MemoryStorageReader {
     data: Bytes,
 }
 
+#[async_trait]
 impl StorageReader for MemoryStorageReader {
-    fn read_at(&self, offset: u64, len: usize) -> Result<Bytes> {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<Bytes> {
         let start = offset as usize;
         let end = std::cmp::min(start + len, self.data.len());
 
@@ -201,7 +205,7 @@ impl StorageReader for MemoryStorageReader {
         Ok(self.data.slice(start..end))
     }
 
-    fn read_all_from(&self, offset: u64) -> Result<Bytes> {
+    async fn read_all_from(&self, offset: u64) -> Result<Bytes> {
         let start = offset as usize;
         if start >= self.data.len() {
             return Ok(Bytes::new());
@@ -218,89 +222,89 @@ impl StorageReader for MemoryStorageReader {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_memory_backend_create_and_read() {
+    #[tokio::test]
+    async fn test_memory_backend_create_and_read() {
         let backend = MemoryStorageBackend::new();
         let path = Path::new("test.dat");
 
         // Create and write
-        let mut writer = backend.create(path).unwrap();
-        writer.append(b"Hello, ").unwrap();
-        writer.append(b"World!").unwrap();
+        let mut writer = backend.create(path).await.unwrap();
+        writer.append(b"Hello, ").await.unwrap();
+        writer.append(b"World!").await.unwrap();
         assert_eq!(writer.current_size(), 13);
-        writer.close().unwrap();
+        writer.close().await.unwrap();
 
         // Read back
-        let reader = backend.open_read(path).unwrap();
+        let reader = backend.open_read(path).await.unwrap();
         assert_eq!(reader.size(), 13);
 
-        let data = reader.read_at(0, 7).unwrap();
+        let data = reader.read_at(0, 7).await.unwrap();
         assert_eq!(&data[..], b"Hello, ");
 
-        let data = reader.read_at(7, 6).unwrap();
+        let data = reader.read_at(7, 6).await.unwrap();
         assert_eq!(&data[..], b"World!");
 
-        let all = reader.read_all_from(0).unwrap();
+        let all = reader.read_all_from(0).await.unwrap();
         assert_eq!(&all[..], b"Hello, World!");
     }
 
-    #[test]
-    fn test_memory_backend_exists_and_delete() {
+    #[tokio::test]
+    async fn test_memory_backend_exists_and_delete() {
         let backend = MemoryStorageBackend::new();
         let path = Path::new("test.dat");
 
-        assert!(!backend.exists(path));
+        assert!(!backend.exists(path).await);
 
-        let writer = backend.create(path).unwrap();
-        writer.close().unwrap();
+        let writer = backend.create(path).await.unwrap();
+        writer.close().await.unwrap();
 
-        assert!(backend.exists(path));
+        assert!(backend.exists(path).await);
 
-        backend.delete(path).unwrap();
-        assert!(!backend.exists(path));
+        backend.delete(path).await.unwrap();
+        assert!(!backend.exists(path).await);
     }
 
-    #[test]
-    fn test_memory_backend_open_append() {
+    #[tokio::test]
+    async fn test_memory_backend_open_append() {
         let backend = MemoryStorageBackend::new();
         let path = Path::new("test.dat");
 
         // Create initial content
-        let mut writer = backend.create(path).unwrap();
-        writer.append(b"First").unwrap();
-        writer.close().unwrap();
+        let mut writer = backend.create(path).await.unwrap();
+        writer.append(b"First").await.unwrap();
+        writer.close().await.unwrap();
 
         // Append more
-        let mut writer = backend.open_append(path).unwrap();
+        let mut writer = backend.open_append(path).await.unwrap();
         assert_eq!(writer.current_size(), 5);
-        writer.append(b"Second").unwrap();
-        writer.close().unwrap();
+        writer.append(b"Second").await.unwrap();
+        writer.close().await.unwrap();
 
         // Verify
-        let reader = backend.open_read(path).unwrap();
-        let all = reader.read_all_from(0).unwrap();
+        let reader = backend.open_read(path).await.unwrap();
+        let all = reader.read_all_from(0).await.unwrap();
         assert_eq!(&all[..], b"FirstSecond");
     }
 
-    #[test]
-    fn test_memory_backend_stat() {
+    #[tokio::test]
+    async fn test_memory_backend_stat() {
         let backend = MemoryStorageBackend::new();
         let path = Path::new("test.dat");
 
-        let mut writer = backend.create(path).unwrap();
-        writer.append(b"12345").unwrap();
-        writer.close().unwrap();
+        let mut writer = backend.create(path).await.unwrap();
+        writer.append(b"12345").await.unwrap();
+        writer.close().await.unwrap();
 
-        let stat = backend.stat(path).unwrap();
+        let stat = backend.stat(path).await.unwrap();
         assert_eq!(stat.size, 5);
     }
 
-    #[test]
-    fn test_memory_backend_file_not_found() {
+    #[tokio::test]
+    async fn test_memory_backend_file_not_found() {
         let backend = MemoryStorageBackend::new();
         let path = Path::new("nonexistent.dat");
 
-        let result = backend.open_read(path);
+        let result = backend.open_read(path).await;
         assert!(result.is_err());
     }
 }
