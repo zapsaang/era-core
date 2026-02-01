@@ -31,7 +31,9 @@ async fn test_malicious_block_header_huge_length_returns_error() {
         [0u8; 16],
     );
 
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
 
     let block = era_common::EncryptedMacroBlock {
         block_id: BlockId::new(0),
@@ -96,7 +98,9 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
         [0u8; 16],
     );
 
-    let writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
+    let writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
     writer.finalize().await.unwrap();
 
     // 2. Write a malicious shard header directly to the data region
@@ -133,7 +137,9 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
     };
 
     let erasure_info = fake_location.erasure_info.unwrap();
-    let result = reader.read_erasure_shards(&fake_location, &erasure_info).await;
+    let result = reader
+        .read_erasure_shards(&fake_location, &erasure_info)
+        .await;
 
     // Should succeed but mark the first shard as None (corrupted)
     assert!(
@@ -163,7 +169,9 @@ async fn test_scan_handles_malicious_length_gracefully() {
         [0u8; 16],
     );
 
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
 
     // Write a valid block first
     let block = era_common::EncryptedMacroBlock {
@@ -254,7 +262,9 @@ async fn test_length_at_max_shard_size_boundary() {
         [0u8; 16],
     );
 
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
 
     // Write a block with size just under MAX_SHARD_SIZE (we can't actually write 16MB in test)
     // This just verifies the logic path works for valid sizes

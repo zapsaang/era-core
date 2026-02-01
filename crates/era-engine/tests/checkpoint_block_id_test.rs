@@ -16,21 +16,23 @@ use std::path::Path;
 use tempfile::TempDir;
 
 /// Test that footer version supports checkpoint block_id field
-#[test]
-fn test_footer_supports_checkpoint_block_id() {
+#[tokio::test]
+async fn test_footer_supports_checkpoint_block_id() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("checkpoint_test.era");
 
     // Create archive (checkpoint is embedded in volume, not sidecar)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build().await
+        .build()
+        .await
         .expect("Failed to build writer");
 
     // Add some data
-    writer.add_bytes("file1.txt", b"Hello, ERA!").unwrap();
+    writer.add_bytes("file1.txt", b"Hello, ERA!").await.unwrap();
     writer
         .add_bytes("file2.txt", b"Checkpoint test data")
+        .await
         .unwrap();
 
     // Finalize the archive
@@ -40,7 +42,9 @@ fn test_footer_supports_checkpoint_block_id() {
     // Open the volume and check footer
     let backend = LocalStorageBackend::new(temp_dir.path());
     let file_name = archive_path.file_name().unwrap();
-    let reader = VolumeReader::open(&backend, Path::new(file_name)).expect("Failed to open volume");
+    let reader = VolumeReader::open(&backend, Path::new(file_name))
+        .await
+        .expect("Failed to open volume");
 
     let footer = reader.footer().expect("Missing footer");
 
@@ -56,19 +60,20 @@ fn test_footer_supports_checkpoint_block_id() {
 }
 
 /// Test that no sidecar checkpoint files are created
-#[test]
-fn test_no_sidecar_checkpoint_files() {
+#[tokio::test]
+async fn test_no_sidecar_checkpoint_files() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("no_sidecar.era");
 
     // Create archive (v2.2 uses embedded checkpoints, not sidecar files)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build().await
+        .build()
+        .await
         .expect("Failed to build writer");
 
     // Add data
-    writer.add_bytes("test.txt", b"Test data").unwrap();
+    writer.add_bytes("test.txt", b"Test data").await.unwrap();
     writer.finalize().await.expect("Finalize failed");
 
     // Check that no sidecar files exist
@@ -91,24 +96,27 @@ fn test_no_sidecar_checkpoint_files() {
 }
 
 /// Test footer has_index returns false (Memory backend is default)
-#[test]
-fn test_footer_no_index() {
+#[tokio::test]
+async fn test_footer_no_index() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("no_index.era");
 
     // Create archive with defaults (Memory backend)
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build().await
+        .build()
+        .await
         .expect("Failed to build writer");
 
-    writer.add_bytes("test.txt", b"Test data").unwrap();
+    writer.add_bytes("test.txt", b"Test data").await.unwrap();
     writer.finalize().await.expect("Finalize failed");
 
     // Open volume and check footer
     let backend = LocalStorageBackend::new(temp_dir.path());
     let file_name = archive_path.file_name().unwrap();
-    let reader = VolumeReader::open(&backend, Path::new(file_name)).expect("Failed to open volume");
+    let reader = VolumeReader::open(&backend, Path::new(file_name))
+        .await
+        .expect("Failed to open volume");
 
     let footer = reader.footer().expect("Missing footer");
 
@@ -122,24 +130,27 @@ fn test_footer_no_index() {
 }
 
 /// Test that checkpoint detection uses volume footer, not sidecar files
-#[test]
-fn test_checkpoint_detection_via_footer() {
+#[tokio::test]
+async fn test_checkpoint_detection_via_footer() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("footer_detection.era");
 
     // Create and finalize archive
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
-        .build().await
+        .build()
+        .await
         .expect("Failed to build writer");
 
-    writer.add_bytes("test.txt", b"Test data").unwrap();
+    writer.add_bytes("test.txt", b"Test data").await.unwrap();
     writer.finalize().await.expect("Finalize failed");
 
     // Open volume and verify checkpoint detection method
     let backend = LocalStorageBackend::new(temp_dir.path());
     let file_name = archive_path.file_name().unwrap();
-    let reader = VolumeReader::open(&backend, Path::new(file_name)).expect("Failed to open volume");
+    let reader = VolumeReader::open(&backend, Path::new(file_name))
+        .await
+        .expect("Failed to open volume");
 
     let footer = reader.footer().expect("Missing footer");
 

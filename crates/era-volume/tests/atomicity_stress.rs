@@ -26,7 +26,9 @@ async fn test_multi_volume_padding_and_atomicity() {
         [0u8; 16],
     );
 
-    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).await.unwrap();
+    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header)
+        .await
+        .unwrap();
 
     // 2. Write enough data to force a split
     // Each block is 32KB.

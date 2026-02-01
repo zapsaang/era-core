@@ -317,7 +317,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 
         // Read erasure block header (4 bytes original_len) from the first available volume
         // All volumes now have this header written before their first shard of each block
-        let header_bytes = match self.volume_readers[0].read_raw(self.current_offsets[0], 4).await {
+        let header_bytes = match self.volume_readers[0]
+            .read_raw(self.current_offsets[0], 4)
+            .await
+        {
             Ok(bytes) if bytes.len() == 4 => bytes,
             Ok(_) => return None,
             Err(e) => return Some(Err(e)),
@@ -398,7 +401,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Read shard data
-            match reader.read_raw(self.current_offsets[reader_idx], shard_len).await {
+            match reader
+                .read_raw(self.current_offsets[reader_idx], shard_len)
+                .await
+            {
                 Ok(shard_data) => {
                     // Verify CRC
                     if shard_header.verify(&shard_data) {
@@ -806,21 +812,23 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     continue;
                 }
 
-                let prefix_bytes =
-                    match reader.read_raw(self.current_offsets[idx], header_prefix_len).await {
-                        Ok(bytes) if bytes.len() == header_prefix_len => {
-                            any_shard_seen = true;
-                            bytes
-                        }
-                        Ok(_) => {
-                            self.current_offsets[idx] = self.data_ends[idx];
-                            continue;
-                        }
-                        Err(_) => {
-                            self.current_offsets[idx] = self.data_ends[idx];
-                            continue;
-                        }
-                    };
+                let prefix_bytes = match reader
+                    .read_raw(self.current_offsets[idx], header_prefix_len)
+                    .await
+                {
+                    Ok(bytes) if bytes.len() == header_prefix_len => {
+                        any_shard_seen = true;
+                        bytes
+                    }
+                    Ok(_) => {
+                        self.current_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                    Err(_) => {
+                        self.current_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                };
 
                 if stripe_lengths.is_none() {
                     let mut lengths = Vec::with_capacity(data_shards);
@@ -830,10 +838,13 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     stripe_lengths = Some(lengths);
                 }
 
-                let header_bytes = match reader.read_raw(
-                    self.current_offsets[idx] + header_prefix_len as u64,
-                    ShardHeader::SIZE,
-                ).await {
+                let header_bytes = match reader
+                    .read_raw(
+                        self.current_offsets[idx] + header_prefix_len as u64,
+                        ShardHeader::SIZE,
+                    )
+                    .await
+                {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                     Ok(_) => {
                         self.current_offsets[idx] = self.data_ends[idx];
@@ -861,10 +872,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     max_len = shard_len;
                 }
 
-                let shard_data = match reader.read_raw(
-                    self.current_offsets[idx] + header_prefix_len as u64 + ShardHeader::SIZE as u64,
-                    shard_len,
-                ).await {
+                let shard_data = match reader
+                    .read_raw(
+                        self.current_offsets[idx]
+                            + header_prefix_len as u64
+                            + ShardHeader::SIZE as u64,
+                        shard_len,
+                    )
+                    .await
+                {
                     Ok(data) => data,
                     Err(_) => {
                         self.current_offsets[idx] +=

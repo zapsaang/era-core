@@ -19,7 +19,10 @@ async fn test_native_directory_recursion() {
     fs::write(source_dir.join("file1.txt"), "File 1 Content").unwrap();
     fs::write(source_dir.join("subdir/file2.txt"), "File 2 Content").unwrap();
 
-    let mut writer = ArchiveWriterBuilder::new(&archive_path).build().await.unwrap();
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+        .build()
+        .await
+        .unwrap();
 
     // This method needs to be recursive or support directories
     // Currently, based on audit, this might fail or not exist

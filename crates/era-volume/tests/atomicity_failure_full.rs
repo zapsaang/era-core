@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::Bytes;
 use era_common::{ArchiveConfig, ArchiveId, BlockId, EncryptedMacroBlock, Result};
 use era_storage::{LocalStorageBackend, StorageBackend, StorageMetadata};
@@ -6,7 +7,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
-use async_trait::async_trait;
 
 // Mock Backend to simulate failures
 #[derive(Clone)]
@@ -91,7 +91,9 @@ async fn test_atomicity_failure_recovery() {
         [0u8; 16],
     );
 
-    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header).await.unwrap();
+    let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header)
+        .await
+        .unwrap();
 
     let block_data = Bytes::from(vec![0xAAu8; 1024]);
     let block = EncryptedMacroBlock {

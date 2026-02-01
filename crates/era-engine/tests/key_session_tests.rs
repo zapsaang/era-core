@@ -101,12 +101,17 @@ async fn test_key_session_writer_roundtrip() {
             .await
             .unwrap();
 
-        writer.add_bytes("hello.txt", b"Hello, World!").await.unwrap();
+        writer
+            .add_bytes("hello.txt", b"Hello, World!")
+            .await
+            .unwrap();
         writer.finalize().await.unwrap();
     }
 
     // Read header to get context
-    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
     let header = reader_for_salt.header();
 
     // Derive Session
@@ -116,7 +121,9 @@ async fn test_key_session_writer_roundtrip() {
 
     // Now read with session (fast path - no KDF needed)
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session)
+            .await
+            .unwrap();
         reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
@@ -144,12 +151,17 @@ async fn test_key_session_reader_works() {
             .await
             .unwrap();
 
-        writer.add_bytes("data.bin", b"Test data content").await.unwrap();
+        writer
+            .add_bytes("data.bin", b"Test data content")
+            .await
+            .unwrap();
         writer.finalize().await.unwrap();
     }
 
     // Read archive header to get salt
-    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
     let header = reader_for_salt.header();
 
     let session = derive_session_from_header(header, "test_password").unwrap();
@@ -157,7 +169,9 @@ async fn test_key_session_reader_works() {
 
     // Open with session - should work
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session)
+            .await
+            .unwrap();
         reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
@@ -185,12 +199,17 @@ async fn test_key_session_wrong_password_fails() {
             .await
             .unwrap();
 
-        writer.add_bytes("secret.txt", b"Secret data").await.unwrap();
+        writer
+            .add_bytes("secret.txt", b"Secret data")
+            .await
+            .unwrap();
         writer.finalize().await.unwrap();
     }
 
     // Read archive header to get salt
-    let reader_for_salt = ArchiveReader::open(&archive_path, "correct_password").await.unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "correct_password")
+        .await
+        .unwrap();
     let header = reader_for_salt.header();
 
     // Create session with WRONG password - should fail at derivation stage
@@ -231,7 +250,9 @@ async fn test_key_session_multiple_files() {
     }
 
     // Get salt from archive and create session
-    let reader_for_salt = ArchiveReader::open(&archive_path, "multi_password").await.unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "multi_password")
+        .await
+        .unwrap();
     let header = reader_for_salt.header();
 
     let session = derive_session_from_header(header, "multi_password").unwrap();
@@ -239,7 +260,9 @@ async fn test_key_session_multiple_files() {
 
     // Verify all files using session
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session)
+            .await
+            .unwrap();
         reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
@@ -281,7 +304,9 @@ async fn test_key_session_with_erasure_coding() {
     assert!(archive_path.exists());
 
     // Get salt and create session
-    let reader_for_salt = ArchiveReader::open(&archive_path, "erasure_password").await.unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "erasure_password")
+        .await
+        .unwrap();
     let header = reader_for_salt.header();
 
     let session = derive_session_from_header(header, "erasure_password").unwrap();
@@ -289,7 +314,9 @@ async fn test_key_session_with_erasure_coding() {
 
     // Read back with session
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session)
+            .await
+            .unwrap();
         reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");
@@ -315,12 +342,17 @@ async fn test_key_session_from_derived_key() {
             .await
             .unwrap();
 
-        writer.add_bytes("test.txt", b"From derived key").await.unwrap();
+        writer
+            .add_bytes("test.txt", b"From derived key")
+            .await
+            .unwrap();
         writer.finalize().await.unwrap();
     }
 
     // Get salt from archive
-    let reader_for_salt = ArchiveReader::open(&archive_path, "from_derived").await.unwrap();
+    let reader_for_salt = ArchiveReader::open(&archive_path, "from_derived")
+        .await
+        .unwrap();
     let header = reader_for_salt.header();
 
     // Use helper which does the derivation and unwrapping
@@ -330,7 +362,9 @@ async fn test_key_session_from_derived_key() {
 
     // Use session to read archive
     {
-        let mut reader = ArchiveReader::open_with_session(&archive_path, &session).await.unwrap();
+        let mut reader = ArchiveReader::open_with_session(&archive_path, &session)
+            .await
+            .unwrap();
         reader.load_catalog().await.unwrap();
 
         let extract_dir = temp_dir.path().join("extract");

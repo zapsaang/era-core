@@ -5,8 +5,8 @@ use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_simple_multivolume_read() {
+#[tokio::test]
+async fn test_simple_multivolume_read() {
     println!("\n=== SIMPLE MULTIVOLUME READ TEST ===\n");
 
     let erasure_config = ErasureCodeConfig {
@@ -34,13 +34,15 @@ fn test_simple_multivolume_read() {
         .volume_count(3)
         .enable_matrix_distribution(true)
         .build()
+        .await
         .expect("Failed to create writer");
 
     let data = vec![0xAB; 256 * 1024]; // 256KB
     writer
         .add_bytes("test.bin", &data)
+        .await
         .expect("Failed to add file");
-    writer.finalize().expect("Failed to finalize");
+    writer.finalize().await.expect("Failed to finalize");
 
     // Check created files
     println!("\nFiles created:");
@@ -54,12 +56,15 @@ fn test_simple_multivolume_read() {
 
     // Try to read with all volumes
     println!("\nTest 1: Reading with all 3 volumes");
-    match ArchiveReader::open(&base_path, "") {
+    match ArchiveReader::open(&base_path, "").await {
         Ok(mut reader) => {
             println!("✅ Successfully opened archive with 3 volumes");
-            match reader.extract_all(&era_engine::ExtractOptions::new(
-                temp_dir.path().join("extract1"),
-            )) {
+            match reader
+                .extract_all(&era_engine::ExtractOptions::new(
+                    temp_dir.path().join("extract1"),
+                ))
+                .await
+            {
                 Ok(_) => println!("✅ Successfully extracted with 3 volumes"),
                 Err(e) => println!("❌ Failed to extract: {}", e),
             }
@@ -85,12 +90,15 @@ fn test_simple_multivolume_read() {
 
     // Use first remaining volume to open - this should find all available volumes
     let vol1_path = temp_dir.path().join("archive.era.001");
-    match ArchiveReader::open(&vol1_path, "") {
+    match ArchiveReader::open(&vol1_path, "").await {
         Ok(mut reader) => {
             println!("✅ Successfully opened archive with 2 volumes");
-            match reader.extract_all(&era_engine::ExtractOptions::new(
-                temp_dir.path().join("extract2"),
-            )) {
+            match reader
+                .extract_all(&era_engine::ExtractOptions::new(
+                    temp_dir.path().join("extract2"),
+                ))
+                .await
+            {
                 Ok(_) => println!("✅ Successfully extracted with 2 volumes"),
                 Err(e) => println!("❌ Failed to extract: {}", e),
             }

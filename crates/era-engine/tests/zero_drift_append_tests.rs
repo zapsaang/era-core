@@ -49,15 +49,18 @@ async fn test_zero_drift_append_dedup() {
         .chunker_config(drift_chunker.clone())
         .max_volume_size(max_volume_size)
         .enable_small_file_packing(false)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&data_path).await.unwrap();
-    let stats_first = writer.finalize().await.await.unwrap();
+    let stats_first = writer.finalize().await.unwrap();
     let size_first = fs::metadata(&archive_path).unwrap().len();
 
-    let mut sanity_reader = era_engine::ArchiveReader::open(&archive_path, "zero_drift").await.unwrap();
-    sanity_reader.verify().await.await.unwrap();
+    let mut sanity_reader = era_engine::ArchiveReader::open(&archive_path, "zero_drift")
+        .await
+        .unwrap();
+    sanity_reader.verify().await.unwrap();
     drop(sanity_reader);
 
     let mut writer = ArchiveWriter::builder(&archive_path)
@@ -67,11 +70,12 @@ async fn test_zero_drift_append_dedup() {
         .config(config)
         .max_volume_size(max_volume_size)
         .enable_small_file_packing(false)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&copy_path).await.unwrap();
-    let stats_second = writer.finalize().await.await.unwrap();
+    let stats_second = writer.finalize().await.unwrap();
     let size_second = fs::metadata(&archive_path).unwrap().len();
 
     assert!(
@@ -93,9 +97,12 @@ async fn test_zero_drift_append_dedup() {
 
     // Sanity check: extraction still works
     let output_dir = temp_dir.path().join("output");
-    let mut reader = era_engine::ArchiveReader::open(&archive_path, "zero_drift").await.unwrap();
+    let mut reader = era_engine::ArchiveReader::open(&archive_path, "zero_drift")
+        .await
+        .unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     assert_eq!(extract_stats.extracted, 2);

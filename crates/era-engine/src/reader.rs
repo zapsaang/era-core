@@ -656,7 +656,9 @@ impl ArchiveReader {
             reader_idx, footer.catalog_offset, footer.catalog_size, footer.catalog_block_id
         );
 
-        let encrypted_block = self.volume_readers[reader_idx].read_block(&catalog_location).await?;
+        let encrypted_block = self.volume_readers[reader_idx]
+            .read_block(&catalog_location)
+            .await?;
 
         // Create temporary session-based unpacker for decryption
         let unpacker = self.create_unpacker();
@@ -808,12 +810,16 @@ impl ArchiveReader {
         reader: &VolumeReader<R>,
         offset: u64,
     ) -> Result<Bytes> {
-        let header_bytes = reader.read_raw(offset, era_common::ShardHeader::SIZE).await?;
+        let header_bytes = reader
+            .read_raw(offset, era_common::ShardHeader::SIZE)
+            .await?;
         if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
-            let data = reader.read_raw(
-                offset + era_common::ShardHeader::SIZE as u64,
-                header.length as usize,
-            ).await?;
+            let data = reader
+                .read_raw(
+                    offset + era_common::ShardHeader::SIZE as u64,
+                    header.length as usize,
+                )
+                .await?;
             if header.verify(&data) {
                 return Ok(data);
             }
@@ -1194,8 +1200,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_roundtrip() {
+    #[tokio::test]
+    async fn test_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("test.era");
         let password = "test_password";
@@ -1205,21 +1211,28 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("hello.txt", b"Hello, World!").unwrap();
-        writer.add_bytes("data.bin", &[1, 2, 3, 4, 5]).unwrap();
-        writer.finalize().unwrap();
+        writer
+            .add_bytes("hello.txt", b"Hello, World!")
+            .await
+            .unwrap();
+        writer
+            .add_bytes("data.bin", &[1, 2, 3, 4, 5])
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
 
         // Read archive
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
-        let files = reader.list_files().unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let files = reader.list_files().await.unwrap();
         assert_eq!(files.len(), 2);
 
         // Extract
         let extract_dir = temp_dir.path().join("extracted");
         let options = ExtractOptions::new(&extract_dir);
-        let stats = reader.extract_all(&options).unwrap();
+        let stats = reader.extract_all(&options).await.unwrap();
 
         assert_eq!(stats.extracted, 2);
         assert_eq!(stats.bytes_written, 18); // 13 + 5
@@ -1232,8 +1245,8 @@ mod tests {
         assert_eq!(data_content, vec![1, 2, 3, 4, 5]);
     }
 
-    #[test]
-    fn test_wrong_password_fails() {
+    #[tokio::test]
+    async fn test_wrong_password_fails() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("secure.era");
 
@@ -1242,18 +1255,22 @@ mod tests {
             .password("correct_password")
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("secret.txt", b"Secret data").unwrap();
-        writer.finalize().unwrap();
+        writer
+            .add_bytes("secret.txt", b"Secret data")
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
 
         // Try to open with wrong password
-        let result = ArchiveReader::open(&archive_path, "wrong_password");
+        let result = ArchiveReader::open(&archive_path, "wrong_password").await;
         assert!(result.is_err(), "Wrong password should fail");
     }
 
-    #[test]
-    fn test_empty_archive_roundtrip() {
+    #[tokio::test]
+    async fn test_empty_archive_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("empty.era");
         let password = "test";
@@ -1263,17 +1280,18 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
 
         // Read empty archive
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
-        let files = reader.list_files().unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let files = reader.list_files().await.unwrap();
         assert!(files.is_empty());
     }
 
-    #[test]
-    fn test_large_file_roundtrip() {
+    #[tokio::test]
+    async fn test_large_file_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("large.era");
         let password = "test";
@@ -1284,15 +1302,16 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
-        writer.add_bytes("large.bin", &large_data).unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("large.bin", &large_data).await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Extract and verify
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
         let extract_dir = temp_dir.path().join("extracted");
         let options = ExtractOptions::new(&extract_dir);
-        let stats = reader.extract_all(&options).unwrap();
+        let stats = reader.extract_all(&options).await.unwrap();
 
         assert_eq!(stats.extracted, 1);
         assert_eq!(stats.bytes_written, 512 * 1024);
@@ -1301,8 +1320,8 @@ mod tests {
         assert_eq!(extracted, large_data);
     }
 
-    #[test]
-    fn test_unicode_roundtrip() {
+    #[tokio::test]
+    async fn test_unicode_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("unicode.era");
         let password = "密码";
@@ -1312,24 +1331,26 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
         writer
             .add_bytes("文档.txt", "这是中文内容".as_bytes())
+            .await
             .unwrap();
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
 
         // Extract and verify
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
         let extract_dir = temp_dir.path().join("extracted");
         let options = ExtractOptions::new(&extract_dir);
-        reader.extract_all(&options).unwrap();
+        reader.extract_all(&options).await.unwrap();
 
         let extracted = fs::read_to_string(extract_dir.join("文档.txt")).unwrap();
         assert_eq!(extracted, "这是中文内容");
     }
 
-    #[test]
-    fn test_overwrite_protection() {
+    #[tokio::test]
+    async fn test_overwrite_protection() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("test.era");
         let password = "test";
@@ -1339,9 +1360,10 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
-        writer.add_bytes("file.txt", b"new content").unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("file.txt", b"new content").await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Create existing file
         let extract_dir = temp_dir.path().join("extracted");
@@ -1349,9 +1371,9 @@ mod tests {
         fs::write(extract_dir.join("file.txt"), b"original content").unwrap();
 
         // Extract without overwrite
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
         let options = ExtractOptions::new(&extract_dir);
-        let stats = reader.extract_all(&options).unwrap();
+        let stats = reader.extract_all(&options).await.unwrap();
 
         assert_eq!(stats.skipped, 1);
         assert_eq!(stats.extracted, 0);
@@ -1361,8 +1383,8 @@ mod tests {
         assert_eq!(content, "original content");
     }
 
-    #[test]
-    fn test_overwrite_enabled() {
+    #[tokio::test]
+    async fn test_overwrite_enabled() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("test.era");
         let password = "test";
@@ -1372,9 +1394,10 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
-        writer.add_bytes("file.txt", b"new content").unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("file.txt", b"new content").await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Create existing file
         let extract_dir = temp_dir.path().join("extracted");
@@ -1382,9 +1405,9 @@ mod tests {
         fs::write(extract_dir.join("file.txt"), b"original content").unwrap();
 
         // Extract with overwrite enabled
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
         let options = ExtractOptions::new(&extract_dir).overwrite(true);
-        let stats = reader.extract_all(&options).unwrap();
+        let stats = reader.extract_all(&options).await.unwrap();
 
         assert_eq!(stats.extracted, 1);
 
@@ -1393,8 +1416,8 @@ mod tests {
         assert_eq!(content, "new content");
     }
 
-    #[test]
-    fn test_nested_directory_structure() {
+    #[tokio::test]
+    async fn test_nested_directory_structure() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("nested.era");
         let password = "test";
@@ -1404,16 +1427,20 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
-        writer.add_bytes("a/b/c/deep.txt", b"deep content").unwrap();
-        writer.add_bytes("a/shallow.txt", b"shallow").unwrap();
-        writer.finalize().unwrap();
+        writer
+            .add_bytes("a/b/c/deep.txt", b"deep content")
+            .await
+            .unwrap();
+        writer.add_bytes("a/shallow.txt", b"shallow").await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Extract
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
         let extract_dir = temp_dir.path().join("extracted");
         let options = ExtractOptions::new(&extract_dir);
-        reader.extract_all(&options).unwrap();
+        reader.extract_all(&options).await.unwrap();
 
         // Verify nested file
         let deep = fs::read_to_string(extract_dir.join("a/b/c/deep.txt")).unwrap();
@@ -1423,8 +1450,8 @@ mod tests {
         assert_eq!(shallow, "shallow");
     }
 
-    #[test]
-    fn test_verify_valid_archive() {
+    #[tokio::test]
+    async fn test_verify_valid_archive() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("verify.era");
         let password = "test";
@@ -1434,16 +1461,23 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("file1.txt", b"Hello, World!").unwrap();
-        writer.add_bytes("file2.txt", b"More content here").unwrap();
-        writer.add_bytes("binary.bin", &[0u8; 1024]).unwrap();
-        writer.finalize().unwrap();
+        writer
+            .add_bytes("file1.txt", b"Hello, World!")
+            .await
+            .unwrap();
+        writer
+            .add_bytes("file2.txt", b"More content here")
+            .await
+            .unwrap();
+        writer.add_bytes("binary.bin", &[0u8; 1024]).await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Verify the archive
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
-        let stats = reader.verify().unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let stats = reader.verify().await.unwrap();
 
         assert!(stats.is_ok(), "Verification should pass");
         assert!(stats.blocks_verified > 0);
@@ -1453,8 +1487,8 @@ mod tests {
         assert!(stats.errors.is_empty());
     }
 
-    #[test]
-    fn test_verify_large_chunked_file() {
+    #[tokio::test]
+    async fn test_verify_large_chunked_file() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("chunked.era");
         let password = "test";
@@ -1465,21 +1499,22 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
 
-        writer.add_bytes("large.bin", &large_data).unwrap();
-        writer.finalize().unwrap();
+        writer.add_bytes("large.bin", &large_data).await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Verify the archive
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
-        let stats = reader.verify().unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let stats = reader.verify().await.unwrap();
 
         assert!(stats.is_ok(), "Verification should pass for chunked file");
         assert!(stats.bytes_verified > 0);
     }
 
-    #[test]
-    fn test_verify_empty_archive() {
+    #[tokio::test]
+    async fn test_verify_empty_archive() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("empty.era");
         let password = "test";
@@ -1489,12 +1524,13 @@ mod tests {
             .password(password)
             .config(test_config_no_ec())
             .build()
+            .await
             .unwrap();
-        writer.finalize().unwrap();
+        writer.finalize().await.unwrap();
 
         // Verify empty archive
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
-        let stats = reader.verify().unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let stats = reader.verify().await.unwrap();
 
         assert!(stats.is_ok(), "Empty archive should verify ok");
         assert_eq!(stats.files_verified, 0);
@@ -1506,8 +1542,8 @@ mod tests {
         assert_eq!(super::MAX_DECLARED_FILE_SIZE, 100 * 1024 * 1024 * 1024);
     }
 
-    #[test]
-    fn test_erasure_simple_roundtrip() {
+    #[tokio::test]
+    async fn test_erasure_simple_roundtrip() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("erasure.era");
         let password = "test";
@@ -1522,19 +1558,21 @@ mod tests {
             .password(password)
             .erasure_config(erasure_config)
             .build()
+            .await
             .unwrap();
 
         writer
             .add_bytes("test.txt", b"Hello, Erasure World!")
+            .await
             .unwrap();
-        let stats = writer.finalize().unwrap();
+        let stats = writer.finalize().await.unwrap();
         assert_eq!(stats.total_files, 1);
 
         // Extract and verify
-        let mut reader = ArchiveReader::open(&archive_path, password).unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
         let extract_dir = temp_dir.path().join("extracted");
         let options = ExtractOptions::new(&extract_dir);
-        let extract_stats = reader.extract_all(&options).unwrap();
+        let extract_stats = reader.extract_all(&options).await.unwrap();
 
         assert_eq!(extract_stats.extracted, 1);
 

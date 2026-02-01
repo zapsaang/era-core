@@ -49,17 +49,18 @@ fn bench_archive_creation(c: &mut Criterion) {
                         let input_dir = temp_dir.path().join("input");
                         let archive_path = temp_dir.path().join("test.era");
 
-                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                            .password("benchmark_password")
-                            .config(fast_kdf_config())
-                            .build()
-                            .unwrap();
-
                         let file_path = input_dir.join("file_0.bin");
                         rt.block_on(async {
+                            let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                                .password("benchmark_password")
+                                .config(fast_kdf_config())
+                                .build()
+                                .await
+                                .unwrap();
+
                             writer.add_file(&file_path).await.unwrap();
+                            writer.finalize().await.unwrap();
                         });
-                        writer.finalize().unwrap();
 
                         black_box(archive_path)
                     },
@@ -88,17 +89,18 @@ fn bench_archive_extraction(c: &mut Criterion) {
                 create_test_files(&input_dir, 1, size);
 
                 let archive_path = temp_dir.path().join("test.era");
-                let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                    .password("benchmark_password")
-                    .config(fast_kdf_config())
-                    .build()
-                    .unwrap();
-
                 let file_path = input_dir.join("file_0.bin");
                 rt.block_on(async {
+                    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                        .password("benchmark_password")
+                        .config(fast_kdf_config())
+                        .build()
+                        .await
+                        .unwrap();
+
                     writer.add_file(&file_path).await.unwrap();
+                    writer.finalize().await.unwrap();
                 });
-                writer.finalize().unwrap();
 
                 // Benchmark extraction
                 b.iter(|| {
@@ -106,10 +108,13 @@ fn bench_archive_extraction(c: &mut Criterion) {
                     let output_dir = temp_dir.path().join(format!("output_{}", count));
                     fs::create_dir_all(&output_dir).unwrap();
 
-                    let mut reader =
-                        ArchiveReader::open(&archive_path, "benchmark_password").unwrap();
-                    let options = ExtractOptions::new(&output_dir).overwrite(true);
-                    reader.extract_all(&options).unwrap();
+                    rt.block_on(async {
+                        let mut reader = ArchiveReader::open(&archive_path, "benchmark_password")
+                            .await
+                            .unwrap();
+                        let options = ExtractOptions::new(&output_dir).overwrite(true);
+                        reader.extract_all(&options).await.unwrap();
+                    });
 
                     black_box(output_dir)
                 });
@@ -145,19 +150,20 @@ fn bench_multiple_files(c: &mut Criterion) {
                         let input_dir = temp_dir.path().join("input");
                         let archive_path = temp_dir.path().join("test.era");
 
-                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                            .password("benchmark_password")
-                            .config(fast_kdf_config())
-                            .build()
-                            .unwrap();
+                        rt.block_on(async {
+                            let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                                .password("benchmark_password")
+                                .config(fast_kdf_config())
+                                .build()
+                                .await
+                                .unwrap();
 
-                        for i in 0..count {
-                            let file_path = input_dir.join(format!("file_{}.bin", i));
-                            rt.block_on(async {
+                            for i in 0..count {
+                                let file_path = input_dir.join(format!("file_{}.bin", i));
                                 writer.add_file(&file_path).await.unwrap();
-                            });
-                        }
-                        writer.finalize().unwrap();
+                            }
+                            writer.finalize().await.unwrap();
+                        });
 
                         black_box(archive_path)
                     },
@@ -191,23 +197,26 @@ fn bench_roundtrip(c: &mut Criterion) {
                 let output_dir = temp_dir.path().join("output");
                 fs::create_dir_all(&output_dir).unwrap();
 
-                // Create archive
-                let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                    .password("benchmark_password")
-                    .config(fast_kdf_config())
-                    .build()
-                    .unwrap();
-
-                let file_path = input_dir.join("file_0.bin");
                 rt.block_on(async {
-                    writer.add_file(&file_path).await.unwrap();
-                });
-                writer.finalize().unwrap();
+                    // Create archive
+                    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                        .password("benchmark_password")
+                        .config(fast_kdf_config())
+                        .build()
+                        .await
+                        .unwrap();
 
-                // Extract archive
-                let mut reader = ArchiveReader::open(&archive_path, "benchmark_password").unwrap();
-                let options = ExtractOptions::new(&output_dir);
-                reader.extract_all(&options).unwrap();
+                    let file_path = input_dir.join("file_0.bin");
+                    writer.add_file(&file_path).await.unwrap();
+                    writer.finalize().await.unwrap();
+
+                    // Extract archive
+                    let mut reader = ArchiveReader::open(&archive_path, "benchmark_password")
+                        .await
+                        .unwrap();
+                    let options = ExtractOptions::new(&output_dir);
+                    reader.extract_all(&options).await.unwrap();
+                });
 
                 black_box((archive_path, output_dir))
             },

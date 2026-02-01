@@ -27,8 +27,8 @@ fn test_hash(value: u64) -> ChunkHash {
     ChunkHash::from_bytes(bytes)
 }
 
-#[test]
-fn test_cold_recovery_from_orphaned_volume() {
+#[tokio::test]
+async fn test_cold_recovery_from_orphaned_volume() {
     let temp_dir = TempDir::new().unwrap();
 
     // ========================================================================
@@ -53,7 +53,9 @@ fn test_cold_recovery_from_orphaned_volume() {
         ArchiveConfig::default(),
         nonce_context,
     );
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
 
     // Build index with 1,000 test entries
     let mut builder = IndexBuilder::new_default();
@@ -71,6 +73,7 @@ fn test_cold_recovery_from_orphaned_volume() {
     // CRITICAL: Write index to volume (embedded mode)
     let (meta_index, index_location) = builder
         .finalize(&mut writer, &session, &volume_key, nonce_context)
+        .await
         .unwrap();
 
     println!(
@@ -79,7 +82,7 @@ fn test_cold_recovery_from_orphaned_volume() {
     );
 
     // Finalize volume (footer will reference index location)
-    let _header = writer.finalize().unwrap();
+    let _header = writer.finalize().await.unwrap();
 
     // Verify index was embedded (no external files)
     let external_files: Vec<_> = fs::read_dir(temp_dir.path())
@@ -107,13 +110,15 @@ fn test_cold_recovery_from_orphaned_volume() {
     // ========================================================================
 
     // Open volume reader
-    let reader = VolumeReader::open(&backend, volume_path).unwrap();
+    let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
 
     println!("Attempting cold recovery from volume scan...");
 
     // Perform cold recovery (ZERO external metadata)
     let mut recovered_index =
-        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context).unwrap();
+        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+            .await
+            .unwrap();
 
     println!("✅ Cold recovery successful!");
 
@@ -145,8 +150,8 @@ fn test_cold_recovery_from_orphaned_volume() {
     println!("✅ All {} chunk lookups verified after cold recovery", 1000);
 }
 
-#[test]
-fn test_index_embedded_in_volume() {
+#[tokio::test]
+async fn test_index_embedded_in_volume() {
     // This test verifies the CORRECT behavior:
     //
     // ✅ IndexBuilder::finalize() writes index pages as BLOCKS in the volume
@@ -175,7 +180,9 @@ fn test_index_embedded_in_volume() {
         ArchiveConfig::default(),
         nonce_context,
     );
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
 
     let mut builder = IndexBuilder::new_default();
     for i in 0..100u64 {
@@ -195,9 +202,10 @@ fn test_index_embedded_in_volume() {
 
     let (_meta, index_location) = builder
         .finalize(&mut writer, &session, &volume_key, nonce_context)
+        .await
         .unwrap();
 
-    writer.finalize().unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify index is in volume
     assert!(index_location.physical_offset > 0);

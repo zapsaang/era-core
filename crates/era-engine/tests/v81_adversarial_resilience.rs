@@ -178,13 +178,14 @@ async fn create_test_archive_ec_4_1(
         .password("testpass")
         .volume_count(5) // 4 data + 1 parity
         .enable_matrix_distribution(true)
-        .build()?;
+        .build()
+        .await?;
 
     let payload_path = source_dir.join("payload.bin");
     fs::write(&payload_path, original_data)?;
 
     writer.add_file(&payload_path).await?;
-    let _stats = writer.finalize()?;
+    let _stats = writer.finalize().await?;
 
     Ok(archive_path)
 }
@@ -210,13 +211,14 @@ async fn create_single_volume_archive(
     let mut writer = ArchiveWriter::builder(&archive_path)
         .config(config)
         .password("testpass")
-        .build()?;
+        .build()
+        .await?;
 
     let payload_path = source_dir.join("payload.bin");
     fs::write(&payload_path, original_data)?;
 
     writer.add_file(&payload_path).await?;
-    let _stats = writer.finalize()?;
+    let _stats = writer.finalize().await?;
 
     Ok(archive_path)
 }
@@ -251,9 +253,9 @@ async fn test_v81_recover_from_corrupted_primary_header() -> Result<(), Box<dyn 
 
     // Attempt recovery - should succeed by falling back to backup header
     println!("🏥 Attempting recovery with corrupted primary header...");
-    let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
+    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
     let options = ExtractOptions::new(&restore_dir);
-    reader.extract_all(&options)?;
+    reader.extract_all(&options).await?;
 
     // Verify data integrity
     let restored_path = restore_dir.join("payload.bin");
@@ -296,9 +298,9 @@ async fn test_v81_recover_from_corrupted_primary_footer() -> Result<(), Box<dyn 
 
     // Attempt recovery - should succeed by falling back to backup footer at offset 4096
     println!("🏥 Attempting recovery with corrupted primary footer...");
-    let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
+    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
     let options = ExtractOptions::new(&restore_dir);
-    reader.extract_all(&options)?;
+    reader.extract_all(&options).await?;
 
     let restored_path = restore_dir.join("payload.bin");
     assert!(restored_path.exists(), "Restored file missing!");
@@ -343,9 +345,9 @@ async fn test_v81_recover_from_corrupted_header_and_footer(
     // 1. Primary header fails -> read backup footer to find backup_header_offset
     // 2. Primary footer fails -> read backup footer at offset 4096
     println!("🏥 Attempting recovery with BOTH header and footer corrupted...");
-    let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
+    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
     let options = ExtractOptions::new(&restore_dir);
-    reader.extract_all(&options)?;
+    reader.extract_all(&options).await?;
 
     let restored_path = restore_dir.join("payload.bin");
     assert!(restored_path.exists(), "Restored file missing!");
@@ -392,9 +394,9 @@ async fn test_v81_self_healing_data_corruption_with_ec() -> Result<(), Box<dyn s
 
     // Recovery should succeed - EC will reconstruct the corrupted shard
     println!("🏥 Attempting self-healing recovery...");
-    let mut reader = ArchiveReader::open(&archive_path, "testpass")?;
+    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
     let options = ExtractOptions::new(&restore_dir);
-    reader.extract_all(&options)?;
+    reader.extract_all(&options).await?;
 
     let restored_path = restore_dir.join("payload.bin");
     assert!(restored_path.exists(), "Restored file missing!");
@@ -438,7 +440,7 @@ async fn test_v81_triple_corruption_fails_gracefully() -> Result<(), Box<dyn std
 
     // This should FAIL - no recovery possible
     println!("🏥 Attempting impossible recovery (should fail)...");
-    let result = ArchiveReader::open(&archive_path, "testpass");
+    let result = ArchiveReader::open(&archive_path, "testpass").await;
 
     match result {
         Ok(_) => {

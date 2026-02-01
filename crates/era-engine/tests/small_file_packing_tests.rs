@@ -29,7 +29,8 @@ async fn test_small_file_packing_roundtrip() {
 
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password(password)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for (filename, _) in &expected_files {
@@ -92,7 +93,8 @@ async fn test_mixed_small_and_large_files() {
     let archive_path = temp_dir.path().join("mixed.era");
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("password")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     // Add all files
@@ -112,12 +114,15 @@ async fn test_mixed_small_and_large_files() {
     writer.finalize().await.unwrap();
 
     // Extract and verify
-    let mut reader = ArchiveReader::open(&archive_path, "password").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "password")
+        .await
+        .unwrap();
     let files = reader.list_files().await.unwrap();
     assert_eq!(files.len(), 7);
 
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
     assert_eq!(extract_stats.extracted, 7);
 
@@ -152,9 +157,10 @@ async fn test_many_small_files() {
     }
 
     let archive_path = temp_dir.path().join("many.era");
-    let mut writer = ArchiveWriterBuilder::new(&archive_path).await
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for i in 0..file_count {
@@ -173,7 +179,8 @@ async fn test_many_small_files() {
     // Extract
     let mut reader = ArchiveReader::open(&archive_path, "test").await.unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
     assert_eq!(extract_stats.extracted as usize, file_count);
 
@@ -200,9 +207,10 @@ async fn test_empty_files_packed() {
     }
 
     let archive_path = temp_dir.path().join("empty.era");
-    let mut writer = ArchiveWriterBuilder::new(&archive_path).await
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("password")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for i in 0..5 {
@@ -215,9 +223,12 @@ async fn test_empty_files_packed() {
     writer.finalize().await.unwrap();
 
     // Extract and verify
-    let mut reader = ArchiveReader::open(&archive_path, "password").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "password")
+        .await
+        .unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
     assert_eq!(extract_stats.extracted, 5);
 

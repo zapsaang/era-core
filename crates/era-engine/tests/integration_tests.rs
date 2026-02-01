@@ -42,17 +42,21 @@ async fn test_create_and_extract_single_file() {
     let archive_path = temp_dir.path().join("test.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_password")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    let _stats = writer.finalize().await.await.unwrap();
+    let _stats = writer.finalize().await.unwrap();
 
     // Extract archive
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
     reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     // Verify extracted content
@@ -80,23 +84,27 @@ async fn test_create_and_extract_multiple_files() {
 
     // Create archive
     let archive_path = temp_dir.path().join("multi.era");
-    let mut writer = ArchiveWriter::builder(&archive_path).await
+    let mut writer = ArchiveWriter::builder(&archive_path)
         .password("secure_pass")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for (name, _) in &files {
         writer.add_file(&input_dir.join(name)).await.unwrap();
     }
-    let stats = writer.finalize().await.await.unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     assert_eq!(stats.total_files, 3);
 
     // Extract archive
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "secure_pass").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "secure_pass")
+        .await
+        .unwrap();
     reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     // Verify all extracted files
@@ -117,16 +125,17 @@ async fn test_wrong_password_fails() {
 
     // Create archive with password
     let archive_path = temp_dir.path().join("protected.era");
-    let mut writer = ArchiveWriter::builder(&archive_path).await
+    let mut writer = ArchiveWriter::builder(&archive_path)
         .password("correct_password")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Try to open with wrong password - should fail
-    let result = ArchiveReader::open(&archive_path, "wrong_password");
+    let result = ArchiveReader::open(&archive_path, "wrong_password").await;
     assert!(result.is_err());
 
     // The error should indicate incorrect password
@@ -160,16 +169,19 @@ async fn test_list_files() {
     let archive_path = temp_dir.path().join("listing.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("list_test")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for name in &files {
         writer.add_file(&input_dir.join(name)).await.unwrap();
     }
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Open and list files
-    let mut reader = ArchiveReader::open(&archive_path, "list_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "list_test")
+        .await
+        .unwrap();
     let listed = reader.list_files().await.unwrap();
 
     assert_eq!(listed.len(), files.len());
@@ -197,18 +209,19 @@ async fn test_empty_password() {
     let archive_path = temp_dir.path().join("empty_pass.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Open with empty password
-    let reader = ArchiveReader::open(&archive_path, "");
+    let reader = ArchiveReader::open(&archive_path, "").await;
     assert!(reader.is_ok(), "Should open with empty password");
 
     // Open with non-empty password should fail
-    let wrong = ArchiveReader::open(&archive_path, "any_password");
+    let wrong = ArchiveReader::open(&archive_path, "any_password").await;
     assert!(wrong.is_err(), "Should fail with non-empty password");
 }
 
@@ -224,14 +237,17 @@ async fn test_archive_info() {
     let archive_path = temp_dir.path().join("info.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("info_pass")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Open and check header info
-    let reader = ArchiveReader::open(&archive_path, "info_pass").await.unwrap();
+    let reader = ArchiveReader::open(&archive_path, "info_pass")
+        .await
+        .unwrap();
     let header = reader.header();
 
     // Verify header is valid
@@ -253,19 +269,23 @@ async fn test_large_file() {
     let archive_path = temp_dir.path().join("large.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("large_test")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    let stats = writer.finalize().await.await.unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     assert_eq!(stats.total_size, content.len() as u64);
 
     // Extract and verify
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "large_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "large_test")
+        .await
+        .unwrap();
     reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     let extracted = fs::read(output_dir.join("large.bin")).unwrap();
@@ -284,19 +304,23 @@ async fn test_binary_file() {
 
     // Create archive
     let archive_path = temp_dir.path().join("binary.era");
-    let mut writer = ArchiveWriter::builder(&archive_path).await
+    let mut writer = ArchiveWriter::builder(&archive_path)
         .password("binary_test")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Extract and verify
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "binary_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "binary_test")
+        .await
+        .unwrap();
     reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     let extracted = fs::read(output_dir.join("binary.bin")).unwrap();
@@ -321,20 +345,24 @@ async fn test_cdc_large_file_roundtrip() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("cdc_password")
         .enable_cdc(true)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    let stats = writer.finalize().await.await.unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     // The file should be chunked into multiple pieces
     assert!(stats.total_size > 0);
 
     // Extract archive
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "cdc_password").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "cdc_password")
+        .await
+        .unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     assert_eq!(extract_stats.extracted, 1);
@@ -362,17 +390,21 @@ async fn test_cdc_deduplication() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("dedup_password")
         .enable_cdc(true)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&file_path).await.unwrap();
-    let _stats = writer.finalize().await.await.unwrap();
+    let _stats = writer.finalize().await.unwrap();
 
     // Extract and verify
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "dedup_password").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "dedup_password")
+        .await
+        .unwrap();
     reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     let extracted = fs::read(output_dir.join("repeated.bin")).unwrap();
@@ -401,18 +433,22 @@ async fn test_cdc_mixed_files() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("mixed_password")
         .enable_cdc(true)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&small_path).await.unwrap();
     writer.add_file(&large_path).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Extract and verify both files
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "mixed_password").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "mixed_password")
+        .await
+        .unwrap();
     let stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     assert_eq!(stats.extracted, 2);
@@ -447,14 +483,15 @@ async fn test_multifile_packing_efficiency() {
     let archive_path = temp_dir.path().join("packed.era");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("pack_test")
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for path in &paths {
         writer.add_file(path).await.unwrap();
     }
 
-    let stats = writer.finalize().await.await.unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     // With 100 files of 1KB each = 100KB total
     // Should be packed into just a few blocks (not 100 blocks!).
@@ -469,9 +506,12 @@ async fn test_multifile_packing_efficiency() {
 
     // Verify all files extract correctly
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "pack_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "pack_test")
+        .await
+        .unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     assert_eq!(extract_stats.extracted, file_count as u64);
@@ -516,18 +556,21 @@ async fn test_erasure_coding_roundtrip() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("erasure_test")
         .erasure_config(erasure_config)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for (name, _) in &files {
         writer.add_file(&input_dir.join(name)).await.unwrap();
     }
 
-    let stats = writer.finalize().await.await.unwrap();
+    let stats = writer.finalize().await.unwrap();
     assert_eq!(stats.total_files, 3);
 
     // Verify erasure config is stored in header
-    let reader = ArchiveReader::open(&archive_path, "erasure_test").await.unwrap();
+    let reader = ArchiveReader::open(&archive_path, "erasure_test")
+        .await
+        .unwrap();
     let header = reader.header();
     assert!(
         header.config.erasure.is_some(),
@@ -540,9 +583,12 @@ async fn test_erasure_coding_roundtrip() {
 
     // Extract and verify all files
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test")
+        .await
+        .unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     assert_eq!(extract_stats.extracted, 3);
@@ -572,17 +618,20 @@ async fn test_erasure_verify_integration() {
         parity_shards: 2,
     };
 
-    let mut writer = ArchiveWriter::builder(&archive_path).await
+    let mut writer = ArchiveWriter::builder(&archive_path)
         .password("verify_test")
         .erasure_config(erasure_config)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&input_dir.join("data.bin")).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify archive integrity
-    let mut reader = ArchiveReader::open(&archive_path, "verify_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "verify_test")
+        .await
+        .unwrap();
     let verify_stats = reader.verify().await.unwrap();
 
     assert!(
@@ -626,15 +675,18 @@ async fn test_erasure_different_configs() {
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password("config_test")
             .erasure_config(erasure_config)
-            .build().await
+            .build()
+            .await
             .unwrap();
 
         writer.add_file(&input_dir.join("test.bin")).await.unwrap();
-        writer.finalize().await.await.unwrap();
+        writer.finalize().await.unwrap();
 
         // Verify extraction works
         let output_dir = temp_dir.path().join(format!("output_{}_{}", data, parity));
-        let mut reader = ArchiveReader::open(&archive_path, "config_test").await.unwrap();
+        let mut reader = ArchiveReader::open(&archive_path, "config_test")
+            .await
+            .unwrap();
 
         // Check header
         let header = reader.header();
@@ -644,7 +696,8 @@ async fn test_erasure_different_configs() {
 
         // Extract and verify
         let stats = reader
-            .extract_all(&ExtractOptions::new(&output_dir)).await
+            .extract_all(&ExtractOptions::new(&output_dir))
+            .await
             .unwrap();
         assert_eq!(stats.extracted, 1);
 
@@ -676,14 +729,15 @@ async fn test_repair_healthy_archive() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("repair_test")
         .erasure_config(erasure_config)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer
         .add_file(&input_dir.join("healthy.bin"))
         .await
         .unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Run repair in dry-run mode
     let repair_options = RepairOptions {
@@ -692,7 +746,9 @@ async fn test_repair_healthy_archive() {
         continue_on_error: true,
     };
 
-    let stats = repair_archive(&archive_path, "repair_test", repair_options).unwrap();
+    let stats = repair_archive(&archive_path, "repair_test", repair_options)
+        .await
+        .unwrap();
 
     // Should find no corruption
     assert_eq!(stats.corrupted_shards_found, 0);
@@ -711,15 +767,19 @@ async fn test_repair_non_erasure_archive() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_pass")
         .config(config_no_ec())
-        .build().await
+        .build()
+        .await
         .unwrap();
 
-    writer.add_bytes("test.txt", b"Hello, World!").unwrap();
-    writer.finalize().await.await.unwrap();
+    writer
+        .add_bytes("test.txt", b"Hello, World!")
+        .await
+        .unwrap();
+    writer.finalize().await.unwrap();
 
     // Repair should fail because no erasure coding
     let repair_options = RepairOptions::default();
-    let result = repair_archive(&archive_path, "test_pass", repair_options);
+    let result = repair_archive(&archive_path, "test_pass", repair_options).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -742,14 +802,18 @@ async fn test_repair_wrong_password() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("correct_password")
         .erasure_config(ErasureCodeConfig::default())
-        .build().await
+        .build()
+        .await
         .unwrap();
 
-    writer.add_bytes("secret.txt", b"Secret data").unwrap();
-    writer.finalize().await.await.unwrap();
+    writer
+        .add_bytes("secret.txt", b"Secret data")
+        .await
+        .unwrap();
+    writer.finalize().await.unwrap();
 
     // Try repair with wrong password
-    let result = repair_archive(&archive_path, "wrong_password", RepairOptions::default());
+    let result = repair_archive(&archive_path, "wrong_password", RepairOptions::default()).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();

@@ -60,7 +60,9 @@ async fn test_matrix_distribution_basic() {
     }
 
     // Read back and verify
-    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let mut reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open archive");
     let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].path.to_str().unwrap(), "matrix_test.bin");
@@ -68,7 +70,10 @@ async fn test_matrix_distribution_basic() {
     // Extract and verify content
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).await.expect("Failed to extract");
+    reader
+        .extract_all(&options)
+        .await
+        .expect("Failed to extract");
 
     let extracted_path = extract_dir.join("matrix_test.bin");
     let extracted_data = fs::read(&extracted_path).expect("Failed to read extracted file");
@@ -111,7 +116,10 @@ async fn test_matrix_distribution_multiple_blocks() {
         for (j, item) in data.iter_mut().enumerate() {
             *item = ((i + j).wrapping_mul(11)) as u8;
         }
-        writer.add_bytes(&format!("file_{}.bin", i), &data).await.unwrap();
+        writer
+            .add_bytes(&format!("file_{}.bin", i), &data)
+            .await
+            .unwrap();
     }
 
     writer.finalize().await.unwrap();
@@ -147,13 +155,18 @@ async fn test_matrix_distribution_multiple_blocks() {
     );
 
     // Read and verify all files
-    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let mut reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open archive");
     let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 5);
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).await.expect("Failed to extract");
+    reader
+        .extract_all(&options)
+        .await
+        .expect("Failed to extract");
 
     for i in 0..5 {
         let extracted_path = extract_dir.join(format!("file_{}.bin", i));
@@ -205,7 +218,10 @@ async fn test_fixed_size_volume_splitting() {
         for (j, item) in data.iter_mut().enumerate() {
             *item = ((i + j).wrapping_mul(17)) as u8;
         }
-        writer.add_bytes(&format!("file_{}.bin", i), &data).await.unwrap();
+        writer
+            .add_bytes(&format!("file_{}.bin", i), &data)
+            .await
+            .unwrap();
     }
 
     writer.finalize().await.unwrap();
@@ -229,13 +245,18 @@ async fn test_fixed_size_volume_splitting() {
     assert_eq!(volume_count, 6);
 
     // Read back and verify
-    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let mut reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open archive");
     let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 5);
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).await.expect("Failed to extract");
+    reader
+        .extract_all(&options)
+        .await
+        .expect("Failed to extract");
 
     for i in 0..5 {
         let extracted_path = extract_dir.join(format!("file_{}.bin", i));
@@ -279,13 +300,18 @@ async fn test_legacy_distribution_compatibility() {
     writer.finalize().await.unwrap();
 
     // Read back
-    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let mut reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open archive");
     let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 1);
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).await.expect("Failed to extract");
+    reader
+        .extract_all(&options)
+        .await
+        .expect("Failed to extract");
 
     let extracted_path = extract_dir.join("legacy_test.bin");
     let extracted_data = fs::read(&extracted_path).expect("Failed to read extracted file");
@@ -660,13 +686,18 @@ async fn test_matrix_distribution_large_archive() {
     writer.finalize().await.unwrap();
 
     // Verify extraction
-    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let mut reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open archive");
     let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 10, "Should have 10 files");
 
     let extract_dir = temp_dir.path().join("extract");
     let options = ExtractOptions::new(&extract_dir);
-    reader.extract_all(&options).await.expect("Failed to extract");
+    reader
+        .extract_all(&options)
+        .await
+        .expect("Failed to extract");
 
     // Verify each file
     for (idx, original) in all_data.iter().enumerate() {

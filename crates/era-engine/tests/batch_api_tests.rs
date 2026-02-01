@@ -46,20 +46,24 @@ async fn test_batch_add_files() {
         .password("test_password")
         .config(test_config_no_ec())
         .build()
+        .await
         .unwrap();
 
     // Convert to &[&Path] for batch API
     let file_refs: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
     writer.add_files(&file_refs).await.unwrap();
-    let stats = writer.finalize().unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     assert_eq!(stats.total_files, 10);
 
     // Extract and verify
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
     reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     // Verify all files extracted correctly
@@ -78,7 +82,7 @@ async fn test_batch_vs_individual_equivalence() {
     fs::create_dir_all(&input_dir).unwrap();
 
     // Create test files
-    let files: Vec<_> = (0..5).await
+    let files: Vec<_> = (0..5)
         .map(|i| {
             let content = format!("Content {}", i);
             create_test_file(&input_dir, &format!("file_{}.txt", i), content.as_bytes())
@@ -91,11 +95,12 @@ async fn test_batch_vs_individual_equivalence() {
         .password("test_password")
         .config(test_config_no_ec())
         .build()
+        .await
         .unwrap();
 
     let file_refs: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
     writer_batch.add_files(&file_refs).await.unwrap();
-    let stats_batch = writer_batch.finalize().unwrap();
+    let stats_batch = writer_batch.finalize().await.unwrap();
 
     // Create archive with individual adds (EC disabled for single-volume test)
     let archive_individual = temp_dir.path().join("individual.era");
@@ -103,12 +108,13 @@ async fn test_batch_vs_individual_equivalence() {
         .password("test_password")
         .config(test_config_no_ec())
         .build()
+        .await
         .unwrap();
 
     for file in &files {
         writer_individual.add_file(file).await.unwrap();
     }
-    let stats_individual = writer_individual.finalize().unwrap();
+    let stats_individual = writer_individual.finalize().await.unwrap();
 
     // Both methods should produce the same results
     assert_eq!(stats_batch.total_files, stats_individual.total_files);
@@ -119,14 +125,20 @@ async fn test_batch_vs_individual_equivalence() {
     let output_batch = temp_dir.path().join("output_batch");
     let output_individual = temp_dir.path().join("output_individual");
 
-    let mut reader_batch = ArchiveReader::open(&archive_batch, "test_password").unwrap();
+    let mut reader_batch = ArchiveReader::open(&archive_batch, "test_password")
+        .await
+        .unwrap();
     reader_batch
-        .extract_all(&ExtractOptions::new(&output_batch)).await
+        .extract_all(&ExtractOptions::new(&output_batch))
+        .await
         .unwrap();
 
-    let mut reader_individual = ArchiveReader::open(&archive_individual, "test_password").unwrap();
+    let mut reader_individual = ArchiveReader::open(&archive_individual, "test_password")
+        .await
+        .unwrap();
     reader_individual
-        .extract_all(&ExtractOptions::new(&output_individual)).await
+        .extract_all(&ExtractOptions::new(&output_individual))
+        .await
         .unwrap();
 
     // Verify files are identical
@@ -147,11 +159,12 @@ async fn test_batch_empty() {
         .password("test_password")
         .config(test_config_no_ec())
         .build()
+        .await
         .unwrap();
 
     // Empty batch should work without error
     writer.add_files(&[]).await.unwrap();
-    let stats = writer.finalize().unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     assert_eq!(stats.total_files, 0);
 }
@@ -179,17 +192,20 @@ async fn test_batch_large_number_of_files() {
         .password("test_password")
         .config(test_config_no_ec())
         .build()
+        .await
         .unwrap();
 
     let file_refs: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
     writer.add_files(&file_refs).await.unwrap();
-    let stats = writer.finalize().unwrap();
+    let stats = writer.finalize().await.unwrap();
 
     assert_eq!(stats.total_files, 100);
 
     // Quick verification
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
-    let verify_stats = reader.verify().unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
+    let verify_stats = reader.verify().await.unwrap();
     assert!(verify_stats.is_ok());
     assert_eq!(verify_stats.files_verified, 100);
 }
@@ -211,6 +227,7 @@ async fn test_mixed_batch_and_individual() {
         .password("test_password")
         .config(test_config_no_ec())
         .build()
+        .await
         .unwrap();
 
     // Mix batch and individual operations
@@ -221,14 +238,17 @@ async fn test_mixed_batch_and_individual() {
         .unwrap();
     writer.add_file(&file4).await.unwrap();
 
-    let stats = writer.finalize().unwrap();
+    let stats = writer.finalize().await.unwrap();
     assert_eq!(stats.total_files, 4);
 
     // Verify extraction
     let output_dir = temp_dir.path().join("output");
-    let mut reader = ArchiveReader::open(&archive_path, "test_password").unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
     let extract_stats = reader
-        .extract_all(&ExtractOptions::new(&output_dir)).await
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
 
     assert_eq!(extract_stats.extracted, 4);

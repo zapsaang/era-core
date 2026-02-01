@@ -20,6 +20,7 @@ fn create_test_data(size: usize) -> Vec<u8> {
 
 /// Benchmark archive creation with different file sizes
 fn bench_archive_creation(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let sizes = [
         (64 * 1024, "64KB"),
         (256 * 1024, "256KB"),
@@ -39,13 +40,16 @@ fn bench_archive_creation(c: &mut Criterion) {
             b.iter_with_setup(
                 || TempDir::new().unwrap(),
                 |temp_dir| {
-                    let archive_path = temp_dir.path().join("benchmark.era");
-                    let mut writer = ArchiveWriter::builder(&archive_path)
-                        .password("benchmark_password")
-                        .build()
-                        .unwrap();
-                    writer.add_bytes("data.bin", data).unwrap();
-                    black_box(writer.finalize().unwrap());
+                    rt.block_on(async {
+                        let archive_path = temp_dir.path().join("benchmark.era");
+                        let mut writer = ArchiveWriter::builder(&archive_path)
+                            .password("benchmark_password")
+                            .build()
+                            .await
+                            .unwrap();
+                        writer.add_bytes("data.bin", data).await.unwrap();
+                        black_box(writer.finalize().await.unwrap());
+                    });
                 },
             );
         });
@@ -56,6 +60,7 @@ fn bench_archive_creation(c: &mut Criterion) {
 
 /// Benchmark archive extraction with different file sizes
 fn bench_archive_extraction(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let sizes = [
         (64 * 1024, "64KB"),
         (256 * 1024, "256KB"),
@@ -74,14 +79,15 @@ fn bench_archive_extraction(c: &mut Criterion) {
         // Pre-create the archive
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("benchmark.era");
-        {
+        rt.block_on(async {
             let mut writer = ArchiveWriter::builder(&archive_path)
                 .password("benchmark_password")
                 .build()
+                .await
                 .unwrap();
-            writer.add_bytes("data.bin", &data).unwrap();
-            writer.finalize().unwrap();
-        }
+            writer.add_bytes("data.bin", &data).await.unwrap();
+            writer.finalize().await.unwrap();
+        });
 
         group.bench_with_input(BenchmarkId::new("standard", label), &(), |b, _| {
             b.iter_with_setup(
@@ -93,12 +99,16 @@ fn bench_archive_extraction(c: &mut Criterion) {
                     extract_dir
                 },
                 |extract_dir| {
-                    let mut reader =
-                        ArchiveReader::open(&archive_path, "benchmark_password").unwrap();
-                    let stats = reader
-                        .extract_all(&ExtractOptions::new(&extract_dir).overwrite(true))
-                        .unwrap();
-                    black_box(stats);
+                    rt.block_on(async {
+                        let mut reader = ArchiveReader::open(&archive_path, "benchmark_password")
+                            .await
+                            .unwrap();
+                        let stats = reader
+                            .extract_all(&ExtractOptions::new(&extract_dir).overwrite(true))
+                            .await
+                            .unwrap();
+                        black_box(stats);
+                    });
                 },
             );
         });
@@ -111,6 +121,7 @@ fn bench_archive_extraction(c: &mut Criterion) {
 fn bench_erasure_overhead(c: &mut Criterion) {
     use era_common::ErasureCodeConfig;
 
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let data = create_test_data(1024 * 1024); // 1MB
     let mut group = c.benchmark_group("e2e_erasure_overhead");
     group.sample_size(20);
@@ -121,13 +132,16 @@ fn bench_erasure_overhead(c: &mut Criterion) {
         b.iter_with_setup(
             || TempDir::new().unwrap(),
             |temp_dir| {
-                let archive_path = temp_dir.path().join("benchmark.era");
-                let mut writer = ArchiveWriter::builder(&archive_path)
-                    .password("benchmark_password")
-                    .build()
-                    .unwrap();
-                writer.add_bytes("data.bin", &data).unwrap();
-                black_box(writer.finalize().unwrap());
+                rt.block_on(async {
+                    let archive_path = temp_dir.path().join("benchmark.era");
+                    let mut writer = ArchiveWriter::builder(&archive_path)
+                        .password("benchmark_password")
+                        .build()
+                        .await
+                        .unwrap();
+                    writer.add_bytes("data.bin", &data).await.unwrap();
+                    black_box(writer.finalize().await.unwrap());
+                });
             },
         );
     });
@@ -137,17 +151,20 @@ fn bench_erasure_overhead(c: &mut Criterion) {
         b.iter_with_setup(
             || TempDir::new().unwrap(),
             |temp_dir| {
-                let archive_path = temp_dir.path().join("benchmark.era");
-                let mut writer = ArchiveWriter::builder(&archive_path)
-                    .password("benchmark_password")
-                    .erasure_config(ErasureCodeConfig {
-                        data_shards: 4,
-                        parity_shards: 2,
-                    })
-                    .build()
-                    .unwrap();
-                writer.add_bytes("data.bin", &data).unwrap();
-                black_box(writer.finalize().unwrap());
+                rt.block_on(async {
+                    let archive_path = temp_dir.path().join("benchmark.era");
+                    let mut writer = ArchiveWriter::builder(&archive_path)
+                        .password("benchmark_password")
+                        .erasure_config(ErasureCodeConfig {
+                            data_shards: 4,
+                            parity_shards: 2,
+                        })
+                        .build()
+                        .await
+                        .unwrap();
+                    writer.add_bytes("data.bin", &data).await.unwrap();
+                    black_box(writer.finalize().await.unwrap());
+                });
             },
         );
     });
@@ -157,17 +174,20 @@ fn bench_erasure_overhead(c: &mut Criterion) {
         b.iter_with_setup(
             || TempDir::new().unwrap(),
             |temp_dir| {
-                let archive_path = temp_dir.path().join("benchmark.era");
-                let mut writer = ArchiveWriter::builder(&archive_path)
-                    .password("benchmark_password")
-                    .erasure_config(ErasureCodeConfig {
-                        data_shards: 8,
-                        parity_shards: 4,
-                    })
-                    .build()
-                    .unwrap();
-                writer.add_bytes("data.bin", &data).unwrap();
-                black_box(writer.finalize().unwrap());
+                rt.block_on(async {
+                    let archive_path = temp_dir.path().join("benchmark.era");
+                    let mut writer = ArchiveWriter::builder(&archive_path)
+                        .password("benchmark_password")
+                        .erasure_config(ErasureCodeConfig {
+                            data_shards: 8,
+                            parity_shards: 4,
+                        })
+                        .build()
+                        .await
+                        .unwrap();
+                    writer.add_bytes("data.bin", &data).await.unwrap();
+                    black_box(writer.finalize().await.unwrap());
+                });
             },
         );
     });
@@ -177,6 +197,7 @@ fn bench_erasure_overhead(c: &mut Criterion) {
 
 /// Benchmark multiple file packing efficiency
 fn bench_multi_file_packing(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("e2e_multi_file");
     group.sample_size(20);
 
@@ -197,17 +218,20 @@ fn bench_multi_file_packing(c: &mut Criterion) {
         b.iter_with_setup(
             || TempDir::new().unwrap(),
             |temp_dir| {
-                let archive_path = temp_dir.path().join("benchmark.era");
-                let mut writer = ArchiveWriter::builder(&archive_path)
-                    .password("benchmark_password")
-                    .build()
-                    .unwrap();
+                rt.block_on(async {
+                    let archive_path = temp_dir.path().join("benchmark.era");
+                    let mut writer = ArchiveWriter::builder(&archive_path)
+                        .password("benchmark_password")
+                        .build()
+                        .await
+                        .unwrap();
 
-                for (name, data) in &small_files {
-                    writer.add_bytes(name, data).unwrap();
-                }
+                    for (name, data) in &small_files {
+                        writer.add_bytes(name, data).await.unwrap();
+                    }
 
-                black_box(writer.finalize().unwrap());
+                    black_box(writer.finalize().await.unwrap());
+                });
             },
         );
     });
@@ -217,6 +241,7 @@ fn bench_multi_file_packing(c: &mut Criterion) {
 
 /// Benchmark verification performance
 fn bench_verification(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let sizes = [
         (256 * 1024, "256KB"),
         (1024 * 1024, "1MB"),
@@ -233,20 +258,25 @@ fn bench_verification(c: &mut Criterion) {
         // Pre-create archive
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("verify.era");
-        {
+        rt.block_on(async {
             let mut writer = ArchiveWriter::builder(&archive_path)
                 .password("verify_password")
                 .build()
+                .await
                 .unwrap();
-            writer.add_bytes("data.bin", &data).unwrap();
-            writer.finalize().unwrap();
-        }
+            writer.add_bytes("data.bin", &data).await.unwrap();
+            writer.finalize().await.unwrap();
+        });
 
         group.bench_with_input(BenchmarkId::new("verify", label), &(), |b, _| {
             b.iter(|| {
-                let mut reader = ArchiveReader::open(&archive_path, "verify_password").unwrap();
-                let stats = reader.verify().unwrap();
-                black_box(stats);
+                rt.block_on(async {
+                    let mut reader = ArchiveReader::open(&archive_path, "verify_password")
+                        .await
+                        .unwrap();
+                    let stats = reader.verify().await.unwrap();
+                    black_box(stats);
+                });
             });
         });
     }

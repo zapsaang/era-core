@@ -1131,6 +1131,7 @@ impl ArchiveWriter {
     /// let mut writer = ArchiveWriterBuilder::new("archive.era")
     ///     .password("secret")
     ///     .build()
+    ///     .await
     ///     .unwrap();
     ///
     /// let files = vec![

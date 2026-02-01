@@ -87,7 +87,11 @@ impl Default for RepairOptions {
 /// 4. Re-encodes and writes repaired shards back to the file
 ///
 /// Returns RepairStats with details about what was repaired.
-pub async fn repair_archive(path: &Path, password: &str, options: RepairOptions) -> Result<RepairStats> {
+pub async fn repair_archive(
+    path: &Path,
+    password: &str,
+    options: RepairOptions,
+) -> Result<RepairStats> {
     info!("Starting archive repair: {}", path.display());
 
     // Open archive for reading first
@@ -228,10 +232,13 @@ pub async fn repair_archive(path: &Path, password: &str, options: RepairOptions)
                 max_len = shard_len;
             }
 
-            match volume_reader.read_raw(
-                offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
-                shard_len,
-            ).await {
+            match volume_reader
+                .read_raw(
+                    offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
+                    shard_len,
+                )
+                .await
+            {
                 Ok(shard_data) => {
                     if shard_header.verify(&shard_data) {
                         shards.push((shard_idx, shard_data));
@@ -671,7 +678,8 @@ pub async fn repair_archive_matrix(
                 }
 
                 let header_bytes = match reader
-                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE).await
+                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE)
+                    .await
                 {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                     _ => {
@@ -702,10 +710,13 @@ pub async fn repair_archive_matrix(
                 }
 
                 any_shard_read = true;
-                match reader.read_raw(
-                    shard_offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
-                    shard_len,
-                ).await {
+                match reader
+                    .read_raw(
+                        shard_offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
+                        shard_len,
+                    )
+                    .await
+                {
                     Ok(shard_data) => {
                         if shard_header.verify(&shard_data) {
                             shards.push((shard_idx, shard_data));

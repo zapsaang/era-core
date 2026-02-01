@@ -127,14 +127,15 @@ impl RecoveryManager {
     ///
     /// **V2.2 Change:** Now checks volume footer instead of sidecar files.
     pub async fn new(archive_path: &Path) -> Result<Self> {
-        let checkpoint_manager = if archive_path.exists() && volume_has_checkpoint(archive_path).await {
-            // Note: In V2.2, the actual checkpoint data is in the volume
-            // CheckpointManager is kept for API compatibility but doesn't
-            // manage sidecar files anymore
-            Some(CheckpointManager::new(archive_path))
-        } else {
-            None
-        };
+        let checkpoint_manager =
+            if archive_path.exists() && volume_has_checkpoint(archive_path).await {
+                // Note: In V2.2, the actual checkpoint data is in the volume
+                // CheckpointManager is kept for API compatibility but doesn't
+                // manage sidecar files anymore
+                Some(CheckpointManager::new(archive_path))
+            } else {
+                None
+            };
 
         Ok(Self {
             archive_path: archive_path.to_path_buf(),
@@ -446,12 +447,12 @@ mod tests {
 
     // ============ RecoveryStatus Tests ============
 
-    #[test]
-    fn test_analyze_no_checkpoint() {
+    #[tokio::test]
+    async fn test_analyze_no_checkpoint() {
         let temp = TempDir::new().unwrap();
         let archive_path = temp.path().join("test.era");
 
-        let status = RecoveryManager::analyze(&archive_path).unwrap();
+        let status = RecoveryManager::analyze(&archive_path).await.unwrap();
 
         assert!(!status.checkpoint_exists);
         assert!(!status.archive_exists);
@@ -462,12 +463,12 @@ mod tests {
 
     // ============ RecoveryManager Tests ============
 
-    #[test]
-    fn test_recovery_manager_no_checkpoint() {
+    #[tokio::test]
+    async fn test_recovery_manager_no_checkpoint() {
         let temp = TempDir::new().unwrap();
         let archive_path = temp.path().join("test.era");
 
-        let manager = RecoveryManager::new(&archive_path).unwrap();
+        let manager = RecoveryManager::new(&archive_path).await.unwrap();
 
         assert!(!manager.can_recover());
         assert!(!manager.is_file_completed(Path::new("/any/file.txt")));

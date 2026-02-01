@@ -34,11 +34,14 @@ async fn test_volume_auto_adjustment() {
         .erasure_config(erasure_config)
         // NOTE: NOT calling .volume_count() means default = 1
         .enable_matrix_distribution(true)
-        .build().await.expect("Failed to create writer");
+        .build()
+        .await
+        .expect("Failed to create writer");
 
     let data = vec![0xAB; 128 * 1024]; // 128KB
     writer
         .add_bytes("test.bin", &data)
+        .await
         .expect("Failed to add file");
     writer.finalize().await.expect("Failed to finalize");
 
@@ -76,10 +79,13 @@ async fn test_volume_auto_adjustment() {
         .erasure_config(erasure_config)
         .volume_count(3) // Explicitly set to minimum viable
         .enable_matrix_distribution(true)
-        .build().await.expect("Failed to create writer");
+        .build()
+        .await
+        .expect("Failed to create writer");
 
     writer
         .add_bytes("test.bin", &data)
+        .await
         .expect("Failed to add file");
     writer.finalize().await.expect("Failed to finalize");
 
@@ -106,7 +112,9 @@ async fn test_volume_auto_adjustment() {
 
     // Test 3: Verify fault tolerance improves with 6 volumes
     println!("Test 3: Fault tolerance with auto-adjusted 6 volumes");
-    let _reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open auto archive");
+    let _reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open auto archive");
     println!("✅ Successfully opened archive with optimal volumes");
 }
 
@@ -151,10 +159,11 @@ async fn test_volume_specification_compliance() {
 
         let mut writer = builder
             .build()
+            .await
             .unwrap_or_else(|_| panic!("Failed for {}", label));
         let data = vec![0xAB; 64 * 1024];
-        writer.add_bytes("test", &data).ok();
-        writer.finalize().ok();
+        writer.add_bytes("test", &data).await.ok();
+        writer.finalize().await.ok();
 
         let mut actual_count = 0;
         for i in 0..12 {

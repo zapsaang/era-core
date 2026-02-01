@@ -25,9 +25,14 @@ async fn corrupt_standard_block(path: &Path) {
     let parent = path.parent().unwrap();
     let backend = LocalStorageBackend::new(parent);
     let volume_path = path.file_name().unwrap();
-    let reader = VolumeReader::open(&backend, Path::new(volume_path)).await.unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(volume_path))
+        .await
+        .unwrap();
     let (data_start, _) = reader.data_region();
-    let header_bytes = reader.read_raw(data_start, ShardHeader::SIZE).unwrap();
+    let header_bytes = reader
+        .read_raw(data_start, ShardHeader::SIZE)
+        .await
+        .unwrap();
     let header = ShardHeader::from_bytes(&header_bytes).unwrap();
     let corrupt_offset = data_start + ShardHeader::SIZE as u64 + (header.length as u64 / 2);
     flip_byte_at(path, corrupt_offset);
@@ -37,11 +42,16 @@ async fn corrupt_erasure_shard(path: &Path, data_shards: usize) {
     let parent = path.parent().unwrap();
     let backend = LocalStorageBackend::new(parent);
     let volume_path = path.file_name().unwrap();
-    let reader = VolumeReader::open(&backend, Path::new(volume_path)).await.unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(volume_path))
+        .await
+        .unwrap();
     let (data_start, _) = reader.data_region();
     let header_prefix_len = (data_shards * 4) as u64;
     let header_offset = data_start + header_prefix_len;
-    let header_bytes = reader.read_raw(header_offset, ShardHeader::SIZE).unwrap();
+    let header_bytes = reader
+        .read_raw(header_offset, ShardHeader::SIZE)
+        .await
+        .unwrap();
     let header = ShardHeader::from_bytes(&header_bytes).unwrap();
     let corrupt_offset = header_offset + ShardHeader::SIZE as u64 + (header.length as u64 / 2);
     flip_byte_at(path, corrupt_offset);
@@ -51,11 +61,16 @@ async fn truncate_erasure_shard_payload(path: &Path, data_shards: usize) {
     let parent = path.parent().unwrap();
     let backend = LocalStorageBackend::new(parent);
     let volume_path = path.file_name().unwrap();
-    let reader = VolumeReader::open(&backend, Path::new(volume_path)).await.unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(volume_path))
+        .await
+        .unwrap();
     let (data_start, _) = reader.data_region();
     let header_prefix_len = (data_shards * 4) as u64;
     let header_offset = data_start + header_prefix_len;
-    let header_bytes = reader.read_raw(header_offset, ShardHeader::SIZE).unwrap();
+    let header_bytes = reader
+        .read_raw(header_offset, ShardHeader::SIZE)
+        .await
+        .unwrap();
     let header = ShardHeader::from_bytes(&header_bytes).unwrap();
     let data_offset = header_offset + ShardHeader::SIZE as u64;
     let tail_len = 16u64.min(header.length as u64);
@@ -85,7 +100,7 @@ async fn test_standard_block_crc_detection() {
         .password("crc_test")
         .config(config_no_ec)
         .enable_small_file_packing(false)
-        .build().await
+        .build()
         .await
         .unwrap();
 
@@ -93,12 +108,14 @@ async fn test_standard_block_crc_detection() {
         .add_bytes("data.bin", &vec![0xA5u8; 64 * 1024])
         .await
         .unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     corrupt_standard_block(&archive_path).await;
 
-    let mut reader = ArchiveReader::open(&archive_path, "crc_test").await.unwrap();
-    let stats = reader.verify().await.await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "crc_test")
+        .await
+        .unwrap();
+    let stats = reader.verify().await.unwrap();
 
     assert!(!stats.is_ok(), "CRC corruption should fail verification");
     assert!(stats.blocks_failed > 0);
@@ -117,17 +134,19 @@ async fn test_single_shard_crc_auto_recovery() {
             parity_shards: 2,
         })
         .enable_small_file_packing(false)
-        .build().await
+        .build()
         .await
         .unwrap();
 
     writer.add_bytes("payload.bin", &payload).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     corrupt_erasure_shard(&archive_path, 4).await;
 
     let output_dir = temp_dir.path().join("output_crc");
-    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test")
+        .await
+        .unwrap();
     let extract_stats = reader
         .extract_all(&ExtractOptions::new(&output_dir))
         .await
@@ -137,8 +156,10 @@ async fn test_single_shard_crc_auto_recovery() {
     let extracted = fs::read(output_dir.join("payload.bin")).unwrap();
     assert_eq!(extracted, payload);
 
-    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").await.unwrap();
-    let verify_stats = reader.verify().await.await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test")
+        .await
+        .unwrap();
+    let verify_stats = reader.verify().await.unwrap();
     assert!(verify_stats.is_ok());
 }
 
@@ -155,17 +176,19 @@ async fn test_single_shard_truncation_auto_recovery() {
             parity_shards: 2,
         })
         .enable_small_file_packing(false)
-        .build().await
+        .build()
         .await
         .unwrap();
 
     writer.add_bytes("payload.bin", &payload).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     truncate_erasure_shard_payload(&archive_path, 4).await;
 
     let output_dir = temp_dir.path().join("output_trunc");
-    let mut reader = ArchiveReader::open(&archive_path, "erasure_test").await.unwrap();
+    let mut reader = ArchiveReader::open(&archive_path, "erasure_test")
+        .await
+        .unwrap();
     let extract_stats = reader
         .extract_all(&ExtractOptions::new(&output_dir))
         .await

@@ -71,6 +71,7 @@ fn create_test_data(size: usize) -> Vec<u8> {
 
 /// Benchmark: Small file with PRODUCTION KDF (shows the KDF bottleneck)
 fn bench_small_file_production_kdf(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     c.bench_function("small_file_1kb_production_kdf", |b| {
         b.iter_with_setup(
             || {
@@ -80,15 +81,18 @@ fn bench_small_file_production_kdf(c: &mut Criterion) {
                 (temp_dir, archive_path, data)
             },
             |(temp_dir, archive_path, data)| {
-                // NOTE: Using DEFAULT KDF config (256MB memory, time_cost=3)
-                let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                    .password("benchmark_password")
-                    // NO custom config - use production defaults
-                    .build()
-                    .unwrap();
+                rt.block_on(async {
+                    // NOTE: Using DEFAULT KDF config (256MB memory, time_cost=3)
+                    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                        .password("benchmark_password")
+                        // NO custom config - use production defaults
+                        .build()
+                        .await
+                        .unwrap();
 
-                writer.add_bytes("file.bin", &data).unwrap();
-                writer.finalize().unwrap();
+                    writer.add_bytes("file.bin", &data).await.unwrap();
+                    writer.finalize().await.unwrap();
+                });
 
                 black_box(temp_dir);
             },
@@ -98,6 +102,7 @@ fn bench_small_file_production_kdf(c: &mut Criterion) {
 
 /// Benchmark: Multiple small files to expose KDF re-derivation cost
 fn bench_multiple_small_files_production_kdf(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("multiple_small_files_production");
     group.sample_size(10); // Reduce samples due to long execution time
 
@@ -113,18 +118,22 @@ fn bench_multiple_small_files_production_kdf(c: &mut Criterion) {
                         (temp_dir, archive_path)
                     },
                     |(temp_dir, archive_path)| {
-                        let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                            .password("benchmark_password")
-                            .build()
-                            .unwrap();
-
-                        for i in 0..count {
-                            let data = format!("Content for file {}", i);
-                            writer
-                                .add_bytes(&format!("file_{}.txt", i), data.as_bytes())
+                        rt.block_on(async {
+                            let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                                .password("benchmark_password")
+                                .build()
+                                .await
                                 .unwrap();
-                        }
-                        writer.finalize().unwrap();
+
+                            for i in 0..count {
+                                let data = format!("Content for file {}", i);
+                                writer
+                                    .add_bytes(&format!("file_{}.txt", i), data.as_bytes())
+                                    .await
+                                    .unwrap();
+                            }
+                            writer.finalize().await.unwrap();
+                        });
 
                         black_box(temp_dir);
                     },
@@ -138,6 +147,7 @@ fn bench_multiple_small_files_production_kdf(c: &mut Criterion) {
 
 /// Benchmark: Large file to show KDF overhead is amortized
 fn bench_large_file_production_kdf(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     c.bench_function("large_file_10mb_production_kdf", |b| {
         b.iter_with_setup(
             || {
@@ -147,13 +157,16 @@ fn bench_large_file_production_kdf(c: &mut Criterion) {
                 (temp_dir, archive_path, data)
             },
             |(temp_dir, archive_path, data)| {
-                let mut writer = ArchiveWriterBuilder::new(&archive_path)
-                    .password("benchmark_password")
-                    .build()
-                    .unwrap();
+                rt.block_on(async {
+                    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+                        .password("benchmark_password")
+                        .build()
+                        .await
+                        .unwrap();
 
-                writer.add_bytes("large.bin", &data).unwrap();
-                writer.finalize().unwrap();
+                    writer.add_bytes("large.bin", &data).await.unwrap();
+                    writer.finalize().await.unwrap();
+                });
 
                 black_box(temp_dir);
             },
@@ -163,29 +176,35 @@ fn bench_large_file_production_kdf(c: &mut Criterion) {
 
 /// Benchmark: Extraction with PRODUCTION KDF
 fn bench_extract_production_kdf(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     // Setup: Create an archive first
     let setup_dir = TempDir::new().unwrap();
     let archive_path = setup_dir.path().join("test.era");
 
-    {
+    rt.block_on(async {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .password("benchmark_password")
             .build()
+            .await
             .unwrap();
 
         let data = create_test_data(1024 * 1024); // 1MB
-        writer.add_bytes("file.bin", &data).unwrap();
-        writer.finalize().unwrap();
-    }
+        writer.add_bytes("file.bin", &data).await.unwrap();
+        writer.finalize().await.unwrap();
+    });
 
     c.bench_function("extract_1mb_production_kdf", |b| {
         b.iter_with_setup(
             || TempDir::new().unwrap(),
             |extract_dir| {
-                let mut reader = ArchiveReader::open(&archive_path, "benchmark_password").unwrap();
+                rt.block_on(async {
+                    let mut reader = ArchiveReader::open(&archive_path, "benchmark_password")
+                        .await
+                        .unwrap();
 
-                let options = ExtractOptions::new(extract_dir.path());
-                reader.extract_all(&options).unwrap();
+                    let options = ExtractOptions::new(extract_dir.path());
+                    reader.extract_all(&options).await.unwrap();
+                });
 
                 black_box(extract_dir);
             },
@@ -274,6 +293,7 @@ fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
 
 /// Benchmark: Multiple archive reads with vs without KeySession
 fn bench_key_session_reader_speedup(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     // Setup: Create test archives
     let setup_dir = TempDir::new().unwrap();
     let archive_paths: Vec<_> = (0..5)
@@ -284,15 +304,18 @@ fn bench_key_session_reader_speedup(c: &mut Criterion) {
             config.encryption.kdf_memory_cost = 1024;
             config.encryption.kdf_time_cost = 1;
 
-            let mut writer = ArchiveWriterBuilder::new(&path)
-                .password("benchmark_password")
-                .config(config)
-                .build()
-                .unwrap();
+            rt.block_on(async {
+                let mut writer = ArchiveWriterBuilder::new(&path)
+                    .password("benchmark_password")
+                    .config(config)
+                    .build()
+                    .await
+                    .unwrap();
 
-            let data = create_test_data(1024);
-            writer.add_bytes("file.bin", &data).unwrap();
-            writer.finalize().unwrap();
+                let data = create_test_data(1024);
+                writer.add_bytes("file.bin", &data).await.unwrap();
+                writer.finalize().await.unwrap();
+            });
 
             path
         })
@@ -303,15 +326,23 @@ fn bench_key_session_reader_speedup(c: &mut Criterion) {
     // Benchmark: Open multiple archives WITHOUT KeySession (each calls KDF)
     group.bench_function("open_5_archives_without_session", |b| {
         b.iter(|| {
-            for path in &archive_paths {
-                let reader = ArchiveReader::open(path, "benchmark_password").unwrap();
-                black_box(reader);
-            }
+            rt.block_on(async {
+                for path in &archive_paths {
+                    let reader = ArchiveReader::open(path, "benchmark_password")
+                        .await
+                        .unwrap();
+                    black_box(reader);
+                }
+            });
         });
     });
 
     // Get session for first archive
-    let first_reader = ArchiveReader::open(&archive_paths[0], "benchmark_password").unwrap();
+    let first_reader = rt.block_on(async {
+        ArchiveReader::open(&archive_paths[0], "benchmark_password")
+            .await
+            .unwrap()
+    });
     let header = first_reader.header();
 
     let session = derive_session_from_header(header, "benchmark_password").unwrap();
@@ -322,8 +353,12 @@ fn bench_key_session_reader_speedup(c: &mut Criterion) {
     group.bench_function("open_1_archive_with_session", |b| {
         let session = session.clone();
         b.iter(|| {
-            let reader = ArchiveReader::open_with_session(&archive_paths[0], &session).unwrap();
-            black_box(reader);
+            rt.block_on(async {
+                let reader = ArchiveReader::open_with_session(&archive_paths[0], &session)
+                    .await
+                    .unwrap();
+                black_box(reader);
+            });
         });
     });
 

@@ -37,7 +37,9 @@ async fn test_matrix_distribution_algorithm_correctness() {
         .erasure_config(erasure_config)
         .volume_count(6)
         .enable_matrix_distribution(true)
-        .build().await.unwrap();
+        .build()
+        .await
+        .unwrap();
 
     // Create 3 files of different sizes to generate multiple blocks
     let file_sizes = [
@@ -56,7 +58,7 @@ async fn test_matrix_distribution_algorithm_correctness() {
     }
 
     // Finalize and check volumes were created
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Verify all 6 volumes exist
     for i in 0..6 {
@@ -73,7 +75,9 @@ async fn test_matrix_distribution_algorithm_correctness() {
     }
 
     // Read archive metadata to verify shard distribution
-    let mut reader = ArchiveReader::open(&base_path, "").await.expect("Failed to open archive");
+    let mut reader = ArchiveReader::open(&base_path, "")
+        .await
+        .expect("Failed to open archive");
     let files = reader.list_files().await.expect("Failed to list files");
     assert_eq!(files.len(), 3, "Should have 3 files");
 
@@ -201,11 +205,13 @@ async fn test_matrix_recovery_scenario() {
         .erasure_config(erasure_config)
         .volume_count(6)
         .enable_matrix_distribution(true)
-        .build().await.unwrap();
+        .build()
+        .await
+        .unwrap();
 
     let data = vec![0xAB; 256 * 1024]; // 256KB
     writer.add_bytes("recovery_test.bin", &data).await.unwrap();
-    writer.finalize().await.await.unwrap();
+    writer.finalize().await.unwrap();
 
     // Simulate losing 3 volumes (worse than parity count)
     println!("\nTesting recovery with matrix distribution:");
@@ -223,11 +229,14 @@ async fn test_matrix_recovery_scenario() {
     }
 
     // Try to read - should succeed with matrix distribution
-    match ArchiveReader::open(&base_path, "") {
+    match ArchiveReader::open(&base_path, "").await {
         Ok(mut reader) => {
-            match reader.extract_all(&era_engine::ExtractOptions::new(
-                temp_dir.path().join("extract"),
-            )) {
+            match reader
+                .extract_all(&era_engine::ExtractOptions::new(
+                    temp_dir.path().join("extract"),
+                ))
+                .await
+            {
                 Ok(_) => println!("✅ Recovery successful with 3 missing volumes!"),
                 Err(e) => println!("⚠️  Recovery failed: {}", e),
             }

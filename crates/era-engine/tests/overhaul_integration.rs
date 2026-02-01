@@ -38,7 +38,8 @@ async fn dedup_audit_small_files() {
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password(PASSWORD)
         .enable_cdc(true)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     for i in 0..10 {
@@ -90,7 +91,8 @@ async fn missing_volume_recovery_extracts_successfully() {
         .volume_count(6)
         .enable_matrix_distribution(true)
         .max_volume_size(256 * 1024)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&source_path).await.unwrap();
@@ -105,6 +107,7 @@ async fn missing_volume_recovery_extracts_successfully() {
     let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
     let stats = reader
         .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
     assert!(stats.extracted > 0);
 
@@ -129,7 +132,8 @@ async fn aware_read_recovers_aead_corruption() {
         .volume_count(3)
         .enable_matrix_distribution(false)
         .max_volume_size(256 * 1024)
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     writer.add_file(&source_path).await.unwrap();
@@ -181,6 +185,7 @@ async fn aware_read_recovers_aead_corruption() {
     let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
     let stats = reader
         .extract_all(&ExtractOptions::new(&output_dir))
+        .await
         .unwrap();
     assert!(stats.extracted > 0);
 

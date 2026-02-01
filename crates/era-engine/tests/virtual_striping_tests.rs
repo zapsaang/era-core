@@ -89,7 +89,10 @@ async fn test_virtual_striping_end_to_end() {
 
     // This expects the Reader to handle the Virtual Striping layout correctly
     // i.e., skip parity blocks and read data blocks.
-    let extract_stats = reader.extract_all(&options).await.expect("Extraction failed");
+    let extract_stats = reader
+        .extract_all(&options)
+        .await
+        .expect("Extraction failed");
 
     assert_eq!(extract_stats.extracted, 5);
 

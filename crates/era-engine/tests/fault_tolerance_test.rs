@@ -124,9 +124,11 @@ async fn test_precise_fault_tolerance_limits() {
                 Ok(mut reader) => {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            reader.extract_all(&era_engine::ExtractOptions::new(
-                                test_dir.path().join("extract"),
-                            )).await
+                            reader
+                                .extract_all(&era_engine::ExtractOptions::new(
+                                    test_dir.path().join("extract"),
+                                ))
+                                .await
                         })
                     }));
 

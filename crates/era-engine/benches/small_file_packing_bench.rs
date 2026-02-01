@@ -35,6 +35,7 @@ fn bench_small_files_packing(c: &mut Criterion) {
                         let mut writer = ArchiveWriterBuilder::new(&archive_path)
                             .password("benchmark")
                             .build()
+                            .await
                             .unwrap();
 
                         for i in 0..count {
@@ -42,7 +43,7 @@ fn bench_small_files_packing(c: &mut Criterion) {
                             writer.add_file(&path).await.unwrap();
                         }
 
-                        black_box(writer.finalize().unwrap());
+                        black_box(writer.finalize().await.unwrap());
                         fs::remove_file(&archive_path).ok();
                     })
                 });
@@ -82,6 +83,7 @@ fn bench_various_file_sizes(c: &mut Criterion) {
                         let mut writer = ArchiveWriterBuilder::new(&archive_path)
                             .password("benchmark")
                             .build()
+                            .await
                             .unwrap();
 
                         for i in 0..file_count {
@@ -89,7 +91,7 @@ fn bench_various_file_sizes(c: &mut Criterion) {
                             writer.add_file(&path).await.unwrap();
                         }
 
-                        black_box(writer.finalize().unwrap());
+                        black_box(writer.finalize().await.unwrap());
                         fs::remove_file(&archive_path).ok();
                     })
                 });

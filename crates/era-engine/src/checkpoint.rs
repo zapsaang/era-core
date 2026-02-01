@@ -250,7 +250,8 @@ impl CheckpointManager {
             volume_key,
             nonce_context,
             &self.checkpoint,
-        ).await
+        )
+        .await
     }
 
     /// Delete checkpoint (no-op in new implementation)
@@ -416,7 +417,9 @@ pub async fn write_checkpoint<W: StorageWriter>(
     };
 
     // Write as canonical block
-    let location = volume_writer.write_canonical_block(&encrypted_block, BlockType::Checkpoint).await?;
+    let location = volume_writer
+        .write_canonical_block(&encrypted_block, BlockType::Checkpoint)
+        .await?;
 
     // Update footer's last_checkpoint_offset and block_id for direct decryption
     let checkpoint_block_id = block_id.sequence() as u32;
@@ -426,7 +429,9 @@ pub async fn write_checkpoint<W: StorageWriter>(
     // This persists the footer (primary + backup) so that if power is lost after this point,
     // the checkpoint can be recovered. Without this call, the checkpoint data would be written
     // but the footer wouldn't point to it, making recovery impossible.
-    volume_writer.commit_checkpoint(location.physical_offset).await?;
+    volume_writer
+        .commit_checkpoint(location.physical_offset)
+        .await?;
 
     tracing::info!(
         "Checkpoint committed: {} chunks, {} files at offset {} (block_id={})",
@@ -577,7 +582,9 @@ pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
                 nonce_context,
                 checkpoint_offset,
                 block_id_opt,
-            ).await {
+            )
+            .await
+            {
                 Ok(checkpoint) => {
                     checkpoints.push(checkpoint);
                     // TODO: In a full implementation, each checkpoint would store

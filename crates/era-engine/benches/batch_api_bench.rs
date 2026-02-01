@@ -58,12 +58,13 @@ fn bench_batch_vs_individual(c: &mut Criterion) {
                                 .password("bench")
                                 .config(fast_kdf_config())
                                 .build()
+                                .await
                                 .unwrap();
 
                             let file_refs: Vec<&std::path::Path> =
                                 files.iter().map(|p| p.as_path()).collect();
                             writer.add_files(&file_refs).await.unwrap();
-                            writer.finalize().unwrap();
+                            writer.finalize().await.unwrap();
 
                             black_box(archive_path)
                         })
@@ -95,12 +96,13 @@ fn bench_batch_vs_individual(c: &mut Criterion) {
                                 .password("bench")
                                 .config(fast_kdf_config())
                                 .build()
+                                .await
                                 .unwrap();
 
                             for file in &files {
-                                writer.add_file(file).await.unwrap();
+                                writer.add_file(file.as_path()).await.unwrap();
                             }
-                            writer.finalize().unwrap();
+                            writer.finalize().await.unwrap();
 
                             black_box(archive_path)
                         })
@@ -141,12 +143,13 @@ fn bench_small_files_batch(c: &mut Criterion) {
                                 .password("bench")
                                 .config(fast_kdf_config())
                                 .build()
+                                .await
                                 .unwrap();
 
                             let file_refs: Vec<&std::path::Path> =
                                 files.iter().map(|p| p.as_path()).collect();
                             writer.add_files(&file_refs).await.unwrap();
-                            writer.finalize().unwrap();
+                            writer.finalize().await.unwrap();
 
                             black_box(archive_path)
                         })

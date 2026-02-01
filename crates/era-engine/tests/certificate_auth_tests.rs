@@ -34,7 +34,8 @@ async fn test_certificate_mode_creates_archive() {
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .certificate(cert)
         .config(test_config_no_ec())
-        .build().await
+        .build()
+        .await
         .expect("Failed to create writer with certificate mode");
 
     // Verify certificate mode is active
@@ -80,7 +81,8 @@ async fn test_certificate_mode_roundtrip() {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .certificate(cert)
             .config(test_config_no_ec())
-            .build().await
+            .build()
+            .await
             .unwrap();
 
         writer.add_file(&test_file1).await.unwrap();
@@ -95,13 +97,17 @@ async fn test_certificate_mode_roundtrip() {
 
     // Extract with keypair
     {
-        let mut reader = ArchiveReader::open_with_keypair(&archive_path, &keypair).await
+        let mut reader = ArchiveReader::open_with_keypair(&archive_path, &keypair)
+            .await
             .expect("Failed to open archive with keypair");
 
         reader.load_catalog().await.expect("Failed to load catalog");
 
         let options = era_engine::ExtractOptions::new(&output_dir);
-        let stats = reader.extract_all(&options).await.expect("Failed to extract");
+        let stats = reader
+            .extract_all(&options)
+            .await
+            .expect("Failed to extract");
 
         assert_eq!(stats.extracted, 2);
         assert!(stats.bytes_written > 0);
@@ -140,7 +146,8 @@ async fn test_password_archive_rejects_keypair() {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .password("test123")
             .config(test_config_no_ec())
-            .build().await
+            .build()
+            .await
             .unwrap();
 
         writer.add_file(&test_file).await.unwrap();
@@ -184,7 +191,8 @@ async fn test_wrong_keypair_rejected() {
         let mut writer = ArchiveWriterBuilder::new(&archive_path)
             .certificate(cert)
             .config(test_config_no_ec())
-            .build().await
+            .build()
+            .await
             .unwrap();
 
         writer.add_file(&test_file).await.unwrap();
@@ -228,7 +236,8 @@ async fn test_certificate_mode_performance() {
         let _writer = ArchiveWriterBuilder::new(&archive_path)
             .certificate(cert.clone())
             .config(test_config_no_ec())
-            .build().await
+            .build()
+            .await
             .unwrap();
         cert_times.push(start.elapsed());
     }
@@ -241,7 +250,8 @@ async fn test_certificate_mode_performance() {
         let _writer = ArchiveWriterBuilder::new(&archive_path)
             .password("test_password")
             .config(test_config_no_ec())
-            .build().await
+            .build()
+            .await
             .unwrap();
         password_times.push(start.elapsed());
     }
@@ -279,7 +289,8 @@ async fn test_key_encapsulation_roundtrip() {
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .certificate(cert)
         .config(test_config_no_ec())
-        .build().await
+        .build()
+        .await
         .unwrap();
 
     // Get the key encapsulation

@@ -21,7 +21,9 @@ async fn test_volume_traffic_fingerprint_padding() {
     );
 
     // 2. Create Writer
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
 
     // Set a fixed max size (e.g., 1MB)
     let max_size = 1024 * 1024; // 1MB
@@ -102,7 +104,9 @@ async fn test_checkpoint_traffic_safety() {
     );
 
     // 2. Create Writer & Set Max Size
-    let mut writer = VolumeWriter::create(&backend, volume_path, header).await.unwrap();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
     let max_size = 1024 * 1024; // 1MB
     writer.set_max_size(max_size).await.unwrap();
 

@@ -6,8 +6,8 @@ use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_design_promise_verification() {
+#[tokio::test]
+async fn test_design_promise_verification() {
     println!("\n=== DESIGN PROMISE VERIFICATION ===\n");
     println!("Design doc promises:");
     println!("1. Tolerate up to parity_shards volume losses");
@@ -53,12 +53,14 @@ fn test_design_promise_verification() {
             .erasure_config(erasure)
             .volume_count(vol_count)
             .enable_matrix_distribution(true)
-            .build().await
+            .build()
+            .await
             .unwrap_or_else(|_| panic!("Failed for {} volumes", vol_count));
 
         let data = vec![0xAB; 256 * 1024];
         writer
             .add_bytes("test.bin", &data)
+            .await
             .expect("Failed to add file");
         writer.finalize().await.expect("Failed to finalize");
 
@@ -118,26 +120,23 @@ fn test_design_promise_verification() {
             }
 
             if let Some(path) = open_path {
-                match ArchiveReader::open(&path, "") {
+                match ArchiveReader::open(&path, "").await {
                     Ok(mut reader) => {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            reader.extract_all(&era_engine::ExtractOptions::new(
+                        let result = reader
+                            .extract_all(&era_engine::ExtractOptions::new(
                                 test_dir.path().join("extract"),
                             ))
-                        }));
+                            .await;
 
                         match result {
-                            Ok(Ok(_)) => {
+                            Ok(_) => {
                                 println!("  ✅ Lost {} volumes → recovered", volumes_to_lose);
                             }
-                            Ok(Err(e)) => {
+                            Err(e) => {
                                 println!(
                                     "  ❌ Lost {} volumes → recovery failed: {}",
                                     volumes_to_lose, e
                                 );
-                            }
-                            Err(_) => {
-                                println!("  💥 Lost {} volumes → PANIC", volumes_to_lose);
                             }
                         }
                     }
@@ -160,8 +159,8 @@ fn test_design_promise_verification() {
     println!("⚠️ Conclusion: promise is incorrect; needs total_shards volumes");
 }
 
-#[test]
-fn test_sharding_math_verification() {
+#[tokio::test]
+async fn test_sharding_math_verification() {
     println!("\n=== SHARDING MATH VERIFICATION ===\n");
 
     let erasure = ErasureCodeConfig {
@@ -215,8 +214,8 @@ fn test_sharding_math_verification() {
     println!("✓ Therefore: for 4+2, need 6 volumes to tolerate 2 failures");
 }
 
-#[test]
-fn test_actual_implementation_behavior() {
+#[tokio::test]
+async fn test_actual_implementation_behavior() {
     println!("\n=== ACTUAL IMPLEMENTATION BEHAVIOR ===\n");
 
     let erasure = ErasureCodeConfig {
@@ -244,11 +243,15 @@ fn test_actual_implementation_behavior() {
         .erasure_config(erasure)
         // Note: omitting volume_count should auto-select
         .enable_matrix_distribution(true)
-        .build().await
+        .build()
+        .await
         .expect("Failed to create writer");
 
     let data = vec![0xAB; 256 * 1024];
-    writer.add_bytes("test.bin", &data).expect("Failed to add");
+    writer
+        .add_bytes("test.bin", &data)
+        .await
+        .expect("Failed to add");
     writer.finalize().await.expect("Failed to finalize");
 
     // Check how many volumes were created

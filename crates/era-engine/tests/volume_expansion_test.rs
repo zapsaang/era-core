@@ -2,8 +2,8 @@ use era_common::{ErasureCodeConfig, Result};
 use era_engine::ArchiveWriter;
 use tempfile::tempdir;
 
-#[test]
-fn test_volume_expansion_matrix_mode() -> Result<()> {
+#[tokio::test]
+async fn test_volume_expansion_matrix_mode() -> Result<()> {
     let dir = tempdir().unwrap();
     let output_path = dir.path().join("archive.era");
 
@@ -25,7 +25,8 @@ fn test_volume_expansion_matrix_mode() -> Result<()> {
         .volume_count(volume_count)
         .max_volume_size(max_volume_size)
         // Disable various buffers to ensure writes happen
-        .build()?;
+        .build()
+        .await?;
 
     // Generate 10MB of data (should fill 6MB capacity and require expansion)
     let data_size = 10 * 1024 * 1024;
@@ -39,7 +40,7 @@ fn test_volume_expansion_matrix_mode() -> Result<()> {
     }
 
     // This should fail currently
-    match writer.add_bytes("large_file.dat", &data) {
+    match writer.add_bytes("large_file.dat", &data).await {
         Ok(_) => println!("Successfully added data"),
         Err(e) => {
             println!("Failed as expected (or unexpected): {}", e);

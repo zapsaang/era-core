@@ -6,8 +6,8 @@ use era_engine::{ArchiveReader, ArchiveWriterBuilder};
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn test_panic_root_cause_analysis() {
+#[tokio::test]
+async fn test_panic_root_cause_analysis() {
     println!("\n=== PANIC ROOT CAUSE ANALYSIS ===\n");
 
     let erasure = ErasureCodeConfig {
@@ -36,11 +36,12 @@ fn test_panic_root_cause_analysis() {
         .volume_count(4)
         .enable_matrix_distribution(true)
         .build()
+        .await
         .expect("Failed");
 
     let data = vec![0xAB; 128 * 1024];
-    writer.add_bytes("test.bin", &data).expect("Failed");
-    writer.finalize().expect("Failed");
+    writer.add_bytes("test.bin", &data).await.expect("Failed");
+    writer.finalize().await.expect("Failed");
 
     println!("✓ Created\n");
 
@@ -115,31 +116,23 @@ fn test_panic_root_cause_analysis() {
             found_openable = true;
             println!("Attempting to open from volume {}...", i);
 
-            match ArchiveReader::open(&test_path, "") {
+            match ArchiveReader::open(&test_path, "").await {
                 Ok(mut reader) => {
                     println!("  ✓ Opened successfully");
 
                     // Try to extract
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        reader.extract_all(&era_engine::ExtractOptions::new(
+                    let result = reader
+                        .extract_all(&era_engine::ExtractOptions::new(
                             test_dir.path().join("extract"),
                         ))
-                    }));
+                        .await;
 
                     match result {
-                        Ok(Ok(_)) => {
+                        Ok(_) => {
                             println!("  ✅ Extracted successfully");
                         }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             println!("  ❌ Extraction failed: {}", e);
-                        }
-                        Err(_) => {
-                            println!("  💥 PANIC during extraction");
-                            println!("     Issue: reader.rs:68 tried to index an empty buffer");
-                            println!(
-                                "     Cause: with too few volumes, some block offsets point to deleted volumes"
-                            );
-                            println!("     Effect: read failure produced empty data, then crash");
                         }
                     }
                     break;

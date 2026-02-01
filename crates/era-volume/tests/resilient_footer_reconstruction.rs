@@ -25,9 +25,9 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
     let writer = VolumeWriter::create(&backend, path, header.clone()).await?;
     writer.finalize().await?;
 
-    // 3. Corrupt the footer manually
-    // The footer is at the end. We must corrupt the VALID part of the footer.
-    // Footer is 128 bytes. The first 4 bytes are length.
+    // 3. Corrupt BOTH footers manually
+    // Primary footer is at the end (last 128 bytes)
+    // Backup footer is at offset 4096 (HEADER_SIZE)
     {
         use std::fs::OpenOptions;
         use std::io::Seek;
@@ -36,10 +36,12 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
         let file_path = temp_dir.path().join(path);
         let mut file = OpenOptions::new().write(true).open(file_path).unwrap();
 
-        // Go to start of footer (128 bytes before end)
+        // Corrupt primary footer (last 128 bytes)
         file.seek(std::io::SeekFrom::End(-128)).unwrap();
+        file.write_all(&[0xFF; 128]).unwrap();
 
-        // Trash the whole footer
+        // Corrupt backup footer at offset 4096
+        file.seek(std::io::SeekFrom::Start(4096)).unwrap();
         file.write_all(&[0xFF; 128]).unwrap();
 
         // Ensure changes are on disk
@@ -47,7 +49,8 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
     }
 
     // 4. Try to open with VolumeReader
-    // This should SUCCESS now because erasure is enabled in header
+    // This should SUCCEED now because erasure is enabled in header
+    // (even though footer is corrupted, the volume can be opened for recovery)
     let reader = VolumeReader::open(&backend, path).await;
     assert!(
         reader.is_ok(),
@@ -56,8 +59,11 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
 
     let reader = reader.unwrap();
 
-    // 5. Verify footer is None
-    assert!(reader.footer().is_none(), "Footer should be None");
+    // 5. Verify footer is None (both primary and backup are corrupted)
+    assert!(
+        reader.footer().is_none(),
+        "Footer should be None when both footers are corrupted"
+    );
 
     // 6. Verify we can still read parts (like header)
     assert_eq!(reader.header().archive_id.0, header.archive_id.0);
@@ -72,7 +78,10 @@ async fn test_fail_without_erasure() -> Result<()> {
     let path = Path::new("test_fragile.era");
 
     // 1. Create a volume configuration WITHOUT erasure coding
-    let config = ArchiveConfig::default(); // erasure is None by default
+    let config = ArchiveConfig {
+        erasure: None, // Explicitly disable erasure coding
+        ..Default::default()
+    };
 
     let header = SuperHeader::new(ArchiveId::new(), vec![], config, [0u8; 16]);
 
@@ -80,24 +89,47 @@ async fn test_fail_without_erasure() -> Result<()> {
     let writer = VolumeWriter::create(&backend, path, header).await?;
     writer.finalize().await?;
 
-    // 3. Corrupt footer
+    // 3. Corrupt ALL footer locations (primary, backup, and any area that might contain footer magic)
+    // Layout: [Header 4096] [Backup Footer 128] [Backup Header 4096] [Primary Footer 128]
     {
         use std::fs::OpenOptions;
-        use std::io::Seek;
-        use std::io::Write;
+        use std::io::{Seek, Write};
         let file_path = temp_dir.path().join(path);
-        let mut file = OpenOptions::new().write(true).open(file_path).unwrap();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file_path)
+            .unwrap();
 
+        // Get file size
+        let file_size = file.metadata().unwrap().len();
+
+        // Corrupt primary footer (last 128 bytes)
         file.seek(std::io::SeekFrom::End(-128)).unwrap();
         file.write_all(&[0xFF; 128]).unwrap();
+
+        // Corrupt backup footer at offset 4096
+        file.seek(std::io::SeekFrom::Start(4096)).unwrap();
+        file.write_all(&[0xFF; 128]).unwrap();
+
+        // Corrupt entire data region after backup footer gap to prevent floating footer recovery
+        // This corrupts the backup header area which might contain footer-like patterns
+        let corrupt_start = 4096 + 128; // After backup footer gap
+        let corrupt_len = file_size as usize - corrupt_start as usize - 128; // Before primary footer
+        if corrupt_len > 0 {
+            file.seek(std::io::SeekFrom::Start(corrupt_start as u64))
+                .unwrap();
+            file.write_all(&vec![0xFF; corrupt_len]).unwrap();
+        }
+
         file.sync_all().unwrap();
     }
 
-    // 4. Try to open - SHOULD FAIL
+    // 4. Try to open - SHOULD FAIL when all footers corrupted and erasure disabled
     let reader = VolumeReader::open(&backend, path).await;
     assert!(
         reader.is_err(),
-        "Should fail when footer is corrupted and erasure is disabled"
+        "Should fail when all footers are corrupted and erasure is disabled"
     );
 
     Ok(())
