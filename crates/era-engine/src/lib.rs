@@ -30,6 +30,7 @@ pub mod metrics_collector;
 mod reader;
 mod recovery;
 mod repair;
+mod small_file_packer;
 mod writer;
 
 pub use async_pipeline::{ChunkPipeline, PipelineConfig, ProcessedChunk};

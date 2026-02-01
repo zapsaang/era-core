@@ -40,7 +40,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-use walkdir::WalkDir;
 
 const INTERNAL_INDEX_NAME: &str = ".era/meta/index.bin";
 const INTERNAL_CHECKPOINT_NAME: &str = ".era/meta/checkpoint.bin";
@@ -51,6 +50,7 @@ use crate::checkpoint::CheckpointManager;
 use crate::chunk_index::{create_chunk_index, ChunkIndex};
 use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
+use crate::small_file_packer::{SmallFileEntry, SmallFilePacker};
 
 /// Authentication mode for archive encryption
 #[derive(Clone, Debug)]
@@ -844,20 +844,11 @@ impl ArchiveWriterBuilder {
             checkpoint_manager,
             next_block_id: AtomicU64::new(next_block_id),
             // Small file packing
-            small_file_buffer: Vec::new(),
-            small_file_total_size: 0,
-            small_file_threshold: if self.enable_small_file_packing {
-                16 * 1024
+            small_file_packer: if self.enable_small_file_packing {
+                SmallFilePacker::new(16 * 1024, 1024 * 1024, 1000)
             } else {
-                0
+                SmallFilePacker::disabled()
             },
-            pack_size_threshold: if self.enable_small_file_packing {
-                1024 * 1024
-            } else {
-                0
-            },
-            max_buffered_files: 1000,
-            enable_small_file_packing: self.enable_small_file_packing,
             embedded_index,
         })
     }
@@ -940,18 +931,8 @@ pub struct ArchiveWriter {
     next_block_id: AtomicU64,
 
     // Small file packing
-    /// Buffered small files waiting to be packed
-    small_file_buffer: Vec<SmallFileEntry>,
-    /// Total size of buffered small files
-    small_file_total_size: u64,
-    /// Small file threshold (files smaller than this are packed together)
-    small_file_threshold: u64,
-    /// Pack size threshold (when buffer reaches this size, flush it)
-    pack_size_threshold: u64,
-    /// Maximum number of files to buffer
-    max_buffered_files: usize,
-    /// Enable packing of multiple small files into a single chunk
-    enable_small_file_packing: bool,
+    /// Buffers small files for efficient packing
+    small_file_packer: SmallFilePacker,
 }
 
 #[derive(Debug, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
@@ -973,11 +954,31 @@ impl EmbeddedIndexSnapshot {
     }
 }
 
-/// Entry for a small file waiting to be packed
-struct SmallFileEntry {
-    path: PathBuf,
-    data: Vec<u8>,
-    hash: ChunkHash,
+/// Recursively collect file paths using async I/O.
+/// Prevents reactor blocking on large directories.
+fn collect_files_async(
+    dir: PathBuf,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send>> {
+    Box::pin(async move {
+        let mut files = Vec::new();
+        let mut read_dir = tokio::fs::read_dir(&dir)
+            .await
+            .map_err(era_common::EraError::Io)?;
+
+        while let Some(entry) = read_dir.next_entry().await.map_err(era_common::EraError::Io)? {
+            let path = entry.path();
+            let file_type = entry.file_type().await.map_err(era_common::EraError::Io)?;
+
+            if file_type.is_file() {
+                files.push(path);
+            } else if file_type.is_dir() {
+                let sub_files = collect_files_async(path).await?;
+                files.extend(sub_files);
+            }
+            // Symlinks and special files are skipped
+        }
+        Ok(files)
+    })
 }
 
 impl ArchiveWriter {
@@ -1013,7 +1014,11 @@ impl ArchiveWriter {
     /// If `path` is a directory and `recursive` is true, all contents are added.
     /// Directory structure is preserved.
     pub async fn add_path(&mut self, path: &Path, recursive: bool) -> Result<()> {
-        if path.is_dir() {
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(era_common::EraError::Io)?;
+
+        if metadata.is_dir() {
             if !recursive {
                 return Err(era_common::EraError::Io(std::io::Error::new(
                     std::io::ErrorKind::IsADirectory,
@@ -1021,17 +1026,7 @@ impl ArchiveWriter {
                 )));
             }
 
-            // Collecting first to avoid borrowing issues while iterating and calling async method
-            // Also WalkDir is sync, so we collect paths synchronously.
-            // PROPER FIX: Use async recursion with tokio::fs::read_dir
-            // For now, to unblock compilation:
-            let entries: Vec<_> = WalkDir::new(path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .map(|e| e.path().to_path_buf())
-                .collect();
-
+            let entries = collect_files_async(path.to_path_buf()).await?;
             for entry_path in entries {
                 self.add_file_with_path(&entry_path, &entry_path).await?;
             }
@@ -1057,8 +1052,7 @@ impl ArchiveWriter {
         let relative_path = stored_path.to_path_buf();
 
         // Small file path: buffer for packing (but not empty files)
-        if self.enable_small_file_packing && file_size > 0 && file_size < self.small_file_threshold
-        {
+        if self.small_file_packer.should_buffer(file_size) {
             debug!(
                 "Buffering small file: {} ({} bytes)",
                 disk_path.display(),
@@ -1070,16 +1064,12 @@ impl ArchiveWriter {
             let hash = blake3::hash(&data);
             let chunk_hash = ChunkHash(*hash.as_bytes());
 
-            self.small_file_buffer.push(SmallFileEntry {
+            if let Some(entries_to_flush) = self.small_file_packer.push(SmallFileEntry {
                 path: relative_path,
                 data,
                 hash: chunk_hash,
-            });
-            self.small_file_total_size += file_size;
-
-            // Check if we should flush the buffer
-            if self.should_flush_pack() {
-                self.flush_packed_files().await?;
+            }) {
+                self.flush_packed_files_batch(entries_to_flush).await?;
             }
 
             return Ok(());
@@ -1313,28 +1303,29 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    /// Check if we should flush the packed files buffer
-    fn should_flush_pack(&self) -> bool {
-        self.small_file_total_size >= self.pack_size_threshold
-            || self.small_file_buffer.len() >= self.max_buffered_files
-    }
-
     /// Flush buffered small files by packing them together
     async fn flush_packed_files(&mut self) -> Result<()> {
-        if self.small_file_buffer.is_empty() {
+        if self.small_file_packer.is_empty() {
+            return Ok(());
+        }
+        let buffered = self.small_file_packer.take();
+        self.flush_packed_files_batch(buffered).await
+    }
+
+    /// Flush a batch of small files by packing them together
+    async fn flush_packed_files_batch(&mut self, buffered: Vec<SmallFileEntry>) -> Result<()> {
+        if buffered.is_empty() {
             return Ok(());
         }
 
+        let file_count = buffered.len();
+        let total_size: u64 = buffered.iter().map(|e| e.data.len() as u64).sum();
+
         info!(
             "Packing {} small files ({} bytes total)",
-            self.small_file_buffer.len(),
-            self.small_file_total_size
+            file_count,
+            total_size
         );
-
-        // Take the buffered files
-        let buffered = std::mem::take(&mut self.small_file_buffer);
-        let file_count = buffered.len();
-        self.small_file_total_size = 0;
 
         // Deterministic fingerprint alignment: group by hash and pack unique data in hash order
         let mut grouped: HashMap<ChunkHash, Vec<&SmallFileEntry>> = HashMap::new();
