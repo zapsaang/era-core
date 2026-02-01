@@ -24,10 +24,10 @@ use era_common::{
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::Nonce;
 use era_crypto::{AeadContext, XChaCha20Poly1305Context};
-use era_crypto::{KdfParams, KeySession, Salt, VolumeKey};
+use era_crypto::{KdfParams, KeySession, Salt};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{
-    BlockMeta, PackedBlock, PackedChunk, SessionBlockBuilder, StagingPool, Stripe, StripeBuffer,
+    BlockMeta, PackedBlock, PackedChunk, StagingPool, Stripe, StripeBuffer,
 };
 use era_storage::LocalStorageBackend;
 use era_volume::{
@@ -37,7 +37,6 @@ use era_volume::{
 use rand::RngCore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -48,6 +47,7 @@ const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
 use crate::checkpoint::CheckpointManager;
 use crate::chunk_index::{create_chunk_index, ChunkIndex};
+use crate::encryption_context::EncryptionContext;
 use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 use crate::small_file_packer::{SmallFileEntry, SmallFilePacker};
@@ -813,12 +813,18 @@ impl ArchiveWriterBuilder {
             0
         };
 
-        Ok(ArchiveWriter {
-            archive_id,
-            output_path: self.output_path,
+        // Create encryption context with all cryptographic state
+        let encryption = EncryptionContext::with_starting_block_id(
             session,
             volume_key,
             nonce_context,
+            next_block_id,
+        );
+
+        Ok(ArchiveWriter {
+            archive_id,
+            output_path: self.output_path,
+            encryption,
             compression_config: config.compression.clone(),
             erasure_config: if enable_erasure {
                 Some(erasure_config)
@@ -842,7 +848,6 @@ impl ArchiveWriterBuilder {
             // CRITICAL: Set target_block_size matching StagingPool
             target_block_size,
             checkpoint_manager,
-            next_block_id: AtomicU64::new(next_block_id),
             // Small file packing
             small_file_packer: if self.enable_small_file_packing {
                 SmallFilePacker::new(16 * 1024, 1024 * 1024, 1000)
@@ -877,13 +882,9 @@ pub struct ArchiveWriter {
     #[allow(dead_code)] // Kept for future use in recovery/diagnostics
     output_path: PathBuf,
 
-    // Key Session (security-critical, mlock-protected)
-    /// The KeySession holds the master key, protected by mlock
-    session: KeySession,
-    /// Pre-derived volume key for the primary volume (volume 0)
-    volume_key: VolumeKey,
-    /// Salt-based nonce context for AEAD operations (16 bytes from Salt)
-    nonce_context: [u8; 16],
+    // Encryption context (security-critical, mlock-protected)
+    /// Encapsulates KeySession, VolumeKey, nonce context, and block ID counter
+    encryption: EncryptionContext,
 
     // Configuration
     /// Compression settings
@@ -926,9 +927,6 @@ pub struct ArchiveWriter {
 
     // Checkpoint for crash recovery
     checkpoint_manager: Option<CheckpointManager>,
-
-    /// Block ID counter for per-block key derivation
-    next_block_id: AtomicU64,
 
     // Small file packing
     /// Buffers small files for efficient packing
@@ -1434,11 +1432,6 @@ impl ArchiveWriter {
         }
     }
 
-    /// Get the next block ID and increment the counter.
-    fn next_block_id(&self) -> u64 {
-        self.next_block_id.fetch_add(1, Ordering::SeqCst)
-    }
-
     /// Process a packed block (either write directly or buffer for erasure coding).
     ///
     /// This replaces the old `pack_and_write_chunks` and handles index updates internally.
@@ -1459,15 +1452,7 @@ impl ArchiveWriter {
 
         // Create encrypted block (common for both paths)
         let compressor = self.create_compressor();
-        let block_id = self.next_block_id();
-
-        let builder = SessionBlockBuilder::new(
-            &self.session,
-            &self.volume_key,
-            self.nonce_context,
-            compressor,
-        )
-        .with_starting_block_id(block_id);
+        let builder = self.encryption.create_block_builder(compressor);
 
         let encrypted_block = builder.pack_chunks(chunks)?;
 
@@ -1522,15 +1507,7 @@ impl ArchiveWriter {
             } else {
                 // Prepare Padding Block (Empty Encrypted Block)
                 let compressor = self.create_compressor();
-                let block_id = self.next_block_id();
-
-                let builder = SessionBlockBuilder::new(
-                    &self.session,
-                    &self.volume_key,
-                    self.nonce_context,
-                    compressor,
-                )
-                .with_starting_block_id(block_id);
+                let builder = self.encryption.create_block_builder(compressor);
 
                 let encrypted_block = builder.pack_chunks(vec![])?;
                 stripe_lengths[i] = encrypted_block.data.len() as u32;
@@ -1749,13 +1726,7 @@ impl ArchiveWriter {
 
         // Create session-based builder for catalog encryption
         let compressor = self.create_compressor();
-        let catalog_builder = SessionBlockBuilder::new(
-            &self.session,
-            &self.volume_key,
-            self.nonce_context,
-            compressor,
-        )
-        .with_starting_block_id(self.next_block_id());
+        let catalog_builder = self.encryption.create_block_builder(compressor);
 
         // Pack catalog ONCE to ensure same block_id (and thus same nonce) for all volumes
         // This is critical because the block_id is used to derive the encryption nonce
@@ -1766,13 +1737,7 @@ impl ArchiveWriter {
         let backup_block = if self.erasure_config.is_some() {
             // Create another builder for the backup block (will get next block_id)
             let compressor = self.create_compressor();
-            let backup_builder = SessionBlockBuilder::new(
-                &self.session,
-                &self.volume_key,
-                self.nonce_context,
-                compressor,
-            )
-            .with_starting_block_id(self.next_block_id());
+            let backup_builder = self.encryption.create_block_builder(compressor);
             Some(backup_builder.pack_single(catalog_chunk)?)
         } else {
             None
@@ -1836,7 +1801,7 @@ impl ArchiveWriter {
         // Checkpoints are now stored as typed blocks inside the .era volume.
 
         // Calculate total blocks written using our counter
-        let blocks_written = self.next_block_id.load(Ordering::SeqCst);
+        let blocks_written = self.encryption.blocks_written();
 
         let stats = ArchiveStats {
             archive_id: self.archive_id,
@@ -2275,18 +2240,18 @@ pub mod generic {
 
             let chunk_index = create_chunk_index()?;
 
+            // Create encryption context
+            let encryption = EncryptionContext::new(session, volume_key, nonce_context);
+
             Ok(GenericArchiveWriter {
                 archive_id,
-                session,
-                volume_key,
-                nonce_context,
+                encryption,
                 compression_config,
                 volume_writer,
                 catalog: Catalog::new(),
                 chunk_index,
                 staging_pool: StagingPool::new(self.config.packing.k_factor, 4 * 1024 * 1024)
                     .with_flush_threshold(self.config.packing.flush_threshold),
-                next_block_id: AtomicU64::new(0),
             })
         }
     }
@@ -2300,12 +2265,8 @@ pub mod generic {
     /// - Keys are stored in mlock-protected memory
     pub struct GenericArchiveWriter<W: StorageWriter> {
         archive_id: ArchiveId,
-        /// Key session for deriving per-block keys (mlock-protected)
-        session: KeySession,
-        /// Pre-derived volume key for volume 0
-        volume_key: VolumeKey,
-        /// Salt-based nonce context for AEAD operations
-        nonce_context: [u8; 16],
+        /// Encryption context (session, volume key, nonce context, block ID counter)
+        encryption: EncryptionContext,
         /// Compression configuration
         compression_config: era_common::CompressionConfig,
         volume_writer: VolumeWriter<W>,
@@ -2313,8 +2274,6 @@ pub mod generic {
         chunk_index: Arc<dyn ChunkIndex>,
         /// k-Bounded Best-Fit staging pool for optimal packing
         staging_pool: StagingPool,
-        /// Block ID counter for per-block key derivation
-        next_block_id: AtomicU64,
     }
 
     impl<W: StorageWriter> GenericArchiveWriter<W> {
@@ -2334,11 +2293,6 @@ pub mod generic {
                     Box::new(era_codec::LZ4Compressor::new(self.compression_config.level))
                 }
             }
-        }
-
-        /// Get the next block ID and increment the counter.
-        fn next_block_id(&self) -> u64 {
-            self.next_block_id.fetch_add(1, Ordering::SeqCst)
         }
 
         /// Add a file from memory
@@ -2378,13 +2332,7 @@ pub mod generic {
 
             // Create session-based builder for this block
             let compressor = self.create_compressor();
-            let block_builder = SessionBlockBuilder::new(
-                &self.session,
-                &self.volume_key,
-                self.nonce_context,
-                compressor,
-            )
-            .with_starting_block_id(self.next_block_id());
+            let block_builder = self.encryption.create_block_builder(compressor);
 
             let encrypted_block = block_builder.pack_chunks(packed.chunks)?;
             let location = self
@@ -2423,13 +2371,7 @@ pub mod generic {
 
             // Create session-based builder for catalog encryption
             let compressor = self.create_compressor();
-            let catalog_builder = SessionBlockBuilder::new(
-                &self.session,
-                &self.volume_key,
-                self.nonce_context,
-                compressor,
-            )
-            .with_starting_block_id(self.next_block_id());
+            let catalog_builder = self.encryption.create_block_builder(compressor);
 
             let catalog_block = catalog_builder.pack_single(catalog_chunk)?;
             let catalog_block_id = catalog_block.block_id.sequence() as u32;
@@ -2451,7 +2393,7 @@ pub mod generic {
                 )
                 .await?;
 
-            let blocks_written = self.next_block_id.load(Ordering::SeqCst);
+            let blocks_written = self.encryption.blocks_written();
 
             let stats = ArchiveStats {
                 archive_id: self.archive_id,

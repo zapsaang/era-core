@@ -26,6 +26,7 @@ mod block_iter;
 mod checkpoint;
 pub(crate) mod chunk_index;
 pub(crate) mod chunk_processor;
+mod encryption_context;
 pub mod metrics_collector;
 mod reader;
 mod recovery;

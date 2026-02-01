@@ -5,13 +5,15 @@
 
 A next-generation encrypted storage engine with content-defined chunking, erasure coding, and post-quantum cryptography support.
 
+**Status**: Pre-alpha / Competitor Audit Mode. API is unstable; breaking changes expected. Not production-ready.
+
 ## ✨ Features
 
 - **🔐 Strong Encryption**: XChaCha20-Poly1305 AEAD with context-bound key derivation
 - **🛡️ Post-Quantum Ready**: Hybrid KEM (X25519 + Kyber-768) for future-proof key encapsulation
 - **📦 Erasure Coding**: Reed-Solomon (4+1 default) for data redundancy and corruption recovery
 - **🔄 Content-Defined Chunking**: FastCDC algorithm for efficient deduplication
-- **⚡ Async Runtime**: Pure async I/O with Tokio for maximum performance
+- **⚡ Async Runtime**: Async-first Tokio design (some blocking paths still under refactor)
 - **🔧 Zero-Copy Serialization**: Rkyv for internal structures, Protobuf for wire format
 - **📁 Multi-Volume Support**: Automatic volume splitting with matrix shard distribution
 - **🔑 Flexible Authentication**: Password-based (Scrypt) or certificate-based (X25519/Kyber hybrid)
@@ -20,8 +22,8 @@ A next-generation encrypted storage engine with content-defined chunking, erasur
 
 ### Prerequisites
 
-- Rust 1.75+ (2021 Edition)
-- Linux: `libacl1-dev`, `protobuf-compiler`
+- Rust stable (2021 Edition)
+- Linux: `build-essential`, `libacl1-dev`, `protobuf-compiler`
 - macOS: `protobuf` (via Homebrew)
 
 ### Installation
@@ -100,20 +102,20 @@ Layered architecture with strict dependency ordering:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Component Status
+### Component Status (Audit Snapshot)
 
 | Component | Description | Status |
 |-----------|-------------|--------|
 | `era-common` | Shared types, errors, configuration | ✅ Stable |
 | `era-crypto` | XChaCha20, Kyber, Scrypt, secure memory | ✅ Stable |
 | `era-codec` | Compression (Zstd/LZ4), erasure coding | ✅ Stable |
-| `era-storage` | Async storage backend abstraction | ✅ Stable |
-| `era-volume` | Volume format, header/footer, recovery | ✅ Stable |
-| `era-packing` | Chunk packing, buffer management | ✅ Stable |
-| `era-ingest` | Content-defined chunking (FastCDC) | ✅ Stable |
-| `era-index` | LSM-tree index, bloom filters | ✅ Stable |
-| `era-engine` | High-level archive API | ✅ Stable |
-| `era-cli` | Command-line interface | ✅ Stable |
+| `era-storage` | Async storage backend abstraction | ⚠️ WIP |
+| `era-volume` | Volume format, header/footer, recovery | ⚠️ WIP |
+| `era-packing` | Chunk packing, buffer management | ⚠️ WIP |
+| `era-ingest` | Content-defined chunking (FastCDC) | ⚠️ WIP |
+| `era-index` | LSM-tree index, bloom filters | ⚠️ WIP (Bloom bug) |
+| `era-engine` | High-level archive API | ⚠️ WIP (God object) |
+| `era-cli` | Command-line interface | ⚠️ WIP |
 
 ### Volume Format (v8.1)
 
@@ -153,7 +155,24 @@ Layered architecture with strict dependency ordering:
 - **Core Dump Prevention**: Automatic `RLIMIT_CORE` restriction
 - **Redundant Metadata**: Backup headers and footers for resilience
 
+## 🧭 Engineering Standards (Audit Snapshot)
+
+- **Async purity**: Disk/network I/O must be async; CPU-heavy work uses `tokio::task::spawn_blocking`.
+- **Serialization policy**: Only `prost` (headers/wire) and `rkyv` (internal hot structures).
+- **Security hygiene**: Never log keys, hashes, salts; key material must be zeroized.
+- **Error handling**: Avoid `unwrap()` in runtime paths; use `era_common::Result`.
+
 ## 🧪 Development
+
+### CI Workflow (Local)
+
+The CI pipeline runs these checks in order (see [ci.yml](.github/workflows/ci.yml)):
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
 
 ### Running Tests
 
@@ -198,6 +217,14 @@ Generate and view documentation:
 ```bash
 cargo doc --workspace --no-deps --open
 ```
+
+## ⚠️ Known Critical Issues
+
+The following items are tracked in [CLAUDE.md](CLAUDE.md) and are considered high-priority:
+
+- **Async reactor blocking** in `ArchiveWriter::add_path` (sync `WalkDir` inside async).
+- **Bloom filter performance bug** in `era-index` (`bloom_contains` uses full lookup).
+- **God object** design in `ArchiveWriter` (needs pipeline refactor).
 
 ## 🗺️ Roadmap
 
