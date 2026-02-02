@@ -2,8 +2,8 @@
 //!
 //! MacroBlock packing for the ERA archive system.
 //!
-//! This crate provides the L3 (Transformation & Packing) layer implementation.
-//! For MVP, we use a simplified fixed-size packing strategy.
+//! This crate provides the L3 (Transformation & Packing) layer implementation,
+//! featuring k-Bounded Best-Fit packing via `StagingPool` for efficient MacroBlock aggregation.
 //!
 //! ## Session-Aware Builders
 //!

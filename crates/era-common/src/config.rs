@@ -22,7 +22,7 @@ pub struct ArchiveConfig {
     #[serde(default)]
     pub packing: PackingConfig,
     /// Erasure coding configuration (None = disabled)
-    /// Default: 4 data shards + 1 parity shard for single-drive bit-rot protection
+    /// Default: 4 data shards + 2 parity shards per whitepaper specification
     pub erasure: Option<ErasureCodeConfig>,
     /// Matrix distribution configuration
     #[serde(default)]
@@ -38,10 +38,10 @@ impl Default for ArchiveConfig {
             block: BlockConfig::default(),
             chunking: ChunkingConfig::default(),
             packing: PackingConfig::default(),
-            // V8.1: EC is ON by default (4+1) for single-drive bit-rot protection
+            // V8.1: EC is ON by default (4+2) per whitepaper specification
             erasure: Some(ErasureCodeConfig {
                 data_shards: 4,
-                parity_shards: 1,
+                parity_shards: 2,
             }),
             distribution: MatrixDistributionConfig::default(),
         }

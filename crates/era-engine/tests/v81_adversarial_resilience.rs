@@ -458,13 +458,13 @@ async fn test_v81_triple_corruption_fails_gracefully() -> Result<(), Box<dyn std
 }
 
 // =============================================================================
-// TEST 6: Default EC should be 4+1
+// TEST 6: Default EC should be 4+2 (per whitepaper specification)
 // =============================================================================
 #[tokio::test]
-async fn test_v81_default_ec_is_4_plus_1() -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n=== TEST: V8.1 Default EC is 4+1 ===");
+async fn test_v81_default_ec_is_4_plus_2() -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n=== TEST: V8.1 Default EC is 4+2 ===");
 
-    // Check that ArchiveConfig::default() has EC enabled with 4+1
+    // Check that ArchiveConfig::default() has EC enabled with 4+2
     let config = ArchiveConfig::default();
 
     assert!(
@@ -479,12 +479,12 @@ async fn test_v81_default_ec_is_4_plus_1() -> Result<(), Box<dyn std::error::Err
         ec.data_shards
     );
     assert_eq!(
-        ec.parity_shards, 1,
-        "Default parity_shards should be 1, got {}",
+        ec.parity_shards, 2,
+        "Default parity_shards should be 2, got {}",
         ec.parity_shards
     );
 
-    println!("🎉 SUCCESS: Default EC is correctly set to 4+1!");
+    println!("🎉 SUCCESS: Default EC is correctly set to 4+2!");
     Ok(())
 }
 

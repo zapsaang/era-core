@@ -51,8 +51,8 @@ impl MacroBlockBuilder {
 
     /// Pack a single chunk into a MacroBlock
     ///
-    /// For MVP, each chunk becomes its own block. In later versions,
-    /// multiple chunks will be packed together using k-Bounded Best-Fit.
+    /// Used for metadata/catalog blocks that need individual packing.
+    /// For user data, use `StagingPool` which aggregates chunks via k-Bounded Best-Fit.
     pub fn pack_single(&self, chunk: UniqueChunk) -> Result<EncryptedMacroBlock> {
         let chunks = vec![chunk];
         self.pack_chunks(chunks)
