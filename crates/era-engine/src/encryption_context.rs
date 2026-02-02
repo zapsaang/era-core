@@ -54,7 +54,12 @@ impl EncryptionContext {
     /// Create a new encryption context with a starting block ID.
     ///
     /// Use this when resuming from a checkpoint or appending to an existing archive.
-    pub fn with_starting_block_id(session: KeySession, volume_key: VolumeKey, nonce_context: [u8; 16], block_id: u64) -> Self {
+    pub fn with_starting_block_id(
+        session: KeySession,
+        volume_key: VolumeKey,
+        nonce_context: [u8; 16],
+        block_id: u64,
+    ) -> Self {
         Self {
             session,
             volume_key,
@@ -146,7 +151,8 @@ mod tests {
         let volume_key = session.derive_volume_key(0);
         let nonce_context = salt.as_bytes()[..16].try_into().unwrap();
 
-        let ctx = EncryptionContext::with_starting_block_id(session, volume_key, nonce_context, 100);
+        let ctx =
+            EncryptionContext::with_starting_block_id(session, volume_key, nonce_context, 100);
         assert_eq!(ctx.next_block_id(), 100);
         assert_eq!(ctx.next_block_id(), 101);
     }

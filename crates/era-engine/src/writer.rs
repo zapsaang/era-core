@@ -26,9 +26,7 @@ use era_crypto::Nonce;
 use era_crypto::{AeadContext, XChaCha20Poly1305Context};
 use era_crypto::{KdfParams, KeySession, Salt};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
-use era_packing::{
-    BlockMeta, PackedBlock, PackedChunk, StagingPool, Stripe, StripeBuffer,
-};
+use era_packing::{BlockMeta, PackedBlock, PackedChunk, Stripe};
 use era_storage::LocalStorageBackend;
 use era_volume::{
     Footer, RecipientSlot, RecipientType, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader,
@@ -48,6 +46,8 @@ const INTERNAL_META_PREFIX: &str = ".era/meta/";
 use crate::checkpoint::CheckpointManager;
 use crate::chunk_index::{create_chunk_index, ChunkIndex};
 use crate::encryption_context::EncryptionContext;
+use crate::erasure_stage::ErasureStage;
+use crate::packing_stage::PackingStage;
 use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 use crate::small_file_packer::{SmallFileEntry, SmallFilePacker};
@@ -791,7 +791,7 @@ impl ArchiveWriterBuilder {
                 .unwrap_or(4 * 1024 * 1024)
         } else {
             // Default to 4MB MacroBlocks as per Whitepaper, regardless of CDC.
-            // StagingPool will aggregate small CDC chunks into these 4MB blocks.
+            // PackingStage will aggregate small CDC chunks into these 4MB blocks.
             4 * 1024 * 1024
         };
 
@@ -826,27 +826,24 @@ impl ArchiveWriterBuilder {
             output_path: self.output_path,
             encryption,
             compression_config: config.compression.clone(),
-            erasure_config: if enable_erasure {
-                Some(erasure_config)
-            } else {
-                None
-            },
             volume_pool,
             catalog,
             chunk_index,
             key_encapsulation,
             file_reader,
             enable_cdc,
-            stripe_buffer: if enable_erasure {
-                Some(StripeBuffer::new(erasure_config))
+            // Initialize packing stage with k-Bounded Best-Fit
+            packing: PackingStage::new(
+                config.packing.k_factor,
+                target_block_size,
+                config.packing.flush_threshold,
+            ),
+            // Initialize erasure stage (enabled or disabled based on config)
+            erasure: if enable_erasure {
+                ErasureStage::new(Some(erasure_config))
             } else {
-                None
+                ErasureStage::disabled()
             },
-            // Initialize k-Bounded Best-Fit staging pool
-            staging_pool: StagingPool::new(config.packing.k_factor, target_block_size)
-                .with_flush_threshold(config.packing.flush_threshold),
-            // CRITICAL: Set target_block_size matching StagingPool
-            target_block_size,
             checkpoint_manager,
             // Small file packing
             small_file_packer: if self.enable_small_file_packing {
@@ -889,8 +886,6 @@ pub struct ArchiveWriter {
     // Configuration
     /// Compression settings
     compression_config: era_common::CompressionConfig,
-    /// Erasure coding configuration (if enabled)
-    erasure_config: Option<ErasureCodeConfig>,
 
     /// Volume pool for managing archive volumes
     volume_pool: VolumePool<era_storage::LocalStorageBackend>,
@@ -914,16 +909,14 @@ pub struct ArchiveWriter {
     file_reader: FileReader,
     enable_cdc: bool,
 
-    // k-Bounded Best-Fit staging pool for optimal packing
-    /// Replaces the old pending_chunks Vec with intelligent bin packing
-    /// This dramatically improves space utilization from ~55% to ~95%
-    staging_pool: StagingPool,
-    /// Target block size for batching (default 4MB)
-    target_block_size: usize,
+    // Packing stage for k-Bounded Best-Fit bin packing
+    /// Aggregates small chunks into optimal 4MB blocks
+    /// Improves space utilization from ~55% to ~95%
+    packing: PackingStage,
 
-    /// Virtual stripping buffer for erasure coding
+    // Erasure coding stage for stripe buffering
     /// Buffers K blocks before computing M parity shards
-    stripe_buffer: Option<StripeBuffer>,
+    erasure: ErasureStage,
 
     // Checkpoint for crash recovery
     checkpoint_manager: Option<CheckpointManager>,
@@ -963,7 +956,11 @@ fn collect_files_async(
             .await
             .map_err(era_common::EraError::Io)?;
 
-        while let Some(entry) = read_dir.next_entry().await.map_err(era_common::EraError::Io)? {
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(era_common::EraError::Io)?
+        {
             let path = entry.path();
             let file_type = entry.file_type().await.map_err(era_common::EraError::Io)?;
 
@@ -1247,12 +1244,12 @@ impl ArchiveWriter {
     /// The staging pool will automatically flush bins when they reach 95% capacity.
     async fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
         // Implementation Reform: k-Bounded Best-Fit is MANDATORY for all modes.
-        // We use the staging pool to aggregate small CDC chunks into 4MB MacroBlocks.
+        // We use the packing stage to aggregate small CDC chunks into 4MB MacroBlocks.
         // This is critical for L3 Smart Packing.
 
-        // Use k-Bounded Best-Fit staging pool
-        // The pool will automatically handle oversized chunks and optimal bin selection
-        if let Some(packed) = self.staging_pool.push(chunk) {
+        // Use k-Bounded Best-Fit packing stage
+        // The stage will automatically handle oversized chunks and optimal bin selection
+        if let Some(packed) = self.packing.push(chunk) {
             // A bin reached flush threshold - write it
             self.write_packed_block(packed).await?;
         }
@@ -1260,17 +1257,17 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    /// Flush all bins in the staging pool
+    /// Flush all bins in the packing stage
     /// This should be called at the end of archiving to write all buffered chunks
     async fn flush_pending(&mut self) -> Result<()> {
-        let packed_blocks = self.staging_pool.flush_all();
+        let packed_blocks = self.packing.flush_all();
 
         if packed_blocks.is_empty() {
             return Ok(());
         }
 
         debug!(
-            "Flushing {} packed blocks from staging pool",
+            "Flushing {} packed blocks from packing stage",
             packed_blocks.len()
         );
 
@@ -1321,8 +1318,7 @@ impl ArchiveWriter {
 
         info!(
             "Packing {} small files ({} bytes total)",
-            file_count,
-            total_size
+            file_count, total_size
         );
 
         // Deterministic fingerprint alignment: group by hash and pack unique data in hash order
@@ -1456,9 +1452,9 @@ impl ArchiveWriter {
 
         let encrypted_block = builder.pack_chunks(chunks)?;
 
-        if let Some(stripe_buffer) = &mut self.stripe_buffer {
+        if self.erasure.is_enabled() {
             // Erasure Coding Path
-            let maybe_stripe = stripe_buffer.push(encrypted_block, block_meta)?;
+            let maybe_stripe = self.erasure.buffer_block(encrypted_block, block_meta)?;
             if let Some(stripe) = maybe_stripe {
                 self.flush_stripe(stripe).await?;
             }
@@ -1643,11 +1639,13 @@ impl ArchiveWriter {
     pub async fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
         info!("Adding in-memory file: {} ({} bytes)", name, data.len());
 
-        if data.len() > self.target_block_size {
+        let target_block_size = self.packing.target_block_size();
+
+        if data.len() > target_block_size {
             let mut chunk_refs = Vec::new();
             let mut offset = 0u64;
 
-            for chunk in data.chunks(self.target_block_size) {
+            for chunk in data.chunks(target_block_size) {
                 let hash = era_crypto::hash(chunk);
 
                 if !self.chunk_index.contains(&hash)? {
@@ -1694,11 +1692,8 @@ impl ArchiveWriter {
 
         // Flush erasure stripe buffer if not empty
         // This ensures the last partial stripe is written (with padding)
-        if let Some(ref mut buffer) = self.stripe_buffer {
-            if !buffer.is_empty() {
-                let stripe = buffer.flush()?;
-                self.flush_stripe(stripe).await?;
-            }
+        if let Some(stripe) = self.erasure.flush()? {
+            self.flush_stripe(stripe).await?;
         }
 
         // Embed critical metadata in-archive (self-contained recovery)
@@ -1706,11 +1701,8 @@ impl ArchiveWriter {
 
         // Flush any metadata chunks that were added
         self.flush_pending().await?;
-        if let Some(ref mut buffer) = self.stripe_buffer {
-            if !buffer.is_empty() {
-                let stripe = buffer.flush()?;
-                self.flush_stripe(stripe).await?;
-            }
+        if let Some(stripe) = self.erasure.flush()? {
+            self.flush_stripe(stripe).await?;
         }
 
         // Sync checkpoint before writing catalog (atomic point)
@@ -1734,7 +1726,7 @@ impl ArchiveWriter {
         let catalog_block_id = catalog_block.block_id.sequence() as u32;
 
         // Optionally create a backup block for erasure-coded archives
-        let backup_block = if self.erasure_config.is_some() {
+        let backup_block = if self.erasure.is_enabled() {
             // Create another builder for the backup block (will get next block_id)
             let compressor = self.create_compressor();
             let backup_builder = self.encryption.create_block_builder(compressor);
@@ -1970,7 +1962,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(writer.staging_pool.bin_count(), 3);
+        assert_eq!(writer.packing.bin_count(), 3);
     }
 
     #[tokio::test]
@@ -2250,8 +2242,11 @@ pub mod generic {
                 volume_writer,
                 catalog: Catalog::new(),
                 chunk_index,
-                staging_pool: StagingPool::new(self.config.packing.k_factor, 4 * 1024 * 1024)
-                    .with_flush_threshold(self.config.packing.flush_threshold),
+                packing: PackingStage::new(
+                    self.config.packing.k_factor,
+                    4 * 1024 * 1024,
+                    self.config.packing.flush_threshold,
+                ),
             })
         }
     }
@@ -2272,8 +2267,8 @@ pub mod generic {
         volume_writer: VolumeWriter<W>,
         catalog: Catalog,
         chunk_index: Arc<dyn ChunkIndex>,
-        /// k-Bounded Best-Fit staging pool for optimal packing
-        staging_pool: StagingPool,
+        /// Packing stage for k-Bounded Best-Fit bin packing
+        packing: PackingStage,
     }
 
     impl<W: StorageWriter> GenericArchiveWriter<W> {
@@ -2314,11 +2309,11 @@ pub mod generic {
             Ok(())
         }
 
-        /// Add chunk to staging pool using k-Bounded Best-Fit
+        /// Add chunk to packing stage using k-Bounded Best-Fit
         async fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
-            // Use k-Bounded Best-Fit staging pool for optimal packing
-            // The pool automatically handles oversized chunks and bin selection
-            if let Some(packed) = self.staging_pool.push(chunk) {
+            // Use k-Bounded Best-Fit packing stage for optimal packing
+            // The stage automatically handles oversized chunks and bin selection
+            if let Some(packed) = self.packing.push(chunk) {
                 // A bin reached flush threshold - write it
                 self.write_packed_block(packed).await?;
             }
@@ -2347,9 +2342,9 @@ pub mod generic {
             Ok(())
         }
 
-        /// Flush all bins in the staging pool
+        /// Flush all bins in the packing stage
         async fn flush_pending(&mut self) -> Result<()> {
-            let packed_blocks = self.staging_pool.flush_all();
+            let packed_blocks = self.packing.flush_all();
 
             for packed in packed_blocks {
                 self.write_packed_block(packed).await?;

@@ -82,8 +82,7 @@ impl SmallFilePacker {
 
     /// Check if the buffer should be flushed.
     fn should_flush(&self) -> bool {
-        self.total_size >= self.pack_size_threshold
-            || self.buffer.len() >= self.max_buffered_files
+        self.total_size >= self.pack_size_threshold || self.buffer.len() >= self.max_buffered_files
     }
 
     /// Take all buffered entries, resetting the buffer.
