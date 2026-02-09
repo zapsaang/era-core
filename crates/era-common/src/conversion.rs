@@ -263,6 +263,7 @@ impl TryFrom<proto::BlockChunkIndex> for BlockChunkIndex {
 }
 
 impl From<MatrixDistributionConfig> for proto::MatrixDistributionConfig {
+    #[allow(deprecated)]
     fn from(config: MatrixDistributionConfig) -> Self {
         Self {
             strategy: match config.strategy {
@@ -278,6 +279,7 @@ impl From<MatrixDistributionConfig> for proto::MatrixDistributionConfig {
 }
 
 impl From<proto::MatrixDistributionConfig> for MatrixDistributionConfig {
+    #[allow(deprecated)]
     fn from(proto: proto::MatrixDistributionConfig) -> Self {
         Self {
             strategy: match proto.strategy() {

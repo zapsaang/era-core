@@ -134,7 +134,6 @@ async fn create_test_archive(
         .config(config)
         .password("testpass")
         .volume_count(6) // Force generation of 6 physical files
-        .enable_matrix_distribution(true)
         .build()
         .await?;
 

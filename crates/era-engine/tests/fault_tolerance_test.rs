@@ -38,7 +38,6 @@ async fn test_precise_fault_tolerance_limits() {
             .enable_erasure(true)
             .erasure_config(erasure_config)
             .volume_count(*volume_count)
-            .enable_matrix_distribution(true)
             .build()
             .await
             .unwrap();

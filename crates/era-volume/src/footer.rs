@@ -1,27 +1,60 @@
 //! Volume footer structure.
+//!
+//! The footer uses a fixed-length binary format to guarantee atomic writes
+//! within a single 128-byte disk sector. This is critical for crash consistency.
 
-use era_common::proto::Footer as ProtoFooter;
 use era_common::{EraError, Result};
-use prost::Message;
 
 /// Magic bytes for footer: "ERAF"
 pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
 
-/// Footer size (128 bytes for atomic write)
+/// Footer size (128 bytes for atomic write within a single disk sector)
 pub const FOOTER_SIZE: usize = 128;
 
 /// Backup footer gap size (reserved after header for backup footer)
 /// Layout: [Header 4096] [Backup Footer Gap 128] [Data...] [Backup Header 4096] [Primary Footer 128]
 pub const BACKUP_FOOTER_GAP: usize = FOOTER_SIZE;
 
+/// Footer format version
+pub const FOOTER_VERSION: u8 = 1;
+
 /// Volume footer - stored at the end of each volume
 ///
 /// The footer is designed to be exactly 128 bytes to fit within a single
 /// disk sector, ensuring atomic writes on most storage devices.
+///
+/// ## Binary Layout (128 bytes, fixed-length)
+///
+/// | Offset | Size | Field                    |
+/// |--------|------|--------------------------|
+/// | 0      | 4    | magic ("ERAF")           |
+/// | 4      | 1    | version                  |
+/// | 5      | 1    | reserved1                |
+/// | 6      | 2    | flags                    |
+/// | 8      | 8    | data_end_offset          |
+/// | 16     | 4    | block_count              |
+/// | 20     | 4    | reserved2                |
+/// | 24     | 8    | sequence_number          |
+/// | 32     | 8    | catalog_offset           |
+/// | 40     | 4    | catalog_size             |
+/// | 44     | 4    | catalog_block_id         |
+/// | 48     | 8    | last_checkpoint_offset   |
+/// | 56     | 4    | last_checkpoint_block_id |
+/// | 60     | 4    | reserved3                |
+/// | 64     | 8    | index_offset             |
+/// | 72     | 4    | index_size               |
+/// | 76     | 4    | index_block_id           |
+/// | 80     | 8    | backup_header_offset     |
+/// | 88     | 8    | reserved4                |
+/// | 96     | 32   | checksum (Blake3)        |
+/// | **128**|      | **Total**                |
+///
 #[derive(Debug, Clone, PartialEq)]
 pub struct Footer {
     /// Magic bytes: "ERAF"
     pub magic: [u8; 4],
+    /// Format version
+    pub version: u8,
     /// Status flags
     pub flags: u16,
     /// Offset of the data region end
@@ -89,6 +122,7 @@ impl Footer {
     ) -> Self {
         let mut footer = Self {
             magic: FOOTER_MAGIC,
+            version: FOOTER_VERSION,
             flags: 0,
             data_end_offset,
             block_count,
@@ -119,58 +153,14 @@ impl Footer {
         self.index_offset > 0 && self.index_size > 0
     }
 
-    fn to_proto(&self) -> ProtoFooter {
-        ProtoFooter {
-            magic: self.magic.to_vec(),
-            flags: self.flags as u32,
-            data_end_offset: self.data_end_offset,
-            block_count: self.block_count,
-            sequence_number: self.sequence_number,
-            catalog_offset: self.catalog_offset,
-            catalog_size: self.catalog_size,
-            catalog_block_id: self.catalog_block_id,
-            last_checkpoint_offset: self.last_checkpoint_offset,
-            last_checkpoint_block_id: self.last_checkpoint_block_id,
-            checksum: self.checksum.to_vec(),
-            index_offset: self.index_offset,
-            index_size: self.index_size,
-            index_block_id: self.index_block_id,
-            backup_header_offset: self.backup_header_offset,
-        }
-    }
-
-    fn from_proto(proto: ProtoFooter) -> Result<Self> {
-        let magic: [u8; 4] = proto.magic.try_into().unwrap_or(FOOTER_MAGIC);
-        let checksum: [u8; 32] = proto.checksum.try_into().unwrap_or([0u8; 32]);
-
-        Ok(Self {
-            magic,
-            flags: proto.flags as u16,
-            data_end_offset: proto.data_end_offset,
-            block_count: proto.block_count,
-            sequence_number: proto.sequence_number,
-            catalog_offset: proto.catalog_offset,
-            catalog_size: proto.catalog_size,
-            catalog_block_id: proto.catalog_block_id,
-            last_checkpoint_offset: proto.last_checkpoint_offset,
-            last_checkpoint_block_id: proto.last_checkpoint_block_id,
-            index_offset: proto.index_offset,
-            index_size: proto.index_size,
-            index_block_id: proto.index_block_id,
-            backup_header_offset: proto.backup_header_offset,
-            checksum,
-        })
-    }
-
     /// Update the checksum field
     fn update_checksum(&mut self) {
         // Zero out checksum for calculation
         self.checksum = [0u8; 32];
-        let mut proto = self.to_proto();
-        // Ensure proto checksum is empty for calculation
-        proto.checksum = Vec::new();
 
-        let data = proto.encode_to_vec();
+        // Serialize without checksum (first 96 bytes)
+        let mut data = [0u8; FOOTER_SIZE - 32];
+        self.write_fields_to(&mut data);
 
         // Calculate Blake3 hash
         let hash = blake3::hash(&data);
@@ -179,44 +169,89 @@ impl Footer {
 
     /// Verify the checksum
     pub fn verify_checksum(&self) -> bool {
-        let mut proto = self.to_proto();
-        let expected = proto.checksum.clone();
+        // Serialize without checksum (first 96 bytes)
+        let mut data = [0u8; FOOTER_SIZE - 32];
+        self.write_fields_to(&mut data);
 
-        // Zero out checksum for recalculation
-        proto.checksum = Vec::new();
-
-        let data = proto.encode_to_vec();
         let hash = blake3::hash(&data);
-
-        hash.as_bytes().as_slice() == expected.as_slice()
+        hash.as_bytes() == &self.checksum
     }
 
-    /// Serialize the footer to bytes
-    pub fn to_bytes(&self) -> Result<[u8; FOOTER_SIZE]> {
-        let proto = self.to_proto();
-        // Since update_checksum uses empty checksum, we must ensure self.checksum is set before calling to_proto
-        // But to_bytes is supposedly called on a valid valid Footer.
-        // Wait, update_checksum sets self.checksum. to_proto reads it.
-        // So proto.checksum will be set.
+    /// Write all fields except checksum to a buffer
+    fn write_fields_to(&self, buf: &mut [u8; FOOTER_SIZE - 32]) {
+        // Offset 0: magic (4 bytes)
+        buf[0..4].copy_from_slice(&self.magic);
+        // Offset 4: version (1 byte)
+        buf[4] = self.version;
+        // Offset 5: reserved1 (1 byte)
+        buf[5] = 0;
+        // Offset 6: flags (2 bytes)
+        buf[6..8].copy_from_slice(&self.flags.to_le_bytes());
+        // Offset 8: data_end_offset (8 bytes)
+        buf[8..16].copy_from_slice(&self.data_end_offset.to_le_bytes());
+        // Offset 16: block_count (4 bytes)
+        buf[16..20].copy_from_slice(&self.block_count.to_le_bytes());
+        // Offset 20: reserved2 (4 bytes)
+        buf[20..24].copy_from_slice(&0u32.to_le_bytes());
+        // Offset 24: sequence_number (8 bytes)
+        buf[24..32].copy_from_slice(&self.sequence_number.to_le_bytes());
+        // Offset 32: catalog_offset (8 bytes)
+        buf[32..40].copy_from_slice(&self.catalog_offset.to_le_bytes());
+        // Offset 40: catalog_size (4 bytes)
+        buf[40..44].copy_from_slice(&self.catalog_size.to_le_bytes());
+        // Offset 44: catalog_block_id (4 bytes)
+        buf[44..48].copy_from_slice(&self.catalog_block_id.to_le_bytes());
+        // Offset 48: last_checkpoint_offset (8 bytes)
+        buf[48..56].copy_from_slice(&self.last_checkpoint_offset.to_le_bytes());
+        // Offset 56: last_checkpoint_block_id (4 bytes)
+        buf[56..60].copy_from_slice(&self.last_checkpoint_block_id.to_le_bytes());
+        // Offset 60: reserved3 (4 bytes)
+        buf[60..64].copy_from_slice(&0u32.to_le_bytes());
+        // Offset 64: index_offset (8 bytes)
+        buf[64..72].copy_from_slice(&self.index_offset.to_le_bytes());
+        // Offset 72: index_size (4 bytes)
+        buf[72..76].copy_from_slice(&self.index_size.to_le_bytes());
+        // Offset 76: index_block_id (4 bytes)
+        buf[76..80].copy_from_slice(&self.index_block_id.to_le_bytes());
+        // Offset 80: backup_header_offset (8 bytes)
+        buf[80..88].copy_from_slice(&self.backup_header_offset.to_le_bytes());
+        // Offset 88: reserved4 (8 bytes)
+        buf[88..96].copy_from_slice(&0u64.to_le_bytes());
+    }
 
-        let data = proto.encode_to_vec();
-
-        // Format: [u32 len] [protobuf bytes] [padding]
-        // Length of length prefix = 4 bytes.
-        let payload_len = data.len();
-        if payload_len + 4 > FOOTER_SIZE {
-            return Err(EraError::Serialization(format!(
-                "Footer serialization too large: {} bytes > {}",
-                payload_len + 4,
-                FOOTER_SIZE
-            )));
+    /// Read fields from a buffer (excluding checksum)
+    fn read_fields_from(buf: &[u8; FOOTER_SIZE - 32]) -> Self {
+        Self {
+            magic: buf[0..4].try_into().unwrap(),
+            version: buf[4],
+            flags: u16::from_le_bytes(buf[6..8].try_into().unwrap()),
+            data_end_offset: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            block_count: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
+            sequence_number: u64::from_le_bytes(buf[24..32].try_into().unwrap()),
+            catalog_offset: u64::from_le_bytes(buf[32..40].try_into().unwrap()),
+            catalog_size: u32::from_le_bytes(buf[40..44].try_into().unwrap()),
+            catalog_block_id: u32::from_le_bytes(buf[44..48].try_into().unwrap()),
+            last_checkpoint_offset: u64::from_le_bytes(buf[48..56].try_into().unwrap()),
+            last_checkpoint_block_id: u32::from_le_bytes(buf[56..60].try_into().unwrap()),
+            index_offset: u64::from_le_bytes(buf[64..72].try_into().unwrap()),
+            index_size: u32::from_le_bytes(buf[72..76].try_into().unwrap()),
+            index_block_id: u32::from_le_bytes(buf[76..80].try_into().unwrap()),
+            backup_header_offset: u64::from_le_bytes(buf[80..88].try_into().unwrap()),
+            checksum: [0u8; 32], // Will be filled separately
         }
+    }
 
+    /// Serialize the footer to bytes (always exactly 128 bytes)
+    pub fn to_bytes(&self) -> Result<[u8; FOOTER_SIZE]> {
         let mut result = [0u8; FOOTER_SIZE];
-        // Write length
-        result[0..4].copy_from_slice(&(payload_len as u32).to_le_bytes());
-        // Write data
-        result[4..4 + payload_len].copy_from_slice(&data);
+
+        // Write fields (first 96 bytes)
+        let mut fields_buf = [0u8; FOOTER_SIZE - 32];
+        self.write_fields_to(&mut fields_buf);
+        result[0..96].copy_from_slice(&fields_buf);
+
+        // Write checksum (last 32 bytes)
+        result[96..128].copy_from_slice(&self.checksum);
 
         Ok(result)
     }
@@ -227,27 +262,24 @@ impl Footer {
             return Err(EraError::CorruptedFooter("Footer too small".to_string()));
         }
 
-        // Read length
-        let len_bytes: [u8; 4] = data[0..4].try_into().unwrap();
-        let payload_len = u32::from_le_bytes(len_bytes) as usize;
+        // Read fields
+        let fields_buf: [u8; FOOTER_SIZE - 32] = data[0..96].try_into().unwrap();
+        let mut footer = Self::read_fields_from(&fields_buf);
 
-        if payload_len + 4 > FOOTER_SIZE {
-            return Err(EraError::CorruptedFooter(format!(
-                "Invalid footer length: {}",
-                payload_len
-            )));
-        }
-
-        let proto_data = &data[4..4 + payload_len];
-        let proto = ProtoFooter::decode(proto_data).map_err(|e| {
-            EraError::Deserialization(format!("Failed to decode footer proto: {}", e))
-        })?;
-
-        let footer = Self::from_proto(proto)?;
+        // Read checksum
+        footer.checksum = data[96..128].try_into().unwrap();
 
         // Validate magic
         if footer.magic != FOOTER_MAGIC {
             return Err(EraError::CorruptedFooter("Invalid magic".to_string()));
+        }
+
+        // Validate version
+        if footer.version > FOOTER_VERSION {
+            return Err(EraError::CorruptedFooter(format!(
+                "Unsupported footer version: {} (max supported: {})",
+                footer.version, FOOTER_VERSION
+            )));
         }
 
         // Validate checksum
@@ -264,6 +296,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_footer_size_is_exactly_128_bytes() {
+        let footer = Footer::new(1024 * 1024, 10, 1);
+        let bytes = footer.to_bytes().unwrap();
+        assert_eq!(bytes.len(), 128, "Footer must be exactly 128 bytes");
+    }
+
+    #[test]
     fn test_footer_roundtrip() {
         let footer = Footer::new(1024 * 1024, 10, 1);
 
@@ -272,8 +311,42 @@ mod tests {
 
         let restored = Footer::from_bytes(&bytes).unwrap();
         assert_eq!(restored.magic, FOOTER_MAGIC);
+        assert_eq!(restored.version, FOOTER_VERSION);
         assert_eq!(restored.data_end_offset, 1024 * 1024);
         assert_eq!(restored.block_count, 10);
+        assert_eq!(restored.sequence_number, 1);
+    }
+
+    #[test]
+    fn test_footer_with_all_fields() {
+        let footer = Footer::with_catalog(
+            0xFFFF_FFFF_FFFF_FFFF, // max u64
+            0xFFFF_FFFF,           // max u32
+            0xFFFF_FFFF_FFFF_FFFF, // max u64
+            0xFFFF_FFFF_FFFF_FFFF, // catalog_offset
+            0xFFFF_FFFF,           // catalog_size
+            0xFFFF_FFFF,           // catalog_block_id
+            0xFFFF_FFFF_FFFF_FFFF, // last_checkpoint_offset
+            0xFFFF_FFFF,           // last_checkpoint_block_id
+            0xFFFF_FFFF_FFFF_FFFF, // index_offset
+            0xFFFF_FFFF,           // index_size
+            0xFFFF_FFFF,           // index_block_id
+            0xFFFF_FFFF_FFFF_FFFF, // backup_header_offset
+        );
+
+        // Must still serialize to exactly 128 bytes even with max values
+        let bytes = footer.to_bytes().unwrap();
+        assert_eq!(
+            bytes.len(),
+            128,
+            "Footer must be exactly 128 bytes even with max values"
+        );
+
+        let restored = Footer::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.data_end_offset, 0xFFFF_FFFF_FFFF_FFFF);
+        assert_eq!(restored.block_count, 0xFFFF_FFFF);
+        assert_eq!(restored.catalog_offset, 0xFFFF_FFFF_FFFF_FFFF);
+        assert_eq!(restored.index_offset, 0xFFFF_FFFF_FFFF_FFFF);
     }
 
     #[test]
@@ -297,5 +370,36 @@ mod tests {
         let result = Footer::from_bytes(&bytes);
 
         assert!(result.is_err());
+        assert!(matches!(result, Err(EraError::CorruptedFooter(_))));
+    }
+
+    #[test]
+    fn test_corrupted_checksum() {
+        let footer = Footer::new(1024, 5, 1);
+        let mut bytes = footer.to_bytes().unwrap();
+
+        // Corrupt the checksum
+        bytes[96] ^= 0xFF;
+
+        let result = Footer::from_bytes(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_has_catalog_location() {
+        let footer = Footer::new(1024, 5, 1);
+        assert!(!footer.has_catalog_location());
+
+        let footer_with_catalog = Footer::with_catalog(1024, 5, 1, 2048, 512, 1, 0, 0, 0, 0, 0, 0);
+        assert!(footer_with_catalog.has_catalog_location());
+    }
+
+    #[test]
+    fn test_has_index() {
+        let footer = Footer::new(1024, 5, 1);
+        assert!(!footer.has_index());
+
+        let footer_with_index = Footer::with_catalog(1024, 5, 1, 0, 0, 0, 0, 0, 4096, 1024, 2, 0);
+        assert!(footer_with_index.has_index());
     }
 }

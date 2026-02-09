@@ -10,7 +10,7 @@ use era_common::{
 use era_storage::{StorageBackend, StorageReader};
 use std::path::Path;
 
-use crate::footer::FOOTER_SIZE;
+use crate::footer::{FOOTER_MAGIC, FOOTER_SIZE};
 use crate::header::{DATA_REGION_START, HEADER_SIZE};
 use crate::{Footer, SuperHeader, MAX_SHARD_SIZE};
 
@@ -156,10 +156,10 @@ impl<R: StorageReader> VolumeReader<R> {
         Footer::from_bytes(&bytes)
     }
 
-    /// Try floating footer recovery (reverse scan) for legacy volumes
+    /// Try floating footer recovery (reverse scan)
     async fn try_floating_footer_recovery(reader: &R, size: u64) -> Result<Option<Footer>> {
         // Scan the last 1MB (or full file if smaller) for footer magic
-        // Pattern: 0x0A (Field 1) 0x04 (Len) "ERAF"
+        // New fixed-length format: footer starts directly with "ERAF" magic
         let scan_size = 1024 * 1024; // 1MB scan window
         let start_offset = if size > scan_size {
             size - scan_size
@@ -168,7 +168,7 @@ impl<R: StorageReader> VolumeReader<R> {
         };
         let scan_len = (size - start_offset) as usize;
 
-        if scan_len <= 6 {
+        if scan_len < FOOTER_SIZE {
             return Ok(None);
         }
 
@@ -177,22 +177,15 @@ impl<R: StorageReader> VolumeReader<R> {
             Err(_) => return Ok(None),
         };
 
-        // Search backwards for footer pattern
-        // Pattern: [0x0A, 0x04, 'E', 'R', 'A', 'F']
-        let pattern = [0x0A, 0x04, 0x45, 0x52, 0x41, 0x46];
+        // Search backwards for footer magic pattern "ERAF"
+        let magic = FOOTER_MAGIC;
 
         // Iterate backwards to find the *last* valid footer
-        for i in (0..data.len().saturating_sub(5)).rev() {
-            if data[i..i + 6] == pattern {
-                // Possible match found
-                // Footer format: [u32 len] [proto bytes]
-                // The magic is the first field of proto bytes, so footer starts at i - 4
-                if i < 4 {
-                    continue;
-                }
-
-                let candidate_start = i - 4;
-                let footer_file_offset = start_offset + candidate_start as u64;
+        // Footer must be aligned and have at least FOOTER_SIZE bytes after it
+        for i in (0..=data.len().saturating_sub(FOOTER_SIZE)).rev() {
+            if data[i..i + 4] == magic {
+                // Possible match found - try to parse as footer
+                let footer_file_offset = start_offset + i as u64;
 
                 // Try to read footer from this offset
                 if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE).await {

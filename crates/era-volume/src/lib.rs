@@ -11,6 +11,7 @@
 /// symmetric validation (archives that can be written can always be read).
 pub const MAX_SHARD_SIZE: usize = 16 * 1024 * 1024;
 
+mod distribution;
 pub mod footer;
 pub mod header;
 mod multi_volume;
@@ -18,6 +19,7 @@ mod reader;
 mod volume_pool;
 mod writer;
 
+pub use distribution::{DistributionCalculator, DistributionConfigExt, VolumePoolStatusExt};
 pub use footer::{Footer, FOOTER_MAGIC, FOOTER_SIZE};
 pub use header::{RecipientSlot, RecipientType, SuperHeader, DATA_REGION_START, HEADER_SIZE};
 pub use multi_volume::{

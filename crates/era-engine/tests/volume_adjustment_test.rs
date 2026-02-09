@@ -33,7 +33,6 @@ async fn test_volume_auto_adjustment() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         // NOTE: NOT calling .volume_count() means default = 1
-        .enable_matrix_distribution(true)
         .build()
         .await
         .expect("Failed to create writer");
@@ -78,7 +77,6 @@ async fn test_volume_auto_adjustment() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(3) // Explicitly set to minimum viable
-        .enable_matrix_distribution(true)
         .build()
         .await
         .expect("Failed to create writer");
@@ -150,8 +148,7 @@ async fn test_volume_specification_compliance() {
         let mut builder = ArchiveWriterBuilder::new(&base_path)
             .config(config.clone())
             .enable_erasure(true)
-            .erasure_config(erasure)
-            .enable_matrix_distribution(true);
+            .erasure_config(erasure);
 
         if specified > 1 {
             builder = builder.volume_count(specified);

@@ -33,7 +33,7 @@ async fn test_reproduce_matrix_distribution_panic() {
         .password("test_password")
         .erasure_config(erasure_config)
         .enable_erasure(true)
-        .enable_matrix_distribution(true) // This triggers the use of VolumePool
+        // This triggers the use of VolumePool
         .build()
         .await
     {

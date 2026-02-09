@@ -21,7 +21,7 @@ use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{compute_shard_crc, EraError, ErasureCodeConfig, Result, ShardHeader};
 use era_crypto::KeySession;
 use era_storage::LocalStorageBackend;
-use era_volume::VolumeReader;
+use era_volume::{DistributionCalculator, VolumeReader};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};

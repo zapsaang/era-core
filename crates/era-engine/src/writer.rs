@@ -115,8 +115,6 @@ pub struct ArchiveWriterBuilder {
     erasure_config: ErasureCodeConfig,
     /// Number of storage volumes to distribute data across
     volume_count: usize,
-    /// Enable true matrix distribution for erasure shards
-    enable_matrix_distribution: bool,
     /// Maximum volume size for fixed-size splitting (bytes)
     max_volume_size: Option<u64>,
     /// Target size for encrypted blocks (default: 4MB)
@@ -141,7 +139,6 @@ impl ArchiveWriterBuilder {
             enable_erasure: None,
             erasure_config: ErasureCodeConfig::default(),
             volume_count: 1,
-            enable_matrix_distribution: false,
             max_volume_size: None,
             target_block_size: None,
             enable_small_file_packing: true,
@@ -258,23 +255,6 @@ impl ArchiveWriterBuilder {
         self
     }
 
-    /// Enable true matrix distribution for erasure shards.
-    ///
-    /// When enabled, each block's shards are distributed across volumes using
-    /// a rotating offset pattern. This ensures that:
-    /// - Consecutive blocks use different starting volumes
-    /// - Loss of any `parity_shards` volumes still allows full recovery
-    /// - Shards are evenly distributed across all volumes
-    ///
-    /// This also automatically enables erasure coding if not already enabled.
-    pub fn enable_matrix_distribution(mut self, enable: bool) -> Self {
-        self.enable_matrix_distribution = enable;
-        if enable {
-            self.enable_erasure = Some(true);
-        }
-        self
-    }
-
     /// Set maximum volume size for fixed-size splitting.
     ///
     /// When set, volumes will automatically split when reaching this size limit.
@@ -341,7 +321,6 @@ impl ArchiveWriterBuilder {
             // Fallback (shouldn't reach here if enable_erasure is false)
             self.erasure_config
         };
-        let enable_matrix_distribution = self.enable_matrix_distribution;
         let volume_count = self.volume_count;
         let enable_cdc = self.enable_cdc;
         let chunker_override = self.chunker_config;
@@ -563,18 +542,14 @@ impl ArchiveWriterBuilder {
         }
 
         // Set distribution strategy in config, to match VolumePool behavior
-        if enable_matrix_distribution {
-            config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
+        // Always use RotatingOffset strategy for optimal fault tolerance
+        config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
-            // Calculate optimal volume counts if needed
-            if enable_erasure {
-                let erasure = self.erasure_config;
-                let total_shards = (erasure.data_shards + erasure.parity_shards) as usize;
-                config.distribution.min_volumes = (erasure.parity_shards as usize + 1).max(2);
-                config.distribution.target_volumes = total_shards;
-            }
-        } else {
-            config.distribution.strategy = MatrixDistributionStrategy::Striped;
+        // Calculate optimal volume counts for erasure coding
+        if enable_erasure {
+            let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
+            config.distribution.min_volumes = (erasure_config.parity_shards as usize + 1).max(2);
+            config.distribution.target_volumes = total_shards;
         }
 
         // Create volume header
@@ -587,18 +562,15 @@ impl ArchiveWriterBuilder {
 
         let base_filename = self.output_path.file_name().unwrap_or_default();
 
-        // Determine volume count based on erasure config if matrix distribution is enabled
-        let resolved_volume_count = if enable_matrix_distribution && enable_erasure {
+        // Determine volume count based on erasure config
+        let resolved_volume_count = if enable_erasure {
             let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
-
-            // For matrix distribution, recommend total_shards volumes for optimal fault tolerance
-            // This allows tolerating up to parity_shards volume failures
             let recommended_volumes = total_shards;
 
             if volume_count <= 1 {
                 // User didn't specify, use recommended optimal count
                 info!(
-                    "Matrix distribution: automatically using {} volumes \
+                    "Erasure coding: automatically using {} volumes \
                      for optimal fault tolerance (can tolerate {} volume failures)",
                     recommended_volumes, erasure_config.parity_shards
                 );
@@ -608,7 +580,7 @@ impl ArchiveWriterBuilder {
                 let min_viable = (erasure_config.parity_shards as usize + 1).max(2);
                 if volume_count >= min_viable {
                     warn!(
-                        "Using {} volumes for matrix distribution. \
+                        "Using {} volumes. \
                          Note: will tolerate at most 1 volume failure \
                          (recommended: {} volumes for up to {} volume failures)",
                         volume_count, recommended_volumes, erasure_config.parity_shards
@@ -628,23 +600,11 @@ impl ArchiveWriterBuilder {
             } else {
                 // User specified at least recommended count
                 info!(
-                    "Using {} volumes for matrix distribution \
+                    "Using {} volumes \
                      (will tolerate up to {} volume failures)",
                     volume_count, erasure_config.parity_shards
                 );
                 volume_count
-            }
-        } else if enable_erasure {
-            // EC enabled without matrix distribution: auto-adjust volume count
-            let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
-            if volume_count <= 1 {
-                info!(
-                    "Erasure coding enabled: automatically using {} volumes for {} data + {} parity shards",
-                    total_shards, erasure_config.data_shards, erasure_config.parity_shards
-                );
-                total_shards
-            } else {
-                volume_count.max(total_shards)
             }
         } else {
             volume_count
@@ -665,14 +625,6 @@ impl ArchiveWriterBuilder {
 
         if let Some(max_size) = max_volume_size {
             pool_config = pool_config.with_max_size(max_size);
-        }
-
-        // Apply correct distribution strategy
-        if !enable_matrix_distribution {
-            // Force Striped behavior (non-matrix distribution)
-            let mut dist_config = pool_config.distribution.clone();
-            dist_config.strategy = MatrixDistributionStrategy::Striped;
-            pool_config = pool_config.with_distribution(dist_config);
         }
 
         // Initialize catalog - MUST be done before VolumePool creation (truncation)
@@ -700,13 +652,8 @@ impl ArchiveWriterBuilder {
         };
 
         info!(
-            "Created VolumePool with {} volumes (Strategy: {:?})",
-            volume_pool.volume_count(),
-            if enable_matrix_distribution {
-                "Matrix"
-            } else {
-                "Striped"
-            }
+            "Created VolumePool with {} volumes (Strategy: RotatingOffset)",
+            volume_pool.volume_count()
         );
 
         // Configure file reader with CDC if enabled
@@ -1365,7 +1312,8 @@ impl ArchiveWriter {
             if let Some(existing_location) = self.pipeline.get_location(&chunk_hash)? {
                 for hash in &small_file_hashes {
                     if !self.pipeline.contains(hash)? {
-                        self.pipeline.record_location(*hash, existing_location.clone())?;
+                        self.pipeline
+                            .record_location(*hash, existing_location.clone())?;
                     }
                 }
             } else {

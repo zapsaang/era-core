@@ -89,7 +89,6 @@ async fn missing_volume_recovery_extracts_successfully() {
         .enable_erasure(true)
         .erasure_config(ErasureCodeConfig::new(4, 2))
         .volume_count(6)
-        .enable_matrix_distribution(true)
         .max_volume_size(256 * 1024)
         .build()
         .await
@@ -130,7 +129,6 @@ async fn aware_read_recovers_aead_corruption() {
         .enable_erasure(true)
         .erasure_config(ErasureCodeConfig::new(2, 1))
         .volume_count(3)
-        .enable_matrix_distribution(false)
         .max_volume_size(256 * 1024)
         .build()
         .await

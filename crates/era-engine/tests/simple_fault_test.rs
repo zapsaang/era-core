@@ -32,7 +32,6 @@ async fn test_simple_multivolume_read() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(3)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .expect("Failed to create writer");

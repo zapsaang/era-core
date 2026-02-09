@@ -185,13 +185,13 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     if let Some(val) = max_volume_size {
         config.volume.max_size = val;
     }
-    if let Some(val) = matrix_distribution {
-        config.distribution.strategy = if val {
-            MatrixDistributionStrategy::RotatingOffset
-        } else {
-            MatrixDistributionStrategy::Striped
-        };
+    // Always use RotatingOffset strategy (Striped is deprecated)
+    if let Some(false) = matrix_distribution {
+        eprintln!(
+            "Warning: --matrix-distribution=false is deprecated. Using RotatingOffset strategy."
+        );
     }
+    config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
     // Validate CDC bounds
     let min_size = config.chunking.min_size;
@@ -209,22 +209,16 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         );
     }
 
-    // Validate erasure + distribution combinations
-    if config.erasure.is_none() {
-        if matches!(matrix_distribution, Some(true)) {
-            anyhow::bail!("Matrix distribution requires erasure coding");
-        }
-    } else if let Some(ec) = &config.erasure {
-        if config.distribution.strategy == MatrixDistributionStrategy::RotatingOffset {
-            let required = (ec.data_shards + ec.parity_shards) as usize;
-            if let Some(v) = volume_count {
-                if v < required {
-                    anyhow::bail!(
-                        "Volume count ({}) must be >= total shards ({}) for matrix distribution",
-                        v,
-                        required
-                    );
-                }
+    // Validate erasure + volume count combinations
+    if let Some(ec) = &config.erasure {
+        let required = (ec.data_shards + ec.parity_shards) as usize;
+        if let Some(v) = volume_count {
+            if v < required {
+                anyhow::bail!(
+                    "Volume count ({}) must be >= total shards ({}) for erasure coding",
+                    v,
+                    required
+                );
             }
         }
     }
@@ -273,9 +267,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
                 // Default to total_shards for optimal distribution
                 (ec.data_shards + ec.parity_shards) as usize
             });
-            builder = builder
-                .volume_count(volumes)
-                .enable_matrix_distribution(true);
+            builder = builder.volume_count(volumes);
         } else if let Some(v) = volume_count {
             builder = builder.volume_count(v);
         }

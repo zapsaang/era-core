@@ -177,7 +177,6 @@ async fn create_test_archive_ec_4_1(
         .config(config)
         .password("testpass")
         .volume_count(5) // 4 data + 1 parity
-        .enable_matrix_distribution(true)
         .build()
         .await?;
 
@@ -531,11 +530,9 @@ async fn test_v81_volume_layout_structure() -> Result<(), Box<dyn std::error::Er
     // Verify backup footer exists at offset 4096 (HEADER_SIZE)
     // The backup footer should have the footer magic pattern
     let backup_footer_region = &file_data[4096..4096 + 128];
-    // Footer format: [u32 len] [proto with magic field]
-    // Proto magic field starts at offset 4 in the footer bytes
-    // Pattern: 0x0A (field 1) 0x04 (len 4) "ERAF"
-    let footer_pattern = [0x0A, 0x04, 0x45, 0x52, 0x41, 0x46];
-    let has_backup_footer = backup_footer_region.windows(6).any(|w| w == footer_pattern);
+    // New fixed-length footer format: magic "ERAF" at offset 0
+    let footer_magic = [0x45, 0x52, 0x41, 0x46]; // "ERAF"
+    let has_backup_footer = backup_footer_region[0..4] == footer_magic;
     assert!(
         has_backup_footer,
         "Backup footer not found at offset 4096! First bytes: {:02X?}",
@@ -563,9 +560,8 @@ async fn test_v81_volume_layout_structure() -> Result<(), Box<dyn std::error::Er
     // Verify primary footer at end
     let primary_footer_offset = file_len - 128;
     let primary_footer_region = &file_data[primary_footer_offset as usize..];
-    let has_primary_footer = primary_footer_region
-        .windows(6)
-        .any(|w| w == footer_pattern);
+    // New fixed-length footer format: magic "ERAF" at offset 0
+    let has_primary_footer = primary_footer_region[0..4] == footer_magic;
     assert!(
         has_primary_footer,
         "Primary footer not found at offset {}!",

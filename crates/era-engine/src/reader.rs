@@ -707,6 +707,11 @@ impl ArchiveReader {
                 EraError::IntegrityError("Missing shard offsets for erasure block".into())
             })?;
 
+            // Check shard volumes - archives must be explicit about shard locations
+            let _shard_volumes = location.shard_volumes.as_ref().ok_or_else(|| {
+                EraError::IntegrityError("Missing shard volumes for erasure block".into())
+            })?;
+
             // Determine volume index for each shard
             // We need to map shard_idx -> volume_reader index
 

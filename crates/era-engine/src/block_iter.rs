@@ -22,7 +22,7 @@ use era_common::{
 };
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker};
-use era_volume::VolumeReader;
+use era_volume::{DistributionCalculator, VolumeReader};
 use std::collections::VecDeque;
 
 /// Result of reading and decoding a block

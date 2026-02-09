@@ -36,7 +36,6 @@ async fn test_matrix_distribution_algorithm_correctness() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .unwrap();
@@ -204,7 +203,6 @@ async fn test_matrix_recovery_scenario() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .unwrap();

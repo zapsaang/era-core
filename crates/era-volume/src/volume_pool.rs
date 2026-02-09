@@ -12,6 +12,7 @@ use era_common::{
 use era_storage::StorageBackend;
 use std::path::{Path, PathBuf};
 
+use crate::distribution::{DistributionCalculator, DistributionConfigExt};
 use crate::footer::FOOTER_SIZE;
 use crate::{SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE};
 
@@ -555,8 +556,13 @@ impl<B: StorageBackend> VolumePool<B> {
         let mut volumes_with_header: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
 
-        let mut location =
-            MatrixBlockLocation::new(block_id, self.block_sequence, erasure_config, original_len);
+        let mut location = MatrixBlockLocation::new(
+            block_id,
+            self.block_sequence,
+            erasure_config.data_shards,
+            erasure_config.parity_shards,
+            original_len,
+        );
 
         for (shard_idx, shard_data) in shards.iter().enumerate() {
             let slot = self.shard_volume_slot(shard_idx);

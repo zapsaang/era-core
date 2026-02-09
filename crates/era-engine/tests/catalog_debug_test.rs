@@ -32,7 +32,6 @@ async fn test_catalog_recovery_debug() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(4)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .expect("Failed to create writer");

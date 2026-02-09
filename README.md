@@ -11,12 +11,13 @@ A next-generation encrypted storage engine with content-defined chunking, erasur
 
 - **🔐 Strong Encryption**: XChaCha20-Poly1305 AEAD with context-bound key derivation
 - **🛡️ Post-Quantum Ready**: Hybrid KEM (X25519 + Kyber-768) for future-proof key encapsulation
-- **📦 Erasure Coding**: Reed-Solomon (4+1 default) for data redundancy and corruption recovery
+- **📦 Erasure Coding**: Reed-Solomon (4+2 default) for data redundancy and corruption recovery
 - **🔄 Content-Defined Chunking**: FastCDC algorithm for efficient deduplication
 - **⚡ Async Runtime**: Async-first Tokio design (some blocking paths still under refactor)
-- **🔧 Zero-Copy Serialization**: Rkyv for internal structures, Protobuf for wire format
+- **🔧 Zero-Copy Serialization**: Rkyv for internal structures, fixed-length binary for critical metadata
 - **📁 Multi-Volume Support**: Automatic volume splitting with matrix shard distribution
 - **🔑 Flexible Authentication**: Password-based (Scrypt) or certificate-based (X25519/Kyber hybrid)
+- **📦 Small File Packing**: Efficient storage of many small files via packing
 
 ## 🚀 Quick Start
 
@@ -90,53 +91,85 @@ Layered architecture with strict dependency ordering:
 ┌─────────────────────────────────────────────────────────────┐
 │  L5: era-cli (Command-Line Interface)                       │
 ├─────────────────────────────────────────────────────────────┤
-│  L4: era-engine (Archive Orchestration)                      │
+│  L4: era-engine (Archive Orchestration)                     │
 ├─────────────────────────────────────────────────────────────┤
 │  L3: era-index, era-ingest (Indexing & Ingestion)           │
 ├─────────────────────────────────────────────────────────────┤
-│  L2: era-packing, era-volume (Chunk Packing & Volume I/O)   │
+│  L2: era-packing (Chunk Packing & Buffer Management)        │
 ├─────────────────────────────────────────────────────────────┤
-│  L1: era-codec, era-storage (Encoding & Storage Backends)   │
+│  L1: era-volume, era-codec, era-storage                     │
+│      (Volume I/O, Encoding, Storage Backends)               │
 ├─────────────────────────────────────────────────────────────┤
 │  L0: era-crypto, era-common (Cryptography & Shared Types)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Component Status (Audit Snapshot)
+### Design Principles
+
+- **L0 (era-common)**: Pure type definitions and traits only. No calculation logic.
+- **L1 (era-volume)**: Physical layer with fixed-length binary formats for atomic writes.
+- **Explicit over implicit**: All shard locations are explicitly recorded in metadata.
+- **Immutable archives**: No runtime-calculated defaults for critical data.
+
+### Component Status
 
 | Component | Description | Status |
 |-----------|-------------|--------|
 | `era-common` | Shared types, errors, configuration | ✅ Stable |
 | `era-crypto` | XChaCha20, Kyber, Scrypt, secure memory | ✅ Stable |
 | `era-codec` | Compression (Zstd/LZ4), erasure coding | ✅ Stable |
-| `era-storage` | Async storage backend abstraction | ⚠️ WIP |
-| `era-volume` | Volume format, header/footer, recovery | ⚠️ WIP |
-| `era-packing` | Chunk packing, buffer management | ⚠️ WIP |
-| `era-ingest` | Content-defined chunking (FastCDC) | ⚠️ WIP |
-| `era-index` | LSM-tree index, bloom filters | ⚠️ WIP (Bloom bug) |
-| `era-engine` | High-level archive API | ⚠️ WIP (God object) |
+| `era-storage` | Async storage backend abstraction | ✅ Stable |
+| `era-volume` | Volume format, header/footer, recovery | ✅ Stable |
+| `era-packing` | Chunk packing, buffer management | ✅ Stable |
+| `era-ingest` | Content-defined chunking (FastCDC) | ✅ Stable |
+| `era-index` | LSM-tree index, bloom filters | ⚠️ WIP |
+| `era-engine` | High-level archive API | ⚠️ WIP |
 | `era-cli` | Command-line interface | ⚠️ WIP |
 
 ### Volume Format (v8.1)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Primary Header (4096 bytes)                                  │
-│  - Magic: "ERA\x08\x01"                                       │
-│  - Archive ID, Config, Recipient Slots                        │
+│  Primary Header (4096 bytes)                                 │
+│  - Magic: "ERA\x08\x01"                                      │
+│  - Archive ID, Config, Recipient Slots                       │
 ├──────────────────────────────────────────────────────────────┤
-│  Backup Footer Gap (128 bytes)                                │
+│  Backup Footer (128 bytes, fixed-length binary)              │
 ├──────────────────────────────────────────────────────────────┤
-│  Data Region (Encrypted Blocks)                               │
-│  - Packed chunks with erasure shards                          │
-│  - AEAD encrypted with context-bound keys                     │
+│  Data Region (Encrypted Blocks)                              │
+│  - Packed chunks with erasure shards                         │
+│  - AEAD encrypted with context-bound keys                    │
 ├──────────────────────────────────────────────────────────────┤
-│  Backup Header (4096 bytes)                                   │
+│  Backup Header (4096 bytes)                                  │
 ├──────────────────────────────────────────────────────────────┤
-│  Primary Footer (128 bytes)                                   │
-│  - Block count, Index location, Checksums                     │
+│  Primary Footer (128 bytes, fixed-length binary)             │
+│  - Block count, Index location, Checksums                    │
+│  - Atomic write guarantee (single disk sector)               │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+### Footer Binary Layout (128 bytes)
+
+The footer uses a fixed-length binary format to guarantee atomic writes within a single disk sector:
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | Magic ("ERAF") |
+| 4 | 1 | Version |
+| 6 | 2 | Flags |
+| 8 | 8 | data_end_offset |
+| 16 | 4 | block_count |
+| 24 | 8 | sequence_number |
+| 32 | 8 | catalog_offset |
+| 40 | 4 | catalog_size |
+| 44 | 4 | catalog_block_id |
+| 48 | 8 | last_checkpoint_offset |
+| 56 | 4 | last_checkpoint_block_id |
+| 64 | 8 | index_offset |
+| 72 | 4 | index_size |
+| 76 | 4 | index_block_id |
+| 80 | 8 | backup_header_offset |
+| 96 | 32 | checksum (Blake3) |
 
 ## 🔒 Security
 
@@ -145,7 +178,7 @@ Layered architecture with strict dependency ordering:
 - **Encryption**: XChaCha20-Poly1305 (256-bit key, 192-bit nonce)
 - **Key Derivation**: Scrypt (N=2^20, r=8, p=1) for passwords
 - **Hybrid KEM**: X25519 + Kyber-768 for post-quantum security
-- **Hashing**: BLAKE3 for content addressing
+- **Hashing**: BLAKE3 for content addressing and checksums
 - **Key Expansion**: HKDF-SHA256 with context binding
 
 ### Security Features
@@ -154,13 +187,15 @@ Layered architecture with strict dependency ordering:
 - **Secure Memory**: Locked memory pages (mlock), zeroization on drop
 - **Core Dump Prevention**: Automatic `RLIMIT_CORE` restriction
 - **Redundant Metadata**: Backup headers and footers for resilience
+- **Explicit Shard Locations**: All erasure shard locations explicitly recorded (no implicit calculations)
 
-## 🧭 Engineering Standards (Audit Snapshot)
+## 🧭 Engineering Standards
 
 - **Async purity**: Disk/network I/O must be async; CPU-heavy work uses `tokio::task::spawn_blocking`.
-- **Serialization policy**: Only `prost` (headers/wire) and `rkyv` (internal hot structures).
+- **Serialization policy**: Fixed-length binary for critical metadata (footer), Rkyv for internal structures.
 - **Security hygiene**: Never log keys, hashes, salts; key material must be zeroized.
 - **Error handling**: Avoid `unwrap()` in runtime paths; use `era_common::Result`.
+- **Layer separation**: L0 contains only types/traits; calculation logic belongs in L1+.
 
 ## 🧪 Development
 
@@ -217,14 +252,6 @@ Generate and view documentation:
 ```bash
 cargo doc --workspace --no-deps --open
 ```
-
-## ⚠️ Known Critical Issues
-
-The following items are tracked in [CLAUDE.md](CLAUDE.md) and are considered high-priority:
-
-- **Async reactor blocking** in `ArchiveWriter::add_path` (sync `WalkDir` inside async).
-- **Bloom filter performance bug** in `era-index` (`bloom_contains` uses full lookup).
-- **God object** design in `ArchiveWriter` (needs pipeline refactor).
 
 ## 🗺️ Roadmap
 

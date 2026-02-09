@@ -3,60 +3,41 @@
 //! This module provides types for implementing true matrix distribution
 //! of erasure-coded shards across multiple volumes, ensuring optimal
 //! fault tolerance.
+//!
+//! Note: This module only contains type definitions. Calculation logic
+//! (e.g., `calculate_volume`) is implemented in `era-volume` via extension traits.
 
 use serde::{Deserialize, Serialize};
 
-use super::{BlockId, ErasureCodeConfig};
+use super::BlockId;
 
 /// Matrix distribution strategy for shard placement.
 ///
 /// Determines how shards are distributed across volumes to maximize
 /// fault tolerance. The default strategy rotates shard placement
 /// based on block sequence number.
+///
+/// ## Formulas (implemented in era-volume)
+/// - `RotatingOffset`: `volume_idx = (shard_idx + block_sequence) % volume_count`
+/// - `Striped`: `volume_idx = shard_idx % volume_count`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MatrixDistributionStrategy {
-    /// Rotate shard assignment by block sequence number
-    /// Formula: volume_idx = (shard_idx + block_sequence) % volume_count
+    /// Rotate shard assignment by block sequence number.
     ///
     /// This ensures that consecutive blocks use different starting volumes,
     /// distributing shards more evenly and preventing correlated failures.
     #[default]
     RotatingOffset,
 
-    /// Striped distribution (legacy behavior)
-    /// Formula: volume_idx = shard_idx % volume_count
+    /// Striped distribution (legacy, kept for backwards compatibility).
     ///
     /// All blocks use the same shard-to-volume mapping.
     /// Less fault-tolerant but simpler.
+    ///
+    /// **Deprecated**: This mode is only used when reading archives created
+    /// with older versions. New archives always use `RotatingOffset`.
+    #[deprecated(since = "0.2.0", note = "Use RotatingOffset for new archives")]
     Striped,
-}
-
-impl MatrixDistributionStrategy {
-    /// Calculate which volume a shard should be written to.
-    ///
-    /// # Arguments
-    /// * `shard_idx` - The shard index (0..total_shards)
-    /// * `block_sequence` - The block sequence number
-    /// * `volume_count` - Total number of available volumes
-    ///
-    /// # Returns
-    /// The volume index (0..volume_count) where this shard should be stored.
-    pub fn calculate_volume(
-        &self,
-        shard_idx: usize,
-        block_sequence: u64,
-        volume_count: usize,
-    ) -> usize {
-        if volume_count == 0 {
-            return 0;
-        }
-        match self {
-            MatrixDistributionStrategy::RotatingOffset => {
-                (shard_idx + (block_sequence as usize)) % volume_count
-            }
-            MatrixDistributionStrategy::Striped => shard_idx % volume_count,
-        }
-    }
 }
 
 /// Configuration for matrix distribution.
@@ -77,33 +58,6 @@ impl Default for MatrixDistributionConfig {
             strategy: MatrixDistributionStrategy::RotatingOffset,
             min_volumes: 3,    // Minimum for 4+2 erasure
             target_volumes: 6, // Optimal for 4+2 erasure
-        }
-    }
-}
-
-impl MatrixDistributionConfig {
-    /// Create configuration based on erasure config.
-    ///
-    /// Automatically calculates optimal volume counts.
-    pub fn from_erasure_config(erasure: ErasureCodeConfig) -> Self {
-        let total_shards = erasure.total_shards();
-        let min_volumes = (erasure.parity_shards as usize + 1).max(2);
-        Self {
-            strategy: MatrixDistributionStrategy::RotatingOffset,
-            min_volumes,
-            target_volumes: total_shards,
-        }
-    }
-
-    /// Validate volume count against this configuration.
-    pub fn validate_volume_count(&self, volume_count: usize) -> Result<(), String> {
-        if volume_count < self.min_volumes {
-            Err(format!(
-                "Insufficient volumes: have {}, need at least {}",
-                volume_count, self.min_volumes
-            ))
-        } else {
-            Ok(())
         }
     }
 }
@@ -143,8 +97,9 @@ pub struct MatrixBlockLocation {
     pub block_id: BlockId,
     /// Block sequence number (used for rotation calculation)
     pub block_sequence: u64,
-    /// Erasure configuration
-    pub erasure_config: ErasureCodeConfig,
+    /// Erasure configuration (data_shards, parity_shards)
+    pub data_shards: u8,
+    pub parity_shards: u8,
     /// Original data length before erasure encoding
     pub original_len: u32,
     /// Shard locations, indexed by shard number (0..total_shards)
@@ -157,15 +112,18 @@ impl MatrixBlockLocation {
     pub fn new(
         block_id: BlockId,
         block_sequence: u64,
-        erasure_config: ErasureCodeConfig,
+        data_shards: u8,
+        parity_shards: u8,
         original_len: u32,
     ) -> Self {
+        let total_shards = data_shards as usize + parity_shards as usize;
         Self {
             block_id,
             block_sequence,
-            erasure_config,
+            data_shards,
+            parity_shards,
             original_len,
-            shards: Vec::with_capacity(erasure_config.total_shards()),
+            shards: Vec::with_capacity(total_shards),
         }
     }
 
@@ -174,24 +132,14 @@ impl MatrixBlockLocation {
         self.shards.push(entry);
     }
 
-    /// Check if all shards have been recorded.
-    pub fn is_complete(&self) -> bool {
-        self.shards.len() == self.erasure_config.total_shards()
+    /// Get total number of shards.
+    pub fn total_shards(&self) -> usize {
+        self.data_shards as usize + self.parity_shards as usize
     }
 
-    /// Get shards grouped by volume sequence.
-    ///
-    /// Returns a map from volume_sequence to list of (shard_index, entry) pairs.
-    pub fn shards_by_volume(
-        &self,
-    ) -> std::collections::HashMap<u16, Vec<(usize, &MatrixShardEntry)>> {
-        let mut map = std::collections::HashMap::new();
-        for (idx, entry) in self.shards.iter().enumerate() {
-            map.entry(entry.volume_sequence)
-                .or_insert_with(Vec::new)
-                .push((idx, entry));
-        }
-        map
+    /// Check if all shards have been recorded.
+    pub fn is_complete(&self) -> bool {
+        self.shards.len() == self.total_shards()
     }
 
     /// Get the volume sequence where the primary (first) shard is stored.
@@ -213,83 +161,33 @@ pub struct VolumePoolStatus {
     pub max_volume_size: u64,
 }
 
-impl VolumePoolStatus {
-    /// Check if a volume can fit a block of given size.
-    pub fn can_fit(&self, volume_idx: usize, block_size: u64) -> bool {
-        if volume_idx >= self.volume_sizes.len() {
-            return false;
-        }
-        self.volume_sizes[volume_idx] + block_size <= self.max_volume_size
-    }
-
-    /// Find next volume that can fit a block.
-    /// Returns None if no volume has space (need to create new one).
-    pub fn find_available_volume(&self, start_idx: usize, block_size: u64) -> Option<usize> {
-        for i in 0..self.active_volumes {
-            let idx = (start_idx + i) % self.active_volumes;
-            if self.can_fit(idx, block_size) {
-                return Some(idx);
-            }
-        }
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_rotating_offset_distribution() {
-        let strategy = MatrixDistributionStrategy::RotatingOffset;
-
-        // 3 volumes, block 0
-        assert_eq!(strategy.calculate_volume(0, 0, 3), 0);
-        assert_eq!(strategy.calculate_volume(1, 0, 3), 1);
-        assert_eq!(strategy.calculate_volume(2, 0, 3), 2);
-        assert_eq!(strategy.calculate_volume(3, 0, 3), 0);
-        assert_eq!(strategy.calculate_volume(4, 0, 3), 1);
-        assert_eq!(strategy.calculate_volume(5, 0, 3), 2);
-
-        // 3 volumes, block 1 (rotated by 1)
-        assert_eq!(strategy.calculate_volume(0, 1, 3), 1);
-        assert_eq!(strategy.calculate_volume(1, 1, 3), 2);
-        assert_eq!(strategy.calculate_volume(2, 1, 3), 0);
-
-        // 3 volumes, block 2 (rotated by 2)
-        assert_eq!(strategy.calculate_volume(0, 2, 3), 2);
-        assert_eq!(strategy.calculate_volume(1, 2, 3), 0);
-        assert_eq!(strategy.calculate_volume(2, 2, 3), 1);
+    fn test_matrix_distribution_config_default() {
+        let config = MatrixDistributionConfig::default();
+        assert_eq!(config.strategy, MatrixDistributionStrategy::RotatingOffset);
+        assert_eq!(config.min_volumes, 3);
+        assert_eq!(config.target_volumes, 6);
     }
 
     #[test]
-    fn test_striped_distribution() {
-        let strategy = MatrixDistributionStrategy::Striped;
-
-        // All blocks use same distribution
-        for block in 0..5 {
-            assert_eq!(strategy.calculate_volume(0, block, 3), 0);
-            assert_eq!(strategy.calculate_volume(1, block, 3), 1);
-            assert_eq!(strategy.calculate_volume(2, block, 3), 2);
-            assert_eq!(strategy.calculate_volume(3, block, 3), 0);
-        }
-    }
-
-    #[test]
-    fn test_matrix_config_from_erasure() {
-        let erasure = ErasureCodeConfig::new(4, 2);
-        let config = MatrixDistributionConfig::from_erasure_config(erasure);
-
-        assert_eq!(config.min_volumes, 3); // parity + 1
-        assert_eq!(config.target_volumes, 6); // total shards
+    fn test_matrix_shard_entry() {
+        let entry = MatrixShardEntry::new(1, 4096, 1024, 0xDEADBEEF);
+        assert_eq!(entry.volume_sequence, 1);
+        assert_eq!(entry.physical_offset, 4096);
+        assert_eq!(entry.shard_size, 1024);
+        assert_eq!(entry.crc, 0xDEADBEEF);
     }
 
     #[test]
     fn test_matrix_block_location() {
         let block_id = BlockId::new(0);
-        let erasure = ErasureCodeConfig::new(4, 2);
-        let mut loc = MatrixBlockLocation::new(block_id, 0, erasure, 4096);
+        let mut loc = MatrixBlockLocation::new(block_id, 0, 4, 2, 4096);
 
+        assert_eq!(loc.total_shards(), 6);
         assert!(!loc.is_complete());
 
         for i in 0..6 {
@@ -297,8 +195,6 @@ mod tests {
         }
 
         assert!(loc.is_complete());
-
-        let by_volume = loc.shards_by_volume();
-        assert_eq!(by_volume.len(), 6);
+        assert_eq!(loc.primary_volume_sequence(), Some(0));
     }
 }

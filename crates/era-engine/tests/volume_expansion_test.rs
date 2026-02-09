@@ -21,7 +21,6 @@ async fn test_volume_expansion_matrix_mode() -> Result<()> {
     let mut writer = ArchiveWriter::builder(&output_path)
         .enable_erasure(true)
         .erasure_config(erasure_config)
-        .enable_matrix_distribution(true)
         .volume_count(volume_count)
         .max_volume_size(max_volume_size)
         // Disable various buffers to ensure writes happen

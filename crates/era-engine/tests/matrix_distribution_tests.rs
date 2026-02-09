@@ -37,7 +37,6 @@ async fn test_matrix_distribution_basic() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6) // 6 volumes for 6 shards
-        .enable_matrix_distribution(true)
         .build()
         .await
         .unwrap();
@@ -105,7 +104,6 @@ async fn test_matrix_distribution_multiple_blocks() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(3)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .unwrap();
@@ -206,7 +204,6 @@ async fn test_fixed_size_volume_splitting() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6) // Start with 6 volumes for 6 shards
-        .enable_matrix_distribution(true)
         // Use default volume size (no limit) for simpler test
         .build()
         .await
@@ -265,11 +262,11 @@ async fn test_fixed_size_volume_splitting() {
     }
 }
 
-/// Test that legacy (non-matrix) distribution still works
+/// Test basic erasure coding with default RotatingOffset distribution
 #[tokio::test]
-async fn test_legacy_distribution_compatibility() {
+async fn test_basic_erasure_distribution() {
     let temp_dir = TempDir::new().unwrap();
-    let base_path = temp_dir.path().join("legacy.era");
+    let base_path = temp_dir.path().join("basic_erasure.era");
 
     let erasure_config = ErasureCodeConfig {
         data_shards: 2,
@@ -284,13 +281,12 @@ async fn test_legacy_distribution_compatibility() {
         ..Default::default()
     };
 
-    // Build without matrix distribution (legacy mode)
+    // Build with erasure coding (always uses RotatingOffset)
     let mut writer = ArchiveWriterBuilder::new(&base_path)
         .config(config)
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(3)
-        // Note: NOT calling enable_matrix_distribution
         .build()
         .await
         .unwrap();
@@ -347,7 +343,6 @@ async fn test_matrix_distribution_fault_tolerance() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .unwrap();
@@ -449,7 +444,6 @@ async fn test_shard_size_validation() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(3)
-        .enable_matrix_distribution(true)
         .max_volume_size(30 * 1024) // 30KB - too small for 100KB shards
         .build()
         .await
@@ -548,7 +542,6 @@ async fn test_matrix_distribution_repair_workflow() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .unwrap();
@@ -651,7 +644,6 @@ async fn test_matrix_distribution_large_archive() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6)
-        .enable_matrix_distribution(true)
         .max_volume_size(500 * 1024) // 500KB per volume
         .build()
         .await

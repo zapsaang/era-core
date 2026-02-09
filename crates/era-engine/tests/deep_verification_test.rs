@@ -52,7 +52,6 @@ async fn test_design_promise_verification() {
             .enable_erasure(true)
             .erasure_config(erasure)
             .volume_count(vol_count)
-            .enable_matrix_distribution(true)
             .build()
             .await
             .unwrap_or_else(|_| panic!("Failed for {} volumes", vol_count));
@@ -242,7 +241,6 @@ async fn test_actual_implementation_behavior() {
         .enable_erasure(true)
         .erasure_config(erasure)
         // Note: omitting volume_count should auto-select
-        .enable_matrix_distribution(true)
         .build()
         .await
         .expect("Failed to create writer");

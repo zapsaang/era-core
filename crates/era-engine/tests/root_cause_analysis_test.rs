@@ -34,7 +34,6 @@ async fn test_panic_root_cause_analysis() {
         .enable_erasure(true)
         .erasure_config(erasure)
         .volume_count(4)
-        .enable_matrix_distribution(true)
         .build()
         .await
         .expect("Failed");
