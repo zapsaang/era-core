@@ -146,6 +146,20 @@ impl Chunker {
             .collect()
     }
 
+    /// Async version of `chunk_all` that offloads CPU-intensive work to a blocking thread.
+    ///
+    /// This prevents blocking the async runtime during chunking and hashing operations.
+    /// Use this method when calling from async contexts.
+    pub async fn chunk_all_async(&self, data: Bytes) -> Result<Vec<UniqueChunk>> {
+        let config = self.config.clone();
+        tokio::task::spawn_blocking(move || {
+            let chunker = Chunker::new(config);
+            chunker.chunk_all(&data)
+        })
+        .await
+        .map_err(|e| era_common::EraError::AsyncError(format!("Chunking task failed: {}", e)))
+    }
+
     /// Chunk a file into UniqueChunks
     ///
     /// Reads the entire file into memory first. For very large files,

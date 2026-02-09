@@ -252,6 +252,9 @@ impl FileReader {
     ///
     /// This is the original MVP behavior, kept for backward compatibility.
     /// For large files, consider using `read_file_chunked` instead.
+    ///
+    /// Note: Hashing is offloaded to a blocking thread to avoid blocking
+    /// the async runtime with CPU-intensive work.
     pub async fn read_file(&self, path: &Path) -> Result<UniqueChunk> {
         let file = File::open(path).await.map_err(EraError::Io)?;
         let metadata = file.metadata().await.map_err(EraError::Io)?;
@@ -261,9 +264,15 @@ impl FileReader {
         let mut data = Vec::with_capacity(size);
         reader.read_to_end(&mut data).await.map_err(EraError::Io)?;
 
-        let hash = era_crypto::hash(&data);
+        // Offload CPU-bound hashing to blocking thread
+        let chunk = tokio::task::spawn_blocking(move || {
+            let hash = era_crypto::hash(&data);
+            UniqueChunk::new(Bytes::from(data), hash)
+        })
+        .await
+        .map_err(|e| EraError::AsyncError(format!("Hash task failed: {}", e)))?;
 
-        Ok(UniqueChunk::new(Bytes::from(data), hash))
+        Ok(chunk)
     }
 
     /// Read a file with automatic chunking for large files (Async Stream)
@@ -314,16 +323,30 @@ impl FileReader {
     /// Read a file and split into chunks using FastCDC
     ///
     /// Always uses CDC chunking regardless of file size.
+    /// Note: Chunking and hashing are offloaded to a blocking thread.
     pub async fn read_file_cdc(&self, path: &Path) -> Result<Vec<UniqueChunk>> {
-        let chunker = Chunker::new(self.chunker_config.clone());
+        let config = self.chunker_config.clone();
         let data = self.read_bytes(path).await?;
-        Ok(chunker.chunk_all(&data))
+
+        // Offload CPU-bound chunking + hashing to blocking thread
+        tokio::task::spawn_blocking(move || {
+            let chunker = Chunker::new(config);
+            chunker.chunk_all(&data)
+        })
+        .await
+        .map_err(|e| EraError::AsyncError(format!("Chunking task failed: {}", e)))
     }
 
     /// Read a file and compute its hash without loading all data at once
+    ///
+    /// Note: Hashing is offloaded to a blocking thread.
     pub async fn hash_file(&self, path: &Path) -> Result<ChunkHash> {
         let bytes = self.read_bytes(path).await?;
-        Ok(era_crypto::hash(&bytes))
+
+        // Offload CPU-bound hashing to blocking thread
+        tokio::task::spawn_blocking(move || era_crypto::hash(&bytes))
+            .await
+            .map_err(|e| EraError::AsyncError(format!("Hash task failed: {}", e)))
     }
 
     /// Read file contents into memory

@@ -28,12 +28,15 @@ pub(crate) mod chunk_index;
 pub(crate) mod chunk_processor;
 mod encryption_context;
 mod erasure_stage;
+mod index_stage;
 pub mod metrics_collector;
 mod packing_stage;
 mod reader;
 mod recovery;
 mod repair;
 mod small_file_packer;
+mod volume_stage;
+mod write_pipeline;
 mod writer;
 
 pub use async_pipeline::{ChunkPipeline, PipelineConfig, ProcessedChunk};
