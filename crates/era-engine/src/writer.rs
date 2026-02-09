@@ -16,17 +16,16 @@
 
 use crate::auth::PasswordSlotParams;
 use bytes::Bytes;
-use era_codec::{Compressor, ErasureCoder, ErasureConfig, NoCompressor, ZstdCompressor};
 use era_common::{
-    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, CompressionAlgorithm, EncryptedMacroBlock,
-    ErasureBlockInfo, ErasureCodeConfig, MatrixDistributionStrategy, Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, ErasureCodeConfig,
+    MatrixDistributionStrategy, Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::Nonce;
 use era_crypto::{AeadContext, XChaCha20Poly1305Context};
 use era_crypto::{KdfParams, KeySession, Salt};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
-use era_packing::{BlockMeta, PackedBlock, PackedChunk, Stripe};
+use era_packing::{PackedBlock, PackedChunk};
 use era_storage::LocalStorageBackend;
 use era_volume::{
     Footer, RecipientSlot, RecipientType, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader,
@@ -47,10 +46,13 @@ use crate::checkpoint::CheckpointManager;
 use crate::chunk_index::{create_chunk_index, ChunkIndex};
 use crate::encryption_context::EncryptionContext;
 use crate::erasure_stage::ErasureStage;
+use crate::index_stage::IndexStage;
 use crate::packing_stage::PackingStage;
 use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 use crate::small_file_packer::{SmallFileEntry, SmallFilePacker};
+use crate::volume_stage::VolumeStage;
+use crate::write_pipeline::WritePipeline;
 
 /// Authentication mode for archive encryption
 #[derive(Clone, Debug)]
@@ -821,15 +823,39 @@ impl ArchiveWriterBuilder {
             next_block_id,
         );
 
+        // Create erasure stage (enabled or disabled based on config)
+        let erasure = if enable_erasure {
+            ErasureStage::new(Some(erasure_config))
+        } else {
+            ErasureStage::disabled()
+        };
+
+        // Create volume stage wrapping the pool
+        let volume = VolumeStage::new(volume_pool);
+
+        // Create index stage with chunk index, embedded index, and checkpoint
+        let index = IndexStage::new(chunk_index, checkpoint_manager);
+
+        // Populate index with existing embedded_index entries
+        for (hash, location) in embedded_index {
+            // Use put directly to avoid re-recording to checkpoint
+            index.chunk_index().put(hash, location)?;
+        }
+
+        // Create write pipeline
+        let pipeline = WritePipeline::new(
+            encryption,
+            erasure,
+            volume,
+            index,
+            config.compression.clone(),
+        );
+
         Ok(ArchiveWriter {
             archive_id,
             output_path: self.output_path,
-            encryption,
-            compression_config: config.compression.clone(),
-            volume_pool,
-            catalog,
-            chunk_index,
             key_encapsulation,
+            catalog,
             file_reader,
             enable_cdc,
             // Initialize packing stage with k-Bounded Best-Fit
@@ -838,20 +864,13 @@ impl ArchiveWriterBuilder {
                 target_block_size,
                 config.packing.flush_threshold,
             ),
-            // Initialize erasure stage (enabled or disabled based on config)
-            erasure: if enable_erasure {
-                ErasureStage::new(Some(erasure_config))
-            } else {
-                ErasureStage::disabled()
-            },
-            checkpoint_manager,
             // Small file packing
             small_file_packer: if self.enable_small_file_packing {
                 SmallFilePacker::new(16 * 1024, 1024 * 1024, 1000)
             } else {
                 SmallFilePacker::disabled()
             },
-            embedded_index,
+            pipeline,
         })
     }
 }
@@ -879,31 +898,12 @@ pub struct ArchiveWriter {
     #[allow(dead_code)] // Kept for future use in recovery/diagnostics
     output_path: PathBuf,
 
-    // Encryption context (security-critical, mlock-protected)
-    /// Encapsulates KeySession, VolumeKey, nonce context, and block ID counter
-    encryption: EncryptionContext,
-
-    // Configuration
-    /// Compression settings
-    compression_config: era_common::CompressionConfig,
-
-    /// Volume pool for managing archive volumes
-    volume_pool: VolumePool<era_storage::LocalStorageBackend>,
-
     // Certificate mode: key encapsulation data
     /// Encrypted master key for certificate mode (None for password mode)
     key_encapsulation: Option<KeyEncapsulation>,
 
-    // Catalog and deduplication
+    // Catalog
     catalog: Catalog,
-    /// LSM-Tree or Memory-based chunk deduplication index
-    /// Replaces the old HashMap<ChunkHash, BlockLocation> for:
-    /// - Persistent incremental backups
-    /// - Memory efficiency at scale
-    /// - Bloom filter accelerated lookups
-    chunk_index: Arc<dyn ChunkIndex>,
-    /// Embedded snapshot of chunk index for self-contained recovery
-    embedded_index: HashMap<ChunkHash, BlockLocation>,
 
     // File reading
     file_reader: FileReader,
@@ -914,16 +914,13 @@ pub struct ArchiveWriter {
     /// Improves space utilization from ~55% to ~95%
     packing: PackingStage,
 
-    // Erasure coding stage for stripe buffering
-    /// Buffers K blocks before computing M parity shards
-    erasure: ErasureStage,
-
-    // Checkpoint for crash recovery
-    checkpoint_manager: Option<CheckpointManager>,
-
     // Small file packing
     /// Buffers small files for efficient packing
     small_file_packer: SmallFilePacker,
+
+    // Write pipeline (handles encryption, erasure, volume, index)
+    /// Coordinates the flow: chunks → encryption → erasure → volume → index
+    pipeline: WritePipeline<LocalStorageBackend>,
 }
 
 #[derive(Debug, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
@@ -1166,7 +1163,7 @@ impl ArchiveWriter {
         debug!("File size: {} bytes, hash: {}", size, hash);
 
         // Check for dedup: skip if we already have this chunk
-        if !self.chunk_index.contains(&hash)? {
+        if !self.pipeline.contains(&hash)? {
             // Add to pending batch
             self.add_to_pending(chunk).await?;
         }
@@ -1198,7 +1195,7 @@ impl ArchiveWriter {
             total_size += length as u64;
 
             // Dedup check
-            if !self.chunk_index.contains(&hash)? {
+            if !self.pipeline.contains(&hash)? {
                 self.add_to_pending(chunk).await?;
             }
 
@@ -1291,9 +1288,10 @@ impl ArchiveWriter {
             }
         );
 
-        // Pack and write chunks (with or without erasure coding)
-        // Uses process_packed_block which handles index updates internally
-        self.process_packed_block(packed.chunks, Vec::new()).await?;
+        // Use the pipeline to process chunks (handles encryption, erasure, volume, index)
+        self.pipeline
+            .process_chunks(packed.chunks, Vec::new())
+            .await?;
 
         Ok(())
     }
@@ -1363,25 +1361,27 @@ impl ArchiveWriter {
         small_file_hashes.sort_by_key(|hash| hash.0);
 
         // Pre-validation: reuse existing packed chunk when possible
-        if self.chunk_index.contains(&chunk_hash)? {
-            if let Some(existing_location) = self.chunk_index.get(&chunk_hash)? {
+        if self.pipeline.contains(&chunk_hash)? {
+            if let Some(existing_location) = self.pipeline.get_location(&chunk_hash)? {
                 for hash in &small_file_hashes {
-                    if !self.chunk_index.contains(hash)? {
-                        self.record_chunk_location(*hash, existing_location.clone())?;
+                    if !self.pipeline.contains(hash)? {
+                        self.pipeline.record_location(*hash, existing_location.clone())?;
                     }
                 }
             } else {
-                self.process_packed_block(vec![packed_chunk], small_file_hashes)
+                self.pipeline
+                    .process_chunks(vec![packed_chunk], small_file_hashes)
                     .await?;
             }
         } else {
             // Process the packed chunk (write or buffer)
             // Pass small_file_hashes so they are associated with the block location
-            self.process_packed_block(vec![packed_chunk], small_file_hashes)
+            self.pipeline
+                .process_chunks(vec![packed_chunk], small_file_hashes)
                 .await?;
         }
 
-        // Note: process_packed_block handles index update for both packed_hash
+        // Note: pipeline.process_chunks handles index update for both packed_hash
         // and all small_file_hashes.
 
         // Update catalog for each file
@@ -1413,228 +1413,6 @@ impl ArchiveWriter {
         Ok(())
     }
 
-    /// Create a fresh compressor based on configuration.
-    ///
-    /// This is called for each pack operation since compressors may have internal state.
-    fn create_compressor(&self) -> Box<dyn Compressor> {
-        match self.compression_config.algorithm {
-            CompressionAlgorithm::None => Box::new(NoCompressor),
-            CompressionAlgorithm::Zstd => {
-                Box::new(ZstdCompressor::new(self.compression_config.level))
-            }
-            CompressionAlgorithm::LZ4 => {
-                Box::new(era_codec::LZ4Compressor::new(self.compression_config.level))
-            }
-        }
-    }
-
-    /// Process a packed block (either write directly or buffer for erasure coding).
-    ///
-    /// This replaces the old `pack_and_write_chunks` and handles index updates internally.
-    /// If erasure coding is enabled, blocks are buffered until a full stripe is formed.
-    async fn process_packed_block(
-        &mut self,
-        chunks: Vec<UniqueChunk>,
-        extra_hashes: Vec<ChunkHash>,
-    ) -> Result<()> {
-        // Collect all hashes that need index update for this block
-        let mut hashes: Vec<ChunkHash> = chunks.iter().map(|c| c.hash).collect();
-        hashes.extend(extra_hashes);
-
-        let block_meta = BlockMeta {
-            chunk_hashes: hashes.clone(),
-            chunk_entries: Vec::new(),
-        };
-
-        // Create encrypted block (common for both paths)
-        let compressor = self.create_compressor();
-        let builder = self.encryption.create_block_builder(compressor);
-
-        let encrypted_block = builder.pack_chunks(chunks)?;
-
-        if self.erasure.is_enabled() {
-            // Erasure Coding Path
-            let maybe_stripe = self.erasure.buffer_block(encrypted_block, block_meta)?;
-            if let Some(stripe) = maybe_stripe {
-                self.flush_stripe(stripe).await?;
-            }
-        } else {
-            // Non-erasure path (Direct Write)
-            // Write standard blocks via VolumePool
-            let (location, _volume_id) = self
-                .volume_pool
-                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)
-                .await?;
-
-            // Update index
-            for hash in hashes {
-                self.record_chunk_location(hash, location.clone())?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Flush a complete stripe to storage
-    async fn flush_stripe(&mut self, stripe: Stripe) -> Result<()> {
-        // Write Data Blocks first
-        let mut locations = Vec::new();
-        // Use round-robin if multiple volumes available, else Volume 0
-        let volume_count = self.volume_pool.volume_count();
-
-        if volume_count == 0 {
-            return Err(era_common::EraError::Io(std::io::Error::other(
-                "No volume writers available",
-            )));
-        }
-
-        // 1. Write Data Blocks (and padding)
-        let data_shards_count = stripe.config.data_shards as usize;
-        let mut data_info = Vec::with_capacity(data_shards_count);
-        let mut stripe_lengths: Vec<u32> = vec![0; data_shards_count];
-        let mut padding_blocks: Vec<Option<EncryptedMacroBlock>> = vec![None; data_shards_count];
-
-        for (i, padding_block) in padding_blocks
-            .iter_mut()
-            .enumerate()
-            .take(data_shards_count)
-        {
-            if i < stripe.data_blocks.len() {
-                stripe_lengths[i] = stripe.data_blocks[i].data.len() as u32;
-            } else {
-                // Prepare Padding Block (Empty Encrypted Block)
-                let compressor = self.create_compressor();
-                let builder = self.encryption.create_block_builder(compressor);
-
-                let encrypted_block = builder.pack_chunks(vec![])?;
-                stripe_lengths[i] = encrypted_block.data.len() as u32;
-                *padding_block = Some(encrypted_block);
-            }
-        }
-
-        // Compute parity shards based on actual data blocks + padding blocks
-        let mut shard_inputs: Vec<Vec<u8>> = Vec::with_capacity(data_shards_count);
-        for (i, padding_block) in padding_blocks.iter().enumerate().take(data_shards_count) {
-            if i < stripe.data_blocks.len() {
-                shard_inputs.push(stripe.data_blocks[i].data.to_vec());
-            } else {
-                let padding_block = padding_block
-                    .as_ref()
-                    .expect("Padding block should be prepared");
-                shard_inputs.push(padding_block.data.to_vec());
-            }
-        }
-
-        let coder = ErasureCoder::new(ErasureConfig::new(
-            data_shards_count,
-            stripe.config.parity_shards as usize,
-        )?)?;
-        let all_shards = coder.encode_shards(&shard_inputs)?;
-        let parity_start = data_shards_count;
-        let parity_shards = all_shards[parity_start..].to_vec();
-
-        for (i, padding_block) in padding_blocks
-            .iter_mut()
-            .enumerate()
-            .take(data_shards_count)
-        {
-            if i < stripe.data_blocks.len() {
-                let block = &stripe.data_blocks[i];
-                stripe_lengths[i] = block.data.len() as u32;
-                let (entry, volume_id) = self
-                    .volume_pool
-                    .write_shard(i, &block.data, false, 0, Some(&stripe_lengths))
-                    .await?;
-
-                let loc = BlockLocation {
-                    volume_id,
-                    slot_index: block.block_id.0 as u32,
-                    physical_offset: entry.physical_offset,
-                    encrypted_size: block.data.len() as u32,
-                    erasure_info: None,
-                    shard_offsets: None,
-                    shard_volumes: None,
-                };
-                locations.push(loc);
-                data_info.push((entry.volume_sequence, entry.physical_offset));
-            } else {
-                let encrypted_block = padding_block
-                    .take()
-                    .expect("Padding block should be prepared");
-
-                let (entry, _) = self
-                    .volume_pool
-                    .write_shard(i, &encrypted_block.data, false, 0, Some(&stripe_lengths))
-                    .await?;
-                data_info.push((entry.volume_sequence, entry.physical_offset));
-                // Note: We don't add to `locations` as it's not a real content block,
-                // but we write it to disk to maintain stripe alignment.
-            }
-        }
-
-        // 2. Write Parity Shards
-        let mut parity_locations = Vec::new();
-        // Fixed: Use configured data shards count, not actual block count.
-        // If we have a partial stripe (e.g., 1 block for 2+1 scheme), we want
-        // parity to be at index 2, not index 1. Index 1 is implicitly zero/padding.
-        let data_count = stripe.config.data_shards as usize;
-
-        for (i, shard) in parity_shards.iter().enumerate() {
-            let (entry, _) = self
-                .volume_pool
-                .write_shard(data_count + i, shard, false, 0, Some(&stripe_lengths))
-                .await?;
-            parity_locations.push((entry.volume_sequence, entry.physical_offset));
-        }
-
-        // Advance block sequence for matrix distribution
-        self.volume_pool.advance_block_sequence();
-
-        // 3. Update Index for Data Blocks with Stripe Information
-        for (i, meta) in stripe.block_meta.iter().enumerate() {
-            let mut loc = locations[i].clone();
-
-            // Add Erasure Info (Virtual Striping Metadata)
-            // We need to point to other shards in the stripe.
-            // data_shards = K, parity_shards = M
-            // We have locations[0..K] and parity_locations[0..M]
-
-            // Construct shard_offsets and shard_volumes lists
-            let mut shard_offsets = Vec::new();
-            let mut shard_volumes = Vec::new();
-
-            // Add all data shard locations (including padding shards), excluding self
-            for (j, (sequence, offset)) in data_info.iter().enumerate() {
-                if i != j {
-                    shard_offsets.push(*offset); // physical_offset
-                    shard_volumes.push(*sequence); // volume_sequence
-                }
-            }
-
-            // Add parity shards
-            for (sequence, offset) in &parity_locations {
-                shard_offsets.push(*offset);
-                shard_volumes.push(*sequence);
-            }
-
-            loc.erasure_info = Some(ErasureBlockInfo {
-                data_shards: stripe.config.data_shards,
-                parity_shards: stripe.config.parity_shards,
-                shard_size: stripe.shard_size,
-                original_len: loc.encrypted_size,
-            });
-
-            loc.shard_offsets = Some(shard_offsets);
-            loc.shard_volumes = Some(shard_volumes);
-
-            // Update index
-            for hash in &meta.chunk_hashes {
-                self.record_chunk_location(*hash, loc.clone())?;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Add a file from memory
     pub async fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
         info!("Adding in-memory file: {} ({} bytes)", name, data.len());
@@ -1648,7 +1426,7 @@ impl ArchiveWriter {
             for chunk in data.chunks(target_block_size) {
                 let hash = era_crypto::hash(chunk);
 
-                if !self.chunk_index.contains(&hash)? {
+                if !self.pipeline.contains(&hash)? {
                     let chunk = UniqueChunk::new(Bytes::copy_from_slice(chunk), hash);
                     self.add_to_pending(chunk).await?;
                 }
@@ -1666,7 +1444,7 @@ impl ArchiveWriter {
         let hash = era_crypto::hash(data);
 
         // Dedup check
-        if !self.chunk_index.contains(&hash)? {
+        if !self.pipeline.contains(&hash)? {
             let chunk = UniqueChunk::new(Bytes::copy_from_slice(data), hash);
             self.add_to_pending(chunk).await?;
         }
@@ -1692,24 +1470,18 @@ impl ArchiveWriter {
 
         // Flush erasure stripe buffer if not empty
         // This ensures the last partial stripe is written (with padding)
-        if let Some(stripe) = self.erasure.flush()? {
-            self.flush_stripe(stripe).await?;
-        }
+        self.pipeline.flush_stripe().await?;
 
         // Embed critical metadata in-archive (self-contained recovery)
         self.write_internal_metadata().await?;
 
         // Flush any metadata chunks that were added
         self.flush_pending().await?;
-        if let Some(stripe) = self.erasure.flush()? {
-            self.flush_stripe(stripe).await?;
-        }
+        self.pipeline.flush_stripe().await?;
 
         // Sync checkpoint before writing catalog (atomic point)
-        if let Some(ref mut mgr) = self.checkpoint_manager {
-            mgr.sync()?;
-            debug!("Checkpoint synced before catalog write");
-        }
+        self.pipeline.sync_checkpoint()?;
+        debug!("Checkpoint synced before catalog write");
 
         // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
@@ -1717,8 +1489,8 @@ impl ArchiveWriter {
         let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
 
         // Create session-based builder for catalog encryption
-        let compressor = self.create_compressor();
-        let catalog_builder = self.encryption.create_block_builder(compressor);
+        let compressor = self.pipeline.create_compressor();
+        let catalog_builder = self.pipeline.encryption().create_block_builder(compressor);
 
         // Pack catalog ONCE to ensure same block_id (and thus same nonce) for all volumes
         // This is critical because the block_id is used to derive the encryption nonce
@@ -1726,21 +1498,21 @@ impl ArchiveWriter {
         let catalog_block_id = catalog_block.block_id.sequence() as u32;
 
         // Optionally create a backup block for erasure-coded archives
-        let backup_block = if self.erasure.is_enabled() {
+        let backup_block = if self.pipeline.erasure_enabled() {
             // Create another builder for the backup block (will get next block_id)
-            let compressor = self.create_compressor();
-            let backup_builder = self.encryption.create_block_builder(compressor);
+            let compressor = self.pipeline.create_compressor();
+            let backup_builder = self.pipeline.encryption().create_block_builder(compressor);
             Some(backup_builder.pack_single(catalog_chunk)?)
         } else {
             None
         };
 
         // Matrix distribution mode: write catalog to each volume in the pool
-        let volume_count = self.volume_pool.volume_count();
+        let volume_count = self.pipeline.volume().pool().volume_count();
         let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
 
         for slot in 0..volume_count {
-            if let Some(writer) = self.volume_pool.get_writer_mut(slot) {
+            if let Some(writer) = self.pipeline.volume_mut().pool_mut().get_writer_mut(slot) {
                 let mut location = writer
                     .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)
                     .await?;
@@ -1778,7 +1550,9 @@ impl ArchiveWriter {
 
         // Finalize the pool with per-volume catalog offsets
         let pool_stats = self
-            .volume_pool
+            .pipeline
+            .volume_mut()
+            .pool_mut()
             .finalize_with_catalogs(&catalog_locations, None)
             .await?;
 
@@ -1793,7 +1567,7 @@ impl ArchiveWriter {
         // Checkpoints are now stored as typed blocks inside the .era volume.
 
         // Calculate total blocks written using our counter
-        let blocks_written = self.encryption.blocks_written();
+        let blocks_written = self.pipeline.blocks_written();
 
         let stats = ArchiveStats {
             archive_id: self.archive_id,
@@ -1821,24 +1595,16 @@ impl ArchiveWriter {
         Ok(stats)
     }
 
-    fn record_chunk_location(&mut self, hash: ChunkHash, location: BlockLocation) -> Result<()> {
-        self.chunk_index.put(hash, location.clone())?;
-        self.embedded_index.insert(hash, location.clone());
-        if let Some(ref mut mgr) = self.checkpoint_manager {
-            mgr.record_chunk(hash, location)?;
-        }
-        Ok(())
-    }
-
     async fn write_internal_metadata(&mut self) -> Result<()> {
-        if !self.embedded_index.is_empty() {
-            let snapshot = EmbeddedIndexSnapshot::from_map(&self.embedded_index);
+        let embedded_snapshot = self.pipeline.index().embedded_snapshot();
+        if !embedded_snapshot.is_empty() {
+            let snapshot = EmbeddedIndexSnapshot::from_map(embedded_snapshot);
             let data = rkyv::to_bytes::<_, 4096>(&snapshot)
                 .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
             self.add_bytes(INTERNAL_INDEX_NAME, &data).await?;
         }
 
-        if let Some(ref mgr) = self.checkpoint_manager {
+        if let Some(mgr) = self.pipeline.index().checkpoint_manager() {
             let data = mgr.snapshot_bytes()?;
             self.add_bytes(INTERNAL_CHECKPOINT_NAME, &data).await?;
         }
@@ -2128,6 +1894,8 @@ mod tests {
 /// Generic archive writer that supports any storage backend
 pub mod generic {
     use super::*;
+    use era_codec::{Compressor, NoCompressor, ZstdCompressor};
+    use era_common::CompressionAlgorithm;
     use era_storage::{StorageBackend, StorageWriter};
 
     /// Builder for creating a GenericArchiveWriter with a custom backend

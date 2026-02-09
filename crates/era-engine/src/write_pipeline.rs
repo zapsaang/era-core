@@ -42,9 +42,8 @@ use crate::volume_stage::VolumeStage;
 /// pipeline.process_chunks(chunks, extra_hashes).await?;
 ///
 /// // At finalization, flush any remaining erasure buffer
-/// pipeline.flush_erasure().await?;
+/// pipeline.flush_stripe().await?;
 /// ```
-#[allow(dead_code)]
 pub struct WritePipeline<B: StorageBackend> {
     /// Encryption context for block encryption
     encryption: EncryptionContext,
@@ -58,7 +57,6 @@ pub struct WritePipeline<B: StorageBackend> {
     compression_config: CompressionConfig,
 }
 
-#[allow(dead_code)]
 impl<B: StorageBackend> WritePipeline<B> {
     /// Create a new write pipeline.
     ///
@@ -118,7 +116,7 @@ impl<B: StorageBackend> WritePipeline<B> {
             // Erasure Coding Path: buffer block until stripe is complete
             let maybe_stripe = self.erasure.buffer_block(encrypted_block, block_meta)?;
             if let Some(stripe) = maybe_stripe {
-                self.flush_stripe(stripe).await?;
+                self.flush_stripe_internal(stripe).await?;
             }
         } else {
             // Non-erasure path: write directly
@@ -140,9 +138,9 @@ impl<B: StorageBackend> WritePipeline<B> {
     ///
     /// This should be called during finalization to ensure all buffered
     /// blocks are written (with padding if necessary).
-    pub async fn flush_erasure(&mut self) -> Result<()> {
+    pub async fn flush_stripe(&mut self) -> Result<()> {
         if let Some(stripe) = self.erasure.flush()? {
-            self.flush_stripe(stripe).await?;
+            self.flush_stripe_internal(stripe).await?;
         }
         Ok(())
     }
@@ -154,7 +152,7 @@ impl<B: StorageBackend> WritePipeline<B> {
     /// 2. Computing and writing parity shards
     /// 3. Updating the index with erasure metadata
     #[allow(clippy::needless_range_loop)]
-    async fn flush_stripe(&mut self, stripe: Stripe) -> Result<()> {
+    async fn flush_stripe_internal(&mut self, stripe: Stripe) -> Result<()> {
         let volume_count = self.volume.volume_count();
 
         if volume_count == 0 {
@@ -312,7 +310,9 @@ impl<B: StorageBackend> WritePipeline<B> {
     }
 
     /// Create a fresh compressor based on configuration.
-    fn create_compressor(&self) -> Box<dyn Compressor> {
+    ///
+    /// This is called for each pack operation since compressors may have internal state.
+    pub fn create_compressor(&self) -> Box<dyn Compressor> {
         match self.compression_config.algorithm {
             CompressionAlgorithm::None => Box::new(NoCompressor),
             CompressionAlgorithm::Zstd => {
@@ -325,8 +325,16 @@ impl<B: StorageBackend> WritePipeline<B> {
     }
 
     /// Check if erasure coding is enabled.
-    pub fn is_erasure_enabled(&self) -> bool {
+    pub fn erasure_enabled(&self) -> bool {
         self.erasure.is_enabled()
+    }
+
+    /// Sync the checkpoint to stable storage.
+    ///
+    /// This should be called at safe points during archiving to enable
+    /// crash recovery.
+    pub fn sync_checkpoint(&mut self) -> Result<()> {
+        self.index.sync_checkpoint()
     }
 
     /// Get the number of blocks written (from encryption context).
@@ -494,7 +502,7 @@ mod tests {
 
         let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 
-        assert!(pipeline.is_erasure_enabled());
+        assert!(pipeline.erasure_enabled());
 
         // Process two chunks to form a complete stripe (K=2)
         let chunk1 = create_test_chunk(b"Chunk 1 data");

@@ -88,6 +88,7 @@ impl IndexStage {
     /// This updates:
     /// 1. The primary chunk index (for deduplication)
     /// 2. The embedded index (for self-contained recovery)
+    /// 3. The checkpoint manager (for crash recovery, if enabled)
     ///
     /// # Arguments
     /// * `hash` - The chunk hash
@@ -97,7 +98,12 @@ impl IndexStage {
         self.chunk_index.put(hash, location.clone())?;
 
         // Update embedded index for self-contained recovery
-        self.embedded_index.insert(hash, location);
+        self.embedded_index.insert(hash, location.clone());
+
+        // Update checkpoint for crash recovery
+        if let Some(ref mut mgr) = self.checkpoint_manager {
+            mgr.record_chunk(hash, location)?;
+        }
 
         Ok(())
     }
