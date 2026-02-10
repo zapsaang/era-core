@@ -17,9 +17,8 @@ use super::BlockId;
 /// fault tolerance. The default strategy rotates shard placement
 /// based on block sequence number.
 ///
-/// ## Formulas (implemented in era-volume)
+/// ## Formula (implemented in era-volume)
 /// - `RotatingOffset`: `volume_idx = (shard_idx + block_sequence) % volume_count`
-/// - `Striped`: `volume_idx = shard_idx % volume_count`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MatrixDistributionStrategy {
     /// Rotate shard assignment by block sequence number.
@@ -28,16 +27,6 @@ pub enum MatrixDistributionStrategy {
     /// distributing shards more evenly and preventing correlated failures.
     #[default]
     RotatingOffset,
-
-    /// Striped distribution (legacy, kept for backwards compatibility).
-    ///
-    /// All blocks use the same shard-to-volume mapping.
-    /// Less fault-tolerant but simpler.
-    ///
-    /// **Deprecated**: This mode is only used when reading archives created
-    /// with older versions. New archives always use `RotatingOffset`.
-    #[deprecated(since = "0.2.0", note = "Use RotatingOffset for new archives")]
-    Striped,
 }
 
 /// Configuration for matrix distribution.

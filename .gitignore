@@ -24,5 +24,7 @@ Cargo.lock
 *.md
 !README.md
 
+fuzz/
+bins/
 **/bench_data/
 **/test_shell/

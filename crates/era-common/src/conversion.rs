@@ -178,13 +178,8 @@ impl From<BlockLocation> for proto::BlockLocation {
             physical_offset: loc.physical_offset,
             encrypted_size: loc.encrypted_size,
             erasure_info: loc.erasure_info.map(Into::into),
-            shard_offsets: loc.shard_offsets.unwrap_or_default(),
-            shard_volumes: loc
-                .shard_volumes
-                .unwrap_or_default()
-                .into_iter()
-                .map(|v| v as u32)
-                .collect(),
+            shard_offsets: loc.shard_offsets,
+            shard_volumes: loc.shard_volumes.into_iter().map(|v| v as u32).collect(),
         }
     }
 }
@@ -204,16 +199,8 @@ impl TryFrom<proto::BlockLocation> for BlockLocation {
             physical_offset: proto.physical_offset,
             encrypted_size: proto.encrypted_size,
             erasure_info: proto.erasure_info.map(|e| e.try_into()).transpose()?,
-            shard_offsets: if proto.shard_offsets.is_empty() {
-                None
-            } else {
-                Some(proto.shard_offsets)
-            },
-            shard_volumes: if proto.shard_volumes.is_empty() {
-                None
-            } else {
-                Some(proto.shard_volumes.into_iter().map(|v| v as u16).collect())
-            },
+            shard_offsets: proto.shard_offsets,
+            shard_volumes: proto.shard_volumes.into_iter().map(|v| v as u16).collect(),
         })
     }
 }
@@ -263,15 +250,11 @@ impl TryFrom<proto::BlockChunkIndex> for BlockChunkIndex {
 }
 
 impl From<MatrixDistributionConfig> for proto::MatrixDistributionConfig {
-    #[allow(deprecated)]
     fn from(config: MatrixDistributionConfig) -> Self {
         Self {
             strategy: match config.strategy {
                 MatrixDistributionStrategy::RotatingOffset => {
                     proto::matrix_distribution_config::Strategy::RotatingOffset.into()
-                }
-                MatrixDistributionStrategy::Striped => {
-                    proto::matrix_distribution_config::Strategy::Striped.into()
                 }
             },
         }
@@ -279,15 +262,13 @@ impl From<MatrixDistributionConfig> for proto::MatrixDistributionConfig {
 }
 
 impl From<proto::MatrixDistributionConfig> for MatrixDistributionConfig {
-    #[allow(deprecated)]
     fn from(proto: proto::MatrixDistributionConfig) -> Self {
         Self {
             strategy: match proto.strategy() {
-                proto::matrix_distribution_config::Strategy::RotatingOffset => {
+                // Striped wire value silently upgrades to RotatingOffset
+                proto::matrix_distribution_config::Strategy::RotatingOffset
+                | proto::matrix_distribution_config::Strategy::Striped => {
                     MatrixDistributionStrategy::RotatingOffset
-                }
-                proto::matrix_distribution_config::Strategy::Striped => {
-                    MatrixDistributionStrategy::Striped
                 }
             },
             ..Default::default()

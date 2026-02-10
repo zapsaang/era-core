@@ -570,8 +570,8 @@ impl ArchiveReader {
             physical_offset: footer.index_offset,
             encrypted_size: footer.index_size,
             erasure_info: None,
-            shard_offsets: None,
-            shard_volumes: None,
+            shard_offsets: Vec::new(),
+            shard_volumes: Vec::new(),
         };
 
         let encrypted_block = reader.read_block(&location).await?;
@@ -647,8 +647,8 @@ impl ArchiveReader {
             physical_offset: footer.catalog_offset,
             encrypted_size: footer.catalog_size,
             erasure_info: None,
-            shard_offsets: None,
-            shard_volumes: None,
+            shard_offsets: Vec::new(),
+            shard_volumes: Vec::new(),
         };
 
         debug!(
@@ -703,14 +703,18 @@ impl ArchiveReader {
             let mut available_shards = Vec::with_capacity(total_shards);
 
             // Check shard offsets
-            let _shard_offsets = location.shard_offsets.as_ref().ok_or_else(|| {
-                EraError::IntegrityError("Missing shard offsets for erasure block".into())
-            })?;
+            if location.shard_offsets.is_empty() {
+                return Err(EraError::IntegrityError(
+                    "Missing shard offsets for erasure block".into(),
+                ));
+            }
 
             // Check shard volumes - archives must be explicit about shard locations
-            let _shard_volumes = location.shard_volumes.as_ref().ok_or_else(|| {
-                EraError::IntegrityError("Missing shard volumes for erasure block".into())
-            })?;
+            if location.shard_volumes.is_empty() {
+                return Err(EraError::IntegrityError(
+                    "Missing shard volumes for erasure block".into(),
+                ));
+            }
 
             // Determine volume index for each shard
             // We need to map shard_idx -> volume_reader index
@@ -739,13 +743,11 @@ impl ArchiveReader {
                         shard_idx - 1
                     };
 
-                    if let Some(ref volumes) = location.shard_volumes {
-                        if let Some(&seq) = volumes.get(vec_idx) {
-                            // Find reader with this sequence
-                            for (i, r) in self.volume_readers.iter().enumerate() {
-                                if r.header().volume_sequence as usize == seq as usize {
-                                    return Some(i);
-                                }
+                    if let Some(&seq) = location.shard_volumes.get(vec_idx) {
+                        // Find reader with this sequence
+                        for (i, r) in self.volume_readers.iter().enumerate() {
+                            if r.header().volume_sequence as usize == seq as usize {
+                                return Some(i);
                             }
                         }
                     }
@@ -765,12 +767,8 @@ impl ArchiveReader {
                         } else {
                             shard_idx - 1
                         };
-                        if let Some(ref offsets) = location.shard_offsets {
-                            if let Some(&off) = offsets.get(vec_idx) {
-                                off
-                            } else {
-                                continue;
-                            }
+                        if let Some(&off) = location.shard_offsets.get(vec_idx) {
+                            off
                         } else {
                             continue;
                         }

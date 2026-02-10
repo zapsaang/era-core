@@ -474,8 +474,8 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
         physical_offset: checkpoint_offset,
         encrypted_size: 0, // Will be read from header
         erasure_info: None,
-        shard_offsets: None,
-        shard_volumes: None,
+        shard_offsets: Vec::new(),
+        shard_volumes: Vec::new(),
     };
 
     // Read typed block
@@ -640,8 +640,8 @@ mod tests {
             physical_offset: 1024,
             encrypted_size: 4096,
             erasure_info: None,
-            shard_offsets: None,
-            shard_volumes: None,
+            shard_offsets: Vec::new(),
+            shard_volumes: Vec::new(),
         };
         written_chunks.insert(hash, location);
 

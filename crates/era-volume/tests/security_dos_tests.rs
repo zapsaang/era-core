@@ -132,8 +132,8 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
             shard_size: 256,
             original_len: 1024,
         }),
-        shard_offsets: None,
-        shard_volumes: None,
+        shard_offsets: Vec::new(),
+        shard_volumes: Vec::new(),
     };
 
     let erasure_info = fake_location.erasure_info.unwrap();

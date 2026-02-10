@@ -425,8 +425,8 @@ impl<R: StorageReader> VolumeReader<R> {
                                                 encrypted_size: (BlockHeader::SIZE as u32
                                                     + header.length),
                                                 erasure_info: None,
-                                                shard_offsets: None,
-                                                shard_volumes: None,
+                                                shard_offsets: Vec::new(),
+                                                shard_volumes: Vec::new(),
                                             });
 
                                             tracing::debug!(

@@ -67,12 +67,12 @@ pub struct BlockLocation {
     pub erasure_info: Option<ErasureBlockInfo>,
     /// Offsets for additional shards in distributed storage
     /// (Shard 0 is at physical_offset, Shard 1 at offsets[0], etc.)
-    /// Required when erasure_info is Some.
-    pub shard_offsets: Option<Vec<u64>>,
+    /// Empty for non-erasure blocks.
+    pub shard_offsets: Vec<u64>,
     /// Volume sequence numbers for each shard (for matrix distribution)
-    /// When present, shard i is on volume_sequences[i].
-    /// Required when erasure_info is Some - archives must be explicit about shard locations.
-    pub shard_volumes: Option<Vec<u16>>,
+    /// Shard i is on volume_sequences[i].
+    /// Empty for non-erasure blocks.
+    pub shard_volumes: Vec<u16>,
 }
 
 /// Information about an erasure-coded block
@@ -123,38 +123,20 @@ impl BlockLocation {
             // shard_offsets excludes self, so should have total_shards - 1 entries
             let expected_other_shards = total_shards.saturating_sub(1);
 
-            match &self.shard_offsets {
-                None => {
-                    return Err(format!(
-                        "Erasure-coded block missing shard_offsets (expected {} entries)",
-                        expected_other_shards
-                    ));
-                }
-                Some(offsets) if offsets.len() != expected_other_shards => {
-                    return Err(format!(
-                        "shard_offsets has {} entries, expected {}",
-                        offsets.len(),
-                        expected_other_shards
-                    ));
-                }
-                _ => {}
+            if self.shard_offsets.len() != expected_other_shards {
+                return Err(format!(
+                    "shard_offsets has {} entries, expected {}",
+                    self.shard_offsets.len(),
+                    expected_other_shards
+                ));
             }
 
-            match &self.shard_volumes {
-                None => {
-                    return Err(format!(
-                        "Erasure-coded block missing shard_volumes (expected {} entries)",
-                        expected_other_shards
-                    ));
-                }
-                Some(volumes) if volumes.len() != expected_other_shards => {
-                    return Err(format!(
-                        "shard_volumes has {} entries, expected {}",
-                        volumes.len(),
-                        expected_other_shards
-                    ));
-                }
-                _ => {}
+            if self.shard_volumes.len() != expected_other_shards {
+                return Err(format!(
+                    "shard_volumes has {} entries, expected {}",
+                    self.shard_volumes.len(),
+                    expected_other_shards
+                ));
             }
         }
         Ok(())

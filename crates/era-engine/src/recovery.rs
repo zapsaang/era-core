@@ -440,8 +440,8 @@ mod tests {
             physical_offset: offset,
             encrypted_size: size,
             erasure_info: None,
-            shard_offsets: None,
-            shard_volumes: None,
+            shard_offsets: Vec::new(),
+            shard_volumes: Vec::new(),
         }
     }
 

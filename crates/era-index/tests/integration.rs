@@ -18,8 +18,8 @@ fn create_test_location(slot: u32) -> BlockLocation {
         physical_offset: slot as u64 * 4096,
         encrypted_size: 4096,
         erasure_info: None,
-        shard_offsets: None,
-        shard_volumes: None,
+        shard_offsets: Vec::new(),
+        shard_volumes: Vec::new(),
     }
 }
 
@@ -35,8 +35,8 @@ fn create_erasure_location(slot: u32) -> BlockLocation {
             shard_size: 1024,
             original_len: 4000,
         }),
-        shard_offsets: Some(vec![4096, 8192, 12288, 16384, 20480]),
-        shard_volumes: Some(vec![0, 1, 2, 0, 1, 2]),
+        shard_offsets: vec![4096, 8192, 12288, 16384, 20480],
+        shard_volumes: vec![0, 1, 2, 0, 1, 2],
     }
 }
 
@@ -186,8 +186,8 @@ fn test_erasure_coded_locations() {
         let info = retrieved.erasure_info.unwrap();
         assert_eq!(info.data_shards, 4);
         assert_eq!(info.parity_shards, 2);
-        assert_eq!(retrieved.shard_offsets.as_ref().unwrap().len(), 5);
-        assert_eq!(retrieved.shard_volumes.as_ref().unwrap().len(), 6);
+        assert_eq!(retrieved.shard_offsets.len(), 5);
+        assert_eq!(retrieved.shard_volumes.len(), 6);
     }
 }
 

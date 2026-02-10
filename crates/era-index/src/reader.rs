@@ -108,8 +108,8 @@ impl IndexReader {
                     physical_offset: footer.index_offset,
                     encrypted_size: footer.index_size,
                     erasure_info: None,
-                    shard_offsets: None,
-                    shard_volumes: None,
+                    shard_offsets: Vec::new(),
+                    shard_volumes: Vec::new(),
                 };
 
                 tracing::info!("Found index in footer at offset {}", footer.index_offset);

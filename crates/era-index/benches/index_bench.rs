@@ -18,8 +18,8 @@ fn random_hash() -> ChunkHash {
         physical_offset: slot as u64 * 4096,
         encrypted_size: 4096,
         erasure_info: None,
-        shard_offsets: None,
-        shard_volumes: None,
+        shard_offsets: Vec::new(),
+        shard_volumes: Vec::new(),
     }
 }
 

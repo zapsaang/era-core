@@ -185,7 +185,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     if let Some(val) = max_volume_size {
         config.volume.max_size = val;
     }
-    // Always use RotatingOffset strategy (Striped is deprecated)
+    // Always use RotatingOffset strategy
     if let Some(false) = matrix_distribution {
         eprintln!(
             "Warning: --matrix-distribution=false is deprecated. Using RotatingOffset strategy."

@@ -261,8 +261,8 @@ impl<W: StorageWriter> VolumeWriter<W> {
             physical_offset: offset,
             encrypted_size: block_len,
             erasure_info: None, // Standard blocks are not erasure-coded
-            shard_offsets: None,
-            shard_volumes: None,
+            shard_offsets: Vec::new(),
+            shard_volumes: Vec::new(),
         };
 
         if self.max_size.is_some() {

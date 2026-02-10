@@ -23,7 +23,6 @@ pub trait DistributionCalculator {
         -> usize;
 }
 
-#[allow(deprecated)]
 impl DistributionCalculator for MatrixDistributionStrategy {
     fn calculate_volume(
         &self,
@@ -38,7 +37,6 @@ impl DistributionCalculator for MatrixDistributionStrategy {
             MatrixDistributionStrategy::RotatingOffset => {
                 (shard_idx + (block_sequence as usize)) % volume_count
             }
-            MatrixDistributionStrategy::Striped => shard_idx % volume_count,
         }
     }
 }
@@ -131,20 +129,6 @@ mod tests {
         assert_eq!(strategy.calculate_volume(0, 2, 3), 2);
         assert_eq!(strategy.calculate_volume(1, 2, 3), 0);
         assert_eq!(strategy.calculate_volume(2, 2, 3), 1);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_striped_distribution_legacy() {
-        let strategy = MatrixDistributionStrategy::Striped;
-
-        // All blocks use same distribution
-        for block in 0..5 {
-            assert_eq!(strategy.calculate_volume(0, block, 3), 0);
-            assert_eq!(strategy.calculate_volume(1, block, 3), 1);
-            assert_eq!(strategy.calculate_volume(2, block, 3), 2);
-            assert_eq!(strategy.calculate_volume(3, block, 3), 0);
-        }
     }
 
     #[test]

@@ -217,8 +217,8 @@ impl<B: StorageBackend> WritePipeline<B> {
                     physical_offset: entry.physical_offset,
                     encrypted_size: block.data.len() as u32,
                     erasure_info: None,
-                    shard_offsets: None,
-                    shard_volumes: None,
+                    shard_offsets: Vec::new(),
+                    shard_volumes: Vec::new(),
                 };
                 locations.push(loc);
                 data_info.push((entry.volume_sequence, entry.physical_offset));
@@ -282,8 +282,8 @@ impl<B: StorageBackend> WritePipeline<B> {
                 original_len: loc.encrypted_size,
             });
 
-            loc.shard_offsets = Some(shard_offsets);
-            loc.shard_volumes = Some(shard_volumes);
+            loc.shard_offsets = shard_offsets;
+            loc.shard_volumes = shard_volumes;
 
             // Update index for all chunk hashes in this block
             for hash in &meta.chunk_hashes {
@@ -348,11 +348,13 @@ impl<B: StorageBackend> WritePipeline<B> {
     }
 
     /// Get a reference to the erasure stage.
+    #[allow(dead_code)]
     pub fn erasure(&self) -> &ErasureStage {
         &self.erasure
     }
 
     /// Get a mutable reference to the erasure stage.
+    #[allow(dead_code)]
     pub fn erasure_mut(&mut self) -> &mut ErasureStage {
         &mut self.erasure
     }
@@ -373,6 +375,7 @@ impl<B: StorageBackend> WritePipeline<B> {
     }
 
     /// Get a mutable reference to the index stage.
+    #[allow(dead_code)]
     pub fn index_mut(&mut self) -> &mut IndexStage {
         &mut self.index
     }
@@ -381,6 +384,7 @@ impl<B: StorageBackend> WritePipeline<B> {
     ///
     /// This is useful during finalization when you need direct access
     /// to individual stages.
+    #[allow(dead_code)]
     pub fn into_parts(self) -> (EncryptionContext, ErasureStage, VolumeStage<B>, IndexStage) {
         (self.encryption, self.erasure, self.volume, self.index)
     }
