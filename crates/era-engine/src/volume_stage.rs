@@ -228,6 +228,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            era_volume::EncryptedVolumeKey {
+                algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            era_volume::AccessPolicy::AnyOfN,
         )
     }
 

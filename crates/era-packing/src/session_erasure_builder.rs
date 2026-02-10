@@ -31,7 +31,7 @@ use crate::SessionBlockBuilder;
 ///
 /// ```ignore
 /// let session = KeySession::new(password, &salt, &params)?;
-/// let volume_key = session.derive_volume_key(0);
+/// let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 /// let builder = SessionErasureBlockBuilder::new(
 ///     &session,
 ///     &volume_key,
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn test_session_erasure_pack_single() {
         let (session, salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn test_session_erasure_pack_multiple_chunks() {
         let (session, salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn test_different_blocks_have_different_ciphertext() {
         let (session, salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
         let compressor1 = Box::new(ZstdCompressor::default());
         let compressor2 = Box::new(ZstdCompressor::default());
@@ -477,7 +477,7 @@ mod tests {
         use era_codec::{ErasureCoder, ErasureConfig};
 
         let (session, salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 

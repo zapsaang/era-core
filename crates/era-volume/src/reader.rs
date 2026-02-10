@@ -480,7 +480,7 @@ impl<R: StorageReader> VolumeReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::VolumeWriter;
+    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, VolumeWriter};
     use era_common::{ArchiveConfig, ArchiveId};
     use era_storage::LocalStorageBackend;
     use tempfile::TempDir;
@@ -497,6 +497,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         );
         let archive_id = header.archive_id;
 
@@ -521,6 +527,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         );
 
         let mut writer = VolumeWriter::create(&backend, path, header).await.unwrap();

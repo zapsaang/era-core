@@ -408,7 +408,7 @@ mod tests {
         let salt = Salt::generate();
         let params = KdfParams::default();
         let session = KeySession::new(b"test_password", &salt, &params).unwrap();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let nonce_context = salt.as_bytes()[..16].try_into().unwrap();
         EncryptionContext::new(session, volume_key, nonce_context)
     }
@@ -419,6 +419,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            era_volume::EncryptedVolumeKey {
+                algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            era_volume::AccessPolicy::AnyOfN,
         )
     }
 

@@ -262,13 +262,13 @@ fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
     c.bench_function("hkdf_volume_key_derivation", |b| {
         let mut volume_id = 0u16;
         b.iter(|| {
-            let _vk = session.derive_volume_key(volume_id);
+            let (_vk, _) = session.generate_and_wrap_volume_key().unwrap();
             volume_id = volume_id.wrapping_add(1);
             black_box(_vk);
         });
     });
 
-    let volume_key = session.derive_volume_key(0);
+    let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
     c.bench_function("hkdf_block_key_derivation", |b| {
         let nonce_context = [0u8; 16];
         let mut block_id = 0u64;

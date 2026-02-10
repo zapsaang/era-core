@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 /// Magic bytes for ERA format: "ERA\x08\x01\x00\x00\x00"
 pub const MAGIC: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00];
 
-/// Current header version (incremented for certificate support)
-pub const HEADER_VERSION: u16 = 2;
+/// Current header version
+pub const HEADER_VERSION: u16 = 3;
 
 /// Size of the header region (4KB aligned)
 pub const HEADER_SIZE: usize = 4096;
@@ -15,6 +15,33 @@ pub const HEADER_SIZE: usize = 4096;
 /// Data region start offset (after header + backup footer gap)
 /// V8.1 layout: [Header 4096] [Backup Footer Gap 128] [Data Region...]
 pub const DATA_REGION_START: u64 = (HEADER_SIZE + crate::footer::BACKUP_FOOTER_GAP) as u64; // 4224
+
+/// The encryption algorithm used for Key Wrapping (IK -> VK)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum KeyWrapAlgorithm {
+    XChaCha20Poly1305 = 1,
+}
+
+/// Access policy for multi-party decryption
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AccessPolicy {
+    /// Any single recipient can unlock (OR logic)
+    #[default]
+    AnyOfN,
+    /// T-of-N threshold required (AND logic via Shamir's Secret Sharing)
+    Threshold(u32),
+}
+
+/// The encrypted Volume Key container
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedVolumeKey {
+    pub algorithm: KeyWrapAlgorithm,
+    /// Random nonce for the wrapping operation (24 bytes for XChaCha20)
+    pub nonce: [u8; 24],
+    /// The random VK encrypted by the IK (ciphertext + Poly1305 tag)
+    pub ciphertext: Vec<u8>,
+}
 
 /// Recipient type for the multi-recipient envelope
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,21 +105,23 @@ pub struct SuperHeader {
     pub config: ArchiveConfig,
     /// Archive-wide salt (16 bytes) for key context/nonce generation
     pub salt: [u8; 16],
+    /// Key Epoch ID. Increments when MK is rotated.
+    pub epoch_id: u32,
+    /// The Encrypted Volume Key (VK wrapped by IK derived from MK)
+    pub encrypted_volume_key: EncryptedVolumeKey,
+    /// Access control policy
+    pub access_policy: AccessPolicy,
 }
 
 impl SuperHeader {
     /// Create a new super header for a new archive
-    ///
-    /// # Arguments
-    /// * `archive_id` - Unique archive identifier
-    /// * `recipients` - List of recipient slots
-    /// * `config` - Archive configuration
-    /// * `salt` - Random salt for the archive context
     pub fn new(
         archive_id: ArchiveId,
         recipients: Vec<RecipientSlot>,
         config: ArchiveConfig,
         salt: [u8; 16],
+        encrypted_volume_key: EncryptedVolumeKey,
+        access_policy: AccessPolicy,
     ) -> Self {
         Self {
             magic: MAGIC,
@@ -100,7 +129,7 @@ impl SuperHeader {
             volume_id: VolumeId::new(),
             archive_id,
             volume_sequence: 0,
-            total_volumes: 0, // Unknown at creation, set by writer
+            total_volumes: 0,
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -109,6 +138,9 @@ impl SuperHeader {
             recipients,
             config,
             salt,
+            epoch_id: 0,
+            encrypted_volume_key,
+            access_policy,
         }
     }
 
@@ -120,7 +152,7 @@ impl SuperHeader {
             volume_id: VolumeId::new(),
             archive_id: self.archive_id,
             volume_sequence: self.volume_sequence + 1,
-            total_volumes: self.total_volumes, // Inherit from parent
+            total_volumes: self.total_volumes,
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -129,6 +161,9 @@ impl SuperHeader {
             recipients: self.recipients.clone(),
             config: self.config.clone(),
             salt: self.salt,
+            epoch_id: self.epoch_id,
+            encrypted_volume_key: self.encrypted_volume_key.clone(),
+            access_policy: self.access_policy,
         }
     }
 
@@ -167,7 +202,7 @@ impl SuperHeader {
             return Err(era_common::EraError::InvalidMagic);
         }
 
-        let header: Self = proto.into();
+        let header: Self = proto.try_into()?;
 
         Ok(header)
     }
@@ -216,8 +251,36 @@ impl From<proto::RecipientSlot> for RecipientSlot {
     }
 }
 
+impl From<EncryptedVolumeKey> for proto::EncryptedVolumeKey {
+    fn from(evk: EncryptedVolumeKey) -> Self {
+        Self {
+            algorithm: match evk.algorithm {
+                KeyWrapAlgorithm::XChaCha20Poly1305 => {
+                    proto::KeyWrapAlgorithm::Xchacha20Poly1305.into()
+                }
+            },
+            nonce: evk.nonce.to_vec(),
+            ciphertext: evk.ciphertext,
+        }
+    }
+}
+
+impl From<proto::EncryptedVolumeKey> for EncryptedVolumeKey {
+    fn from(proto: proto::EncryptedVolumeKey) -> Self {
+        Self {
+            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: proto.nonce.try_into().unwrap_or([0u8; 24]),
+            ciphertext: proto.ciphertext,
+        }
+    }
+}
+
 impl From<SuperHeader> for proto::SuperHeader {
     fn from(header: SuperHeader) -> Self {
+        let (access_policy, threshold) = match header.access_policy {
+            AccessPolicy::AnyOfN => (proto::AccessPolicy::AnyOfN.into(), 0u32),
+            AccessPolicy::Threshold(t) => (proto::AccessPolicy::Threshold.into(), t),
+        };
         Self {
             magic: header.magic.to_vec(),
             version: header.version as u32,
@@ -230,14 +293,41 @@ impl From<SuperHeader> for proto::SuperHeader {
             recipients: header.recipients.into_iter().map(Into::into).collect(),
             config: Some(header.config.into()),
             salt: header.salt.to_vec(),
+            epoch_id: header.epoch_id,
+            encrypted_volume_key: Some(header.encrypted_volume_key.into()),
+            access_policy,
+            threshold,
         }
     }
 }
 
-impl From<proto::SuperHeader> for SuperHeader {
-    fn from(proto: proto::SuperHeader) -> Self {
-        Self {
-            magic: proto.magic.try_into().unwrap_or(MAGIC),
+impl TryFrom<proto::SuperHeader> for SuperHeader {
+    type Error = era_common::EraError;
+
+    fn try_from(proto: proto::SuperHeader) -> std::result::Result<Self, Self::Error> {
+        let magic: [u8; 8] = proto
+            .magic
+            .as_slice()
+            .try_into()
+            .map_err(|_| era_common::EraError::InvalidMagic)?;
+        if magic != MAGIC {
+            return Err(era_common::EraError::InvalidMagic);
+        }
+        let access_policy = match proto.access_policy() {
+            proto::AccessPolicy::AnyOfN => AccessPolicy::AnyOfN,
+            proto::AccessPolicy::Threshold => AccessPolicy::Threshold(proto.threshold),
+        };
+        let encrypted_volume_key =
+            proto
+                .encrypted_volume_key
+                .map(Into::into)
+                .unwrap_or(EncryptedVolumeKey {
+                    algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                    nonce: [0u8; 24],
+                    ciphertext: Vec::new(),
+                });
+        Ok(Self {
+            magic,
             version: proto.version as u16,
             volume_id: VolumeId(
                 uuid::Uuid::from_slice(&proto.volume_id).unwrap_or(uuid::Uuid::nil()),
@@ -252,7 +342,10 @@ impl From<proto::SuperHeader> for SuperHeader {
             recipients: proto.recipients.into_iter().map(Into::into).collect(),
             config: proto.config.map(Into::into).unwrap_or_default(),
             salt: proto.salt.try_into().unwrap_or([0u8; 16]),
-        }
+            epoch_id: proto.epoch_id,
+            encrypted_volume_key,
+            access_policy,
+        })
     }
 }
 
@@ -271,6 +364,14 @@ mod tests {
         )
     }
 
+    fn mock_encrypted_vk() -> EncryptedVolumeKey {
+        EncryptedVolumeKey {
+            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: [0xAA; 24],
+            ciphertext: vec![0xBB; 48], // 32 bytes VK + 16 bytes tag
+        }
+    }
+
     #[test]
     fn test_header_roundtrip() {
         let recipients = vec![mock_recipient()];
@@ -279,6 +380,8 @@ mod tests {
             recipients.clone(),
             ArchiveConfig::default(),
             [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::AnyOfN,
         );
 
         let bytes = header.to_bytes().unwrap();
@@ -290,23 +393,51 @@ mod tests {
         assert_eq!(restored.archive_id.0, header.archive_id.0);
         assert_eq!(restored.recipients.len(), 1);
         assert_eq!(restored.recipients[0].params, TEST_PARAMS.to_vec());
+        assert_eq!(restored.epoch_id, 0);
+        assert_eq!(restored.encrypted_volume_key.nonce, [0xAA; 24]);
+        assert_eq!(restored.encrypted_volume_key.ciphertext, vec![0xBB; 48]);
+        assert_eq!(restored.access_policy, AccessPolicy::AnyOfN);
     }
 
     #[test]
     fn test_next_volume() {
         let recipients = vec![mock_recipient()];
-        let header1 = SuperHeader::new(
+        let header = SuperHeader::new(
             ArchiveId::new(),
             recipients,
             ArchiveConfig::default(),
             [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::AnyOfN,
         );
 
-        let header2 = header1.next_volume();
+        let header2 = header.next_volume();
 
-        assert_eq!(header2.archive_id.0, header1.archive_id.0);
-        assert_ne!(header2.volume_id.0, header1.volume_id.0);
+        assert_eq!(header2.archive_id.0, header.archive_id.0);
+        assert_ne!(header2.volume_id.0, header.volume_id.0);
         assert_eq!(header2.volume_sequence, 1);
         assert_eq!(header2.recipients.len(), 1);
+        assert_eq!(header2.epoch_id, header.epoch_id);
+        assert_eq!(
+            header2.encrypted_volume_key.nonce,
+            header.encrypted_volume_key.nonce
+        );
+    }
+
+    #[test]
+    fn test_threshold_policy_roundtrip() {
+        let header = SuperHeader::new(
+            ArchiveId::new(),
+            vec![mock_recipient()],
+            ArchiveConfig::default(),
+            [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::Threshold(3),
+        );
+        // No need to manually set access_policy — it's passed to new()
+
+        let bytes = header.to_bytes().unwrap();
+        let restored = SuperHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.access_policy, AccessPolicy::Threshold(3));
     }
 }

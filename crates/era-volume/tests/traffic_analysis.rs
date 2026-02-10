@@ -18,6 +18,12 @@ async fn test_volume_traffic_fingerprint_padding() {
         vec![],
         ArchiveConfig::default(),
         [0u8; 16],
+        era_volume::EncryptedVolumeKey {
+            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: [0u8; 24],
+            ciphertext: vec![0u8; 48],
+        },
+        era_volume::AccessPolicy::AnyOfN,
     );
 
     // 2. Create Writer
@@ -101,6 +107,12 @@ async fn test_checkpoint_traffic_safety() {
         vec![],
         ArchiveConfig::default(),
         [0u8; 16],
+        era_volume::EncryptedVolumeKey {
+            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: [0u8; 24],
+            ciphertext: vec![0u8; 48],
+        },
+        era_volume::AccessPolicy::AnyOfN,
     );
 
     // 2. Create Writer & Set Max Size

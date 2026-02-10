@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use rand::rngs::OsRng;
 use rand::RngCore;
 use rkyv::Deserialize;
 use zeroize::Zeroize;
@@ -37,7 +38,7 @@ impl Spiller {
     pub fn new() -> Self {
         // Generate a random 32-byte ephemeral key (never written to disk)
         let mut key_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key_bytes);
+        OsRng.fill_bytes(&mut key_bytes);
         let key = AeadKey::from_bytes(&key_bytes).expect("32-byte key is valid");
 
         // CRITICAL: Zeroize the stack array to prevent memory forensics

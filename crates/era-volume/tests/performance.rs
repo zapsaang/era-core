@@ -22,7 +22,18 @@ async fn test_rotation_latency_under_load() {
     let archive_config = ArchiveConfig::default();
     let salt = [0u8; 16];
 
-    let template_header = SuperHeader::new(ArchiveId::new(), recipients, archive_config, salt);
+    let template_header = SuperHeader::new(
+        ArchiveId::new(),
+        recipients,
+        archive_config,
+        salt,
+        era_volume::EncryptedVolumeKey {
+            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: [0u8; 24],
+            ciphertext: vec![0u8; 48],
+        },
+        era_volume::AccessPolicy::AnyOfN,
+    );
 
     let mut writer = MultiVolumeWriter::create(&backend, config, template_header)
         .await

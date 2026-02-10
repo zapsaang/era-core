@@ -76,7 +76,7 @@ impl Salt {
     /// Generate a new random salt
     pub fn generate() -> Self {
         let mut bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
         Self { bytes }
     }
 

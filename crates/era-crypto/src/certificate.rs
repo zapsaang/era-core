@@ -174,10 +174,8 @@ impl Drop for DecapsulatedKey {
 impl EraKeyPair {
     /// Generate a new keypair
     pub fn generate() -> Result<Self> {
-        let mut rng = rand::thread_rng();
-
         // Generate X25519 keypair
-        let secret_key = StaticSecret::random_from_rng(&mut rng);
+        let secret_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let public_key = PublicKey::from(&secret_key);
 
         // Generate key ID (first 16 bytes of the public key hash)
@@ -636,8 +634,7 @@ impl EraCertificate {
 impl EphemeralKeyPair {
     /// Generate a new ephemeral keypair
     pub fn generate() -> Self {
-        let mut rng = rand::thread_rng();
-        let secret = StaticSecret::random_from_rng(&mut rng);
+        let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let public = PublicKey::from(&secret);
         Self { secret, public }
     }

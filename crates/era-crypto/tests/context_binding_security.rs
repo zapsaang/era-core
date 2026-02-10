@@ -56,8 +56,8 @@ fn test_attack_cross_volume_block_injection() {
     let session = KeySession::from_derived_key(&test_master_key());
 
     // Derive keys for both volumes
-    let volume_a_key = session.derive_volume_key(0);
-    let volume_b_key = session.derive_volume_key(1);
+    let volume_a_key = session.generate_and_wrap_volume_key().unwrap().0;
+    let volume_b_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(0);
     let nonce_context = [0x11; 16];
@@ -95,7 +95,7 @@ fn test_attack_cross_volume_block_injection() {
 #[test]
 fn test_attack_block_offset_manipulation() {
     let session = KeySession::from_derived_key(&test_master_key());
-    let volume_key = session.derive_volume_key(0);
+    let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id_100 = BlockId::new(100);
     let block_id_200 = BlockId::new(200);
@@ -136,7 +136,7 @@ fn test_attack_block_offset_manipulation() {
 #[test]
 fn test_attack_nonce_context_tampering() {
     let session = KeySession::from_derived_key(&test_master_key());
-    let volume_key = session.derive_volume_key(0);
+    let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(0);
     let nonce_context_a = [0x33; 16];
@@ -179,8 +179,8 @@ fn test_attack_mixed_volume_and_block_context() {
 
     let session = KeySession::from_derived_key(&test_master_key());
 
-    let volume_a_key = session.derive_volume_key(0);
-    let volume_b_key = session.derive_volume_key(1);
+    let volume_a_key = session.generate_and_wrap_volume_key().unwrap().0;
+    let volume_b_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(100); // Same block ID
     let nonce_context = [0x55; 16];
@@ -224,7 +224,7 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
     // after we add context binding
 
     let session = KeySession::from_derived_key(&test_master_key());
-    let volume_key = session.derive_volume_key(0);
+    let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(42);
     let nonce_context = [0x66; 16];
@@ -264,8 +264,8 @@ fn test_volume_uuid_affects_derived_keys() {
 
     let session = KeySession::from_derived_key(&test_master_key());
 
-    let volume_key_0 = session.derive_volume_key(0);
-    let volume_key_1 = session.derive_volume_key(1);
+    let volume_key_0 = session.generate_and_wrap_volume_key().unwrap().0;
+    let volume_key_1 = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(0);
     let nonce_context = [0x77; 16];
@@ -299,8 +299,8 @@ fn test_demonstrate_current_vulnerability() {
     let session = KeySession::from_derived_key(&test_master_key());
 
     // Two different volumes
-    let volume_a_key = session.derive_volume_key(0);
-    let volume_b_key = session.derive_volume_key(1);
+    let volume_a_key = session.generate_and_wrap_volume_key().unwrap().0;
+    let volume_b_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(0);
     let nonce_context = [0x99; 16];

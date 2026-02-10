@@ -143,7 +143,7 @@ impl HybridSecretKey {
 /// The secret keys are automatically zeroized on drop.
 pub fn generate_keypair() -> (HybridPublicKey, HybridSecretKey) {
     // Generate X25519 keypair
-    let x25519_secret = StaticSecret::random_from_rng(rand::thread_rng());
+    let x25519_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let x25519_public = X25519PublicKey::from(&x25519_secret);
 
     // Generate Kyber-768 keypair
@@ -176,7 +176,7 @@ pub fn generate_keypair() -> (HybridPublicKey, HybridSecretKey) {
 /// 5. Zeroize intermediate secrets
 pub fn encapsulate(recipient_pk: &HybridPublicKey) -> Result<(Vec<u8>, AeadKey)> {
     // Step 1: Generate ephemeral X25519 keypair
-    let ephemeral_secret = EphemeralSecret::random_from_rng(rand::thread_rng());
+    let ephemeral_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
     let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
 
     // Step 2: X25519 ECDH

@@ -45,7 +45,7 @@ impl Nonce {
     /// Generate a random nonce
     pub fn generate() -> Self {
         let mut nonce = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
         Self(nonce)
     }
 

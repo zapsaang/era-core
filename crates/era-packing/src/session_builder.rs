@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// ```ignore
 /// let session = KeySession::new(password, &salt, &params)?;
-/// let volume_key = session.derive_volume_key(0);
+/// let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 /// let builder = SessionBlockBuilder::new(&session, &volume_key, nonce_context, compressor);
 ///
 /// // Each block gets a unique key
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn test_session_builder_pack_unpack_roundtrip() {
         let (session, _salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
         let builder = SessionBlockBuilder::new(
             &session,
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn test_different_blocks_different_keys() {
         let (session, _salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
         let builder = SessionBlockBuilder::new(
             &session,
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn test_key_isolation_prevents_cross_decryption() {
         let (session, _salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
         let builder = SessionBlockBuilder::new(
             &session,
@@ -320,7 +320,7 @@ mod tests {
         let block = builder.pack_single(chunk).unwrap();
 
         // Try to decrypt with the wrong volume key
-        let wrong_volume_key = session.derive_volume_key(1); // Different volume
+        let wrong_volume_key = session.generate_and_wrap_volume_key().unwrap().0; // Different volume
         let wrong_unpacker = SessionBlockUnpacker::new(
             &session,
             &wrong_volume_key,
@@ -338,8 +338,8 @@ mod tests {
         let (session, _salt) = test_session();
 
         // Derive keys for two different volumes
-        let vk0 = session.derive_volume_key(0);
-        let vk1 = session.derive_volume_key(1);
+        let vk0 = session.generate_and_wrap_volume_key().unwrap().0;
+        let vk1 = session.generate_and_wrap_volume_key().unwrap().0;
 
         // Keys should be different
         assert_ne!(vk0.as_bytes(), vk1.as_bytes());
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn test_pack_multiple_chunks() {
         let (session, _salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
         let builder = SessionBlockBuilder::new(
             &session,
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn test_starting_block_id() {
         let (session, _salt) = test_session();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
         let builder = SessionBlockBuilder::new(
             &session,

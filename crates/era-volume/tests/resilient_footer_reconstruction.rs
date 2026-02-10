@@ -19,7 +19,18 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
         ..Default::default()
     };
 
-    let header = SuperHeader::new(ArchiveId::new(), vec![], config, [0u8; 16]);
+    let header = SuperHeader::new(
+        ArchiveId::new(),
+        vec![],
+        config,
+        [0u8; 16],
+        era_volume::EncryptedVolumeKey {
+            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: [0u8; 24],
+            ciphertext: vec![0u8; 48],
+        },
+        era_volume::AccessPolicy::AnyOfN,
+    );
 
     // 2. Write a valid volume first
     let writer = VolumeWriter::create(&backend, path, header.clone()).await?;
@@ -83,7 +94,18 @@ async fn test_fail_without_erasure() -> Result<()> {
         ..Default::default()
     };
 
-    let header = SuperHeader::new(ArchiveId::new(), vec![], config, [0u8; 16]);
+    let header = SuperHeader::new(
+        ArchiveId::new(),
+        vec![],
+        config,
+        [0u8; 16],
+        era_volume::EncryptedVolumeKey {
+            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: [0u8; 24],
+            ciphertext: vec![0u8; 48],
+        },
+        era_volume::AccessPolicy::AnyOfN,
+    );
 
     // 2. Write
     let writer = VolumeWriter::create(&backend, path, header).await?;

@@ -44,7 +44,7 @@ fn bench_hkdf_key_derivation(c: &mut Criterion) {
         parallelism: 1,
     };
     let session = KeySession::new(b"password", &salt, &params).unwrap();
-    let vk = session.derive_volume_key(0);
+    let vk = session.generate_and_wrap_volume_key().unwrap().0;
     let nonce = [0u8; 16];
 
     group.bench_function("derive_block_key", |b| {
@@ -55,11 +55,11 @@ fn bench_hkdf_key_derivation(c: &mut Criterion) {
         })
     });
 
-    group.bench_function("derive_volume_key_cached", |b| {
+    group.bench_function("generate_and_wrap_volume_key", |b| {
         let mut i = 0u16;
         b.iter(|| {
             i = (i + 1) % 1000;
-            session.derive_volume_key(black_box(i))
+            session.generate_and_wrap_volume_key().unwrap()
         })
     });
 

@@ -740,6 +740,7 @@ impl<B: StorageBackend> VolumePool<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm};
     use bytes::Bytes;
     use era_common::{ArchiveConfig, ArchiveId, BlockId};
     use era_storage::LocalStorageBackend;
@@ -751,6 +752,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         )
     }
 

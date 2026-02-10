@@ -95,6 +95,21 @@ message ChunkHash {
   bytes hash = 1;
 }
 
+enum KeyWrapAlgorithm {
+  KEY_WRAP_ALGORITHM_XCHACHA20_POLY1305 = 0;
+}
+
+message EncryptedVolumeKey {
+  KeyWrapAlgorithm algorithm = 1;
+  bytes nonce = 2;
+  bytes ciphertext = 3;
+}
+
+enum AccessPolicy {
+  ACCESS_POLICY_ANY_OF_N = 0;
+  ACCESS_POLICY_THRESHOLD = 1;
+}
+
 message SuperHeader {
   bytes magic = 1;
   uint32 version = 2;
@@ -107,6 +122,10 @@ message SuperHeader {
   repeated RecipientSlot recipients = 9;
   ArchiveConfig config = 10;
   bytes salt = 11;
+  uint32 epoch_id = 12;
+  EncryptedVolumeKey encrypted_volume_key = 13;
+  AccessPolicy access_policy = 14;
+  uint32 threshold = 15;
 }
 
 message RecipientSlot {

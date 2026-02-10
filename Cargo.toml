@@ -92,6 +92,9 @@ async-trait = "0.1"
 # Secure memory handling
 zeroize = { version = "1.7", features = ["alloc"] }
 
+# Shamir's Secret Sharing
+sharks = "0.5"
+
 # PEM format support
 pem = "3.0"
 

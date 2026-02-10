@@ -31,6 +31,7 @@ use era_volume::{
     Footer, RecipientSlot, RecipientType, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader,
     VolumeWriter,
 };
+use rand::rngs::OsRng;
 use rand::RngCore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -123,6 +124,10 @@ pub struct ArchiveWriterBuilder {
     enable_small_file_packing: bool,
     /// Append to an existing archive instead of creating a new one
     append_existing: bool,
+    /// Access policy for multi-party decryption
+    access_policy: era_volume::AccessPolicy,
+    /// Additional passwords for threshold mode
+    additional_passwords: Vec<String>,
 }
 
 impl ArchiveWriterBuilder {
@@ -143,6 +148,8 @@ impl ArchiveWriterBuilder {
             target_block_size: None,
             enable_small_file_packing: true,
             append_existing: false,
+            access_policy: era_volume::AccessPolicy::AnyOfN,
+            additional_passwords: Vec::new(),
         }
     }
 
@@ -286,6 +293,24 @@ impl ArchiveWriterBuilder {
     /// This enforces chunking configuration inheritance from the existing header.
     pub fn append_existing(mut self, enable: bool) -> Self {
         self.append_existing = enable;
+        self
+    }
+
+    /// Set the access policy for multi-party decryption.
+    ///
+    /// Use `AccessPolicy::Threshold(t)` to require `t` passwords to unlock.
+    /// Each password encrypts a Shamir share of the MK, not the full MK.
+    pub fn access_policy(mut self, policy: era_volume::AccessPolicy) -> Self {
+        self.access_policy = policy;
+        self
+    }
+
+    /// Add an additional password for threshold mode.
+    ///
+    /// The primary password is set via `.password()`. Additional passwords
+    /// are added here. For `Threshold(t)`, you need at least `t` total passwords.
+    pub fn add_password(mut self, password: impl Into<String>) -> Self {
+        self.additional_passwords.push(password.into());
         self
     }
 
@@ -452,50 +477,108 @@ impl ArchiveWriterBuilder {
             skip_auth_setup = true;
         } else {
             // Generate Master Key (DEK) for new archive
-            rand::thread_rng().fill_bytes(&mut master_key);
+            OsRng.fill_bytes(&mut master_key);
         }
 
         let session = KeySession::from_master_key(&master_key)?;
 
-        // 1. Password Mode (adds a password recipient)
+        // 1. Password Mode (adds password recipient(s))
         if !skip_auth_setup {
             if let AuthMode::Password(ref pwd)
             | AuthMode::Hybrid {
                 password: ref pwd, ..
             } = self.auth_mode
             {
-                let salt = Salt::generate();
                 let kdf_params = KdfParams {
                     memory_cost: config.encryption.kdf_memory_cost,
                     time_cost: config.encryption.kdf_time_cost,
                     parallelism: 4,
                 };
 
-                let kek = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)?;
+                match self.access_policy {
+                    era_volume::AccessPolicy::Threshold(t) => {
+                        // Collect all passwords
+                        let mut all_passwords = vec![pwd.clone()];
+                        all_passwords.extend(self.additional_passwords.iter().cloned());
+                        let n = all_passwords.len();
 
-                let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
-                let nonce = Nonce::generate();
-                let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &master_key)?;
+                        if (n as u32) < t {
+                            return Err(era_common::EraError::InvalidConfig(format!(
+                                "Threshold({}) requires at least {} passwords, got {}",
+                                t, t, n
+                            )));
+                        }
+                        if t < 2 {
+                            return Err(era_common::EraError::InvalidConfig(
+                                "Threshold must be >= 2".into(),
+                            ));
+                        }
 
-                let mut combined = Vec::new();
-                combined.extend_from_slice(nonce.as_bytes());
-                combined.extend_from_slice(&encrypted_mk);
+                        // Split MK into N shares with threshold T
+                        let shares = era_crypto::split_master_key(&master_key, t as u8, n as u8)?;
 
-                let p_params = PasswordSlotParams {
-                    salt: *salt.as_bytes(),
-                    kdf_memory_cost: kdf_params.memory_cost,
-                    kdf_time_cost: kdf_params.time_cost,
-                    kdf_parallelism: kdf_params.parallelism,
-                };
+                        // Create a recipient slot for each (password, share) pair
+                        for (password, share) in all_passwords.iter().zip(shares.iter()) {
+                            let salt = Salt::generate();
+                            let kek =
+                                era_crypto::derive_key(password.as_bytes(), &salt, &kdf_params)?;
+                            let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
+                            let nonce = Nonce::generate();
+                            let encrypted_share = ctx.encrypt(nonce.as_bytes(), &[], share)?;
 
-                recipients.push(RecipientSlot {
-                    r_type: RecipientType::ScryptPassword,
-                    key_id: None,
-                    params: rkyv::to_bytes::<_, 64>(&p_params)
-                        .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
-                        .to_vec(),
-                    encrypted_master_key: combined,
-                });
+                            let mut combined = Vec::new();
+                            combined.extend_from_slice(nonce.as_bytes());
+                            combined.extend_from_slice(&encrypted_share);
+
+                            let p_params = PasswordSlotParams {
+                                salt: *salt.as_bytes(),
+                                kdf_memory_cost: kdf_params.memory_cost,
+                                kdf_time_cost: kdf_params.time_cost,
+                                kdf_parallelism: kdf_params.parallelism,
+                            };
+
+                            recipients.push(RecipientSlot {
+                                r_type: RecipientType::ScryptPassword,
+                                key_id: None,
+                                params: rkyv::to_bytes::<_, 64>(&p_params)
+                                    .map_err(|e| {
+                                        era_common::EraError::Serialization(e.to_string())
+                                    })?
+                                    .to_vec(),
+                                encrypted_master_key: combined,
+                            });
+                        }
+                    }
+                    era_volume::AccessPolicy::AnyOfN => {
+                        // Standard: each slot encrypts the full MK
+                        let salt = Salt::generate();
+                        let kek = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)?;
+
+                        let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
+                        let nonce = Nonce::generate();
+                        let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &master_key)?;
+
+                        let mut combined = Vec::new();
+                        combined.extend_from_slice(nonce.as_bytes());
+                        combined.extend_from_slice(&encrypted_mk);
+
+                        let p_params = PasswordSlotParams {
+                            salt: *salt.as_bytes(),
+                            kdf_memory_cost: kdf_params.memory_cost,
+                            kdf_time_cost: kdf_params.time_cost,
+                            kdf_parallelism: kdf_params.parallelism,
+                        };
+
+                        recipients.push(RecipientSlot {
+                            r_type: RecipientType::ScryptPassword,
+                            key_id: None,
+                            params: rkyv::to_bytes::<_, 64>(&p_params)
+                                .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
+                                .to_vec(),
+                            encrypted_master_key: combined,
+                        });
+                    }
+                }
             }
 
             // 2. Certificate Mode (adds a certificate recipient)
@@ -525,8 +608,13 @@ impl ArchiveWriterBuilder {
         // Zeroize master key from stack
         master_key.iter_mut().for_each(|b| *b = 0);
 
-        // Derive volume key for the primary volume (volume 0)
-        let volume_key = session.derive_volume_key(0);
+        // Generate random Volume Key and wrap it with IK derived from MK
+        let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
+        let encrypted_volume_key = era_volume::EncryptedVolumeKey {
+            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: wrapped_vk.nonce,
+            ciphertext: wrapped_vk.ciphertext,
+        };
 
         // Store nonce context (salt) for block encryption
         let nonce_context = *archive_salt.as_bytes();
@@ -558,6 +646,8 @@ impl ArchiveWriterBuilder {
             recipients,
             config.clone(),
             *archive_salt.as_bytes(),
+            encrypted_volume_key,
+            self.access_policy,
         );
 
         let base_filename = self.output_path.file_name().unwrap_or_default();
@@ -678,9 +768,7 @@ impl ArchiveWriterBuilder {
         let checkpoint_manager = if self.enable_checkpoint {
             // Derive HMAC key from session for checkpoint integrity
             // Use HKDF to derive a separate key for checkpoints
-            let checkpoint_vk = session.derive_volume_key(0xFFFF); // Reserved volume ID for checkpoint
-            let mut hmac_key = [0u8; 32];
-            hmac_key.copy_from_slice(checkpoint_vk.as_bytes());
+            let hmac_key = session.derive_checkpoint_key();
 
             let manager = match self.recovery_options.strategy {
                 RecoveryStrategy::StartFresh => {
@@ -1852,6 +1940,7 @@ pub mod generic {
         filename: PathBuf,
         password: Option<String>,
         config: ArchiveConfig,
+        access_policy: Option<era_volume::AccessPolicy>,
     }
 
     impl<B: StorageBackend> GenericArchiveWriterBuilder<B> {
@@ -1862,6 +1951,7 @@ pub mod generic {
                 filename: filename.into(),
                 password: None,
                 config: ArchiveConfig::default(),
+                access_policy: None,
             }
         }
 
@@ -1877,6 +1967,12 @@ pub mod generic {
             self
         }
 
+        /// Set the access policy
+        pub fn access_policy(mut self, policy: era_volume::AccessPolicy) -> Self {
+            self.access_policy = Some(policy);
+            self
+        }
+
         /// Build the archive writer
         pub async fn build(self) -> Result<GenericArchiveWriter<B::Writer>> {
             let archive_id = ArchiveId::new();
@@ -1884,7 +1980,7 @@ pub mod generic {
 
             // Generate Master Key (DEK)
             let mut master_key = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut master_key);
+            OsRng.fill_bytes(&mut master_key);
 
             // Password Recipient
             let password = self.password.unwrap_or_default();
@@ -1926,8 +2022,13 @@ pub mod generic {
             let session = KeySession::from_master_key(&master_key)?;
             master_key.fill(0);
 
-            // Derive volume key for volume 0
-            let volume_key = session.derive_volume_key(0);
+            // Generate random Volume Key and wrap it with IK
+            let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
+            let encrypted_volume_key = era_volume::EncryptedVolumeKey {
+                algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: wrapped_vk.nonce,
+                ciphertext: wrapped_vk.ciphertext,
+            };
 
             // Create volume writer
             let header = SuperHeader::new(
@@ -1935,6 +2036,9 @@ pub mod generic {
                 recipients,
                 self.config.clone(),
                 *archive_salt.as_bytes(),
+                encrypted_volume_key,
+                self.access_policy
+                    .unwrap_or(era_volume::AccessPolicy::AnyOfN),
             );
 
             let volume_writer =

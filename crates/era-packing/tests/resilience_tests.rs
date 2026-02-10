@@ -29,7 +29,7 @@ mod aead_resilience {
             parallelism: 1,
         };
         let session = era_crypto::KeySession::new(b"test_password", &salt, &params).unwrap();
-        let volume_key = session.derive_volume_key(0);
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let nonce_context = [42u8; 16];
         (session, volume_key, nonce_context)
     }

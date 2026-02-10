@@ -135,6 +135,13 @@ pub enum EraError {
     #[error("WAL error: {0}")]
     WalError(String),
 
+    // Security Errors
+    #[error("Security violation: {0}")]
+    Security(String),
+
+    #[error("Threshold not met: need {required} shares, got {provided}")]
+    ThresholdNotMet { required: u32, provided: u32 },
+
     // Generic Errors
     #[error("{0}")]
     Other(String),
@@ -189,5 +196,10 @@ impl EraError {
     /// Create a new WAL error
     pub fn wal_error(msg: impl Into<String>) -> Self {
         Self::WalError(msg.into())
+    }
+
+    /// Create a new security violation error
+    pub fn security(msg: impl Into<String>) -> Self {
+        Self::Security(msg.into())
     }
 }

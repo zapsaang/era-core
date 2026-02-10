@@ -175,11 +175,13 @@ impl<const N: usize> fmt::Debug for SecureBuffer<N> {
 ///
 /// Similar to `SecureBuffer` but allows allocating any size at runtime.
 /// Uses zeroize-alloc for automatic secure memory management.
+#[allow(dead_code)]
 pub struct SecureBytes {
     data: Vec<u8>,
     is_locked: bool,
 }
 
+#[allow(dead_code)]
 impl SecureBytes {
     /// Create a new secure bytes buffer of `size`
     pub fn new(size: usize) -> Result<Self, SecureMemoryError> {

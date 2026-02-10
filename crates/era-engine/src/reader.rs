@@ -24,6 +24,7 @@ use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{Footer, SuperHeader, VolumeReader};
+use rand::rngs::OsRng;
 use rand::RngCore;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -88,9 +89,8 @@ pub struct ArchiveReader {
 }
 
 fn create_embedded_lsm_restore_dir() -> PathBuf {
-    let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 8];
-    rng.fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     let suffix = u64::from_le_bytes(bytes);
 
     let mut path = std::env::temp_dir();
@@ -154,6 +154,20 @@ impl ArchiveReader {
     pub async fn open(path: &Path, password: &str) -> Result<Self> {
         let provider = Box::new(crate::auth::PasswordProvider::new(password.to_string()));
         Self::open_with_providers(path, vec![provider]).await
+    }
+
+    /// Open an archive with multiple passwords (for threshold mode).
+    ///
+    /// Each password is tried against each recipient slot independently.
+    pub async fn open_with_passwords(path: &Path, passwords: &[&str]) -> Result<Self> {
+        let providers: Vec<Box<dyn crate::auth::AuthProvider>> = passwords
+            .iter()
+            .map(|p| {
+                Box::new(crate::auth::PasswordProvider::new(p.to_string()))
+                    as Box<dyn crate::auth::AuthProvider>
+            })
+            .collect();
+        Self::open_with_providers(path, providers).await
     }
 
     pub async fn open_with_providers(
@@ -302,32 +316,65 @@ impl ArchiveReader {
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
 
-        let mut master_key = None;
-        for slot in &header.recipients {
-            for provider in &providers {
-                if let Ok(Some(mk)) = provider.try_unlock(slot) {
-                    master_key = Some(mk);
-                    break;
+        let mk_array: [u8; 32] = match header.access_policy {
+            era_volume::AccessPolicy::AnyOfN => {
+                // Any single successful unlock wins
+                let mut master_key = None;
+                for slot in &header.recipients {
+                    for provider in &providers {
+                        if let Ok(Some(mk)) = provider.try_unlock(slot) {
+                            master_key = Some(mk);
+                            break;
+                        }
+                    }
+                    if master_key.is_some() {
+                        break;
+                    }
                 }
+                let master_key_bytes = master_key.ok_or(EraError::InvalidKey(
+                    "No valid credentials found".to_string(),
+                ))?;
+                master_key_bytes
+                    .try_into()
+                    .map_err(|_| EraError::InvalidKey("Invalid master key length".to_string()))?
             }
-            if master_key.is_some() {
-                break;
+            era_volume::AccessPolicy::Threshold(t) => {
+                if t < 2 {
+                    return Err(EraError::InvalidConfig(
+                        "Threshold access policy requires at least 2 shares. \
+                         Archive header may be malformed or tampered."
+                            .into(),
+                    ));
+                }
+                // Collect shares from all unlockable slots
+                let mut shares = Vec::new();
+                for slot in &header.recipients {
+                    for provider in &providers {
+                        if let Ok(Some(share)) = provider.try_unlock(slot) {
+                            shares.push(share);
+                            break;
+                        }
+                    }
+                }
+                if (shares.len() as u32) < t {
+                    return Err(EraError::ThresholdNotMet {
+                        required: t,
+                        provided: shares.len() as u32,
+                    });
+                }
+                // Reconstruct MK from T shares
+                era_crypto::reconstruct_master_key(&shares, t as u8)?
             }
-        }
-
-        let master_key_bytes = master_key.ok_or(EraError::InvalidKey(
-            "No valid credentials found".to_string(),
-        ))?;
-
-        let mk_array: [u8; 32] = master_key_bytes
-            .try_into()
-            .map_err(|_| EraError::InvalidKey("Invalid master key length".to_string()))?;
+        };
 
         // Create KeySession
         let session = KeySession::from_master_key(&mk_array)?;
 
-        // Derive volume key for volume 0
-        let volume_key = session.derive_volume_key(0);
+        // Unwrap volume key from header's encrypted envelope
+        let volume_key = session.unwrap_volume_key(
+            &header.encrypted_volume_key.nonce,
+            &header.encrypted_volume_key.ciphertext,
+        )?;
 
         // Store nonce context
         let nonce_context = header.salt;
@@ -444,9 +491,12 @@ impl ArchiveReader {
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
 
-        // 5. Clone session and derive volume key
+        // 5. Clone session and unwrap volume key from header
         let owned_session = session.clone();
-        let volume_key = owned_session.derive_volume_key(0);
+        let volume_key = owned_session.unwrap_volume_key(
+            &header.encrypted_volume_key.nonce,
+            &header.encrypted_volume_key.ciphertext,
+        )?;
 
         // Store nonce context and compression config
         let nonce_context = header.salt;
@@ -923,13 +973,29 @@ impl ArchiveReader {
             return Ok(stats);
         }
 
+        const MAX_CONSECUTIVE_FAILURES: u32 = 16;
+        let mut consecutive_failures: u32 = 0;
+
         while let Some(result) = iter.next_block().await {
             match result {
                 Ok(decoded) => {
+                    consecutive_failures = 0;
                     context.process_chunks(decoded.chunks, &mut stats)?;
                 }
                 Err(e) => {
-                    return Err(e);
+                    consecutive_failures += 1;
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        return Err(EraError::Security(format!(
+                            "Aborting: {} consecutive block failures: {}",
+                            consecutive_failures, e
+                        )));
+                    }
+                    tracing::warn!(
+                        "Block failure ({}/{}): {}",
+                        consecutive_failures,
+                        MAX_CONSECUTIVE_FAILURES,
+                        e
+                    );
                 }
             }
             if !context.has_pending() {
@@ -938,6 +1004,14 @@ impl ArchiveReader {
         }
 
         context.log_incomplete_files();
+
+        if context.has_pending() {
+            return Err(EraError::ErasureError(
+                "Not enough shards for recovery: extraction incomplete due to \
+                 too many missing or corrupted volumes."
+                    .into(),
+            ));
+        }
 
         info!(
             "Extraction complete: {} files, {} bytes",

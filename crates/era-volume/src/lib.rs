@@ -21,7 +21,10 @@ mod writer;
 
 pub use distribution::{DistributionCalculator, DistributionConfigExt, VolumePoolStatusExt};
 pub use footer::{Footer, FOOTER_MAGIC, FOOTER_SIZE};
-pub use header::{RecipientSlot, RecipientType, SuperHeader, DATA_REGION_START, HEADER_SIZE};
+pub use header::{
+    AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader,
+    DATA_REGION_START, HEADER_SIZE,
+};
 pub use multi_volume::{
     MultiVolumeConfig, MultiVolumeReader, MultiVolumeStats, MultiVolumeWriter,
     DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE,

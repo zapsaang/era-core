@@ -13,7 +13,18 @@ async fn test_floating_footer_recovery() {
     // Create header
     let archive_id = ArchiveId::new();
     let config = ArchiveConfig::default();
-    let header = SuperHeader::new(archive_id, vec![], config, [0u8; 16]);
+    let header = SuperHeader::new(
+        archive_id,
+        vec![],
+        config,
+        [0u8; 16],
+        era_volume::EncryptedVolumeKey {
+            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce: [0u8; 24],
+            ciphertext: vec![0u8; 48],
+        },
+        era_volume::AccessPolicy::AnyOfN,
+    );
     let header_bytes = header.to_bytes().unwrap();
 
     // 2. Write initial data and a valid footer (Checkpoint 1)

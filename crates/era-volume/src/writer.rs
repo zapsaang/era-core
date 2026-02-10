@@ -15,6 +15,7 @@ use std::path::Path;
 use crate::footer::{BACKUP_FOOTER_GAP, FOOTER_SIZE};
 use crate::header::{DATA_REGION_START, HEADER_SIZE};
 use crate::{Footer, SuperHeader};
+use rand::rngs::OsRng;
 use rand::RngCore;
 
 /// Writer for a single volume
@@ -123,7 +124,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             while remaining > 0 {
                 let to_write = remaining.min(buffer.len() as u64) as usize;
                 // Security: Must be random to prevent traffic analysis
-                rand::thread_rng().fill_bytes(&mut buffer[..to_write]);
+                OsRng.fill_bytes(&mut buffer[..to_write]);
                 self.writer.append(&buffer[..to_write]).await?;
                 remaining -= to_write as u64;
             }
@@ -387,6 +388,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm};
     use bytes::Bytes;
     use era_common::{ArchiveConfig, ArchiveId, BlockId};
     use era_storage::LocalStorageBackend;
@@ -402,6 +404,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         );
 
         let writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
@@ -423,6 +431,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         );
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
@@ -457,6 +471,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         );
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
@@ -491,6 +511,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         );
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
@@ -526,6 +552,12 @@ mod tests {
             vec![],
             ArchiveConfig::default(),
             [0u8; 16],
+            EncryptedVolumeKey {
+                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 48],
+            },
+            AccessPolicy::AnyOfN,
         );
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)

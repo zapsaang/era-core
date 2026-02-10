@@ -41,6 +41,7 @@ parking_lot = { workspace = true }
 hex = "0.4"
 metrics = { workspace = true }
 rkyv = { workspace = true }
+sharks = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
