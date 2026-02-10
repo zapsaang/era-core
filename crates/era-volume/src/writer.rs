@@ -255,15 +255,8 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.writer.append(&block.data).await?;
         }
 
-        let location = BlockLocation {
-            volume_id: self.header.volume_id,
-            slot_index: self.block_count,
-            physical_offset: offset,
-            encrypted_size: block_len,
-            erasure_info: None, // Standard blocks are not erasure-coded
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        };
+        let location =
+            BlockLocation::single(self.header.volume_id, self.block_count, offset, block_len);
 
         if self.max_size.is_some() {
             self.position += total_len;

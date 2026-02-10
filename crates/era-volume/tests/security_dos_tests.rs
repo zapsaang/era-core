@@ -121,22 +121,21 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
     // 3. Try to read erasure shards - should mark the shard as None (corrupted)
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
 
-    let fake_location = BlockLocation {
-        volume_id: era_common::VolumeId::new(),
-        slot_index: 0,
-        physical_offset: data_region_start,
-        encrypted_size: 1024,
-        erasure_info: Some(ErasureBlockInfo {
-            data_shards: 4,
-            parity_shards: 2,
-            shard_size: 256,
-            original_len: 1024,
-        }),
-        shard_offsets: Vec::new(),
-        shard_volumes: Vec::new(),
+    let erasure_info = ErasureBlockInfo {
+        data_shards: 4,
+        parity_shards: 2,
+        shard_size: 256,
+        original_len: 1024,
     };
-
-    let erasure_info = fake_location.erasure_info.unwrap();
+    let fake_location = BlockLocation::erasure(
+        era_common::VolumeId::new(),
+        0,
+        data_region_start,
+        1024,
+        erasure_info,
+        Vec::new(),
+        Vec::new(),
+    );
     let result = reader
         .read_erasure_shards(&fake_location, &erasure_info)
         .await;

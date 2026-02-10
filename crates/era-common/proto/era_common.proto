@@ -16,7 +16,6 @@ message ArchiveConfig {
 message MatrixDistributionConfig {
   enum Strategy {
     STRATEGY_ROTATING_OFFSET = 0;
-    STRATEGY_STRIPED = 1;
   }
   Strategy strategy = 1;
 }

@@ -17,7 +17,7 @@ pub use crate::chunk_processor::{ExtractStats, VerifyStats};
 use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
-use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result};
+use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result, ShardLayout};
 use era_crypto::certificate::EraKeyPair;
 use era_crypto::{KeySession, VolumeKey};
 use era_ingest::{Catalog, FileEntry};
@@ -564,15 +564,12 @@ impl ArchiveReader {
             .footer()
             .expect("Index volume must have valid footer");
 
-        let location = BlockLocation {
-            volume_id: reader.header().volume_id,
-            slot_index: footer.index_block_id,
-            physical_offset: footer.index_offset,
-            encrypted_size: footer.index_size,
-            erasure_info: None,
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        };
+        let location = BlockLocation::single(
+            reader.header().volume_id,
+            footer.index_block_id,
+            footer.index_offset,
+            footer.index_size,
+        );
 
         let encrypted_block = reader.read_block(&location).await?;
         let unpacker = self.create_unpacker();
@@ -641,15 +638,12 @@ impl ArchiveReader {
             .footer()
             .expect("Catalog volume must have valid footer");
 
-        let catalog_location = BlockLocation {
-            volume_id: reader.header().volume_id,
-            slot_index: footer.catalog_block_id,
-            physical_offset: footer.catalog_offset,
-            encrypted_size: footer.catalog_size,
-            erasure_info: None,
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        };
+        let catalog_location = BlockLocation::single(
+            reader.header().volume_id,
+            footer.catalog_block_id,
+            footer.catalog_offset,
+            footer.catalog_size,
+        );
 
         debug!(
             "Loading catalog from volume {} at offset={}, size={}, block_id={}",
@@ -692,10 +686,16 @@ impl ArchiveReader {
     /// Read a block and extract all chunks, handling both erasure and non-erasure blocks
     ///
     /// This is the unified entry point for reading blocks. It automatically detects
-    /// whether the block is erasure-coded based on `location.erasure_info` and uses
+    /// whether the block is erasure-coded based on `location.shard_layout` and uses
     /// the appropriate unpacker.
     pub async fn read_and_extract_chunks(&self, location: &BlockLocation) -> Result<ChunkVec> {
-        if let Some(ref erasure_info) = location.erasure_info {
+        if let ShardLayout::Erasure {
+            ref info,
+            ref shard_offsets,
+            ref shard_volumes,
+        } = location.shard_layout
+        {
+            let erasure_info = info;
             // Erasure-coded block: read shards from multiple volumes
             let total_shards =
                 erasure_info.data_shards as usize + erasure_info.parity_shards as usize;
@@ -703,14 +703,14 @@ impl ArchiveReader {
             let mut available_shards = Vec::with_capacity(total_shards);
 
             // Check shard offsets
-            if location.shard_offsets.is_empty() {
+            if shard_offsets.is_empty() {
                 return Err(EraError::IntegrityError(
                     "Missing shard offsets for erasure block".into(),
                 ));
             }
 
             // Check shard volumes - archives must be explicit about shard locations
-            if location.shard_volumes.is_empty() {
+            if shard_volumes.is_empty() {
                 return Err(EraError::IntegrityError(
                     "Missing shard volumes for erasure block".into(),
                 ));
@@ -743,7 +743,7 @@ impl ArchiveReader {
                         shard_idx - 1
                     };
 
-                    if let Some(&seq) = location.shard_volumes.get(vec_idx) {
+                    if let Some(&seq) = shard_volumes.get(vec_idx) {
                         // Find reader with this sequence
                         for (i, r) in self.volume_readers.iter().enumerate() {
                             if r.header().volume_sequence as usize == seq as usize {
@@ -767,7 +767,7 @@ impl ArchiveReader {
                         } else {
                             shard_idx - 1
                         };
-                        if let Some(&off) = location.shard_offsets.get(vec_idx) {
+                        if let Some(&off) = shard_offsets.get(vec_idx) {
                             off
                         } else {
                             continue;

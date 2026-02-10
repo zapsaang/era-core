@@ -102,15 +102,12 @@ impl IndexReader {
         let meta = if let Some(footer) = volume_reader.footer() {
             if footer.has_index() {
                 // Footer has index location
-                let location = BlockLocation {
-                    volume_id: era_common::VolumeId::new(),
-                    slot_index: footer.index_block_id,
-                    physical_offset: footer.index_offset,
-                    encrypted_size: footer.index_size,
-                    erasure_info: None,
-                    shard_offsets: Vec::new(),
-                    shard_volumes: Vec::new(),
-                };
+                let location = BlockLocation::single(
+                    era_common::VolumeId::new(),
+                    footer.index_block_id,
+                    footer.index_offset,
+                    footer.index_size,
+                );
 
                 tracing::info!("Found index in footer at offset {}", footer.index_offset);
 

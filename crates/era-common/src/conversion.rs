@@ -172,14 +172,29 @@ impl TryFrom<proto::ErasureBlockInfo> for ErasureBlockInfo {
 
 impl From<BlockLocation> for proto::BlockLocation {
     fn from(loc: BlockLocation) -> Self {
-        Self {
-            volume_id: loc.volume_id.0.as_bytes().to_vec(),
-            slot_index: loc.slot_index,
-            physical_offset: loc.physical_offset,
-            encrypted_size: loc.encrypted_size,
-            erasure_info: loc.erasure_info.map(Into::into),
-            shard_offsets: loc.shard_offsets,
-            shard_volumes: loc.shard_volumes.into_iter().map(|v| v as u32).collect(),
+        match loc.shard_layout {
+            crate::types::ShardLayout::Single => Self {
+                volume_id: loc.volume_id.0.as_bytes().to_vec(),
+                slot_index: loc.slot_index,
+                physical_offset: loc.physical_offset,
+                encrypted_size: loc.encrypted_size,
+                erasure_info: None,
+                shard_offsets: Vec::new(),
+                shard_volumes: Vec::new(),
+            },
+            crate::types::ShardLayout::Erasure {
+                info,
+                shard_offsets,
+                shard_volumes,
+            } => Self {
+                volume_id: loc.volume_id.0.as_bytes().to_vec(),
+                slot_index: loc.slot_index,
+                physical_offset: loc.physical_offset,
+                encrypted_size: loc.encrypted_size,
+                erasure_info: Some(info.into()),
+                shard_offsets,
+                shard_volumes: shard_volumes.into_iter().map(|v| v as u32).collect(),
+            },
         }
     }
 }
@@ -193,14 +208,21 @@ impl TryFrom<proto::BlockLocation> for BlockLocation {
         let uuid = uuid::Uuid::from_bytes(volume_id_bytes);
         let volume_id = crate::types::VolumeId(uuid);
 
+        let shard_layout = match proto.erasure_info {
+            None => crate::types::ShardLayout::Single,
+            Some(ei) => crate::types::ShardLayout::Erasure {
+                info: ei.try_into()?,
+                shard_offsets: proto.shard_offsets,
+                shard_volumes: proto.shard_volumes.into_iter().map(|v| v as u16).collect(),
+            },
+        };
+
         Ok(Self {
             volume_id,
             slot_index: proto.slot_index,
             physical_offset: proto.physical_offset,
             encrypted_size: proto.encrypted_size,
-            erasure_info: proto.erasure_info.map(|e| e.try_into()).transpose()?,
-            shard_offsets: proto.shard_offsets,
-            shard_volumes: proto.shard_volumes.into_iter().map(|v| v as u16).collect(),
+            shard_layout,
         })
     }
 }
@@ -265,9 +287,7 @@ impl From<proto::MatrixDistributionConfig> for MatrixDistributionConfig {
     fn from(proto: proto::MatrixDistributionConfig) -> Self {
         Self {
             strategy: match proto.strategy() {
-                // Striped wire value silently upgrades to RotatingOffset
-                proto::matrix_distribution_config::Strategy::RotatingOffset
-                | proto::matrix_distribution_config::Strategy::Striped => {
+                proto::matrix_distribution_config::Strategy::RotatingOffset => {
                     MatrixDistributionStrategy::RotatingOffset
                 }
             },

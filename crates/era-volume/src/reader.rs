@@ -418,16 +418,12 @@ impl<R: StorageReader> VolumeReader<R> {
                                     if header.verify(&data) {
                                         // Valid typed block found
                                         if header.block_type == target_type {
-                                            found_blocks.push(BlockLocation {
-                                                volume_id: era_common::VolumeId::new(),
-                                                slot_index: found_blocks.len() as u32,
-                                                physical_offset: current_offset,
-                                                encrypted_size: (BlockHeader::SIZE as u32
-                                                    + header.length),
-                                                erasure_info: None,
-                                                shard_offsets: Vec::new(),
-                                                shard_volumes: Vec::new(),
-                                            });
+                                            found_blocks.push(BlockLocation::single(
+                                                era_common::VolumeId::new(),
+                                                found_blocks.len() as u32,
+                                                current_offset,
+                                                BlockHeader::SIZE as u32 + header.length,
+                                            ));
 
                                             tracing::debug!(
                                                 "Found {:?} block at offset {}",

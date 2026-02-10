@@ -468,15 +468,7 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
     use era_common::BlockId;
 
     // Construct location for the checkpoint block
-    let location = BlockLocation {
-        volume_id: era_common::VolumeId::new(),
-        slot_index: 0, // Will be determined by scanning
-        physical_offset: checkpoint_offset,
-        encrypted_size: 0, // Will be read from header
-        erasure_info: None,
-        shard_offsets: Vec::new(),
-        shard_volumes: Vec::new(),
-    };
+    let location = BlockLocation::single(era_common::VolumeId::new(), 0, checkpoint_offset, 0);
 
     // Read typed block
     let (block_type, encrypted_block) = volume_reader.read_typed_block(&location).await?;
@@ -634,15 +626,7 @@ mod tests {
     fn test_checkpoint_with_index() {
         let mut written_chunks = HashMap::new();
         let hash = ChunkHash::from_bytes([0u8; 32]);
-        let location = BlockLocation {
-            volume_id: era_common::VolumeId::new(),
-            slot_index: 0,
-            physical_offset: 1024,
-            encrypted_size: 4096,
-            erasure_info: None,
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        };
+        let location = BlockLocation::single(era_common::VolumeId::new(), 0, 1024, 4096);
         written_chunks.insert(hash, location);
 
         let checkpoint = Checkpoint::new(0, 1024, 4096, 10, 100, written_chunks.clone());

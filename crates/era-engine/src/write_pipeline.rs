@@ -211,15 +211,12 @@ impl<B: StorageBackend> WritePipeline<B> {
                     .write_shard(i, &block.data, false, 0, Some(&stripe_lengths))
                     .await?;
 
-                let loc = BlockLocation {
+                let loc = BlockLocation::single(
                     volume_id,
-                    slot_index: block.block_id.0 as u32,
-                    physical_offset: entry.physical_offset,
-                    encrypted_size: block.data.len() as u32,
-                    erasure_info: None,
-                    shard_offsets: Vec::new(),
-                    shard_volumes: Vec::new(),
-                };
+                    block.block_id.0 as u32,
+                    entry.physical_offset,
+                    block.data.len() as u32,
+                );
                 locations.push(loc);
                 data_info.push((entry.volume_sequence, entry.physical_offset));
             } else {
@@ -257,7 +254,7 @@ impl<B: StorageBackend> WritePipeline<B> {
 
         // Update index for data blocks with stripe information
         for (i, meta) in stripe.block_meta.iter().enumerate() {
-            let mut loc = locations[i].clone();
+            let base = &locations[i];
 
             // Build shard_offsets and shard_volumes (excluding self)
             let mut shard_offsets = Vec::new();
@@ -275,15 +272,20 @@ impl<B: StorageBackend> WritePipeline<B> {
                 shard_volumes.push(*sequence);
             }
 
-            loc.erasure_info = Some(ErasureBlockInfo {
-                data_shards: stripe.config.data_shards,
-                parity_shards: stripe.config.parity_shards,
-                shard_size: stripe.shard_size,
-                original_len: loc.encrypted_size,
-            });
-
-            loc.shard_offsets = shard_offsets;
-            loc.shard_volumes = shard_volumes;
+            let loc = BlockLocation::erasure(
+                base.volume_id,
+                base.slot_index,
+                base.physical_offset,
+                base.encrypted_size,
+                ErasureBlockInfo {
+                    data_shards: stripe.config.data_shards,
+                    parity_shards: stripe.config.parity_shards,
+                    shard_size: stripe.shard_size,
+                    original_len: base.encrypted_size,
+                },
+                shard_offsets,
+                shard_volumes,
+            );
 
             // Update index for all chunk hashes in this block
             for hash in &meta.chunk_hashes {

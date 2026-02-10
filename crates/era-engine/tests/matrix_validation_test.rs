@@ -10,7 +10,7 @@ use tempfile::TempDir;
 /// This test checks that:
 /// 1. Shards are distributed across volumes using the rotating offset algorithm
 /// 2. Each block uses a different starting volume (block_sequence rotation)
-/// 3. Fault tolerance improves with matrix distribution vs striped
+/// 3. All 6 volumes are created and populated
 #[tokio::test]
 async fn test_matrix_distribution_algorithm_correctness() {
     let temp_dir = TempDir::new().unwrap();
@@ -83,100 +83,100 @@ async fn test_matrix_distribution_algorithm_correctness() {
     println!("✅ Algorithm correctness test passed!");
 }
 
-/// Test that matrix distribution has better fault tolerance than striped
-///
-/// With matrix distribution:
-/// - Rotating offset ensures blocks use different starting volumes
-/// - Each volume has a different mix of shard indices
-/// - Losing one volume doesn't concentrate shard losses
-///
-/// With striped (non-rotating):
-/// - All blocks use same shard-to-volume mapping
-/// - Volume 0 always has shards 0,2,4; Volume 1 has 1,3,5
-/// - Losing Volume 0 means all blocks lose shards 0,2,4 (3 shards!)
+/// Validate RotatingOffset distribution guarantees:
+/// - Each block rotates its starting volume by block_sequence
+/// - With N volumes and N total shards, every volume gets exactly 1 shard per block
+/// - Losing any single volume loses at most 1 shard per block (within parity budget)
 #[tokio::test]
-async fn test_matrix_vs_striped_fault_tolerance() {
+async fn test_rotating_offset_fault_tolerance_guarantees() {
     // Configuration: 4+2 erasure (can handle 2 shard losses)
-    let _erasure_config = ErasureCodeConfig {
-        data_shards: 4,
-        parity_shards: 2,
-    };
-
     let total_shards = 6;
     let volume_count = 6;
+    let parity_shards = 2;
+    let num_blocks = 12; // Test across many blocks
 
-    println!("\n=== Fault Tolerance Analysis ===\n");
+    println!("\n=== RotatingOffset Fault Tolerance Validation ===\n");
 
-    // Simulate matrix distribution (rotating offset)
-    println!("MATRIX DISTRIBUTION (Rotating Offset):");
-    let mut matrix_losses_per_volume = vec![0; volume_count];
-
-    for block_seq in 0..3 {
-        let mut shards_per_volume = vec![vec![]; volume_count];
+    // For each block, verify the rotating offset formula distributes shards correctly
+    for block_seq in 0..num_blocks {
+        let mut shards_per_volume = vec![0usize; volume_count];
 
         for shard_idx in 0..total_shards {
-            // Formula: (shard_idx + block_sequence) % volume_count
             let vol_idx = (shard_idx + block_seq) % volume_count;
-            shards_per_volume[vol_idx].push(shard_idx);
+            shards_per_volume[vol_idx] += 1;
         }
 
-        println!("  Block {}: {:?}", block_seq, shards_per_volume);
-
-        // Track how many shards each volume has
-        for (vol_idx, loss_count) in matrix_losses_per_volume.iter_mut().enumerate() {
-            if shards_per_volume[vol_idx].is_empty() {
-                *loss_count += 1;
-            }
+        // INVARIANT: With volume_count == total_shards, every volume gets exactly 1 shard
+        for (vol_idx, &count) in shards_per_volume.iter().enumerate() {
+            assert_eq!(
+                count, 1,
+                "Block {}: Volume {} should have exactly 1 shard, got {}",
+                block_seq, vol_idx, count
+            );
         }
     }
 
-    println!("\n  Impact if losing one volume:");
-    for (vol_idx, loss_count) in matrix_losses_per_volume.iter().enumerate() {
-        let shards_lost = 3 - *loss_count; // 3 blocks
+    // Simulate single-volume failure for every possible failed volume
+    println!("Single-volume failure analysis:");
+    for failed_volume in 0..volume_count {
+        let mut max_shards_lost_per_block = 0;
+
+        for block_seq in 0..num_blocks {
+            let mut shards_lost = 0;
+            for shard_idx in 0..total_shards {
+                let vol_idx = (shard_idx + block_seq) % volume_count;
+                if vol_idx == failed_volume {
+                    shards_lost += 1;
+                }
+            }
+            max_shards_lost_per_block = max_shards_lost_per_block.max(shards_lost);
+        }
+
+        // INVARIANT: Losing one volume should never exceed parity budget
+        assert!(
+            max_shards_lost_per_block <= parity_shards,
+            "Losing volume {} causes {} shard losses per block (parity budget: {})",
+            failed_volume,
+            max_shards_lost_per_block,
+            parity_shards
+        );
         println!(
-            "    Volume {}: ~{} shards lost per block",
-            vol_idx, shards_lost
+            "  Volume {} failure: max {} shard(s) lost per block (within parity budget of {})",
+            failed_volume, max_shards_lost_per_block, parity_shards
         );
     }
 
-    // Simulate striped distribution (no rotation)
-    println!("\nSTRIPED DISTRIBUTION (No Rotation):");
-    let mut striped_losses_per_volume = vec![0; volume_count];
+    // Simulate dual-volume failure
+    println!("\nDual-volume failure analysis:");
+    for v1 in 0..volume_count {
+        for v2 in (v1 + 1)..volume_count {
+            let mut max_shards_lost = 0;
 
-    for block_seq in 0..3 {
-        let mut shards_per_volume = vec![vec![]; volume_count];
-
-        for shard_idx in 0..total_shards {
-            // Formula: shard_idx % volume_count
-            let vol_idx = shard_idx % volume_count;
-            shards_per_volume[vol_idx].push(shard_idx);
-        }
-
-        println!("  Block {}: {:?}", block_seq, shards_per_volume);
-
-        for vol_idx in 0..volume_count {
-            if shards_per_volume[vol_idx].is_empty() {
-                striped_losses_per_volume[vol_idx] += 1;
+            for block_seq in 0..num_blocks {
+                let mut shards_lost = 0;
+                for shard_idx in 0..total_shards {
+                    let vol_idx = (shard_idx + block_seq) % volume_count;
+                    if vol_idx == v1 || vol_idx == v2 {
+                        shards_lost += 1;
+                    }
+                }
+                max_shards_lost = max_shards_lost.max(shards_lost);
             }
+
+            assert!(
+                max_shards_lost <= parity_shards,
+                "Losing volumes {} and {} causes {} shard losses (parity budget: {})",
+                v1,
+                v2,
+                max_shards_lost,
+                parity_shards
+            );
         }
     }
 
-    println!("\n  Impact if losing one volume:");
-    for vol_idx in 0..volume_count {
-        let shards_per_block = 1; // Each volume always has exactly 1 shard per block in striped
-        println!(
-            "    Volume {}: {} shard(s) lost per block",
-            vol_idx, shards_per_block
-        );
-    }
-
-    println!("\n=== Conclusion ===");
-    println!("✅ Matrix distribution: 1 shard/block per volume (better distribution)");
-    println!("⚠️  Striped: 1 shard/block per volume (but consistent pattern)");
-    println!("\nFor 4+2 erasure:");
-    println!("- Max tolerable shard losses: 2 per block");
-    println!("- Matrix: Can lose any 2 volumes and recover all blocks");
-    println!("- Striped: Same, but less optimal for partial failures");
+    println!("\n✅ All fault tolerance invariants verified");
+    println!("   - Single volume loss: always recoverable");
+    println!("   - Dual volume loss: always recoverable (within 4+2 budget)");
 }
 
 /// Verify that with matrix distribution, we can recover after volume loss

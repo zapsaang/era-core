@@ -12,32 +12,24 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 fn create_test_location(slot: u32) -> BlockLocation {
-    BlockLocation {
-        volume_id: VolumeId::new(),
-        slot_index: slot,
-        physical_offset: slot as u64 * 4096,
-        encrypted_size: 4096,
-        erasure_info: None,
-        shard_offsets: Vec::new(),
-        shard_volumes: Vec::new(),
-    }
+    BlockLocation::single(VolumeId::new(), slot, slot as u64 * 4096, 4096)
 }
 
 fn create_erasure_location(slot: u32) -> BlockLocation {
-    BlockLocation {
-        volume_id: VolumeId::new(),
-        slot_index: slot,
-        physical_offset: slot as u64 * 4096,
-        encrypted_size: 4096,
-        erasure_info: Some(ErasureBlockInfo {
+    BlockLocation::erasure(
+        VolumeId::new(),
+        slot,
+        slot as u64 * 4096,
+        4096,
+        ErasureBlockInfo {
             data_shards: 4,
             parity_shards: 2,
             shard_size: 1024,
             original_len: 4000,
-        }),
-        shard_offsets: vec![4096, 8192, 12288, 16384, 20480],
-        shard_volumes: vec![0, 1, 2, 0, 1, 2],
-    }
+        },
+        vec![4096, 8192, 12288, 16384, 20480],
+        vec![0, 1, 2, 0, 1, 2],
+    )
 }
 
 /// Test that LSM-Tree can fully replace HashMap for deduplication.
@@ -183,11 +175,11 @@ fn test_erasure_coded_locations() {
         // Verify immediately
         let retrieved = index.get(&hash).unwrap().unwrap();
         assert!(retrieved.is_erasure_coded());
-        let info = retrieved.erasure_info.unwrap();
+        let info = retrieved.erasure_info().unwrap();
         assert_eq!(info.data_shards, 4);
         assert_eq!(info.parity_shards, 2);
-        assert_eq!(retrieved.shard_offsets.len(), 5);
-        assert_eq!(retrieved.shard_volumes.len(), 6);
+        assert_eq!(retrieved.shard_offsets().len(), 5);
+        assert_eq!(retrieved.shard_volumes().len(), 6);
     }
 }
 

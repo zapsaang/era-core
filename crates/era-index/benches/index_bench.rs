@@ -12,15 +12,8 @@ use rand::Rng;
 
 #[cfg(any())] // Disable legacy benchmarks - random_hash
 fn random_hash() -> ChunkHash {
-    BlockLocation {
-        volume_id: VolumeId::new(),
-        slot_index: slot,
-        physical_offset: slot as u64 * 4096,
-        encrypted_size: 4096,
-        erasure_info: None,
-        shard_offsets: Vec::new(),
-        shard_volumes: Vec::new(),
-    }
+    // Legacy code - disabled
+    unimplemented!()
 }
 
 #[allow(dead_code)]

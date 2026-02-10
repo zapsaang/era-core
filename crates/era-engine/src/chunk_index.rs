@@ -141,15 +141,7 @@ mod tests {
     use era_common::VolumeId;
 
     fn create_test_location(slot: u32) -> BlockLocation {
-        BlockLocation {
-            volume_id: VolumeId::new(),
-            slot_index: slot,
-            physical_offset: slot as u64 * 4096,
-            encrypted_size: 4096,
-            erasure_info: None,
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        }
+        BlockLocation::single(VolumeId::new(), slot, slot as u64 * 4096, 4096)
     }
 
     #[test]

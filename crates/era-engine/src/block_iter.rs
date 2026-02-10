@@ -164,15 +164,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             }));
         }
 
-        let location = BlockLocation {
-            volume_id: self.volume_reader.header().volume_id,
-            slot_index: self.block_index,
-            physical_offset: self.current_offset,
-            encrypted_size: block_size,
-            erasure_info: None,
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        };
+        let location = BlockLocation::single(
+            self.volume_reader.header().volume_id,
+            self.block_index,
+            self.current_offset,
+            block_size,
+        );
 
         // Read and decrypt block
         let result = match self.volume_reader.read_block(&location).await {
@@ -602,15 +599,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             }));
         }
 
-        let location = BlockLocation {
-            volume_id: self.volume_reader.header().volume_id,
-            slot_index: self.block_index,
-            physical_offset: self.current_offset,
-            encrypted_size: block_size,
-            erasure_info: None,
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        };
+        let location = BlockLocation::single(
+            self.volume_reader.header().volume_id,
+            self.block_index,
+            self.current_offset,
+            block_size,
+        );
 
         // Read and decrypt block with per-block key derivation
         let result = match self.volume_reader.read_block(&location).await {

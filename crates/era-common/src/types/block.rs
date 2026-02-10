@@ -49,13 +49,38 @@ impl EncryptedMacroBlock {
     }
 }
 
+/// Shard layout for a block — makes invalid states unrepresentable.
+///
+/// A block is either stored as a single copy (non-erasure) or has explicit
+/// erasure-coded shard locations. There is no intermediate "maybe erasure" state.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize,
+)]
+#[archive(check_bytes)]
+pub enum ShardLayout {
+    /// Non-erasure-coded block (single copy on one volume).
+    Single,
+    /// Erasure-coded block with mandatory shard locations.
+    ///
+    /// Shard 0 is at `BlockLocation::physical_offset` on `BlockLocation::volume_id`.
+    /// Remaining shards are at the offsets/volumes listed here.
+    Erasure {
+        /// Erasure coding parameters
+        info: ErasureBlockInfo,
+        /// Physical offsets for shards 1..N (length = total_shards - 1)
+        shard_offsets: Vec<u64>,
+        /// Volume sequences for shards 1..N (length = total_shards - 1)
+        shard_volumes: Vec<u16>,
+    },
+}
+
 /// Location of a block in the archive
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize,
 )]
 #[archive(check_bytes)]
 pub struct BlockLocation {
-    /// Volume containing this block
+    /// Volume containing this block (or shard 0 for erasure-coded blocks)
     pub volume_id: VolumeId,
     /// Slot index within the volume
     pub slot_index: u32,
@@ -63,16 +88,9 @@ pub struct BlockLocation {
     pub physical_offset: u64,
     /// Size of the encrypted block (or first shard if erasure-coded)
     pub encrypted_size: u32,
-    /// Erasure coding info (None = not erasure-coded)
-    pub erasure_info: Option<ErasureBlockInfo>,
-    /// Offsets for additional shards in distributed storage
-    /// (Shard 0 is at physical_offset, Shard 1 at offsets[0], etc.)
-    /// Empty for non-erasure blocks.
-    pub shard_offsets: Vec<u64>,
-    /// Volume sequence numbers for each shard (for matrix distribution)
-    /// Shard i is on volume_sequences[i].
-    /// Empty for non-erasure blocks.
-    pub shard_volumes: Vec<u16>,
+    /// Shard layout — either `Single` or `Erasure { .. }`.
+    /// Enforced at the type level: no runtime `.validate()` needed.
+    pub shard_layout: ShardLayout,
 }
 
 /// Information about an erasure-coded block
@@ -101,45 +119,90 @@ pub struct ErasureBlockInfo {
 }
 
 impl BlockLocation {
-    /// Check if this block is erasure-coded
-    pub fn is_erasure_coded(&self) -> bool {
-        self.erasure_info.is_some()
+    /// Create a non-erasure block location.
+    pub fn single(
+        volume_id: VolumeId,
+        slot_index: u32,
+        physical_offset: u64,
+        encrypted_size: u32,
+    ) -> Self {
+        Self {
+            volume_id,
+            slot_index,
+            physical_offset,
+            encrypted_size,
+            shard_layout: ShardLayout::Single,
+        }
     }
 
-    /// Get total number of shards (data + parity)
-    pub fn total_shards(&self) -> usize {
-        self.erasure_info
-            .map(|e| e.data_shards as usize + e.parity_shards as usize)
-            .unwrap_or(1)
-    }
-
-    /// Validate that erasure-coded blocks have explicit shard locations.
+    /// Create an erasure-coded block location with explicit shard locations.
     ///
-    /// Returns an error if this is an erasure-coded block but shard_offsets
-    /// or shard_volumes are missing or have incorrect lengths.
-    pub fn validate(&self) -> Result<(), String> {
-        if let Some(erasure) = &self.erasure_info {
-            let total_shards = erasure.data_shards as usize + erasure.parity_shards as usize;
-            // shard_offsets excludes self, so should have total_shards - 1 entries
-            let expected_other_shards = total_shards.saturating_sub(1);
+    /// # Panics
+    /// Panics in debug builds if `shard_offsets.len() != shard_volumes.len()`.
+    pub fn erasure(
+        volume_id: VolumeId,
+        slot_index: u32,
+        physical_offset: u64,
+        encrypted_size: u32,
+        info: ErasureBlockInfo,
+        shard_offsets: Vec<u64>,
+        shard_volumes: Vec<u16>,
+    ) -> Self {
+        debug_assert_eq!(
+            shard_offsets.len(),
+            shard_volumes.len(),
+            "shard_offsets and shard_volumes must have equal length"
+        );
+        Self {
+            volume_id,
+            slot_index,
+            physical_offset,
+            encrypted_size,
+            shard_layout: ShardLayout::Erasure {
+                info,
+                shard_offsets,
+                shard_volumes,
+            },
+        }
+    }
 
-            if self.shard_offsets.len() != expected_other_shards {
-                return Err(format!(
-                    "shard_offsets has {} entries, expected {}",
-                    self.shard_offsets.len(),
-                    expected_other_shards
-                ));
-            }
+    /// Check if this block is erasure-coded.
+    pub fn is_erasure_coded(&self) -> bool {
+        matches!(self.shard_layout, ShardLayout::Erasure { .. })
+    }
 
-            if self.shard_volumes.len() != expected_other_shards {
-                return Err(format!(
-                    "shard_volumes has {} entries, expected {}",
-                    self.shard_volumes.len(),
-                    expected_other_shards
-                ));
+    /// Get erasure info, if this block is erasure-coded.
+    pub fn erasure_info(&self) -> Option<&ErasureBlockInfo> {
+        match &self.shard_layout {
+            ShardLayout::Single => None,
+            ShardLayout::Erasure { info, .. } => Some(info),
+        }
+    }
+
+    /// Get shard offsets (empty for single-copy blocks).
+    pub fn shard_offsets(&self) -> &[u64] {
+        match &self.shard_layout {
+            ShardLayout::Single => &[],
+            ShardLayout::Erasure { shard_offsets, .. } => shard_offsets,
+        }
+    }
+
+    /// Get shard volumes (empty for single-copy blocks).
+    pub fn shard_volumes(&self) -> &[u16] {
+        match &self.shard_layout {
+            ShardLayout::Single => &[],
+            ShardLayout::Erasure { shard_volumes, .. } => shard_volumes,
+        }
+    }
+
+    /// Get total number of shards (data + parity), or 1 for single-copy blocks.
+    pub fn total_shards(&self) -> usize {
+        match &self.shard_layout {
+            ShardLayout::Single => 1,
+            ShardLayout::Erasure { info, .. } => {
+                info.data_shards as usize + info.parity_shards as usize
             }
         }
-        Ok(())
     }
 }
 

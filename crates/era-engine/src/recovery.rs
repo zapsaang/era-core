@@ -434,15 +434,7 @@ mod tests {
     }
 
     fn test_location(offset: u64, size: u32) -> BlockLocation {
-        BlockLocation {
-            volume_id: VolumeId::default(),
-            slot_index: 0,
-            physical_offset: offset,
-            encrypted_size: size,
-            erasure_info: None,
-            shard_offsets: Vec::new(),
-            shard_volumes: Vec::new(),
-        }
+        BlockLocation::single(VolumeId::default(), 0, offset, size)
     }
 
     // ============ RecoveryStatus Tests ============
