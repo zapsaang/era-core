@@ -86,7 +86,12 @@ async fn test_atomicity_failure_recovery() {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        vec![era_volume::RecipientSlot::new(
+            era_volume::RecipientType::ScryptPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )],
         ArchiveConfig::default(),
         [0u8; 16],
         era_volume::EncryptedVolumeKey {

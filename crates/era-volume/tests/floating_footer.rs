@@ -15,7 +15,12 @@ async fn test_floating_footer_recovery() {
     let config = ArchiveConfig::default();
     let header = SuperHeader::new(
         archive_id,
-        vec![],
+        vec![era_volume::RecipientSlot::new(
+            era_volume::RecipientType::ScryptPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )],
         config,
         [0u8; 16],
         era_volume::EncryptedVolumeKey {

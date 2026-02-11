@@ -595,7 +595,8 @@ impl ArchiveWriterBuilder {
                 let encapsulation = EraKeyPair::encapsulate_for(cert, &master_key)?;
                 key_encapsulation = Some(encapsulation.clone());
 
-                let key_id_bytes: [u8; 8] = cert.key_id()[..8].try_into().unwrap_or([0u8; 8]);
+                let key_id_bytes: [u8; 8] = cert.key_id()[..8].try_into()
+                    .map_err(|_| era_common::EraError::InvalidKey("Certificate key_id too short".into()))?;
 
                 recipients.push(RecipientSlot {
                     r_type: RecipientType::X25519PubKey,

@@ -320,25 +320,22 @@ impl ArchiveReader {
 
         let mk_array: [u8; 32] = match header.access_policy {
             era_volume::AccessPolicy::AnyOfN => {
-                // Any single successful unlock wins
                 let mut master_key = None;
-                for slot in &header.recipients {
+                'outer: for slot in &header.recipients {
                     for provider in &providers {
                         if let Ok(Some(mk)) = provider.try_unlock(slot) {
                             master_key = Some(mk);
-                            break;
+                            break 'outer;
                         }
                     }
-                    if master_key.is_some() {
-                        break;
-                    }
                 }
-                let master_key_bytes = master_key.ok_or(EraError::InvalidKey(
-                    "No valid credentials found".to_string(),
+                let mut master_key_bytes = master_key.ok_or(EraError::InvalidKey(
+                    "No valid credentials found".into(),
                 ))?;
-                master_key_bytes
-                    .try_into()
-                    .map_err(|_| EraError::InvalidKey("Invalid master key length".to_string()))?
+                let mk_array: [u8; 32] = master_key_bytes.as_slice().try_into()
+                    .map_err(|_| EraError::InvalidKey("Invalid master key length".into()))?;
+                master_key_bytes.zeroize();
+                mk_array
             }
             era_volume::AccessPolicy::Threshold(t) => {
                 if t < 2 {
@@ -359,9 +356,9 @@ impl ArchiveReader {
                         provided: shares.len() as u32,
                     });
                 }
-                let mk = era_crypto::reconstruct_master_key(&shares, t as u8)?;
+                let result = era_crypto::reconstruct_master_key(&shares, t as u8);
                 shares.iter_mut().for_each(|s| s.zeroize());
-                mk
+                result?
             }
         };
 
@@ -426,7 +423,9 @@ impl ArchiveReader {
         let header = volume_reader.header();
 
         if let era_volume::AccessPolicy::Threshold(t) = header.access_policy {
-            tracing::warn!("Threshold({}) opened with session. Multi-party BYPASSED.", t);
+            return Err(EraError::InvalidConfig(
+                format!("Cannot open Threshold({}) archive with session — requires multi-party authentication", t),
+            ));
         }
 
         let owned_session = session.clone();

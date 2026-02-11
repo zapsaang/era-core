@@ -323,7 +323,7 @@ impl<R: StorageReader> MultiVolumeReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm};
+    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType};
     use bytes::Bytes;
     use era_common::{ArchiveConfig, ArchiveId, BlockId};
     use era_storage::LocalStorageBackend;
@@ -332,7 +332,12 @@ mod tests {
     fn create_test_header() -> SuperHeader {
         SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::ScryptPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {

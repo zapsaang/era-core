@@ -21,7 +21,12 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        vec![era_volume::RecipientSlot::new(
+            era_volume::RecipientType::ScryptPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )],
         config,
         [0u8; 16],
         era_volume::EncryptedVolumeKey {
@@ -96,7 +101,12 @@ async fn test_fail_without_erasure() -> Result<()> {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        vec![era_volume::RecipientSlot::new(
+            era_volume::RecipientType::ScryptPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )],
         config,
         [0u8; 16],
         era_volume::EncryptedVolumeKey {

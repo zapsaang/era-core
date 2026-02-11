@@ -430,7 +430,7 @@ impl<R: StorageReader> VolumeReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, VolumeWriter};
+    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, VolumeWriter};
     use era_common::{ArchiveConfig, ArchiveId};
     use era_storage::LocalStorageBackend;
     use tempfile::TempDir;
@@ -444,7 +444,12 @@ mod tests {
         // Create a volume
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::ScryptPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {
@@ -474,7 +479,12 @@ mod tests {
         // Create a volume with a block
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::ScryptPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {

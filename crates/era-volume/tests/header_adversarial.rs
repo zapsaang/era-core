@@ -247,7 +247,7 @@ fn header_09_multi_recipient_roundtrip() {
     assert_eq!(restored.recipients[1].encrypted_master_key, vec![0xBB; 64]);
 }
 
-/// Header with zero recipients must serialize/deserialize (edge case).
+/// Header with zero recipients must be rejected at deserialization (defense-in-depth).
 #[test]
 fn header_10_zero_recipients() {
     let header = SuperHeader::new(
@@ -260,8 +260,11 @@ fn header_10_zero_recipients() {
     );
 
     let bytes = header.to_bytes().unwrap();
-    let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.recipients.len(), 0);
+    let result = SuperHeader::from_bytes(&bytes);
+    assert!(
+        result.is_err(),
+        "Header should reject zero recipients — creates unreadable archive"
+    );
 }
 
 // ============================================================================

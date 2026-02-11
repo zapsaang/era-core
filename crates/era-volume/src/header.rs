@@ -229,10 +229,29 @@ impl From<RecipientSlot> for proto::RecipientSlot {
     }
 }
 
-impl From<proto::RecipientSlot> for RecipientSlot {
-    fn from(proto: proto::RecipientSlot) -> Self {
+impl TryFrom<proto::RecipientSlot> for RecipientSlot {
+    type Error = era_common::EraError;
+
+    fn try_from(proto: proto::RecipientSlot) -> std::result::Result<Self, Self::Error> {
         let r_type = proto.r#type();
-        Self {
+
+        let key_id = if proto.key_id.is_empty() {
+            None
+        } else {
+            Some(
+                proto.key_id.as_slice().try_into().map_err(|_| {
+                    era_common::EraError::CorruptedHeader("Invalid key_id length".into())
+                })?,
+            )
+        };
+
+        if proto.encrypted_master_key.len() < 24 {
+            return Err(era_common::EraError::CorruptedHeader(
+                "encrypted_master_key too short (min 24 bytes)".into(),
+            ));
+        }
+
+        Ok(Self {
             r_type: match r_type {
                 proto::recipient_slot::RecipientType::ScryptPassword => {
                     RecipientType::ScryptPassword
@@ -240,14 +259,10 @@ impl From<proto::RecipientSlot> for RecipientSlot {
                 proto::recipient_slot::RecipientType::X25519Pubkey => RecipientType::X25519PubKey,
                 proto::recipient_slot::RecipientType::Fido2Hmac => RecipientType::Fido2Hmac,
             },
-            key_id: if proto.key_id.is_empty() {
-                None
-            } else {
-                Some(proto.key_id.try_into().unwrap_or([0u8; 8]))
-            },
+            key_id,
             params: proto.params,
             encrypted_master_key: proto.encrypted_master_key,
-        }
+        })
     }
 }
 
@@ -325,14 +340,32 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
         if magic != MAGIC {
             return Err(era_common::EraError::InvalidMagic);
         }
+        if proto.version as u16 != HEADER_VERSION {
+            return Err(era_common::EraError::UnsupportedVersion { version: proto.version });
+        }
         let access_policy = match proto.access_policy() {
             proto::AccessPolicy::AnyOfN => AccessPolicy::AnyOfN,
-            proto::AccessPolicy::Threshold => AccessPolicy::Threshold(proto.threshold),
+            proto::AccessPolicy::Threshold => {
+                if proto.threshold < 2 {
+                    return Err(era_common::EraError::CorruptedHeader(
+                        format!("Invalid threshold: {} (minimum 2)", proto.threshold).into(),
+                    ));
+                }
+                AccessPolicy::Threshold(proto.threshold)
+            }
         };
         let encrypted_volume_key = proto
             .encrypted_volume_key
             .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing EVK".into()))?
             .try_into()?;
+        let recipients: Vec<RecipientSlot> = proto.recipients.into_iter()
+            .map(|r| r.try_into())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if recipients.is_empty() {
+            return Err(era_common::EraError::CorruptedHeader(
+                "Archive must have at least one recipient".into(),
+            ));
+        }
         Ok(Self {
             magic,
             version: proto.version as u16,
@@ -344,12 +377,15 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
                 uuid::Uuid::from_slice(&proto.archive_id)
                     .map_err(|_| era_common::EraError::CorruptedHeader("Invalid UUID".into()))?,
             ),
-            volume_sequence: proto.volume_sequence as u16,
-            total_volumes: proto.total_volumes as u16,
+            volume_sequence: u16::try_from(proto.volume_sequence)
+                .map_err(|_| era_common::EraError::CorruptedHeader("volume_sequence exceeds u16".into()))?,
+            total_volumes: u16::try_from(proto.total_volumes)
+                .map_err(|_| era_common::EraError::CorruptedHeader("total_volumes exceeds u16".into()))?,
             creation_time: proto.creation_time,
             feature_flags: proto.feature_flags,
-            recipients: proto.recipients.into_iter().map(Into::into).collect(),
-            config: proto.config.map(Into::into).unwrap_or_default(),
+            recipients,
+            config: proto.config.map(Into::into)
+                .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing config".into()))?,
             salt: proto.salt.as_slice().try_into()
                 .map_err(|_| era_common::EraError::CorruptedHeader("Corrupted salt".into()))?,
             epoch_id: proto.epoch_id,
@@ -370,7 +406,7 @@ mod tests {
             RecipientType::ScryptPassword,
             Some([0x12; 8]),
             TEST_PARAMS.to_vec(),
-            vec![1, 2, 3, 4],
+            vec![0xCD; 48],
         )
     }
 

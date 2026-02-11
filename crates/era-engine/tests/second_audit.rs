@@ -366,7 +366,12 @@ fn nv2e_behavioral_truncated_salt_accepted() {
     // Create a normal header
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        vec![RecipientSlot::new(
+            RecipientType::ScryptPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )],
         era_common::ArchiveConfig::default(),
         [0xAB; 16], // Valid salt
         mock_encrypted_vk(),
@@ -1045,7 +1050,12 @@ fn header_threshold_0_handled() {
     // Create a header with Threshold(0) — this is a malformed header
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        vec![RecipientSlot::new(
+            RecipientType::ScryptPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )],
         era_common::ArchiveConfig::default(),
         [0xAB; 16],
         mock_encrypted_vk(),
@@ -1054,16 +1064,12 @@ fn header_threshold_0_handled() {
 
     let bytes = header.to_bytes().unwrap();
 
-    // The header deserializes, but the access_policy should be caught
-    // by the reader when attempting to open
-    let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(
-        restored.access_policy,
-        AccessPolicy::Threshold(0),
-        "Header should preserve Threshold(0) — validation is the reader's job"
+    // After RV12 fix, header layer validates threshold >= 2
+    let result = SuperHeader::from_bytes(&bytes);
+    assert!(
+        result.is_err(),
+        "Header should reject Threshold(0) — defense-in-depth validation"
     );
-    // The point: the READER should reject Threshold(0), but the HEADER
-    // layer should faithfully deserialize what's stored.
 }
 
 /// Verify header roundtrip preserves all fields
