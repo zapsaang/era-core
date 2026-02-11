@@ -42,6 +42,7 @@ hex = "0.4"
 metrics = { workspace = true }
 rkyv = { workspace = true }
 sharks = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

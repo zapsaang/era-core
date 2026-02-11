@@ -679,7 +679,7 @@ mod tests {
 
         // Master key to encapsulate
         let mut master_key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut master_key);
+        rand::rngs::OsRng.fill_bytes(&mut master_key);
 
         // Encapsulate
         let encapsulation = EraKeyPair::encapsulate_for(&cert, &master_key).unwrap();

@@ -41,58 +41,8 @@ impl<R: StorageReader> VolumeReader<R> {
             return Err(EraError::CorruptedHeader("Volume too small".to_string()));
         }
 
-        // === HEADER RECOVERY ===
-        let header = match Self::try_read_header(&reader, 0).await {
-            Ok(h) => h,
-            Err(primary_err) => {
-                tracing::warn!(
-                    "Primary header corrupted: {}. Attempting backup recovery...",
-                    primary_err
-                );
-
-                // Try to read backup footer first to get backup_header_offset
-                let backup_result = Self::try_read_footer_at(&reader, HEADER_SIZE as u64).await;
-
-                if let Ok(backup_footer) = backup_result {
-                    if backup_footer.backup_header_offset > 0 {
-                        tracing::info!(
-                            "Found backup footer with backup_header_offset: {}",
-                            backup_footer.backup_header_offset
-                        );
-                        if let Ok(h) =
-                            Self::try_read_header(&reader, backup_footer.backup_header_offset).await
-                        {
-                            h
-                        } else {
-                            // Last resort: try primary footer to find backup header
-                            let primary_footer = Self::try_read_footer(&reader, size).await?;
-                            if primary_footer.backup_header_offset > 0 {
-                                Self::try_read_header(&reader, primary_footer.backup_header_offset)
-                                    .await?
-                            } else {
-                                return Err(EraError::CorruptedHeader(
-                                    "No backup header location available".into(),
-                                ));
-                            }
-                        }
-                    } else {
-                        return Err(EraError::CorruptedHeader(
-                            "Backup footer has no backup_header_offset".into(),
-                        ));
-                    }
-                } else {
-                    // Last resort: try primary footer to find backup header
-                    let primary_footer = Self::try_read_footer(&reader, size).await?;
-                    if primary_footer.backup_header_offset > 0 {
-                        Self::try_read_header(&reader, primary_footer.backup_header_offset).await?
-                    } else {
-                        return Err(EraError::CorruptedHeader(
-                            "No backup header location available".into(),
-                        ));
-                    }
-                }
-            }
-        };
+        // === HEADER ===
+        let header = Self::try_read_header(&reader, 0).await?;
 
         // Check if erasure coding is likely enabled
         let erasure_enabled = header.config.erasure.is_some();

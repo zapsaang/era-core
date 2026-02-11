@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 const INTERNAL_INDEX_NAME: &str = ".era/meta/index.bin";
 const INTERNAL_CHECKPOINT_NAME: &str = ".era/meta/checkpoint.bin";
@@ -606,7 +607,7 @@ impl ArchiveWriterBuilder {
         }
 
         // Zeroize master key from stack
-        master_key.iter_mut().for_each(|b| *b = 0);
+        master_key.zeroize();
 
         // Generate random Volume Key and wrap it with IK derived from MK
         let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
@@ -1975,6 +1976,15 @@ pub mod generic {
 
         /// Build the archive writer
         pub async fn build(self) -> Result<GenericArchiveWriter<B::Writer>> {
+            // Threshold must be rejected: t < 2 is invalid, and even valid
+            // thresholds require Shamir splitting into shares via ArchiveWriter
+            if let Some(era_volume::AccessPolicy::Threshold(_)) = self.access_policy {
+                return Err(era_common::EraError::InvalidConfig(
+                    "GenericArchiveWriter does not support Threshold policy. Use ArchiveWriter::builder()"
+                        .into(),
+                ));
+            }
+
             let archive_id = ArchiveId::new();
             let archive_salt = era_crypto::Salt::generate();
 
@@ -2020,7 +2030,7 @@ pub mod generic {
 
             // Create KeySession
             let session = KeySession::from_master_key(&master_key)?;
-            master_key.fill(0);
+            master_key.zeroize();
 
             // Generate random Volume Key and wrap it with IK
             let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;

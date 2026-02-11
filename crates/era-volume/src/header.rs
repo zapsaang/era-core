@@ -265,13 +265,25 @@ impl From<EncryptedVolumeKey> for proto::EncryptedVolumeKey {
     }
 }
 
-impl From<proto::EncryptedVolumeKey> for EncryptedVolumeKey {
-    fn from(proto: proto::EncryptedVolumeKey) -> Self {
-        Self {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: proto.nonce.try_into().unwrap_or([0u8; 24]),
-            ciphertext: proto.ciphertext,
+impl TryFrom<proto::EncryptedVolumeKey> for EncryptedVolumeKey {
+    type Error = era_common::EraError;
+
+    fn try_from(proto: proto::EncryptedVolumeKey) -> std::result::Result<Self, Self::Error> {
+        let nonce: [u8; 24] = proto
+            .nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| era_common::EraError::CorruptedHeader("Invalid nonce".into()))?;
+        if proto.ciphertext.is_empty() {
+            return Err(era_common::EraError::CorruptedHeader(
+                "Missing ciphertext".into(),
+            ));
         }
+        Ok(Self {
+            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+            nonce,
+            ciphertext: proto.ciphertext,
+        })
     }
 }
 
@@ -317,23 +329,20 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
             proto::AccessPolicy::AnyOfN => AccessPolicy::AnyOfN,
             proto::AccessPolicy::Threshold => AccessPolicy::Threshold(proto.threshold),
         };
-        let encrypted_volume_key =
-            proto
-                .encrypted_volume_key
-                .map(Into::into)
-                .unwrap_or(EncryptedVolumeKey {
-                    algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                    nonce: [0u8; 24],
-                    ciphertext: Vec::new(),
-                });
+        let encrypted_volume_key = proto
+            .encrypted_volume_key
+            .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing EVK".into()))?
+            .try_into()?;
         Ok(Self {
             magic,
             version: proto.version as u16,
             volume_id: VolumeId(
-                uuid::Uuid::from_slice(&proto.volume_id).unwrap_or(uuid::Uuid::nil()),
+                uuid::Uuid::from_slice(&proto.volume_id)
+                    .map_err(|_| era_common::EraError::CorruptedHeader("Invalid UUID".into()))?,
             ),
             archive_id: ArchiveId(
-                uuid::Uuid::from_slice(&proto.archive_id).unwrap_or(uuid::Uuid::nil()),
+                uuid::Uuid::from_slice(&proto.archive_id)
+                    .map_err(|_| era_common::EraError::CorruptedHeader("Invalid UUID".into()))?,
             ),
             volume_sequence: proto.volume_sequence as u16,
             total_volumes: proto.total_volumes as u16,
@@ -341,7 +350,8 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
             feature_flags: proto.feature_flags,
             recipients: proto.recipients.into_iter().map(Into::into).collect(),
             config: proto.config.map(Into::into).unwrap_or_default(),
-            salt: proto.salt.try_into().unwrap_or([0u8; 16]),
+            salt: proto.salt.as_slice().try_into()
+                .map_err(|_| era_common::EraError::CorruptedHeader("Corrupted salt".into()))?,
             epoch_id: proto.epoch_id,
             encrypted_volume_key,
             access_policy,

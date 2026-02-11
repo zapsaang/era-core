@@ -223,20 +223,18 @@ async fn create_single_volume_archive(
 }
 
 // =============================================================================
-// TEST 1: Recover from corrupted primary header using backup header
+// TEST 1: Corrupted primary header is rejected (security: no silent backup recovery)
 // =============================================================================
 #[tokio::test]
 async fn test_v81_recover_from_corrupted_primary_header() -> Result<(), Box<dyn std::error::Error>>
 {
-    println!("\n=== TEST: V8.1 Recovery from Corrupted Primary Header ===");
+    println!("\n=== TEST: V8.1 Corrupted Primary Header Rejected ===");
 
     let temp_dir = TempDir::new()?;
     let repo_dir = temp_dir.path().join("repo");
     let source_dir = temp_dir.path().join("source");
-    let restore_dir = temp_dir.path().join("restore");
     fs::create_dir_all(&repo_dir)?;
     fs::create_dir_all(&source_dir)?;
-    fs::create_dir_all(&restore_dir)?;
 
     // Create test data
     let mut original_data = vec![0u8; 1024 * 1024]; // 1MB
@@ -250,22 +248,15 @@ async fn test_v81_recover_from_corrupted_primary_header() -> Result<(), Box<dyn 
     let saboteur = V81Saboteur::new(&archive_path);
     saboteur.corrupt_primary_header();
 
-    // Attempt recovery - should succeed by falling back to backup header
-    println!("🏥 Attempting recovery with corrupted primary header...");
-    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
-    let options = ExtractOptions::new(&restore_dir);
-    reader.extract_all(&options).await?;
-
-    // Verify data integrity
-    let restored_path = restore_dir.join("payload.bin");
-    assert!(restored_path.exists(), "Restored file missing!");
-    let restored_data = fs::read(&restored_path)?;
-    assert_eq!(
-        original_data, restored_data,
-        "Data mismatch after header recovery!"
+    // Corrupted primary header must be rejected (no silent backup recovery)
+    println!("🔒 Verifying corrupted primary header is rejected...");
+    let result = ArchiveReader::open(&archive_path, "testpass").await;
+    assert!(
+        result.is_err(),
+        "Corrupted primary header should be rejected"
     );
 
-    println!("🎉 SUCCESS: Recovered from corrupted primary header using backup!");
+    println!("🎉 SUCCESS: Corrupted primary header correctly rejected!");
     Ok(())
 }
 
@@ -314,20 +305,18 @@ async fn test_v81_recover_from_corrupted_primary_footer() -> Result<(), Box<dyn 
 }
 
 // =============================================================================
-// TEST 3: Recover from BOTH corrupted header AND footer
+// TEST 3: Corrupted header AND footer is rejected
 // =============================================================================
 #[tokio::test]
 async fn test_v81_recover_from_corrupted_header_and_footer(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n=== TEST: V8.1 Recovery from Corrupted Header AND Footer ===");
+    println!("\n=== TEST: V8.1 Corrupted Header AND Footer Rejected ===");
 
     let temp_dir = TempDir::new()?;
     let repo_dir = temp_dir.path().join("repo");
     let source_dir = temp_dir.path().join("source");
-    let restore_dir = temp_dir.path().join("restore");
     fs::create_dir_all(&repo_dir)?;
     fs::create_dir_all(&source_dir)?;
-    fs::create_dir_all(&restore_dir)?;
 
     let mut original_data = vec![0u8; 1024 * 1024];
     rand::thread_rng().fill_bytes(&mut original_data);
@@ -340,23 +329,15 @@ async fn test_v81_recover_from_corrupted_header_and_footer(
     saboteur.corrupt_primary_header();
     saboteur.corrupt_primary_footer();
 
-    // Recovery should still work:
-    // 1. Primary header fails -> read backup footer to find backup_header_offset
-    // 2. Primary footer fails -> read backup footer at offset 4096
-    println!("🏥 Attempting recovery with BOTH header and footer corrupted...");
-    let mut reader = ArchiveReader::open(&archive_path, "testpass").await?;
-    let options = ExtractOptions::new(&restore_dir);
-    reader.extract_all(&options).await?;
-
-    let restored_path = restore_dir.join("payload.bin");
-    assert!(restored_path.exists(), "Restored file missing!");
-    let restored_data = fs::read(&restored_path)?;
-    assert_eq!(
-        original_data, restored_data,
-        "Data mismatch after dual recovery!"
+    // Corrupted primary header must be rejected
+    println!("🔒 Verifying corrupted header+footer is rejected...");
+    let result = ArchiveReader::open(&archive_path, "testpass").await;
+    assert!(
+        result.is_err(),
+        "Corrupted primary header should be rejected even with backup footer"
     );
 
-    println!("🎉 SUCCESS: Recovered from BOTH corrupted header and footer!");
+    println!("🎉 SUCCESS: Corrupted header+footer correctly rejected!");
     Ok(())
 }
 

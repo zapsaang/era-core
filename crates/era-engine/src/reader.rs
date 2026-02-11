@@ -31,6 +31,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
+use zeroize::Zeroize;
 
 const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
@@ -170,12 +171,13 @@ impl ArchiveReader {
         Self::open_with_providers(path, providers).await
     }
 
-    pub async fn open_with_providers(
+    /// Discover and open all volumes belonging to the same archive.
+    async fn discover_volumes(
         path: &Path,
-        providers: Vec<Box<dyn crate::auth::AuthProvider>>,
-    ) -> Result<Self> {
-        info!("Opening archive: {}", path.display());
-
+    ) -> Result<(
+        Vec<VolumeReader<era_storage::LocalStorageReader>>,
+        Vec<usize>,
+    )> {
         let parent_dir = path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(parent_dir);
         let base_filename = path.file_name().unwrap_or_default();
@@ -197,7 +199,6 @@ impl ArchiveReader {
         };
 
         // 3. Determine how many volumes to scan for
-        // If total_volumes is known, use it; otherwise scan up to MAX_SCAN
         const MAX_SCAN: usize = 32;
         let scan_limit = if total_volumes > 0 {
             total_volumes
@@ -210,18 +211,15 @@ impl ArchiveReader {
         let base_path = if base_str.ends_with(".era") {
             PathBuf::from(base_filename)
         } else {
-            // Handle case where user opened .era.001 etc
-            // Strip the .NNN suffix to get base .era path
             let s = base_str.to_string();
             if let Some(idx) = s.rfind(".era.") {
-                PathBuf::from(&s[..idx + 4]) // Keep up to ".era"
+                PathBuf::from(&s[..idx + 4])
             } else {
                 PathBuf::from(base_filename)
             }
         };
 
         // 5. Scan for all available volumes
-        // Store the first reader in Option to handle ownership
         let mut found_readers: Vec<(usize, VolumeReader<era_storage::LocalStorageReader>)> =
             Vec::new();
         let mut missing_count = 0;
@@ -238,7 +236,6 @@ impl ArchiveReader {
 
             let full_path = parent_dir.join(&volume_path);
 
-            // Check if this corresponds to the file we already opened
             if i == first_vol_sequence {
                 if let Some(reader) = first_reader_opt.take() {
                     found_readers.push((first_vol_sequence, reader));
@@ -250,7 +247,6 @@ impl ArchiveReader {
             if !full_path.exists() {
                 missing_count += 1;
                 if total_volumes > 0 {
-                    // We know the exact count, continue until we've checked all
                     continue;
                 } else if missing_count >= scan_tolerance {
                     break;
@@ -262,9 +258,7 @@ impl ArchiveReader {
 
             match VolumeReader::open(&backend, &volume_path).await {
                 Ok(reader) => {
-                    // Verify it's part of the same archive
                     if reader.header().archive_id == first_archive_id {
-                        // Use the volume_sequence from header, not filename index
                         let vol_seq = reader.header().volume_sequence as usize;
                         found_readers.push((vol_seq, reader));
                     } else {
@@ -280,7 +274,6 @@ impl ArchiveReader {
             }
         }
 
-        // If first_reader wasn't used (e.g., its sequence wasn't in scan range), add it now
         if let Some(reader) = first_reader_opt {
             found_readers.push((first_vol_sequence, reader));
         }
@@ -299,9 +292,8 @@ impl ArchiveReader {
             )));
         }
 
-        // Log discovered volumes
         info!(
-            "Opened {} volumes at sequences {:?} (total expected: {}, scan tolerance: {})",
+            "Opened {} volumes at sequences {:?} (total expected: {})",
             volume_readers.len(),
             volume_indices,
             if total_volumes > 0 {
@@ -309,8 +301,18 @@ impl ArchiveReader {
             } else {
                 "unknown".to_string()
             },
-            scan_tolerance
         );
+
+        Ok((volume_readers, volume_indices))
+    }
+
+    pub async fn open_with_providers(
+        path: &Path,
+        providers: Vec<Box<dyn crate::auth::AuthProvider>>,
+    ) -> Result<Self> {
+        info!("Opening archive: {}", path.display());
+
+        let (volume_readers, volume_indices) = Self::discover_volumes(path).await?;
 
         // Use first available reader for key derivation (all volumes share same crypto params)
         let volume_reader = &volume_readers[0];
@@ -340,13 +342,8 @@ impl ArchiveReader {
             }
             era_volume::AccessPolicy::Threshold(t) => {
                 if t < 2 {
-                    return Err(EraError::InvalidConfig(
-                        "Threshold access policy requires at least 2 shares. \
-                         Archive header may be malformed or tampered."
-                            .into(),
-                    ));
+                    return Err(EraError::InvalidConfig("Threshold must be >= 2".into()));
                 }
-                // Collect shares from all unlockable slots
                 let mut shares = Vec::new();
                 for slot in &header.recipients {
                     for provider in &providers {
@@ -362,13 +359,16 @@ impl ArchiveReader {
                         provided: shares.len() as u32,
                     });
                 }
-                // Reconstruct MK from T shares
-                era_crypto::reconstruct_master_key(&shares, t as u8)?
+                let mk = era_crypto::reconstruct_master_key(&shares, t as u8)?;
+                shares.iter_mut().for_each(|s| s.zeroize());
+                mk
             }
         };
 
         // Create KeySession
         let session = KeySession::from_master_key(&mk_array)?;
+        let mut mk_array = mk_array;
+        mk_array.zeroize();
 
         // Unwrap volume key from header's encrypted envelope
         let volume_key = session.unwrap_volume_key(
@@ -420,85 +420,21 @@ impl ArchiveReader {
     pub async fn open_with_session(path: &Path, session: &KeySession) -> Result<Self> {
         info!("Opening archive with key session: {}", path.display());
 
-        let parent_dir = path.parent().unwrap_or(Path::new("."));
-        let backend = LocalStorageBackend::new(parent_dir);
-        let base_filename = path.file_name().unwrap_or_default();
+        let (volume_readers, volume_indices) = Self::discover_volumes(path).await?;
 
-        // 1. Try to open the specified file first (could be any volume)
-        let first_reader = VolumeReader::open(&backend, Path::new(base_filename)).await?;
-
-        // Read volume metadata from header
-        let first_vol_sequence = first_reader.header().volume_sequence as usize;
-        let total_volumes = first_reader.header().total_volumes as usize;
-        let erasure_config = first_reader.header().config.erasure;
-        let first_archive_id = first_reader.header().archive_id;
-
-        // 2. Determine scan tolerance
-        let scan_tolerance = if let Some(config) = erasure_config {
-            (config.parity_shards as usize + 1).max(2)
-        } else {
-            2
-        };
-
-        // 3. Scan for volumes
-        let max_scan = if total_volumes > 0 {
-            total_volumes + scan_tolerance
-        } else {
-            100
-        };
-
-        let mut volume_readers = vec![first_reader];
-        let mut volume_indices = vec![first_vol_sequence];
-
-        for i in 0..max_scan {
-            if i == first_vol_sequence {
-                continue;
-            }
-
-            let vol_path = if i == 0 {
-                PathBuf::from(base_filename)
-            } else {
-                let base = PathBuf::from(base_filename);
-                let mut name = base.as_os_str().to_os_string();
-                // Remove existing extension if present
-                let base_str = name.to_string_lossy();
-                let clean_base = if let Some(pos) = base_str.rfind(".era") {
-                    base_str[..pos + 4].to_string()
-                } else {
-                    base_str.to_string()
-                };
-                name = std::ffi::OsString::from(format!("{}.{:03}", clean_base, i));
-                PathBuf::from(name)
-            };
-
-            match VolumeReader::open(&backend, &vol_path).await {
-                Ok(reader) => {
-                    if reader.header().archive_id == first_archive_id {
-                        let seq = reader.header().volume_sequence as usize;
-                        let insert_pos = volume_indices
-                            .iter()
-                            .position(|&idx| idx > seq)
-                            .unwrap_or(volume_indices.len());
-                        volume_indices.insert(insert_pos, seq);
-                        volume_readers.insert(insert_pos, reader);
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-
-        // 4. Verify password using session's verification method
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
 
-        // 5. Clone session and unwrap volume key from header
+        if let era_volume::AccessPolicy::Threshold(t) = header.access_policy {
+            tracing::warn!("Threshold({}) opened with session. Multi-party BYPASSED.", t);
+        }
+
         let owned_session = session.clone();
         let volume_key = owned_session.unwrap_volume_key(
             &header.encrypted_volume_key.nonce,
             &header.encrypted_volume_key.ciphertext,
         )?;
 
-        // Store nonce context and compression config
         let nonce_context = header.salt;
         let compression_level = header.config.compression.level;
         let compression_algorithm = header.config.compression.algorithm;
