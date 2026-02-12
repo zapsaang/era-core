@@ -9,11 +9,23 @@ use era_common::{
     ShardHeader,
 };
 use era_storage::LocalStorageBackend;
-use era_volume::{SuperHeader, VolumeReader, VolumeWriter, MAX_SHARD_SIZE};
+use era_volume::{
+    RecipientSlot, RecipientType, SuperHeader, VolumeReader, VolumeWriter, MAX_SHARD_SIZE,
+};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use tempfile::TempDir;
+
+/// Create a dummy recipient slot for test headers (validation requires >= 1 recipient)
+fn dummy_recipients() -> Vec<RecipientSlot> {
+    vec![RecipientSlot::new(
+        RecipientType::ScryptPassword,
+        None,
+        vec![0u8; 32], // dummy params
+        vec![0u8; 48], // dummy encrypted master key
+    )]
+}
 
 /// Test that reading a block with a malicious length field (> MAX_SHARD_SIZE)
 /// returns an error instead of attempting to allocate huge memory.
@@ -26,7 +38,7 @@ async fn test_malicious_block_header_huge_length_returns_error() {
     // 1. Create a valid volume with one block
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
         era_volume::EncryptedVolumeKey {
@@ -99,7 +111,7 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
     // 1. Create a valid volume
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
         era_volume::EncryptedVolumeKey {
@@ -175,7 +187,7 @@ async fn test_scan_handles_malicious_length_gracefully() {
     // 1. Create a valid volume with one block
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
         era_volume::EncryptedVolumeKey {
@@ -274,7 +286,7 @@ async fn test_length_at_max_shard_size_boundary() {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
         era_volume::EncryptedVolumeKey {

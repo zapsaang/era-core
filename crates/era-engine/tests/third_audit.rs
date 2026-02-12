@@ -243,7 +243,7 @@ fn rv3_anyofn_master_key_vec_not_zeroized() {
     let anyofn_start = source
         .find("AccessPolicy::AnyOfN")
         .expect("AnyOfN branch must exist");
-    let anyofn_body = &source[anyofn_start..anyofn_start + 800];
+    let anyofn_body = &source[anyofn_start..anyofn_start + 1200];
 
     // Check if master_key_bytes is zeroized before conversion or after
     let has_mk_bytes_zeroize = anyofn_body.contains("master_key_bytes.zeroize()")

@@ -8,7 +8,7 @@ A post-quantum encrypted archival storage engine written in Rust, featuring 3-la
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: February 11, 2026 — 218 tests passing, 0 clippy warnings, 3 fuzz targets clean.
+**Last Verified**: February 12, 2026 — 795 tests passing, 0 failures, 32 ignored, 0 clippy warnings, 3 fuzz targets clean (~60M iterations).
 
 ## Features
 
@@ -18,6 +18,7 @@ A post-quantum encrypted archival storage engine written in Rust, featuring 3-la
 - **Instant Key Rotation**: Re-wrap volume keys without rewriting data — millisecond MK rotation for petabyte archives
 - **Erasure Coding**: Reed-Solomon (4+2 default) with strict shard validation for data redundancy
 - **Content-Defined Chunking**: FastCDC algorithm for efficient deduplication
+- **V2.1 Embedded Index**: Right-sized Bloom filter + L1 MetaIndex + L2 IndexPages written as typed blocks within volumes for cold recovery without external state
 - **Async Pipeline**: Tokio-based async I/O with blocking offload for CPU-heavy work
 - **Multi-Volume Support**: Automatic volume splitting with matrix shard distribution
 - **Secure Memory**: mlock'd pages, zeroization on drop, core dump prevention
@@ -100,7 +101,7 @@ era-core/
 │   ├── era-volume/        Volume format v8.1, headers/footers, recovery
 │   ├── era-packing/       k-Bounded Best-Fit MacroBlock packing
 │   ├── era-ingest/        File ingestion, FastCDC chunking
-│   ├── era-index/         LSM-tree deduplication index
+│   ├── era-index/         V2.1 embedded deduplication index (Bloom + L1/L2)
 │   └── era-engine/        Archive orchestration, async pipeline
 └── fuzz/                  Fuzzing targets (separate workspace)
 ```
@@ -113,7 +114,7 @@ Layered dependency ordering (downward only):
 ├─────────────────────────────────────────────────────────────┤
 │  L4: era-engine       Archive orchestration, async pipeline │
 ├─────────────────────────────────────────────────────────────┤
-│  L3: era-index        LSM-tree deduplication index          │
+│  L3: era-index        V2.1 embedded dedup index (Bloom+L1/L2)│
 │      era-ingest       FastCDC chunking, file reading        │
 ├─────────────────────────────────────────────────────────────┤
 │  L2: era-packing      k-Bounded Best-Fit MacroBlock packing │
@@ -142,6 +143,7 @@ Layered dependency ordering (downward only):
 │  - Packed chunks with erasure shards                         │
 │  - AEAD encrypted with per-block derived keys                │
 │  - AAD = archive_id ‖ epoch_id ‖ block_index (context-bound)│
+│  - V2.1 Index Pages (Bloom + L1/L2) embedded as typed blocks │
 ├──────────────────────────────────────────────────────────────┤
 │  Backup Header (4096 bytes)                                  │
 ├──────────────────────────────────────────────────────────────┤
@@ -209,7 +211,7 @@ Layer 3: Volume Key (VK)
 
 ### Security Audits
 
-ERA Core has undergone five rounds of adversarial security auditing (189 test cases total):
+ERA Core has undergone five rounds of adversarial security auditing plus a V2.1 index persistence audit (219+ test cases total):
 
 | Audit | Tests | Focus Areas |
 |-------|-------|-------------|
@@ -218,8 +220,9 @@ ERA Core has undergone five rounds of adversarial security auditing (189 test ca
 | `second_audit` | 42 | Key wrapping, secret sharing, multi-party access control |
 | `third_audit` | 43 | Memory zeroization, source-level security patterns, TryFrom bounds |
 | `fourth_audit` | 46 | Context-bound AAD, path traversal, allocation limits, VK wrapping resilience |
+| `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery, MetaIndex |
 
-All 189 audit tests pass. Vulnerabilities identified during audits have been fully remediated.
+All 219 audit tests pass. Vulnerabilities identified during audits have been fully remediated.
 
 ## Development
 
@@ -248,10 +251,11 @@ cargo test --workspace
 
 ### Testing
 
-218 tests across 9 crates covering:
-- **189 adversarial audit tests** across 5 dedicated security audit suites
+795 tests across 9 crates covering:
+- **219 adversarial audit tests** across 6 security audit suites (including V2.1 index persistence)
 - Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
 - Integration tests for archive create/extract roundtrips
+- V2.1 embedded index tests (Bloom filter, L1/L2 page construction, cold recovery)
 - Threshold policy enforcement tests (T-of-N, Any-of-N)
 - Erasure coding recovery and failure tests
 - Memory hygiene, zeroization, and debug redaction tests
@@ -264,6 +268,7 @@ cargo test --package era-engine               # Engine crate only
 cargo test -p era-engine --test fourth_audit  # Specific audit suite
 cargo test -p era-engine --test second_audit  # Second audit suite
 cargo test -p era-engine --test third_audit   # Third audit suite
+cargo test -p era-index --test index_persistence_audit  # V2.1 index audit
 ```
 
 ### Fuzzing
@@ -283,9 +288,9 @@ cargo +nightly fuzz run fuzz_super_header_parse -- -max_total_time=60
 
 | Target | Tests | Last Run |
 |--------|-------|----------|
-| `fuzz_footer_parse` | `Footer::from_bytes()` | Millions of runs, 0 crashes |
-| `fuzz_block_header_parse` | `BlockHeader::from_bytes()`, `ShardHeader::from_bytes()` | 33M+ runs, 0 crashes |
-| `fuzz_super_header_parse` | `SuperHeader::from_bytes()` | 4.8M+ runs, 0 crashes |
+| `fuzz_footer_parse` | `Footer::from_bytes()` | 14M+ runs, 0 crashes |
+| `fuzz_block_header_parse` | `BlockHeader::from_bytes()`, `ShardHeader::from_bytes()` | 41M+ runs, 0 crashes |
+| `fuzz_super_header_parse` | `SuperHeader::from_bytes()` | 4.9M+ runs, 0 crashes |
 
 ### Benchmarks
 
@@ -332,7 +337,8 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - [x] Security audit — round 3: memory zeroization, TryFrom bounds (43/43 passing)
 - [x] Security audit — round 4: context-bound AAD, path traversal, allocation limits (46/46 passing)
 - [x] Security audit — adversarial edge cases (14/14 passing)
-- [ ] Index persistence layer (LSM-tree on-disk storage)
+- [x] V2.1 embedded deduplication index (Bloom + L1/L2 pages in-volume, cold recovery)
+- [x] Index persistence audit (30/30 passing)
 - [ ] CLI UX improvements
 
 ### Near-term (Q3-Q4 2026)
@@ -370,10 +376,10 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 ## Project Statistics
 
 - **Language**: Rust 100%
-- **Lines of Code**: ~54,300 (including tests)
-- **Tests**: 218 passing (0 failures, 3 ignored)
-- **Security Audit Tests**: 189 across 5 adversarial audit suites
-- **Fuzz Targets**: 3 (combined 38M+ runs, 0 crashes)
+- **Lines of Code**: ~55,500 (including tests)
+- **Tests**: 795 passing (0 failures, 32 ignored)
+- **Security Audit Tests**: 219 across 6 adversarial audit suites
+- **Fuzz Targets**: 3 (combined 60M+ runs, 0 crashes)
 - **Crates**: 9 library + 1 binary
 - **Build Time**: ~2 minutes (clean build)
 

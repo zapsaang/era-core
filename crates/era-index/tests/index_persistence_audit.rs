@@ -747,7 +747,7 @@ async fn test_large_index_embedded_finalize() {
 
     // With 10,000 entries and ENTRIES_PER_PAGE=8192, we expect at least 1 page
     assert!(
-        _meta.pages.len() >= 1,
+        !_meta.pages.is_empty(),
         "Must have at least 1 page for 10k entries, got {}",
         _meta.pages.len()
     );

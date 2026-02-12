@@ -349,59 +349,18 @@ fn h3_aead_cipher_strips_aad() {
 // If rel_path contains "../../etc/cron.d/malicious", files are written
 // OUTSIDE the intended restore directory.
 
-/// 🔴 H4: Path traversal in LSM manifest restore — no path sanitization
+/// � H4: Path traversal in LSM manifest restore — RESOLVED
+/// The `restore_lsm_dir_from_manifest` function was removed along with the
+/// LSM backend in v2.2. The V2.1 embedded index writes directly to volume
+/// blocks, eliminating the path traversal attack surface entirely.
 #[test]
 fn h4_path_traversal_lsm_manifest() {
     let reader_source = include_str!("../src/reader.rs");
 
-    // Find restore_lsm_dir_from_manifest
-    let fn_start = reader_source
-        .find("fn restore_lsm_dir_from_manifest")
-        .expect("restore_lsm_dir_from_manifest must exist");
-    let fn_body = &reader_source[fn_start..fn_start + 1000];
-
-    // Check if there's ANY path sanitization
-    let has_path_sanitization = fn_body.contains("canonicalize")
-        || fn_body.contains("starts_with")
-        || fn_body.contains("strip_prefix")
-        || fn_body.contains("is_absolute")
-        || fn_body.contains("has_root")
-        || fn_body.contains("components")
-        || fn_body.contains("path_clean")
-        || fn_body.contains("normalize")
-        || fn_body.contains("..")
-        || fn_body.contains("traversal")
-        || fn_body.contains("sanitize");
-
+    // Verify the vulnerable function has been completely removed
     assert!(
-        has_path_sanitization,
-        "🔴 H4: restore_lsm_dir_from_manifest has NO path sanitization!\n\
-         \n\
-         The function reads `rel_path` from the archived manifest and does:\n\
-         ```\n\
-         let file_path = path.join(rel_path);\n\
-         std::fs::create_dir_all(parent)?;\n\
-         std::fs::write(file_path, file_data)?;\n\
-         ```\n\
-         \n\
-         A crafted archive can include a manifest entry like:\n\
-         `rel_path = \"../../../etc/cron.d/evil\"`\n\
-         \n\
-         This writes OUTSIDE the intended restore directory to any writable\n\
-         location on the filesystem. Combined with directory creation via\n\
-         `create_dir_all`, the attacker can create arbitrary directory trees.\n\
-         \n\
-         IMPACT: Arbitrary file write during archive extraction. A malicious\n\
-         archive can overwrite system files, create cron jobs, modify\n\
-         shell configs, or inject code into other applications.\n\
-         \n\
-         FIX: Validate rel_path:\n\
-         ```\n\
-         let resolved = path.join(&rel_path).canonicalize()?;\n\
-         if !resolved.starts_with(path) {{\n\
-             return Err(EraError::Security(\"Path traversal detected\".into()));\n\
-         }}\n\
-         ```"
+        !reader_source.contains("restore_lsm_dir_from_manifest"),
+        "restore_lsm_dir_from_manifest should be removed (LSM backend removed in v2.2)"
     );
 }
 
@@ -769,57 +728,19 @@ fn m5_decapsulated_key_to_array_leak() {
 // SECTION 10: 🟡 M6 — UNBOUNDED ALLOCATION FROM UNTRUSTED MANIFEST
 // ============================================================================
 
-/// 🟡 M6: LSM manifest causes OOM via crafted size fields
+/// � M6: LSM manifest OOM — RESOLVED
+/// The `restore_lsm_dir_from_manifest` function was removed along with the
+/// LSM backend in v2.2. The V2.1 embedded index uses rkyv deserialization
+/// with bounded sizes, eliminating the unbounded allocation attack surface.
 #[test]
 fn m6_unbounded_allocation_lsm_manifest() {
     let reader_source = include_str!("../src/reader.rs");
 
-    let fn_start = reader_source
-        .find("fn restore_lsm_dir_from_manifest")
-        .expect("restore_lsm_dir_from_manifest must exist");
-    let fn_body = &reader_source[fn_start..fn_start + 1000];
-
-    // Check if there are size limits on allocations from manifest data
-    let has_size_check = fn_body.contains("MAX_")
-        || fn_body.contains("max_size")
-        || fn_body.contains("limit")
-        || fn_body.contains("too large")
-        || fn_body.contains("too many")
-        || fn_body.contains("cap")
-        || fn_body.contains("budget");
-
-    // Check specifically for the `vec![0u8; data_len]` allocation
-    let allocates_from_manifest =
-        fn_body.contains("vec![0u8; data_len]") || fn_body.contains("vec![0u8; path_len]");
-
-    if allocates_from_manifest && !has_size_check {
-        panic!(
-            "🟡 M6: restore_lsm_dir_from_manifest allocates unbounded memory!\n\
-             \n\
-             The function reads `data_len` (u64→usize) from the manifest and does:\n\
-             ```\n\
-             let data_len = u64::from_le_bytes(size_bytes) as usize;\n\
-             let mut file_data = vec![0u8; data_len];\n\
-             ```\n\
-             \n\
-             A crafted manifest with data_len = 0xFFFFFFFFFFFFFFFF causes:\n\
-             - Instant OOM on 64-bit systems\n\
-             - Potential memory exhaustion DoS\n\
-             \n\
-             Also, `count` (u32→usize) allows ~4 billion iterations.\n\
-             \n\
-             Note: The main file extraction has MAX_DECLARED_FILE_SIZE (100GB),\n\
-             but the LSM path has NO such limit.\n\
-             \n\
-             FIX: Add size limits:\n\
-             ```\n\
-             const MAX_LSM_ENTRY_SIZE: usize = 256 * 1024 * 1024; // 256 MB\n\
-             if data_len > MAX_LSM_ENTRY_SIZE {{\n\
-                 return Err(EraError::CorruptedHeader(\"LSM entry too large\".into()));\n\
-             }}\n\
-             ```"
-        );
-    }
+    // Verify the vulnerable function has been completely removed
+    assert!(
+        !reader_source.contains("restore_lsm_dir_from_manifest"),
+        "restore_lsm_dir_from_manifest should be removed (LSM backend removed in v2.2)"
+    );
 }
 
 // ============================================================================

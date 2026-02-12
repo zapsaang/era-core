@@ -1581,14 +1581,18 @@ impl ArchiveWriter {
 
         // Finalize the V2.1 index: write typed index blocks to volume 0
         let volume_count = self.pipeline.volume().pool().volume_count();
-        let index_locations = if let Some(mut builder) = self.pipeline.index().take_index_builder() {
+        let index_locations = if let Some(mut builder) = self.pipeline.index().take_index_builder()
+        {
             // Copy crypto params before taking mutable borrow on pipeline
             let session = self.pipeline.encryption().session().clone();
             let volume_key = self.pipeline.encryption().volume_key().clone();
             let nonce_context = self.pipeline.encryption().nonce_context();
 
             if let Some(writer) = self.pipeline.volume_mut().get_writer_mut(0) {
-                match builder.finalize(writer, &session, &volume_key, nonce_context).await {
+                match builder
+                    .finalize(writer, &session, &volume_key, nonce_context)
+                    .await
+                {
                     Ok((_meta_index, manifest_location)) => {
                         let mut locs: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
                         // Volume 0 gets the real location

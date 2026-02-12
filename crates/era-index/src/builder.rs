@@ -17,8 +17,14 @@ use super::{IndexEntry, Spiller, TieredMerger};
 /// Default MemTable size limit (64MB)
 const DEFAULT_MEM_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Bloom filter expected items (10M items)
-const BLOOM_EXPECTED_ITEMS: usize = 10_000_000;
+/// Bloom filter expected items — derived from mem_limit / entry size
+/// to avoid an oversized bloom filter (previous 10M constant = ~12MB bloom).
+/// With 64MB mem_limit and ~64-byte entries, this yields ~1M expected items ≈ 1.2MB bloom.
+fn bloom_expected_items(mem_limit: usize) -> usize {
+    let entry_size = std::mem::size_of::<IndexEntry>().max(1);
+    // Use mem_limit capacity as upper bound, minimum 1024 to avoid degenerate bloom
+    (mem_limit / entry_size).max(1024)
+}
 
 /// Bloom filter false positive rate (1%)
 const BLOOM_FP_RATE: f64 = 0.01;
@@ -42,7 +48,7 @@ impl IndexBuilder {
     pub fn new(mem_limit: usize) -> Self {
         Self {
             memtable: Vec::with_capacity(mem_limit / IndexEntry::memory_size()),
-            bloom: Bloom::new_for_fp_rate(BLOOM_EXPECTED_ITEMS, BLOOM_FP_RATE),
+            bloom: Bloom::new_for_fp_rate(bloom_expected_items(mem_limit), BLOOM_FP_RATE),
             spiller: Spiller::new(),
             spilled_segments: Vec::new(),
             mem_limit,
@@ -248,7 +254,18 @@ impl IndexBuilder {
         }
 
         // Serialize Bloom filter using rkyv via bloom_serde
-        let bloom_bytes = super::serialize_bloom(&self.bloom)?;
+        // Rebuild a right-sized bloom from actual entries to avoid oversized on-disk bloom.
+        // The in-memory bloom (self.bloom) may be oversized for dedup during ingestion.
+        let finalized_bloom = if all_entries.is_empty() {
+            self.bloom.clone()
+        } else {
+            let mut compact = Bloom::new_for_fp_rate(all_entries.len().max(1024), BLOOM_FP_RATE);
+            for entry in &all_entries {
+                compact.set(&entry.hash);
+            }
+            compact
+        };
+        let bloom_bytes = super::serialize_bloom(&finalized_bloom)?;
         meta.set_bloom_filter(bloom_bytes);
 
         // Encrypt and write MetaIndex as IndexManifest block (using rkyv)

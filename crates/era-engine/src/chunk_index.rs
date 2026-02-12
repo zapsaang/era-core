@@ -125,8 +125,7 @@ impl ChunkIndex for MemoryChunkIndex {
         Ok(())
     }
 
-    fn start_batch(&self) {
-    }
+    fn start_batch(&self) {}
 
     fn commit_batch(&self) -> EraResult<()> {
         Ok(())
@@ -213,8 +212,7 @@ impl ChunkIndex for LsmChunkIndex {
         Ok(())
     }
 
-    fn start_batch(&self) {
-    }
+    fn start_batch(&self) {}
 
     fn commit_batch(&self) -> EraResult<()> {
         Ok(())

@@ -1,4 +1,4 @@
-use era_common::{ArchiveConfig, ErasureCodeConfig, ShardHeader};
+use era_common::{ArchiveConfig, BlockHeader, ErasureCodeConfig, ShardHeader};
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
@@ -30,11 +30,12 @@ async fn corrupt_standard_block(path: &Path) {
         .unwrap();
     let (data_start, _) = reader.data_region();
     let header_bytes = reader
-        .read_raw(data_start, ShardHeader::SIZE)
+        .read_raw(data_start, BlockHeader::SIZE)
         .await
         .unwrap();
-    let header = ShardHeader::from_bytes(&header_bytes).unwrap();
-    let corrupt_offset = data_start + ShardHeader::SIZE as u64 + (header.length as u64 / 2);
+    let header = BlockHeader::from_bytes(&header_bytes).expect("valid BlockHeader at data_start");
+    // Corrupt mid-payload (after the 16-byte BlockHeader)
+    let corrupt_offset = data_start + BlockHeader::SIZE as u64 + (header.length as u64 / 2);
     flip_byte_at(path, corrupt_offset);
 }
 

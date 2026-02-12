@@ -35,10 +35,10 @@ async fn test_mandatory_memory_index_default() {
         .expect("Failed to open volume");
     let footer = reader.footer().expect("Missing footer");
 
-    // Index should NOT be present (Memory backend is default in v2.2+)
+    // V2.1 embedded index should now be present
     assert!(
-        !footer.has_index(),
-        "Index should NOT be present (Memory backend is default)"
+        footer.has_index(),
+        "V2.1 embedded index should be present in footer"
     );
 }
 
