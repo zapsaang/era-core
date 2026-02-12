@@ -42,11 +42,8 @@
 //!           — compiler may optimize away `iter_mut().for_each(|b| *b = 0)`
 
 use era_common::ArchiveId;
-use era_crypto::{
-    reconstruct_master_key, split_master_key, wrap_volume_key, IntermediateKey, KdfParams,
-    KeySession, VolumeKey,
-};
-use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions, GenericArchiveWriterBuilder};
+use era_crypto::{split_master_key, wrap_volume_key, IntermediateKey, KeySession, VolumeKey};
+use era_engine::{ArchiveReader, ArchiveWriter};
 use era_volume::{
     AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader,
 };

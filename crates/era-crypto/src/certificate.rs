@@ -58,6 +58,12 @@ const CERT_FILE_MAGIC: &[u8; 4] = b"ERAC";
 /// Key file version
 const KEY_FILE_VERSION: u8 = 1;
 
+/// Domain separator for certificate MK encapsulation AAD
+const CERT_ENCAPS_AAD: &[u8] = b"ERA_CERT_ENCAPS_v8.1";
+
+/// Domain separator for key file encryption AAD
+const KEY_FILE_AAD: &[u8] = b"ERA_KEY_FILE_v8.1";
+
 /// ERA keypair
 ///
 /// Holds the private and public key used to create and decrypt archives.
@@ -77,9 +83,11 @@ pub struct EraKeyPair {
 
 impl Clone for EraKeyPair {
     fn clone(&self) -> Self {
-        let secret_bytes = self.secret_key.to_bytes();
+        let mut sb = self.secret_key.to_bytes();
+        let sk = StaticSecret::from(sb);
+        sb.zeroize();
         Self {
-            secret_key: StaticSecret::from(secret_bytes),
+            secret_key: sk,
             public_key: self.public_key,
             key_id: self.key_id,
             created_at: self.created_at,
@@ -157,9 +165,9 @@ impl DecapsulatedKey {
         &self.master_key
     }
 
-    /// Get a 32-byte array copy
-    pub fn to_array(&self) -> [u8; KEY_LEN] {
-        let mut arr = [0u8; KEY_LEN];
+    /// Get a 32-byte array copy wrapped in Zeroizing to ensure cleanup
+    pub fn to_array(&self) -> zeroize::Zeroizing<[u8; KEY_LEN]> {
+        let mut arr = zeroize::Zeroizing::new([0u8; KEY_LEN]);
         arr.copy_from_slice(&self.master_key);
         arr
     }
@@ -276,10 +284,11 @@ impl EraKeyPair {
         // Derive wrapping key via HKDF
         let wrap_key = Self::derive_wrap_key(shared_secret.as_bytes())?;
 
-        // Encrypt master key
+        // Encrypt master key with recipient key_id as AAD context
         let aead = AeadCipher::new();
         let nonce = Nonce::zero(); // One-time wrap key allows a zero nonce
-        let encrypted = aead.encrypt(&wrap_key, &nonce, master_key)?;
+        let aad = [CERT_ENCAPS_AAD, recipient.key_id()].concat();
+        let encrypted = aead.encrypt(&wrap_key, &nonce, &aad, master_key)?;
 
         Ok(KeyEncapsulation {
             ephemeral_public: *ephemeral.public.as_bytes(),
@@ -301,10 +310,12 @@ impl EraKeyPair {
         // Derive unwrapping key via HKDF
         let wrap_key = Self::derive_wrap_key(shared_secret.as_bytes())?;
 
-        // Decrypt master key
+        // Decrypt master key with our key_id as AAD context
         let aead = AeadCipher::new();
         let nonce = Nonce::zero();
-        let mut decrypted = aead.decrypt(&wrap_key, &nonce, &encapsulation.encrypted_master_key)?;
+        let aad = [CERT_ENCAPS_AAD, &self.key_id[..]].concat();
+        let mut decrypted =
+            aead.decrypt(&wrap_key, &nonce, &aad, &encapsulation.encrypted_master_key)?;
 
         if decrypted.len() != KEY_LEN {
             decrypted.zeroize();
@@ -345,8 +356,12 @@ impl EraKeyPair {
         let aead = AeadCipher::new();
         let nonce = Nonce::generate();
         let secret_bytes = self.secret_key.as_bytes();
-        let encrypted_secret =
-            aead.encrypt(&AeadKey(*encryption_key.as_bytes()), &nonce, secret_bytes)?;
+        let encrypted_secret = aead.encrypt(
+            &AeadKey(*encryption_key.as_bytes()),
+            &nonce,
+            KEY_FILE_AAD,
+            secret_bytes,
+        )?;
 
         // Build file payload
         // Format: MAGIC(4) + VERSION(1) + SALT(16) + NONCE(24) + KEY_ID(16) + CREATED_AT(8) + ENCRYPTED_SECRET(32+16)
@@ -409,6 +424,7 @@ impl EraKeyPair {
         let secret_bytes = aead.decrypt(
             &AeadKey(*encryption_key.as_bytes()),
             &nonce,
+            KEY_FILE_AAD,
             encrypted_secret,
         )?;
 

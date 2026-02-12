@@ -75,7 +75,9 @@ impl Spiller {
             .map_err(|e| EraError::Serialization(e.to_string()))?;
 
         // Encrypt payload
-        let ciphertext = self.cipher.encrypt(&self.key, &nonce, &plaintext)?;
+        let ciphertext = self
+            .cipher
+            .encrypt(&self.key, &nonce, b"ERA_SPILL_v8.1", &plaintext)?;
 
         // Write file format:
         // [Magic: 8 bytes] [Nonce: 24 bytes] [Ciphertext + Tag: variable]
@@ -114,7 +116,7 @@ impl Spiller {
         // Decrypt
         let plaintext = self
             .cipher
-            .decrypt(&self.key, &nonce, &ciphertext)
+            .decrypt(&self.key, &nonce, b"ERA_SPILL_v8.1", &ciphertext)
             .map_err(|e| EraError::Decryption(format!("Failed to decrypt spill file: {}", e)))?;
 
         // Deserialize using rkyv (zero-copy)

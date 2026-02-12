@@ -94,7 +94,10 @@ impl VolumeKey {
 
 impl Clone for VolumeKey {
     fn clone(&self) -> Self {
-        Self::from_bytes(*self.as_bytes())
+        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default())
+            .expect("Failed to allocate secure memory for VolumeKey clone");
+        buffer.as_mut().copy_from_slice(self.buffer.as_ref());
+        Self { buffer }
     }
 }
 
@@ -164,13 +167,16 @@ pub struct WrappedVolumeKey {
 /// Wrap (encrypt) a Volume Key using the Intermediate Key.
 ///
 /// Uses XChaCha20-Poly1305 with a fresh random nonce from OsRng.
+/// Domain separator for VK wrap AAD context binding
+const VK_WRAP_AAD_DOMAIN: &[u8] = b"ERA_VK_WRAP_v8.1";
+
 pub fn wrap_volume_key(ik: &IntermediateKey, vk: &VolumeKey) -> Result<WrappedVolumeKey> {
     let mut nonce_bytes = [0u8; 24];
     OsRng.fill_bytes(&mut nonce_bytes);
 
     let aead_key = AeadKey::from_bytes(ik.as_bytes())?;
     let nonce = Nonce::from_bytes(&nonce_bytes)?;
-    let ciphertext = AeadCipher.encrypt(&aead_key, &nonce, vk.as_bytes())?;
+    let ciphertext = AeadCipher.encrypt(&aead_key, &nonce, VK_WRAP_AAD_DOMAIN, vk.as_bytes())?;
 
     Ok(WrappedVolumeKey {
         nonce: nonce_bytes,
@@ -190,7 +196,7 @@ pub fn unwrap_volume_key(
     let aead_key = AeadKey::from_bytes(ik.as_bytes())?;
     let nonce = Nonce::from_bytes(nonce)?;
     let plaintext = AeadCipher
-        .decrypt(&aead_key, &nonce, ciphertext)
+        .decrypt(&aead_key, &nonce, VK_WRAP_AAD_DOMAIN, ciphertext)
         .map_err(|_| era_common::EraError::Security("Key Tampering Detected".into()))?;
 
     let mut vk_bytes = [0u8; 32];

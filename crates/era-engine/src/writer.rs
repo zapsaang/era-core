@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 const INTERNAL_INDEX_NAME: &str = ".era/meta/index.bin";
 const INTERNAL_CHECKPOINT_NAME: &str = ".era/meta/checkpoint.bin";
@@ -74,6 +75,18 @@ pub enum AuthMode {
         password: String,
         certificate: EraCertificate,
     },
+}
+
+impl Drop for AuthMode {
+    fn drop(&mut self) {
+        match self {
+            AuthMode::Password(ref mut pwd) => pwd.zeroize(),
+            AuthMode::Hybrid {
+                ref mut password, ..
+            } => password.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 impl Default for AuthMode {
@@ -352,7 +365,7 @@ impl ArchiveWriterBuilder {
         let chunker_override = self.chunker_config;
         let max_volume_size = self.max_volume_size;
 
-        let mut master_key = [0u8; 32];
+        let mut master_key = Zeroizing::new([0u8; 32]);
         let mut archive_salt = era_crypto::Salt::generate();
         let mut recipients = Vec::new();
         let mut skip_auth_setup = false;
@@ -426,7 +439,7 @@ impl ArchiveWriterBuilder {
                 }
             }
 
-            master_key = recovered_mk.ok_or(era_common::EraError::InvalidKey(
+            *master_key = recovered_mk.ok_or(era_common::EraError::InvalidKey(
                 "No valid credentials found for append (password/key mismatch)".into(),
             ))?;
 
@@ -478,7 +491,7 @@ impl ArchiveWriterBuilder {
             skip_auth_setup = true;
         } else {
             // Generate Master Key (DEK) for new archive
-            OsRng.fill_bytes(&mut master_key);
+            OsRng.fill_bytes(master_key.as_mut());
         }
 
         let session = KeySession::from_master_key(&master_key)?;
@@ -557,7 +570,7 @@ impl ArchiveWriterBuilder {
 
                         let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
                         let nonce = Nonce::generate();
-                        let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &master_key)?;
+                        let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &*master_key)?;
 
                         let mut combined = Vec::new();
                         combined.extend_from_slice(nonce.as_bytes());
@@ -592,11 +605,12 @@ impl ArchiveWriterBuilder {
                 // Create ephemeral copy of MK for encapsulation (which might zeroize it, but we need it for session)
                 // Encapsulate takes generic key slice, checking signature?
                 // EraKeyPair::encapsulate_for(cert, &master_key)
-                let encapsulation = EraKeyPair::encapsulate_for(cert, &master_key)?;
+                let encapsulation = EraKeyPair::encapsulate_for(cert, &*master_key)?;
                 key_encapsulation = Some(encapsulation.clone());
 
-                let key_id_bytes: [u8; 8] = cert.key_id()[..8].try_into()
-                    .map_err(|_| era_common::EraError::InvalidKey("Certificate key_id too short".into()))?;
+                let key_id_bytes: [u8; 8] = cert.key_id()[..8].try_into().map_err(|_| {
+                    era_common::EraError::InvalidKey("Certificate key_id too short".into())
+                })?;
 
                 recipients.push(RecipientSlot {
                     r_type: RecipientType::X25519PubKey,

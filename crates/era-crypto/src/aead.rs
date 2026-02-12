@@ -77,14 +77,26 @@ impl AeadCipher {
         Self
     }
 
-    /// Encrypt with key and nonce (delegates to AeadContext trait)
-    pub fn encrypt(&self, key: &AeadKey, nonce: &Nonce, plaintext: &[u8]) -> Result<Vec<u8>> {
-        XChaCha20Poly1305Context::new(&key.0)?.encrypt(nonce.as_bytes(), &[], plaintext)
+    /// Encrypt with key, nonce, and associated data (delegates to AeadContext trait)
+    pub fn encrypt(
+        &self,
+        key: &AeadKey,
+        nonce: &Nonce,
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>> {
+        XChaCha20Poly1305Context::new(&key.0)?.encrypt(nonce.as_bytes(), aad, plaintext)
     }
 
-    /// Decrypt with key and nonce (delegates to AeadContext trait)
-    pub fn decrypt(&self, key: &AeadKey, nonce: &Nonce, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        XChaCha20Poly1305Context::new(&key.0)?.decrypt(nonce.as_bytes(), &[], ciphertext)
+    /// Decrypt with key, nonce, and associated data (delegates to AeadContext trait)
+    pub fn decrypt(
+        &self,
+        key: &AeadKey,
+        nonce: &Nonce,
+        aad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>> {
+        XChaCha20Poly1305Context::new(&key.0)?.decrypt(nonce.as_bytes(), aad, ciphertext)
     }
 }
 

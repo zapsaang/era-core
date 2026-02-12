@@ -100,6 +100,12 @@ fn create_embedded_lsm_restore_dir() -> PathBuf {
     path
 }
 
+/// Maximum size for a single LSM manifest entry (256 MB)
+const MAX_LSM_ENTRY_SIZE: usize = 256 * 1024 * 1024;
+
+/// Maximum number of entries in an LSM manifest
+const MAX_LSM_ENTRY_COUNT: usize = 1_000_000;
+
 fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
     let mut cursor = std::io::Cursor::new(data);
     let mut count_bytes = [0u8; 4];
@@ -107,6 +113,16 @@ fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
         .read_exact(&mut count_bytes)
         .map_err(era_common::EraError::Io)?;
     let count = u32::from_le_bytes(count_bytes) as usize;
+
+    if count > MAX_LSM_ENTRY_COUNT {
+        return Err(era_common::EraError::CorruptedHeader(format!(
+            "LSM manifest entry count too large: {}",
+            count
+        )));
+    }
+
+    // Canonicalize the allowed base directory
+    let allowed = path.canonicalize().map_err(era_common::EraError::Io)?;
 
     for _ in 0..count {
         let mut len_bytes = [0u8; 4];
@@ -128,16 +144,67 @@ fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
             .map_err(era_common::EraError::Io)?;
         let data_len = u64::from_le_bytes(size_bytes) as usize;
 
+        if data_len > MAX_LSM_ENTRY_SIZE {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "LSM entry too large: {} bytes",
+                data_len
+            )));
+        }
+
         let mut file_data = vec![0u8; data_len];
         cursor
             .read_exact(&mut file_data)
             .map_err(era_common::EraError::Io)?;
 
-        let file_path = path.join(rel_path);
+        // Path traversal protection: validate rel_path components
+        let rel = std::path::Path::new(&rel_path);
+        for component in rel.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    return Err(era_common::EraError::Security(format!(
+                        "Path traversal detected in LSM manifest: {}",
+                        rel_path
+                    )));
+                }
+                std::path::Component::RootDir => {
+                    return Err(era_common::EraError::Security(format!(
+                        "Absolute path in LSM manifest: {}",
+                        rel_path
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        let file_path = path.join(&rel_path);
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent).map_err(era_common::EraError::Io)?;
         }
-        std::fs::write(file_path, file_data).map_err(era_common::EraError::Io)?;
+
+        // Post-creation canonicalize check
+        let canonical = if file_path.exists() {
+            file_path.canonicalize().map_err(era_common::EraError::Io)?
+        } else {
+            let parent = file_path
+                .parent()
+                .ok_or_else(|| era_common::EraError::Security("Invalid path".into()))?;
+            let filename = file_path
+                .file_name()
+                .ok_or_else(|| era_common::EraError::Security("Invalid path".into()))?;
+            parent
+                .canonicalize()
+                .map_err(era_common::EraError::Io)?
+                .join(filename)
+        };
+
+        if !canonical.starts_with(&allowed) {
+            return Err(era_common::EraError::Security(format!(
+                "Path traversal detected: {}",
+                rel_path
+            )));
+        }
+
+        std::fs::write(canonical, file_data).map_err(era_common::EraError::Io)?;
     }
 
     Ok(())
@@ -329,10 +396,11 @@ impl ArchiveReader {
                         }
                     }
                 }
-                let mut master_key_bytes = master_key.ok_or(EraError::InvalidKey(
-                    "No valid credentials found".into(),
-                ))?;
-                let mk_array: [u8; 32] = master_key_bytes.as_slice().try_into()
+                let mut master_key_bytes =
+                    master_key.ok_or(EraError::InvalidKey("No valid credentials found".into()))?;
+                let mk_array: [u8; 32] = master_key_bytes
+                    .as_slice()
+                    .try_into()
                     .map_err(|_| EraError::InvalidKey("Invalid master key length".into()))?;
                 master_key_bytes.zeroize();
                 mk_array
@@ -841,6 +909,28 @@ impl ArchiveReader {
                 continue;
             }
             let output_path = options.output_dir.join(&entry.path);
+
+            // Path traversal protection: verify output_path stays within output_dir
+            {
+                let rel = &entry.path;
+                for component in rel.components() {
+                    match component {
+                        std::path::Component::ParentDir => {
+                            return Err(EraError::Security(format!(
+                                "Path traversal detected: {}",
+                                rel.display()
+                            )));
+                        }
+                        std::path::Component::RootDir => {
+                            return Err(EraError::Security(format!(
+                                "Absolute path in archive entry: {}",
+                                rel.display()
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+            }
 
             if output_path.exists() && !options.overwrite {
                 debug!("Skipping existing file: {}", output_path.display());

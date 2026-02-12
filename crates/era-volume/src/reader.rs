@@ -430,7 +430,10 @@ impl<R: StorageReader> VolumeReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, VolumeWriter};
+    use crate::{
+        AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType,
+        VolumeWriter,
+    };
     use era_common::{ArchiveConfig, ArchiveId};
     use era_storage::LocalStorageBackend;
     use tempfile::TempDir;

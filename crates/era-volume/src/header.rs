@@ -238,11 +238,9 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
         let key_id = if proto.key_id.is_empty() {
             None
         } else {
-            Some(
-                proto.key_id.as_slice().try_into().map_err(|_| {
-                    era_common::EraError::CorruptedHeader("Invalid key_id length".into())
-                })?,
-            )
+            Some(proto.key_id.as_slice().try_into().map_err(|_| {
+                era_common::EraError::CorruptedHeader("Invalid key_id length".into())
+            })?)
         };
 
         if proto.encrypted_master_key.len() < 24 {
@@ -341,15 +339,18 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
             return Err(era_common::EraError::InvalidMagic);
         }
         if proto.version as u16 != HEADER_VERSION {
-            return Err(era_common::EraError::UnsupportedVersion { version: proto.version });
+            return Err(era_common::EraError::UnsupportedVersion {
+                version: proto.version,
+            });
         }
         let access_policy = match proto.access_policy() {
             proto::AccessPolicy::AnyOfN => AccessPolicy::AnyOfN,
             proto::AccessPolicy::Threshold => {
                 if proto.threshold < 2 {
-                    return Err(era_common::EraError::CorruptedHeader(
-                        format!("Invalid threshold: {} (minimum 2)", proto.threshold).into(),
-                    ));
+                    return Err(era_common::EraError::CorruptedHeader(format!(
+                        "Invalid threshold: {} (minimum 2)",
+                        proto.threshold
+                    )));
                 }
                 AccessPolicy::Threshold(proto.threshold)
             }
@@ -358,7 +359,9 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
             .encrypted_volume_key
             .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing EVK".into()))?
             .try_into()?;
-        let recipients: Vec<RecipientSlot> = proto.recipients.into_iter()
+        let recipients: Vec<RecipientSlot> = proto
+            .recipients
+            .into_iter()
             .map(|r| r.try_into())
             .collect::<std::result::Result<Vec<_>, _>>()?;
         if recipients.is_empty() {
@@ -377,16 +380,23 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
                 uuid::Uuid::from_slice(&proto.archive_id)
                     .map_err(|_| era_common::EraError::CorruptedHeader("Invalid UUID".into()))?,
             ),
-            volume_sequence: u16::try_from(proto.volume_sequence)
-                .map_err(|_| era_common::EraError::CorruptedHeader("volume_sequence exceeds u16".into()))?,
-            total_volumes: u16::try_from(proto.total_volumes)
-                .map_err(|_| era_common::EraError::CorruptedHeader("total_volumes exceeds u16".into()))?,
+            volume_sequence: u16::try_from(proto.volume_sequence).map_err(|_| {
+                era_common::EraError::CorruptedHeader("volume_sequence exceeds u16".into())
+            })?,
+            total_volumes: u16::try_from(proto.total_volumes).map_err(|_| {
+                era_common::EraError::CorruptedHeader("total_volumes exceeds u16".into())
+            })?,
             creation_time: proto.creation_time,
             feature_flags: proto.feature_flags,
             recipients,
-            config: proto.config.map(Into::into)
-                .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing config".into()))?,
-            salt: proto.salt.as_slice().try_into()
+            config: proto
+                .config
+                .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing config".into()))?
+                .try_into()?,
+            salt: proto
+                .salt
+                .as_slice()
+                .try_into()
                 .map_err(|_| era_common::EraError::CorruptedHeader("Corrupted salt".into()))?,
             epoch_id: proto.epoch_id,
             encrypted_volume_key,

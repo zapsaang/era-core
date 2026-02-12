@@ -4,6 +4,7 @@ use era_crypto::{AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_crypto::{KdfParams, Salt};
 use era_volume::{RecipientSlot, RecipientType};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use zeroize::Zeroize;
 
 /// Abstract identity provider for authentication
 pub trait AuthProvider: Send + Sync {
@@ -23,6 +24,12 @@ pub struct PasswordSlotParams {
 
 pub struct PasswordProvider {
     password: String,
+}
+
+impl Drop for PasswordProvider {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
 }
 
 impl PasswordProvider {
@@ -112,7 +119,7 @@ impl AuthProvider for CertificateProvider {
         };
 
         match self.keypair.decapsulate(&encapsulation) {
-            Ok(dk) => Ok(Some(dk.to_array().to_vec())),
+            Ok(dk) => Ok(Some(dk.as_bytes().to_vec())),
             Err(_) => Ok(None),
         }
     }

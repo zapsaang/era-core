@@ -20,18 +20,46 @@ impl From<ArchiveConfig> for proto::ArchiveConfig {
     }
 }
 
-impl From<proto::ArchiveConfig> for ArchiveConfig {
-    fn from(proto: proto::ArchiveConfig) -> Self {
-        Self {
-            compression: proto.compression.map(Into::into).unwrap_or_default(),
-            encryption: proto.encryption.map(Into::into).unwrap_or_default(),
-            volume: proto.volume.map(Into::into).unwrap_or_default(),
-            block: proto.block.map(Into::into).unwrap_or_default(),
-            erasure: proto.erasure.map(Into::into),
-            distribution: proto.distribution.map(Into::into).unwrap_or_default(),
-            chunking: proto.chunking.map(Into::into).unwrap_or_default(),
-            packing: proto.packing.map(Into::into).unwrap_or_default(),
-        }
+impl TryFrom<proto::ArchiveConfig> for ArchiveConfig {
+    type Error = crate::EraError;
+    fn try_from(proto: proto::ArchiveConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            compression: proto
+                .compression
+                .ok_or_else(|| {
+                    crate::EraError::CorruptedHeader("Missing compression config".into())
+                })?
+                .into(),
+            encryption: proto
+                .encryption
+                .ok_or_else(|| {
+                    crate::EraError::CorruptedHeader("Missing encryption config".into())
+                })?
+                .into(),
+            volume: proto
+                .volume
+                .ok_or_else(|| crate::EraError::CorruptedHeader("Missing volume config".into()))?
+                .into(),
+            block: proto
+                .block
+                .ok_or_else(|| crate::EraError::CorruptedHeader("Missing block config".into()))?
+                .into(),
+            erasure: proto.erasure.map(TryInto::try_into).transpose()?,
+            distribution: proto
+                .distribution
+                .ok_or_else(|| {
+                    crate::EraError::CorruptedHeader("Missing distribution config".into())
+                })?
+                .into(),
+            chunking: proto
+                .chunking
+                .ok_or_else(|| crate::EraError::CorruptedHeader("Missing chunking config".into()))?
+                .into(),
+            packing: proto
+                .packing
+                .ok_or_else(|| crate::EraError::CorruptedHeader("Missing packing config".into()))?
+                .into(),
+        })
     }
 }
 
@@ -136,12 +164,17 @@ impl From<ErasureCodeConfig> for proto::ErasureCodeConfig {
     }
 }
 
-impl From<proto::ErasureCodeConfig> for ErasureCodeConfig {
-    fn from(proto: proto::ErasureCodeConfig) -> Self {
-        Self {
-            data_shards: proto.data_shards as u8,
-            parity_shards: proto.parity_shards as u8,
-        }
+impl TryFrom<proto::ErasureCodeConfig> for ErasureCodeConfig {
+    type Error = crate::EraError;
+    fn try_from(proto: proto::ErasureCodeConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            data_shards: u8::try_from(proto.data_shards).map_err(|_| {
+                crate::EraError::InvalidConfig("data_shards out of range (max 255)".into())
+            })?,
+            parity_shards: u8::try_from(proto.parity_shards).map_err(|_| {
+                crate::EraError::InvalidConfig("parity_shards out of range (max 255)".into())
+            })?,
+        })
     }
 }
 

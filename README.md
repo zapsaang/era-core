@@ -8,7 +8,7 @@ A post-quantum encrypted archival storage engine written in Rust, featuring 3-la
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: February 10, 2026 — 633 tests passing, 0 clippy warnings, 3 fuzz targets clean.
+**Last Verified**: February 11, 2026 — 218 tests passing, 0 clippy warnings, 3 fuzz targets clean.
 
 ## Features
 
@@ -22,6 +22,8 @@ A post-quantum encrypted archival storage engine written in Rust, featuring 3-la
 - **Multi-Volume Support**: Automatic volume splitting with matrix shard distribution
 - **Secure Memory**: mlock'd pages, zeroization on drop, core dump prevention
 - **Small File Packing**: Efficient storage of many small files via k-Bounded Best-Fit packing
+- **Context-Bound AEAD**: All encryption binds archive ID, epoch ID, and block index into the AAD to prevent cross-archive and cross-block splicing attacks
+- **Bounded Allocation**: All deserialization paths enforce strict size limits to prevent memory exhaustion from malicious inputs
 
 ## Quick Start
 
@@ -139,6 +141,7 @@ Layered dependency ordering (downward only):
 │  Data Region (Encrypted Blocks)                              │
 │  - Packed chunks with erasure shards                         │
 │  - AEAD encrypted with per-block derived keys                │
+│  - AAD = archive_id ‖ epoch_id ‖ block_index (context-bound)│
 ├──────────────────────────────────────────────────────────────┤
 │  Backup Header (4096 bytes)                                  │
 ├──────────────────────────────────────────────────────────────┤
@@ -191,15 +194,32 @@ Layer 3: Volume Key (VK)
 - **Memory hygiene**: All key material (MK, IK, VK) zeroized on drop via `zeroize` crate
 - **No key logging**: Key material never appears in any log level including TRACE
 - **AEAD integrity**: Tag verification failure returns `EraError::Security("Key Tampering Detected")`
+- **Context-bound AEAD**: All encryption binds `archive_id ‖ epoch_id ‖ block_index` as AAD — blocks cannot be spliced between archives or reordered within one
 - **Header validation**: Corrupted magic bytes cause hard failure (no silent recovery)
 - **Threshold enforcement**: Reader rejects `Threshold(T<2)` to prevent policy downgrade
 - **Erasure validation**: Extraction fails explicitly when insufficient shards are available
+- **Path traversal prevention**: Filenames are sanitized on extraction — absolute paths, `..`, and symlinks are rejected
+- **Bounded deserialization**: All `TryFrom` conversions enforce maximum sizes to prevent allocation bombs from malicious headers
 
 ### Multi-Party Access Control
 
 **Any-of-N (OR)**: Each recipient slot holds MK encrypted by that user's credential. Any single valid credential unlocks the archive.
 
 **T-of-N Threshold (AND)**: MK is split via Shamir's Secret Sharing. Each recipient slot holds an encrypted share. T shares must be combined to reconstruct MK. Fewer than T shares cannot recover MK (mathematical guarantee).
+
+### Security Audits
+
+ERA Core has undergone five rounds of adversarial security auditing (189 test cases total):
+
+| Audit | Tests | Focus Areas |
+|-------|-------|-------------|
+| `competitor_audit` | 44 | Core crypto, key management, nonce safety, AEAD correctness |
+| `ruthless_audit_tests` | 14 | Edge cases, error handling, adversarial inputs |
+| `second_audit` | 42 | Key wrapping, secret sharing, multi-party access control |
+| `third_audit` | 43 | Memory zeroization, source-level security patterns, TryFrom bounds |
+| `fourth_audit` | 46 | Context-bound AAD, path traversal, allocation limits, VK wrapping resilience |
+
+All 189 audit tests pass. Vulnerabilities identified during audits have been fully remediated.
 
 ## Development
 
@@ -215,7 +235,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 
 # 3. Full test suite
-cargo test
+cargo test --workspace
 ```
 
 Run locally before committing:
@@ -223,23 +243,27 @@ Run locally before committing:
 ```bash
 cargo fmt --all -- --check && \
 cargo clippy --all-targets --all-features -- -D warnings && \
-cargo test
+cargo test --workspace
 ```
 
 ### Testing
 
-633 tests across 9 crates covering:
-- Unit tests for all cryptographic operations
+218 tests across 9 crates covering:
+- **189 adversarial audit tests** across 5 dedicated security audit suites
+- Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
 - Integration tests for archive create/extract roundtrips
-- Adversarial audit tests (44 tests in `competitor_audit.rs`)
-- Threshold policy enforcement tests
+- Threshold policy enforcement tests (T-of-N, Any-of-N)
 - Erasure coding recovery and failure tests
-- Memory hygiene and debug redaction tests
+- Memory hygiene, zeroization, and debug redaction tests
+- Context-bound AEAD verification (cross-archive splicing prevention)
+- Path traversal and bounded allocation tests
 
 ```bash
-cargo test                                    # All tests
-cargo test --package era-engine               # Specific crate
-cargo test -p era-engine --test competitor_audit -- --test-threads=1  # Audit suite
+cargo test --workspace                        # All tests
+cargo test --package era-engine               # Engine crate only
+cargo test -p era-engine --test fourth_audit  # Specific audit suite
+cargo test -p era-engine --test second_audit  # Second audit suite
+cargo test -p era-engine --test third_audit   # Third audit suite
 ```
 
 ### Fuzzing
@@ -250,6 +274,7 @@ Three fuzz targets for critical parsing code (separate workspace, requires night
 rustup toolchain install nightly
 cargo install cargo-fuzz
 
+cd fuzz
 # Run each target
 cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 cargo +nightly fuzz run fuzz_block_header_parse -- -max_total_time=60
@@ -258,9 +283,9 @@ cargo +nightly fuzz run fuzz_super_header_parse -- -max_total_time=60
 
 | Target | Tests | Last Run |
 |--------|-------|----------|
-| `fuzz_footer_parse` | `Footer::from_bytes()` | 15.7M runs, 0 crashes |
-| `fuzz_block_header_parse` | `BlockHeader::from_bytes()`, `ShardHeader::from_bytes()` | 41.1M runs, 0 crashes |
-| `fuzz_super_header_parse` | `SuperHeader::from_bytes()` | 4.6M runs, 0 crashes |
+| `fuzz_footer_parse` | `Footer::from_bytes()` | Millions of runs, 0 crashes |
+| `fuzz_block_header_parse` | `BlockHeader::from_bytes()`, `ShardHeader::from_bytes()` | 33M+ runs, 0 crashes |
+| `fuzz_super_header_parse` | `SuperHeader::from_bytes()` | 4.8M+ runs, 0 crashes |
 
 ### Benchmarks
 
@@ -302,7 +327,11 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - [x] Post-quantum hybrid KEM
 - [x] Erasure coding with strict shard validation
 - [x] Multi-volume support
-- [x] Adversarial security audit (7/7 vulnerabilities remediated)
+- [x] Security audit — round 1: core crypto, nonce safety (44/44 passing)
+- [x] Security audit — round 2: key wrapping, secret sharing (42/42 passing)
+- [x] Security audit — round 3: memory zeroization, TryFrom bounds (43/43 passing)
+- [x] Security audit — round 4: context-bound AAD, path traversal, allocation limits (46/46 passing)
+- [x] Security audit — adversarial edge cases (14/14 passing)
 - [ ] Index persistence layer (LSM-tree on-disk storage)
 - [ ] CLI UX improvements
 
@@ -324,7 +353,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 
 1. Read [CLAUDE.md](CLAUDE.md) for architecture mandates and security constraints
 2. Fork, branch, and make changes following the coding standards
-3. Run all CI checks locally (`fmt`, `clippy -D warnings`, `test`)
+3. Run all CI checks locally (`fmt`, `clippy -D warnings`, `test --workspace`)
 4. Submit a PR — all checks must pass, code review required
 
 ### Coding Standards
@@ -335,13 +364,16 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - Never log key material at any level
 - Avoid `unwrap()` in runtime paths
 - CPU-heavy work must use `spawn_blocking`
+- All AEAD operations must bind context (archive ID, epoch ID, block index) as AAD
+- All `TryFrom` deserialization must enforce bounded allocation limits
 
 ## Project Statistics
 
 - **Language**: Rust 100%
-- **Lines of Code**: ~49,600 (including tests)
-- **Tests**: 633 passing (0 failures)
-- **Fuzz Targets**: 3 (61M+ total runs, 0 crashes)
+- **Lines of Code**: ~54,300 (including tests)
+- **Tests**: 218 passing (0 failures, 3 ignored)
+- **Security Audit Tests**: 189 across 5 adversarial audit suites
+- **Fuzz Targets**: 3 (combined 38M+ runs, 0 crashes)
 - **Crates**: 9 library + 1 binary
 - **Build Time**: ~2 minutes (clean build)
 

@@ -782,8 +782,7 @@ fn rv11_open_with_session_no_enforcement() {
         // This is a finding — the threshold check is advisory only
         // Note: This may be intentionally "advisory" but it violates
         // the principle that threshold archives REQUIRE multi-party auth
-        assert!(
-            false,
+        panic!(
             "🚨 RV11: open_with_session bypasses Threshold with warning only!\n\
              \n\
              The competitor added a `tracing::warn` for NV7, but the function\n\
@@ -977,8 +976,8 @@ fn behavioral_shamir_2of3_reconstruction() {
     }
 
     // Any single share should NOT reconstruct (or produce wrong MK)
-    for i in 0..3 {
-        let single = vec![shares[i].clone()];
+    for share in shares.iter().take(3) {
+        let single = vec![share.clone()];
         // Should either fail or produce wrong MK
         if let Ok(wrong_mk) = reconstruct_master_key(&single, 2) {
             assert_ne!(
@@ -1450,7 +1449,6 @@ async fn e2e_full_lifecycle_anyofn() {
         .extract_all(&ExtractOptions {
             output_dir: output_dir.clone(),
             overwrite: true,
-            ..Default::default()
         })
         .await
         .unwrap();
@@ -1525,7 +1523,6 @@ async fn e2e_threshold_2of2_works() {
         .extract_all(&ExtractOptions {
             output_dir: output_dir.clone(),
             overwrite: true,
-            ..Default::default()
         })
         .await
         .unwrap();
