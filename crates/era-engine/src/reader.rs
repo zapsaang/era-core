@@ -20,6 +20,7 @@ use era_codec::ZstdCompressor;
 use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result, ShardLayout};
 use era_crypto::certificate::EraKeyPair;
 use era_crypto::{KeySession, VolumeKey};
+use era_index::IndexReader;
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
@@ -85,10 +86,13 @@ pub struct ArchiveReader {
     /// Compression algorithm type
     compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
-    /// Restored embedded LSM directory (if present)
+    /// Restored embedded LSM directory (if present, legacy path)
     embedded_lsm_dir: Option<PathBuf>,
+    /// V2.1 index reader recovered from volume (preferred fast path)
+    index_reader: Option<IndexReader>,
 }
 
+#[allow(dead_code)]
 fn create_embedded_lsm_restore_dir() -> PathBuf {
     let mut bytes = [0u8; 8];
     OsRng.fill_bytes(&mut bytes);
@@ -101,11 +105,14 @@ fn create_embedded_lsm_restore_dir() -> PathBuf {
 }
 
 /// Maximum size for a single LSM manifest entry (256 MB)
+#[allow(dead_code)]
 const MAX_LSM_ENTRY_SIZE: usize = 256 * 1024 * 1024;
 
 /// Maximum number of entries in an LSM manifest
+#[allow(dead_code)]
 const MAX_LSM_ENTRY_COUNT: usize = 1_000_000;
 
+#[allow(dead_code)]
 fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
     let mut cursor = std::io::Cursor::new(data);
     let mut count_bytes = [0u8; 4];
@@ -457,6 +464,7 @@ impl ArchiveReader {
             compression_algorithm,
             catalog: None,
             embedded_lsm_dir: None,
+            index_reader: None,
         })
     }
 
@@ -516,6 +524,7 @@ impl ArchiveReader {
             compression_algorithm,
             catalog: None,
             embedded_lsm_dir: None,
+            index_reader: None,
         })
     }
 
@@ -593,58 +602,42 @@ impl ArchiveReader {
     }
 
     async fn restore_embedded_index(&mut self) -> Result<()> {
-        if self.embedded_lsm_dir.is_some() {
+        if self.embedded_lsm_dir.is_some() || self.index_reader.is_some() {
             return Ok(());
         }
 
-        let mut index_reader_idx = None;
-        for (i, reader) in self.volume_readers.iter().enumerate() {
+        // Fast path: try V2.1 IndexReader recovery from volume footer
+        for reader in &self.volume_readers {
             if let Some(footer) = reader.footer() {
                 if footer.has_index() {
-                    index_reader_idx = Some(i);
-                    break;
+                    match IndexReader::recover_from_volume(
+                        reader,
+                        &self.session,
+                        &self.volume_key,
+                        self.nonce_context,
+                    )
+                    .await
+                    {
+                        Ok(index_reader) => {
+                            debug!("V2.1 index recovered from volume footer");
+                            self.index_reader = Some(index_reader);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            debug!(
+                                "V2.1 index recovery failed, continuing without index: {}",
+                                e
+                            );
+                            // Don't fall through to legacy path — the footer's index location
+                            // points to V2.1 typed blocks which can't be unpacked as data blocks.
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
 
-        let reader_idx = match index_reader_idx {
-            Some(idx) => idx,
-            None => return Ok(()),
-        };
-
-        let reader = &self.volume_readers[reader_idx];
-        let footer = reader
-            .footer()
-            .expect("Index volume must have valid footer");
-
-        let location = BlockLocation::single(
-            reader.header().volume_id,
-            footer.index_block_id,
-            footer.index_offset,
-            footer.index_size,
-        );
-
-        let encrypted_block = reader.read_block(&location).await?;
-        let unpacker = self.create_unpacker();
-        let unpacked = unpacker.unpack(&encrypted_block)?;
-        let first_entry = unpacked
-            .index
-            .entries
-            .first()
-            .ok_or(EraError::EmptyCatalog)?;
-        let start = first_entry.offset as usize;
-        let end = start + first_entry.length as usize;
-        if end > unpacked.data.len() {
-            return Err(EraError::decompression(
-                "Index chunk offset exceeds data size",
-            ));
-        }
-
-        let manifest_data = unpacked.data.slice(start..end);
-        let restore_dir = create_embedded_lsm_restore_dir();
-        restore_lsm_dir_from_manifest(&restore_dir, &manifest_data)?;
-        self.embedded_lsm_dir = Some(restore_dir);
-
+        // No footer with index found — nothing to restore
         Ok(())
     }
 

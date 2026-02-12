@@ -64,9 +64,13 @@ impl IndexReader {
     ) -> Result<Self> {
         // For in-memory mode, we store all entries as a single "page"
         // This is simpler than creating actual pages for small indices
+        let mut meta = meta;
         let embedded_pages = if !entries.is_empty() {
             let mut pages = HashMap::new();
             let page = IndexPage::new(entries);
+            // CRITICAL: Register this page in the MetaIndex so lookup() can find it.
+            // Without this, meta.find_page() returns None and lookup() always fails.
+            meta.add_page(page.min_hash, page.max_hash, BlockId::new(0));
             pages.insert(BlockId::new(0), page);
             pages
         } else {

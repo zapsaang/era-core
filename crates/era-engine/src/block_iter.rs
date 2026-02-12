@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig};
 use era_common::{
-    BlockHeader, BlockId, BlockLocation, ChunkVec, EraError, ErasureBlockInfo,
+    BlockHeader, BlockId, BlockLocation, BlockType, ChunkVec, EraError, ErasureBlockInfo,
     MatrixDistributionStrategy, Result, ShardHeader,
 };
 use era_crypto::{KeySession, VolumeKey};
@@ -578,6 +578,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
         };
 
         let block_size = header.length;
+
+        // Skip non-data blocks (e.g., IndexPage, IndexManifest) — they are
+        // encrypted with different keys and are not part of the data stream.
+        if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
+            self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
+            // Don't increment block_index — index blocks use their own ID space
+            return self.next_block().await;
+        }
 
         // Validate block size
         if block_size == 0 {

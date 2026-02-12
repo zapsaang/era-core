@@ -1600,12 +1600,55 @@ impl ArchiveWriter {
             catalog_locations.len()
         );
 
-        // Finalize the pool with per-volume catalog offsets
+        // Finalize the V2.1 index: write typed index blocks to volume 0
+        let volume_count = self.pipeline.volume().pool().volume_count();
+        let index_locations = if let Some(mut builder) = self.pipeline.index().take_index_builder() {
+            // Copy crypto params before taking mutable borrow on pipeline
+            let session = self.pipeline.encryption().session().clone();
+            let volume_key = self.pipeline.encryption().volume_key().clone();
+            let nonce_context = self.pipeline.encryption().nonce_context();
+
+            if let Some(writer) = self.pipeline.volume_mut().get_writer_mut(0) {
+                match builder.finalize(writer, &session, &volume_key, nonce_context).await {
+                    Ok((_meta_index, manifest_location)) => {
+                        let mut locs: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
+                        // Volume 0 gets the real location
+                        locs.push((
+                            manifest_location.physical_offset,
+                            manifest_location.encrypted_size,
+                            manifest_location.slot_index,
+                        ));
+                        // Other volumes get zeroed entries
+                        for _ in 1..volume_count {
+                            locs.push((0, 0, 0));
+                        }
+                        debug!(
+                            "V2.1 index finalized: manifest at offset={}, size={}, block_id={}",
+                            manifest_location.physical_offset,
+                            manifest_location.encrypted_size,
+                            manifest_location.slot_index,
+                        );
+                        Some(locs)
+                    }
+                    Err(e) => {
+                        warn!("Failed to finalize V2.1 index, falling back to embedded snapshot only: {}", e);
+                        None
+                    }
+                }
+            } else {
+                warn!("No volume writer available for index finalization");
+                None
+            }
+        } else {
+            None
+        };
+
+        // Finalize the pool with per-volume catalog offsets and index locations
         let pool_stats = self
             .pipeline
             .volume_mut()
             .pool_mut()
-            .finalize_with_catalogs(&catalog_locations, None)
+            .finalize_with_catalogs(&catalog_locations, index_locations.as_deref())
             .await?;
 
         info!(

@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use era_common::{BlockLocation, ChunkHash, Result};
+use era_index::IndexBuilder;
 
 use crate::checkpoint::CheckpointManager;
-use crate::chunk_index::ChunkIndex;
+use crate::chunk_index::{ChunkIndex, LsmChunkIndex};
 
 /// Index stage for managing chunk deduplication and recovery indexes.
 ///
@@ -190,6 +191,17 @@ impl IndexStage {
     /// Prefer using the stage methods when possible.
     pub fn chunk_index(&self) -> &Arc<dyn ChunkIndex> {
         &self.chunk_index
+    }
+
+    /// Extract the `IndexBuilder` from the underlying chunk index.
+    ///
+    /// This only succeeds when the chunk index is an `LsmChunkIndex`.
+    /// Returns `None` for `MemoryChunkIndex` or if the builder was already taken.
+    pub fn take_index_builder(&self) -> Option<IndexBuilder> {
+        self.chunk_index
+            .as_any()
+            .downcast_ref::<LsmChunkIndex>()
+            .and_then(|lsm| lsm.take_builder())
     }
 }
 
