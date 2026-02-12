@@ -111,22 +111,18 @@ fn verify_v2_writer_padding_uses_osrng() {
     );
 }
 
-/// ✅ Verify V3 fix: reader temp dir uses OsRng
+/// ✅ Verify V3 fix: legacy LSM restore removed, V2.1 IndexReader used instead
 #[test]
 fn verify_v3_reader_temp_dir_uses_osrng() {
     let source = include_str!("../src/reader.rs");
-    // Check that create_embedded_lsm_restore_dir does not use thread_rng
-    let fn_start = source
-        .find("fn create_embedded_lsm_restore_dir")
-        .expect("Function should exist");
-    let fn_section = &source[fn_start..fn_start + 500];
+    // Legacy create_embedded_lsm_restore_dir has been removed in favor of V2.1 IndexReader
     assert!(
-        !fn_section.contains("thread_rng"),
-        "REGRESSION V3: create_embedded_lsm_restore_dir still uses thread_rng"
+        !source.contains("fn create_embedded_lsm_restore_dir"),
+        "Legacy create_embedded_lsm_restore_dir should be removed"
     );
     assert!(
-        fn_section.contains("OsRng"),
-        "REGRESSION V3: create_embedded_lsm_restore_dir must use OsRng"
+        source.contains("IndexReader::recover_from_volume"),
+        "Reader must use V2.1 IndexReader::recover_from_volume"
     );
 }
 

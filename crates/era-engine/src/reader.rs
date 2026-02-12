@@ -25,11 +25,8 @@ use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{Footer, SuperHeader, VolumeReader};
-use rand::rngs::OsRng;
-use rand::RngCore;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 use zeroize::Zeroize;
@@ -86,135 +83,8 @@ pub struct ArchiveReader {
     /// Compression algorithm type
     compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
-    /// Restored embedded LSM directory (if present, legacy path)
-    embedded_lsm_dir: Option<PathBuf>,
-    /// V2.1 index reader recovered from volume (preferred fast path)
+    /// V2.1 index reader recovered from volume
     index_reader: Option<IndexReader>,
-}
-
-#[allow(dead_code)]
-fn create_embedded_lsm_restore_dir() -> PathBuf {
-    let mut bytes = [0u8; 8];
-    OsRng.fill_bytes(&mut bytes);
-    let suffix = u64::from_le_bytes(bytes);
-
-    let mut path = std::env::temp_dir();
-    path.push(format!("era_lsm_restore_{:016x}", suffix));
-    let _ = std::fs::create_dir_all(&path);
-    path
-}
-
-/// Maximum size for a single LSM manifest entry (256 MB)
-#[allow(dead_code)]
-const MAX_LSM_ENTRY_SIZE: usize = 256 * 1024 * 1024;
-
-/// Maximum number of entries in an LSM manifest
-#[allow(dead_code)]
-const MAX_LSM_ENTRY_COUNT: usize = 1_000_000;
-
-#[allow(dead_code)]
-fn restore_lsm_dir_from_manifest(path: &Path, data: &[u8]) -> Result<()> {
-    let mut cursor = std::io::Cursor::new(data);
-    let mut count_bytes = [0u8; 4];
-    cursor
-        .read_exact(&mut count_bytes)
-        .map_err(era_common::EraError::Io)?;
-    let count = u32::from_le_bytes(count_bytes) as usize;
-
-    if count > MAX_LSM_ENTRY_COUNT {
-        return Err(era_common::EraError::CorruptedHeader(format!(
-            "LSM manifest entry count too large: {}",
-            count
-        )));
-    }
-
-    // Canonicalize the allowed base directory
-    let allowed = path.canonicalize().map_err(era_common::EraError::Io)?;
-
-    for _ in 0..count {
-        let mut len_bytes = [0u8; 4];
-        cursor
-            .read_exact(&mut len_bytes)
-            .map_err(era_common::EraError::Io)?;
-        let path_len = u32::from_le_bytes(len_bytes) as usize;
-
-        let mut path_buf = vec![0u8; path_len];
-        cursor
-            .read_exact(&mut path_buf)
-            .map_err(era_common::EraError::Io)?;
-        let rel_path = String::from_utf8(path_buf)
-            .map_err(|e| era_common::EraError::Deserialization(e.to_string()))?;
-
-        let mut size_bytes = [0u8; 8];
-        cursor
-            .read_exact(&mut size_bytes)
-            .map_err(era_common::EraError::Io)?;
-        let data_len = u64::from_le_bytes(size_bytes) as usize;
-
-        if data_len > MAX_LSM_ENTRY_SIZE {
-            return Err(era_common::EraError::CorruptedHeader(format!(
-                "LSM entry too large: {} bytes",
-                data_len
-            )));
-        }
-
-        let mut file_data = vec![0u8; data_len];
-        cursor
-            .read_exact(&mut file_data)
-            .map_err(era_common::EraError::Io)?;
-
-        // Path traversal protection: validate rel_path components
-        let rel = std::path::Path::new(&rel_path);
-        for component in rel.components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    return Err(era_common::EraError::Security(format!(
-                        "Path traversal detected in LSM manifest: {}",
-                        rel_path
-                    )));
-                }
-                std::path::Component::RootDir => {
-                    return Err(era_common::EraError::Security(format!(
-                        "Absolute path in LSM manifest: {}",
-                        rel_path
-                    )));
-                }
-                _ => {}
-            }
-        }
-
-        let file_path = path.join(&rel_path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).map_err(era_common::EraError::Io)?;
-        }
-
-        // Post-creation canonicalize check
-        let canonical = if file_path.exists() {
-            file_path.canonicalize().map_err(era_common::EraError::Io)?
-        } else {
-            let parent = file_path
-                .parent()
-                .ok_or_else(|| era_common::EraError::Security("Invalid path".into()))?;
-            let filename = file_path
-                .file_name()
-                .ok_or_else(|| era_common::EraError::Security("Invalid path".into()))?;
-            parent
-                .canonicalize()
-                .map_err(era_common::EraError::Io)?
-                .join(filename)
-        };
-
-        if !canonical.starts_with(&allowed) {
-            return Err(era_common::EraError::Security(format!(
-                "Path traversal detected: {}",
-                rel_path
-            )));
-        }
-
-        std::fs::write(canonical, file_data).map_err(era_common::EraError::Io)?;
-    }
-
-    Ok(())
 }
 
 impl ArchiveReader {
@@ -463,7 +333,6 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
-            embedded_lsm_dir: None,
             index_reader: None,
         })
     }
@@ -523,7 +392,6 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
-            embedded_lsm_dir: None,
             index_reader: None,
         })
     }
@@ -602,7 +470,7 @@ impl ArchiveReader {
     }
 
     async fn restore_embedded_index(&mut self) -> Result<()> {
-        if self.embedded_lsm_dir.is_some() || self.index_reader.is_some() {
+        if self.index_reader.is_some() {
             return Ok(());
         }
 
@@ -1262,14 +1130,6 @@ impl ArchiveReader {
         };
 
         Self::verify_with_iterator(catalog, &mut iter).await
-    }
-}
-
-impl Drop for ArchiveReader {
-    fn drop(&mut self) {
-        if let Some(path) = &self.embedded_lsm_dir {
-            let _ = std::fs::remove_dir_all(path);
-        }
     }
 }
 

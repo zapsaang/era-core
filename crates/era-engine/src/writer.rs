@@ -40,9 +40,7 @@ use tracing::{debug, info, warn};
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-const INTERNAL_INDEX_NAME: &str = ".era/meta/index.bin";
 const INTERNAL_CHECKPOINT_NAME: &str = ".era/meta/checkpoint.bin";
-const EMBEDDED_INDEX_VERSION: u32 = 1;
 const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
 use crate::checkpoint::CheckpointManager;
@@ -974,25 +972,6 @@ pub struct ArchiveWriter {
     pipeline: WritePipeline<LocalStorageBackend>,
 }
 
-#[derive(Debug, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
-#[archive(check_bytes)]
-struct EmbeddedIndexSnapshot {
-    version: u32,
-    entries: Vec<(ChunkHash, BlockLocation)>,
-}
-
-impl EmbeddedIndexSnapshot {
-    fn from_map(map: &HashMap<ChunkHash, BlockLocation>) -> Self {
-        let mut entries: Vec<(ChunkHash, BlockLocation)> =
-            map.iter().map(|(k, v)| (*k, v.clone())).collect();
-        entries.sort_by_key(|(hash, _)| hash.0);
-        Self {
-            version: EMBEDDED_INDEX_VERSION,
-            entries,
-        }
-    }
-}
-
 /// Recursively collect file paths using async I/O.
 /// Prevents reactor blocking on large directories.
 fn collect_files_async(
@@ -1691,14 +1670,6 @@ impl ArchiveWriter {
     }
 
     async fn write_internal_metadata(&mut self) -> Result<()> {
-        let embedded_snapshot = self.pipeline.index().embedded_snapshot();
-        if !embedded_snapshot.is_empty() {
-            let snapshot = EmbeddedIndexSnapshot::from_map(embedded_snapshot);
-            let data = rkyv::to_bytes::<_, 4096>(&snapshot)
-                .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
-            self.add_bytes(INTERNAL_INDEX_NAME, &data).await?;
-        }
-
         if let Some(mgr) = self.pipeline.index().checkpoint_manager() {
             let data = mgr.snapshot_bytes()?;
             self.add_bytes(INTERNAL_CHECKPOINT_NAME, &data).await?;
