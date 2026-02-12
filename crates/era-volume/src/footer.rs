@@ -143,6 +143,30 @@ impl Footer {
         footer
     }
 
+    /// Create a builder for constructing a Footer with named fields.
+    ///
+    /// Preferred over `with_catalog` for readability.
+    pub fn builder(
+        data_end_offset: u64,
+        block_count: u32,
+        sequence_number: u64,
+    ) -> FooterBuilder {
+        FooterBuilder {
+            data_end_offset,
+            block_count,
+            sequence_number,
+            catalog_offset: 0,
+            catalog_size: 0,
+            catalog_block_id: 0,
+            last_checkpoint_offset: 0,
+            last_checkpoint_block_id: 0,
+            index_offset: 0,
+            index_size: 0,
+            index_block_id: 0,
+            backup_header_offset: 0,
+        }
+    }
+
     /// Check if catalog location is available
     pub fn has_catalog_location(&self) -> bool {
         self.catalog_offset > 0 && self.catalog_size > 0
@@ -288,6 +312,68 @@ impl Footer {
         }
 
         Ok(footer)
+    }
+}
+
+/// Builder for constructing a Footer with named fields.
+///
+/// Replaces the 12-argument `Footer::with_catalog` for better readability.
+pub struct FooterBuilder {
+    data_end_offset: u64,
+    block_count: u32,
+    sequence_number: u64,
+    catalog_offset: u64,
+    catalog_size: u32,
+    catalog_block_id: u32,
+    last_checkpoint_offset: u64,
+    last_checkpoint_block_id: u32,
+    index_offset: u64,
+    index_size: u32,
+    index_block_id: u32,
+    backup_header_offset: u64,
+}
+
+impl FooterBuilder {
+    pub fn catalog(mut self, offset: u64, size: u32, block_id: u32) -> Self {
+        self.catalog_offset = offset;
+        self.catalog_size = size;
+        self.catalog_block_id = block_id;
+        self
+    }
+
+    pub fn checkpoint(mut self, offset: u64, block_id: u32) -> Self {
+        self.last_checkpoint_offset = offset;
+        self.last_checkpoint_block_id = block_id;
+        self
+    }
+
+    pub fn index(mut self, offset: u64, size: u32, block_id: u32) -> Self {
+        self.index_offset = offset;
+        self.index_size = size;
+        self.index_block_id = block_id;
+        self
+    }
+
+    pub fn backup_header(mut self, offset: u64) -> Self {
+        self.backup_header_offset = offset;
+        self
+    }
+
+    pub fn build(self) -> Footer {
+        Footer::with_catalog(
+            self.data_end_offset,
+            self.block_count,
+            self.sequence_number,
+            self.catalog_offset,
+            self.catalog_size,
+            self.catalog_block_id,
+            self.last_checkpoint_offset,
+            self.last_checkpoint_block_id,
+            self.index_offset,
+            self.index_size,
+            self.index_block_id,
+            self.backup_header_offset,
+        )
     }
 }
 

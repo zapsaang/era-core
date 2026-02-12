@@ -20,7 +20,7 @@ mod volume_pool;
 mod writer;
 
 pub use distribution::{DistributionCalculator, DistributionConfigExt, VolumePoolStatusExt};
-pub use footer::{Footer, FOOTER_MAGIC, FOOTER_SIZE};
+pub use footer::{Footer, FooterBuilder, FOOTER_MAGIC, FOOTER_SIZE};
 pub use header::{
     AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader,
     DATA_REGION_START, HEADER_SIZE,

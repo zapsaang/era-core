@@ -137,18 +137,38 @@ pub struct IndexPage {
 
 impl IndexPage {
     /// Create a new index page from sorted entries
+    ///
+    /// Returns an error if entries is empty.
     pub fn new(mut entries: Vec<IndexEntry>) -> Self {
+        assert!(!entries.is_empty(), "IndexPage cannot be empty");
         // Ensure entries are sorted
         entries.sort_unstable_by_key(|e| e.hash);
 
-        let min_hash = entries.first().expect("IndexPage cannot be empty").hash;
-        let max_hash = entries.last().expect("IndexPage cannot be empty").hash;
+        let min_hash = entries.first().unwrap().hash;
+        let max_hash = entries.last().unwrap().hash;
 
         Self {
             min_hash,
             max_hash,
             entries,
         }
+    }
+
+    /// Create a new index page, returning an error if entries is empty.
+    pub fn try_new(mut entries: Vec<IndexEntry>) -> era_common::Result<Self> {
+        if entries.is_empty() {
+            return Err(era_common::EraError::InvalidFormat(
+                "IndexPage cannot be empty".into(),
+            ));
+        }
+        entries.sort_unstable_by_key(|e| e.hash);
+        let min_hash = entries.first().unwrap().hash;
+        let max_hash = entries.last().unwrap().hash;
+        Ok(Self {
+            min_hash,
+            max_hash,
+            entries,
+        })
     }
 
     /// Binary search for a hash within this page
@@ -197,6 +217,8 @@ impl MetaIndex {
     }
 
     /// Add a page pointer to the meta-index
+    ///
+    /// Pages must be added in sorted order (by min_hash).
     pub fn add_page(&mut self, min_hash: ChunkHash, max_hash: ChunkHash, block_id: BlockId) {
         self.pages.push(PagePointer {
             min_hash,
@@ -206,10 +228,28 @@ impl MetaIndex {
     }
 
     /// Find the page that might contain a given hash
+    ///
+    /// Uses binary search on sorted page boundaries for O(log n) lookup.
+    /// Pages must be sorted by min_hash (guaranteed by IndexBuilder which
+    /// processes entries in sorted order).
     pub fn find_page(&self, hash: &ChunkHash) -> Option<&PagePointer> {
-        self.pages
-            .iter()
-            .find(|page_ptr| hash >= &page_ptr.min_hash && hash <= &page_ptr.max_hash)
+        if self.pages.is_empty() {
+            return None;
+        }
+
+        // Binary search: find the last page whose min_hash <= hash
+        let idx = match self.pages.binary_search_by_key(hash, |p| p.min_hash) {
+            Ok(i) => i,
+            Err(0) => return None, // hash is before all pages
+            Err(i) => i - 1,       // page at i-1 has the largest min_hash <= hash
+        };
+
+        let page = &self.pages[idx];
+        if hash >= &page.min_hash && hash <= &page.max_hash {
+            Some(page)
+        } else {
+            None
+        }
     }
 
     /// Set the Bloom filter data

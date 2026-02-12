@@ -166,14 +166,40 @@ impl IndexReader {
             }
 
             // Use the first (should be only) manifest
-            // CRITICAL: We need to try possible block IDs since scanner doesn't know the encryption key
-            // The manifest block ID is typically N (where there are N index pages numbered 0..N-1)
             let location = &manifest_blocks[0];
             let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
 
-            // Try decrypting with likely block IDs (0..100 should cover most cases)
+            // Scan for IndexPage blocks first to estimate the manifest block ID.
+            // The manifest is written after all pages, so its block_id = page_count.
+            let page_blocks_for_hint = volume_reader
+                .scan_for_typed_blocks(BlockType::IndexPage)
+                .await
+                .unwrap_or_default();
+            let page_count_hint = page_blocks_for_hint.len() as u64;
+
+            // Build candidate block IDs: start with the most likely (page_count),
+            // then try nearby values, then expand outward. This replaces the old
+            // hard-coded 0..100 limit that failed for indices with >100 pages.
+            let mut candidates: Vec<u64> = Vec::with_capacity(512);
+            // Most likely: manifest block_id == number of index pages
+            candidates.push(page_count_hint);
+            // Try nearby values (off-by-one errors, partial writes)
+            for delta in 1..=10 {
+                candidates.push(page_count_hint + delta);
+                if page_count_hint >= delta {
+                    candidates.push(page_count_hint - delta);
+                }
+            }
+            // Fallback: scan 0..max(256, page_count_hint * 2) for robustness
+            let upper_bound = (page_count_hint * 2).max(256);
+            for id in 0..upper_bound {
+                if !candidates.contains(&id) {
+                    candidates.push(id);
+                }
+            }
+
             let mut manifest_data = None;
-            for candidate_id in 0..100u64 {
+            for candidate_id in candidates {
                 let block_id = BlockId::new(candidate_id);
                 let block_key =
                     session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);

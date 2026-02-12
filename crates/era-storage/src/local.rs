@@ -126,6 +126,11 @@ pub struct LocalStorageWriter {
 impl StorageWriter for LocalStorageWriter {
     async fn append(&mut self, data: &[u8]) -> Result<u64> {
         let offset = self.size;
+        // Seek to end before writing to ensure correctness after write_at
+        self.file
+            .seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(EraError::Io)?;
         self.file.write_all(data).await.map_err(EraError::Io)?;
         self.size += data.len() as u64;
         Ok(offset)

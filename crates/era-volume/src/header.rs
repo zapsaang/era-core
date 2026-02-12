@@ -132,7 +132,7 @@ impl SuperHeader {
             total_volumes: 0,
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
+                .expect("System clock is before Unix epoch")
                 .as_secs() as i64,
             feature_flags: 0,
             recipients,
@@ -155,7 +155,7 @@ impl SuperHeader {
             total_volumes: self.total_volumes,
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
+                .expect("System clock is before Unix epoch")
                 .as_secs() as i64,
             feature_flags: self.feature_flags,
             recipients: self.recipients.clone(),

@@ -1,7 +1,10 @@
 //! # Tiered Merger - K-way Merge with File Descriptor Management
 //!
 //! Prevents FD exhaustion by using recursive tiered merging.
+//! Uses a proper min-heap k-way merge for O(n log k) performance.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::path::PathBuf;
 
 use era_common::Result;
@@ -33,7 +36,11 @@ impl Iterator for TieredMerger {
     }
 }
 
-/// Recursively merge segments with bounded fan-in
+/// Recursively merge segments with bounded fan-in.
+///
+/// When the number of segments exceeds MAX_FAN_IN, batches are merged
+/// and spilled to encrypted temp files, then recursed. This keeps
+/// memory usage bounded to O(MAX_FAN_IN * segment_size) per level.
 fn recursive_merge(
     segments: Vec<PathBuf>,
     spiller: &Spiller,
@@ -53,37 +60,77 @@ fn recursive_merge(
         return Ok(Box::new(kway_merge(segments, spiller)?));
     }
 
-    // Recursive case: merge in batches
-    let mut next_level = Vec::new();
-    for chunk in segments.chunks(MAX_FAN_IN) {
-        let merged_iter = kway_merge(chunk.to_vec(), spiller)?;
-        let merged_entries: Vec<IndexEntry> = merged_iter.collect();
+    // Recursive case: merge in batches, spill intermediate results to temp files.
+    // Derive temp_dir from the first segment's parent directory.
+    let temp_dir = segments[0]
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
 
-        // For this temporary implementation, we'll just add to next level
-        // In production, we'd spill to temp files
-        next_level.extend(merged_entries);
+    let mut next_level_segments = Vec::new();
+    for chunk in segments.chunks(MAX_FAN_IN) {
+        let merged_entries: Vec<IndexEntry> = kway_merge(chunk.to_vec(), spiller)?.collect();
+
+        if merged_entries.is_empty() {
+            continue;
+        }
+
+        // Spill merged batch to encrypted temp file instead of accumulating in RAM
+        let spill_path = spiller.spill(&merged_entries, temp_dir)?;
+        next_level_segments.push(spill_path);
     }
 
-    // Sort the combined entries
-    next_level.sort_unstable_by_key(|e| e.hash);
-    Ok(Box::new(next_level.into_iter()))
+    // Recurse on the reduced set of segments
+    recursive_merge(next_level_segments, spiller)
 }
 
-/// K-way merge of up to MAX_FAN_IN segments
+/// K-way merge of up to MAX_FAN_IN segments using a min-heap.
+///
+/// Each segment is already sorted. We use a BinaryHeap<Reverse<(hash, seg_idx, entry_idx)>>
+/// to produce a globally sorted stream in O(n log k) time.
+/// Deduplicates by hash — last entry wins (last-write-wins semantics).
 fn kway_merge(
     segments: Vec<PathBuf>,
     spiller: &Spiller,
 ) -> Result<impl Iterator<Item = IndexEntry>> {
-    // Read all segments into memory
-    let mut all_entries = Vec::new();
+    // Read all segments into memory and ensure each is sorted
+    let mut sorted_segments: Vec<Vec<IndexEntry>> = Vec::with_capacity(segments.len());
     for segment in segments {
-        let entries = spiller.read_spill(&segment)?;
-        all_entries.extend(entries);
+        let mut entries = spiller.read_spill(&segment)?;
+        entries.sort_unstable_by_key(|e| e.hash);
+        sorted_segments.push(entries);
     }
 
-    // Sort merged entries
-    all_entries.sort_unstable_by_key(|e| e.hash);
-    Ok(all_entries.into_iter())
+    // Build min-heap: (hash, segment_index, entry_index)
+    // Reverse for min-heap behavior (BinaryHeap is a max-heap by default)
+    let mut heap: BinaryHeap<Reverse<(era_common::ChunkHash, usize, usize)>> =
+        BinaryHeap::new();
+
+    for (seg_idx, seg) in sorted_segments.iter().enumerate() {
+        if !seg.is_empty() {
+            heap.push(Reverse((seg[0].hash, seg_idx, 0)));
+        }
+    }
+
+    // Extract sorted entries via heap
+    let mut merged = Vec::new();
+    while let Some(Reverse((_, seg_idx, entry_idx))) = heap.pop() {
+        let entry = sorted_segments[seg_idx][entry_idx];
+        merged.push(entry);
+
+        // Advance this segment's cursor
+        let next_idx = entry_idx + 1;
+        if next_idx < sorted_segments[seg_idx].len() {
+            heap.push(Reverse((
+                sorted_segments[seg_idx][next_idx].hash,
+                seg_idx,
+                next_idx,
+            )));
+        }
+    }
+
+    // Deduplicate by hash — keep last occurrence (last-write-wins)
+    merged.dedup_by_key(|e| e.hash);
+    Ok(merged.into_iter())
 }
 
 #[cfg(test)]

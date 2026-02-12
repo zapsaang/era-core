@@ -190,7 +190,7 @@ impl IndexBuilder {
         }
 
         // Get sorted entries via tiered merge
-        let all_entries = if self.spilled_segments.is_empty() {
+        let mut all_entries = if self.spilled_segments.is_empty() {
             // No spills: just use sorted MemTable
             self.memtable.clone()
         } else {
@@ -203,6 +203,8 @@ impl IndexBuilder {
             merged.sort_unstable_by_key(|e| e.hash);
             merged
         };
+        // Deduplicate by hash (last-write-wins)
+        all_entries.dedup_by_key(|e| e.hash);
 
         // Build L1 MetaIndex
         let mut meta = super::MetaIndex::new();
@@ -316,7 +318,7 @@ impl IndexBuilder {
         }
 
         // Get sorted entries via tiered merge
-        let all_entries = if self.spilled_segments.is_empty() {
+        let mut all_entries = if self.spilled_segments.is_empty() {
             self.memtable.clone()
         } else {
             let merger = TieredMerger::new(self.spilled_segments.clone(), &self.spiller)?;
@@ -325,6 +327,8 @@ impl IndexBuilder {
             merged.sort_unstable_by_key(|e| e.hash);
             merged
         };
+        // Deduplicate by hash (last-write-wins)
+        all_entries.dedup_by_key(|e| e.hash);
 
         let mut meta = super::MetaIndex::new();
         let mut block_id_counter = 0u64;

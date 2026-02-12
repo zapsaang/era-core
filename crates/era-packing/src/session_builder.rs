@@ -20,7 +20,7 @@ use era_common::{
     BlockChunkIndex, BlockId, ChunkIndexEntry, ChunkVec, EncryptedMacroBlock, Result, UniqueChunk,
 };
 use era_crypto::{BlockKey, KeySession, VolumeKey};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 
 /// A session-aware MacroBlock builder that derives a unique key for each block.
 ///
@@ -48,8 +48,8 @@ pub struct SessionBlockBuilder<'a> {
     compressor: Box<dyn Compressor>,
     /// Nonce context (must be unique per archive, e.g., salt)
     nonce_context: [u8; 16],
-    /// Next block ID
-    next_block_id: AtomicU64,
+    /// Next block ID (interior mutability for &self methods)
+    next_block_id: Cell<u64>,
 }
 
 impl<'a> SessionBlockBuilder<'a> {
@@ -72,7 +72,7 @@ impl<'a> SessionBlockBuilder<'a> {
             target_size: 4 * 1024 * 1024, // 4MB
             compressor,
             nonce_context,
-            next_block_id: AtomicU64::new(0),
+            next_block_id: Cell::new(0),
         }
     }
 
@@ -84,7 +84,7 @@ impl<'a> SessionBlockBuilder<'a> {
 
     /// Set the starting block ID (for resuming from checkpoint).
     pub fn with_starting_block_id(self, id: u64) -> Self {
-        self.next_block_id.store(id, Ordering::SeqCst);
+        self.next_block_id.set(id);
         self
     }
 
@@ -103,7 +103,9 @@ impl<'a> SessionBlockBuilder<'a> {
     ///
     /// Each block is encrypted with a unique key derived via HKDF from the volume key.
     pub fn pack_chunks(&self, chunks: Vec<UniqueChunk>) -> Result<EncryptedMacroBlock> {
-        let block_id = BlockId::new(self.next_block_id.fetch_add(1, Ordering::SeqCst));
+        let id = self.next_block_id.get();
+        self.next_block_id.set(id + 1);
+        let block_id = BlockId::new(id);
 
         // 1. Derive a unique key for this block
         let block_key = self.derive_block_key(block_id);
@@ -161,7 +163,7 @@ impl<'a> SessionBlockBuilder<'a> {
 
     /// Get statistics about the builder.
     pub fn blocks_created(&self) -> u64 {
-        self.next_block_id.load(Ordering::SeqCst)
+        self.next_block_id.get()
     }
 }
 
