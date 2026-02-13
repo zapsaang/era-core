@@ -57,7 +57,11 @@ fn test_footer_from_bytes_truncated_no_panic() {
     for len in 0..FOOTER_SIZE {
         let data = vec![0xFF; len];
         let result = Footer::from_bytes(&data);
-        assert!(result.is_err(), "Should reject truncated footer of len {}", len);
+        assert!(
+            result.is_err(),
+            "Should reject truncated footer of len {}",
+            len
+        );
     }
 }
 
@@ -66,7 +70,10 @@ fn test_footer_from_bytes_truncated_no_panic() {
 fn test_footer_all_zeros_rejected() {
     let data = [0u8; FOOTER_SIZE];
     let result = Footer::from_bytes(&data);
-    assert!(result.is_err(), "All-zero footer must be rejected (bad magic)");
+    assert!(
+        result.is_err(),
+        "All-zero footer must be rejected (bad magic)"
+    );
 }
 
 /// FINDING-VOL-3c: Footer with valid magic but corrupted checksum.
@@ -75,9 +82,12 @@ fn test_footer_valid_magic_bad_checksum() {
     let mut data = [0u8; FOOTER_SIZE];
     data[0..4].copy_from_slice(&[0x45, 0x52, 0x41, 0x46]); // "ERAF"
     data[4] = 1; // version
-    // checksum at 96..128 is all zeros — won't match blake3 of fields
+                 // checksum at 96..128 is all zeros — won't match blake3 of fields
     let result = Footer::from_bytes(&data);
-    assert!(result.is_err(), "Valid magic + bad checksum must be rejected");
+    assert!(
+        result.is_err(),
+        "Valid magic + bad checksum must be rejected"
+    );
 }
 
 /// FINDING-VOL-3d: Footer with future version must be rejected.
@@ -87,7 +97,7 @@ fn test_footer_future_version_rejected() {
     // Serialize, then patch version byte to 255
     let mut bytes = footer.to_bytes().unwrap();
     bytes[4] = 255; // future version
-    // Recompute checksum won't help — from_bytes checks version before checksum
+                    // Recompute checksum won't help — from_bytes checks version before checksum
     let result = Footer::from_bytes(&bytes);
     assert!(result.is_err());
 }
@@ -144,7 +154,15 @@ async fn test_open_append_forged_data_end_offset() {
         999_999_999, // way beyond actual file size
         footer.block_count,
         footer.sequence_number,
-        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     );
 
     // open_append will truncate to this offset — this extends the file

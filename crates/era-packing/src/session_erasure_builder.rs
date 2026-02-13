@@ -201,12 +201,7 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
     /// Decode shards with resilience to corruption - attempts AEAD recovery
     /// before failing. This is the bulletproof variant for production use.
     ///
-    /// # Algorithm
-    /// 1. Try direct decryption (fast path for uncorrupted blocks)
-    /// 2. If AEAD fails, identify corrupted shards
-    /// 3. Reconstruct from healthy shards + parity
-    /// 4. Retry decryption on reconstructed block
-    /// 5. If all attempts fail, return detailed diagnostic error
+    /// Accepts `Vec<(usize, Bytes)>` for backward compatibility.
     pub fn decode_and_extract_all_resilient(
         &self,
         shards: Vec<(usize, bytes::Bytes)>,
@@ -217,6 +212,23 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
 
         let resilient = ResilientBlockUnpacker::new(&self.inner);
         resilient.unpack_resilient(shards, erasure_info, block_id)
+    }
+
+    /// Decode CRC-verified shards with resilience to corruption.
+    ///
+    /// Preferred over `decode_and_extract_all_resilient` when ShardHeader CRC
+    /// info is available. Shards with `crc_valid: false` are immediately
+    /// identified as corrupted without heuristics.
+    pub fn decode_and_extract_all_resilient_verified(
+        &self,
+        shards: Vec<era_common::VerifiedShard>,
+        erasure_info: &era_common::ErasureBlockInfo,
+        block_id: era_common::BlockId,
+    ) -> Result<(ChunkVec, Vec<usize>)> {
+        use crate::resilient_aead::ResilientBlockUnpacker;
+
+        let resilient = ResilientBlockUnpacker::new(&self.inner);
+        resilient.unpack_resilient_verified(shards, erasure_info, block_id)
     }
 
     /// Decode shards for a specific data shard index (virtual striping).

@@ -18,7 +18,13 @@ fn test_hash(value: u64) -> ChunkHash {
 }
 
 fn make_entry(i: u64) -> IndexEntry {
-    IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i / 100), (i % 100) as u32 * 1024, 1024)
+    IndexEntry::new(
+        test_hash(i),
+        VolumeId::new(),
+        BlockId::new(i / 100),
+        (i % 100) as u32 * 1024,
+        1024,
+    )
 }
 
 /// FINDING-IDX-4: IndexPage::new with empty vec panics.
@@ -50,14 +56,19 @@ fn test_duplicate_hashes_deduplicated_after_fix() {
     let vol2 = VolumeId::new();
 
     // Insert same hash pointing to two different locations
-    tree.insert(IndexEntry::new(hash, vol1, BlockId::new(0), 0, 1024)).unwrap();
-    tree.insert(IndexEntry::new(hash, vol2, BlockId::new(1), 4096, 2048)).unwrap();
+    tree.insert(IndexEntry::new(hash, vol1, BlockId::new(0), 0, 1024))
+        .unwrap();
+    tree.insert(IndexEntry::new(hash, vol2, BlockId::new(1), 4096, 2048))
+        .unwrap();
 
     let reader = tree.finalize().unwrap();
 
     // After dedup fix, exactly one entry must be found
     let result = reader.lookup(&hash).unwrap();
-    assert!(result.is_some(), "Deduplicated entry must still be findable");
+    assert!(
+        result.is_some(),
+        "Deduplicated entry must still be findable"
+    );
 }
 
 /// FINDING-IDX-3 (FIXED): MetaIndex.find_page now uses binary search.
@@ -82,16 +93,28 @@ fn test_meta_index_binary_search_correctness() {
     }
 
     // Lookup in first page
-    assert_eq!(meta.find_page(&be_hash(50)).unwrap().block_id, BlockId::new(0));
+    assert_eq!(
+        meta.find_page(&be_hash(50)).unwrap().block_id,
+        BlockId::new(0)
+    );
     // Lookup in last page
-    assert_eq!(meta.find_page(&be_hash(950)).unwrap().block_id, BlockId::new(9));
+    assert_eq!(
+        meta.find_page(&be_hash(950)).unwrap().block_id,
+        BlockId::new(9)
+    );
     // Lookup in middle page
-    assert_eq!(meta.find_page(&be_hash(550)).unwrap().block_id, BlockId::new(5));
+    assert_eq!(
+        meta.find_page(&be_hash(550)).unwrap().block_id,
+        BlockId::new(5)
+    );
     // Lookup beyond all pages
     assert!(meta.find_page(&be_hash(1000)).is_none());
     // Lookup before all pages (if there's a gap)
     // be_hash(0) is in page 0, so this should find page 0
-    assert_eq!(meta.find_page(&be_hash(0)).unwrap().block_id, BlockId::new(0));
+    assert_eq!(
+        meta.find_page(&be_hash(0)).unwrap().block_id,
+        BlockId::new(0)
+    );
 }
 
 /// Verify that the old LE-hash bug scenario no longer returns wrong pages.
@@ -164,7 +187,10 @@ fn test_spiller_tampered_ciphertext_rejected() {
     std::fs::write(&path, &raw).unwrap();
 
     let result = spiller.read_spill(&path);
-    assert!(result.is_err(), "Tampered spill file must fail AEAD verification");
+    assert!(
+        result.is_err(),
+        "Tampered spill file must fail AEAD verification"
+    );
 }
 
 /// FINDING-IDX-1: TieredMerger with many segments loads everything into RAM.
@@ -222,5 +248,9 @@ fn test_lsm_tree_spill_and_recover_all_entries() {
             found += 1;
         }
     }
-    assert_eq!(found, count, "All {} entries must survive spill+merge, found {}", count, found);
+    assert_eq!(
+        found, count,
+        "All {} entries must survive spill+merge, found {}",
+        count, found
+    );
 }

@@ -18,7 +18,7 @@ use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig};
 use era_common::{
     BlockHeader, BlockId, BlockLocation, BlockType, ChunkVec, EraError, ErasureBlockInfo,
-    MatrixDistributionStrategy, Result, ShardHeader,
+    MatrixDistributionStrategy, Result, ShardHeader, VerifiedShard,
 };
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker};
@@ -332,8 +332,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
         // Advance past the header on the first available volume
         self.current_offsets[0] += 4;
 
-        // Read all shards for this block
-        let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(self.total_shards);
+        // Read all shards for this block, preserving CRC verification status
+        let mut verified_shards: Vec<VerifiedShard> = Vec::with_capacity(self.total_shards);
         let mut corrupted_count = 0usize;
         let mut first_shard_size = 0u32;
 
@@ -403,12 +403,17 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
                 .await
             {
                 Ok(shard_data) => {
-                    // Verify CRC
-                    if shard_header.verify(&shard_data) {
-                        shards.push((shard_idx, shard_data));
-                    } else {
+                    // Verify CRC and collect as VerifiedShard (don't drop failures)
+                    let crc_valid = shard_header.verify(&shard_data);
+                    if !crc_valid {
                         corrupted_count += 1;
                     }
+                    verified_shards.push(VerifiedShard {
+                        index: shard_idx,
+                        data: shard_data,
+                        expected_crc: shard_header.crc,
+                        crc_valid,
+                    });
                 }
                 Err(_) => {
                     corrupted_count += 1;
@@ -421,7 +426,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 
         self.stats.corrupted_shards += corrupted_count as u32;
 
-        if shards.is_empty() {
+        if verified_shards.is_empty() {
             // If we failed to read ANY shards, verification fails.
             // Also if we failed to update offsets correctly, subsequent blocks will fail.
             self.stats.blocks_failed += 1;
@@ -441,25 +446,32 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 
         let block_id = BlockId::new(self.block_index as u64);
 
+        // Extract only CRC-valid shards for decoding (non-session path has no resilient AEAD)
+        let valid_shards: Vec<(usize, Bytes)> = verified_shards
+            .into_iter()
+            .filter(|s| s.crc_valid)
+            .map(|s| (s.index, s.data))
+            .collect();
+
         // Decode and extract chunks
-        let result =
-            match self
-                .erasure_unpacker
-                .decode_and_extract_all(shards, &erasure_info, block_id)
-            {
-                Ok(chunks) => {
-                    self.stats.blocks_read += 1;
-                    Ok(DecodedBlock {
-                        block_index: self.block_index,
-                        chunks,
-                        corrupted_shards: corrupted_count,
-                    })
-                }
-                Err(e) => {
-                    self.stats.blocks_failed += 1;
-                    Err(e)
-                }
-            };
+        let result = match self.erasure_unpacker.decode_and_extract_all(
+            valid_shards,
+            &erasure_info,
+            block_id,
+        ) {
+            Ok(chunks) => {
+                self.stats.blocks_read += 1;
+                Ok(DecodedBlock {
+                    block_index: self.block_index,
+                    chunks,
+                    corrupted_shards: corrupted_count,
+                })
+            }
+            Err(e) => {
+                self.stats.blocks_failed += 1;
+                Err(e)
+            }
+        };
 
         self.block_index += 1;
         Some(result)
@@ -791,7 +803,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         let data_shards = self.data_shards as usize;
         let parity_shards = self.parity_shards as usize;
 
-        let mut available_shards: Vec<(usize, Bytes)> = Vec::with_capacity(stripe_size);
+        let mut available_shards: Vec<VerifiedShard> = Vec::with_capacity(stripe_size);
         let mut data_lengths: Vec<Option<u32>> = vec![None; data_shards];
         let mut max_len: usize = 0;
         let mut stripe_lengths: Option<Vec<u32>> = None;
@@ -892,9 +904,20 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 };
 
                 if shard_header.verify(&shard_data) {
-                    available_shards.push((shard_idx, shard_data));
+                    available_shards.push(VerifiedShard {
+                        index: shard_idx,
+                        data: shard_data,
+                        expected_crc: shard_header.crc,
+                        crc_valid: true,
+                    });
                 } else {
                     self.stats.corrupted_shards += 1;
+                    available_shards.push(VerifiedShard {
+                        index: shard_idx,
+                        data: shard_data,
+                        expected_crc: shard_header.crc,
+                        crc_valid: false,
+                    });
                 }
 
                 self.current_offsets[idx] +=
@@ -934,8 +957,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         };
         let total_shards = data_shards + parity_shards;
         let mut shard_array: Vec<Option<Vec<u8>>> = vec![None; total_shards];
-        for (idx, data) in available_shards.iter() {
-            shard_array[*idx] = Some(data.to_vec());
+        let crc_failed_count = available_shards.iter().filter(|s| !s.crc_valid).count();
+        for shard in available_shards.iter() {
+            // Only use CRC-valid shards for RS recovery
+            if shard.crc_valid {
+                shard_array[shard.index] = Some(shard.data.to_vec());
+            }
         }
 
         let coder = match ErasureConfig::new(data_shards, parity_shards).and_then(ErasureCoder::new)
@@ -1102,7 +1129,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     self.pending_blocks.push_back(Ok(DecodedBlock {
                         block_index,
                         chunks,
-                        corrupted_shards: 0,
+                        corrupted_shards: crc_failed_count,
                     }));
                 }
                 None => {

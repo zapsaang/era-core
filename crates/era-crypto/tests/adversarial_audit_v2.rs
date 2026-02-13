@@ -36,8 +36,12 @@ fn test_nonce_reuse_different_plaintext_produces_different_ciphertext() {
     let nonce = Nonce::from_bytes(&[0x01; 24]).unwrap();
     let cipher = AeadCipher::new();
 
-    let ct1 = cipher.encrypt(&key, &nonce, b"aad", b"plaintext A").unwrap();
-    let ct2 = cipher.encrypt(&key, &nonce, b"aad", b"plaintext B").unwrap();
+    let ct1 = cipher
+        .encrypt(&key, &nonce, b"aad", b"plaintext A")
+        .unwrap();
+    let ct2 = cipher
+        .encrypt(&key, &nonce, b"aad", b"plaintext B")
+        .unwrap();
 
     // Both encrypt successfully — the cipher doesn't prevent nonce reuse.
     // The ciphertexts differ, but XOR(ct1, ct2) = XOR(pt1, pt2) — information leak.
@@ -83,7 +87,9 @@ fn test_aad_mismatch_fails() {
     let nonce = Nonce::generate();
     let cipher = AeadCipher::new();
 
-    let ct = cipher.encrypt(&key, &nonce, b"correct_aad", b"data").unwrap();
+    let ct = cipher
+        .encrypt(&key, &nonce, b"correct_aad", b"data")
+        .unwrap();
     let result = cipher.decrypt(&key, &nonce, b"wrong_aad", &ct);
     assert!(result.is_err(), "AAD mismatch must fail AEAD verification");
 }
@@ -96,7 +102,10 @@ fn test_empty_ciphertext_decryption_fails() {
     let cipher = AeadCipher::new();
 
     let result = cipher.decrypt(&key, &nonce, b"", &[]);
-    assert!(result.is_err(), "Empty ciphertext (no Poly1305 tag) must fail");
+    assert!(
+        result.is_err(),
+        "Empty ciphertext (no Poly1305 tag) must fail"
+    );
 }
 
 /// FINDING-CRYPTO-7: Bit-flip in ciphertext must fail authentication.
@@ -106,7 +115,9 @@ fn test_single_bit_flip_detected() {
     let nonce = Nonce::generate();
     let cipher = AeadCipher::new();
 
-    let ct = cipher.encrypt(&key, &nonce, b"", b"important data here").unwrap();
+    let ct = cipher
+        .encrypt(&key, &nonce, b"", b"important data here")
+        .unwrap();
 
     // Flip every single bit position in the ciphertext
     for byte_idx in 0..ct.len() {
@@ -129,13 +140,18 @@ fn test_single_bit_flip_detected() {
 /// block_ids must produce different ciphertext (proving nonce diversity).
 #[test]
 fn test_context_nonce_derivation_uniqueness() {
-    use era_crypto::{encrypt_with_context, derive_key, KdfParams, Salt};
+    use era_crypto::{derive_key, encrypt_with_context, KdfParams, Salt};
 
     let key = derive_key(
         b"test",
         &Salt::from_bytes([0x42; 16]),
-        &KdfParams { memory_cost: 1024, time_cost: 1, parallelism: 1 },
-    ).unwrap();
+        &KdfParams {
+            memory_cost: 1024,
+            time_cost: 1,
+            parallelism: 1,
+        },
+    )
+    .unwrap();
     let context = [0x42u8; 16];
     let plaintext = b"fixed plaintext";
 

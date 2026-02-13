@@ -146,11 +146,7 @@ impl Footer {
     /// Create a builder for constructing a Footer with named fields.
     ///
     /// Preferred over `with_catalog` for readability.
-    pub fn builder(
-        data_end_offset: u64,
-        block_count: u32,
-        sequence_number: u64,
-    ) -> FooterBuilder {
+    pub fn builder(data_end_offset: u64, block_count: u32, sequence_number: u64) -> FooterBuilder {
         FooterBuilder {
             data_end_offset,
             block_count,

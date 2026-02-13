@@ -985,7 +985,7 @@ impl ArchiveReader {
                 Ok(decoded) => {
                     stats.blocks_verified += 1;
                     if decoded.corrupted_shards > 0 {
-                        stats.errors.push(format!(
+                        stats.warnings.push(format!(
                             "Block {}: recovered from {} corrupted shards",
                             decoded.block_index, decoded.corrupted_shards
                         ));
@@ -1012,6 +1012,9 @@ impl ArchiveReader {
                 "Verification passed: {} blocks, {} files, {} bytes",
                 stats.blocks_verified, stats.files_verified, stats.bytes_verified
             );
+            for warn in &stats.warnings {
+                tracing::warn!("Verify Warning: {}", warn);
+            }
         } else {
             info!(
                 "Verification FAILED: {} block errors, {} incomplete files, {} total errors",

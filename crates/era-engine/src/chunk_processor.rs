@@ -278,8 +278,10 @@ pub struct VerifyStats {
     pub files_incomplete: u64,
     /// Total bytes verified
     pub bytes_verified: u64,
-    /// List of errors encountered
+    /// List of errors encountered (unrecoverable failures)
     pub errors: Vec<String>,
+    /// List of warnings (recovered issues, e.g. corrupted shards that were repaired via RS)
+    pub warnings: Vec<String>,
 }
 
 impl VerifyStats {

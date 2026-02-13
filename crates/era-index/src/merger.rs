@@ -102,8 +102,7 @@ fn kway_merge(
 
     // Build min-heap: (hash, segment_index, entry_index)
     // Reverse for min-heap behavior (BinaryHeap is a max-heap by default)
-    let mut heap: BinaryHeap<Reverse<(era_common::ChunkHash, usize, usize)>> =
-        BinaryHeap::new();
+    let mut heap: BinaryHeap<Reverse<(era_common::ChunkHash, usize, usize)>> = BinaryHeap::new();
 
     for (seg_idx, seg) in sorted_segments.iter().enumerate() {
         if !seg.is_empty() {

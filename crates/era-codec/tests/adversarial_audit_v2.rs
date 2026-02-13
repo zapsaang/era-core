@@ -89,7 +89,8 @@ fn test_exhaustive_single_shard_loss_recovery() {
 
     // Test losing each individual shard
     for lost_idx in 0..6 {
-        let mut shard_options: Vec<Option<Vec<u8>>> = shards.iter().map(|s| Some(s.clone())).collect();
+        let mut shard_options: Vec<Option<Vec<u8>>> =
+            shards.iter().map(|s| Some(s.clone())).collect();
         shard_options[lost_idx] = None;
 
         let recovered = coder
@@ -149,5 +150,8 @@ fn test_triple_shard_loss_must_fail() {
     shard_options[4] = None;
 
     let result = coder.decode(&shard_options, original.len());
-    assert!(result.is_err(), "Triple shard loss must fail for 4+2 config");
+    assert!(
+        result.is_err(),
+        "Triple shard loss must fail for 4+2 config"
+    );
 }

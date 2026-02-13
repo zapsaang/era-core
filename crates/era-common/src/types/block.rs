@@ -303,6 +303,24 @@ pub fn compute_shard_crc(data: &[u8]) -> u32 {
     crc32fast::hash(data)
 }
 
+/// A shard with its CRC verification status.
+///
+/// Used by the resilient AEAD recovery pipeline to identify corrupted shards
+/// without re-reading from disk. The `expected_crc` is the CRC stored in the
+/// ShardHeader at write time; `crc_valid` indicates whether the shard data
+/// matched that CRC when it was read.
+#[derive(Debug, Clone)]
+pub struct VerifiedShard {
+    /// Shard index in the erasure coding scheme
+    pub index: usize,
+    /// Shard data bytes
+    pub data: bytes::Bytes,
+    /// CRC32 from the ShardHeader (computed at write time)
+    pub expected_crc: u32,
+    /// Whether the shard data matched the expected CRC at read time
+    pub crc_valid: bool,
+}
+
 /// Shard header containing metadata and CRC for integrity
 #[derive(Debug, Clone, Copy)]
 pub struct ShardHeader {
