@@ -55,7 +55,7 @@ impl IndexReader {
 
     /// Create an in-memory index reader from finalized entries
     ///
-    /// This is used by LsmTree::finalize() to create a reader
+    /// This is used by LsmTree::finalize() to create a reader from Redb entries
     /// from merged entries without disk I/O.
     pub fn from_memory(
         meta: MetaIndex,

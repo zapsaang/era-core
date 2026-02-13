@@ -1,15 +1,14 @@
 //! Chunk deduplication index abstraction layer.
 //!
 //! This module provides a unified interface for chunk deduplication that can use
-//! either in-memory HashMap (for backward compatibility) or persistent LSM-Tree
-//! storage (recommended for production).
+//! either in-memory HashMap (for backward compatibility) or Redb-backed
+//! IndexBuilder (recommended for production).
 //!
 //! NOTE: MemoryChunkIndex is now internal only.
 //! For production use, migrate to era_index::v2 APIs directly.
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use era_common::{BlockId, BlockLocation, ChunkHash, Result as EraResult};
@@ -103,9 +102,9 @@ impl ChunkIndex for MemoryChunkIndex {
     }
 }
 
-/// LSM-Tree backed chunk index for production use.
+/// Redb-backed chunk index for production use.
 ///
-/// Wraps an `IndexBuilder` (for accumulating entries destined for the volume)
+/// Wraps an `IndexBuilder` (Redb staging database for volume finalization)
 /// alongside a `HashMap` (for fast point lookups during the write session).
 ///
 /// At finalization the `IndexBuilder` is extracted via `take_builder()` and
@@ -115,17 +114,14 @@ pub(crate) struct LsmChunkIndex {
     builder: Mutex<Option<IndexBuilder>>,
     /// Fast point-lookup map for dedup during the write session.
     lookup: RwLock<HashMap<ChunkHash, BlockLocation>>,
-    /// Temp directory for IndexBuilder spill files.
-    temp_dir: PathBuf,
 }
 
 impl LsmChunkIndex {
-    /// Create a new LSM chunk index.
-    pub fn new(temp_dir: PathBuf) -> Self {
+    /// Create a new Redb-backed chunk index.
+    pub fn new() -> Self {
         Self {
             builder: Mutex::new(Some(IndexBuilder::new_default())),
             lookup: RwLock::new(HashMap::new()),
-            temp_dir,
         }
     }
 
@@ -162,7 +158,7 @@ impl ChunkIndex for LsmChunkIndex {
                     0, // offset within block (not tracked at this level)
                     location.encrypted_size,
                 );
-                builder.insert(entry, &self.temp_dir)?;
+                builder.insert(entry)?;
             }
             None => {
                 return Err(era_common::EraError::InvalidConfig(
@@ -199,11 +195,9 @@ impl ChunkIndex for LsmChunkIndex {
     }
 }
 
-/// Create a chunk index backed by LSM-Tree (default for production).
+/// Create a chunk index backed by Redb (default for production).
 pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
-    let temp_dir = std::env::temp_dir().join("era_index_spill");
-    let _ = std::fs::create_dir_all(&temp_dir);
-    Ok(Arc::new(LsmChunkIndex::new(temp_dir)))
+    Ok(Arc::new(LsmChunkIndex::new()))
 }
 
 #[cfg(test)]
@@ -236,9 +230,7 @@ mod tests {
 
     #[test]
     fn test_lsm_chunk_index() {
-        let temp_dir = std::env::temp_dir().join("era_test_lsm_index");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let index = LsmChunkIndex::new(temp_dir);
+        let index = LsmChunkIndex::new();
 
         let hash = ChunkHash::from_bytes([2u8; 32]);
         let location = create_test_location(1);

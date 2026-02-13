@@ -78,7 +78,7 @@ async fn test_cold_recovery_from_orphaned_volume() {
             (i % 100) as u32 * 1024,
             1024,
         );
-        builder.insert(entry, temp_dir.path()).unwrap();
+        builder.insert(entry).unwrap();
     }
 
     // CRITICAL: Write index to volume (embedded mode)
@@ -217,7 +217,6 @@ async fn test_index_embedded_in_volume() {
                     i as u32 * 1024,
                     1024,
                 ),
-                temp_dir.path(),
             )
             .unwrap();
     }

@@ -1,15 +1,14 @@
-//! # ERA Index V2.1 - Native Log-Structured Indexing
+//! # ERA Index — Redb-backed Chunk Deduplication Index
 //!
-//! Native, log-structured indexing engine for the ERA archive system.
-//! Replaces RocksDB with a custom, zero-trust implementation.
+//! ACID-compliant chunk deduplication index for the ERA archive system.
+//! Uses Redb 2.1 as the staging database per RFC-023.
 //!
 //! ## Key Features
 //!
-//! - **Native Implementation**: No external database dependencies
-//! - **Secure Spilling**: Ephemeral encryption for temporary files
+//! - **Redb 2.1**: ACID-compliant embedded B-tree database
 //! - **Bloom Filters**: Fast negative lookups (>99% rejection rate)
-//! - **Memory Bounded**: Fixed 64MB MemTable limit
-//! - **Tiered Merging**: Prevents file descriptor exhaustion
+//! - **Zero-Copy**: rkyv serialization with `check_archived_root` validation
+//! - **Self-Contained**: Index embedded as encrypted blocks in `.era` volume
 //!
 //! ## Usage
 //!
@@ -45,20 +44,19 @@ mod builder;
 mod config;
 mod error;
 mod lsm_tree;
-mod merger;
 mod metrics;
 mod reader;
-mod spiller;
+mod schema;
+mod store;
 
 pub use bloom_serde::{deserialize_bloom, serialize_bloom, BloomFilterData};
 pub use builder::IndexBuilder;
 pub use config::{IndexConfig, IndexConfigBuilder};
 pub use error::IndexError;
 pub use lsm_tree::{LsmTree, LsmTreeConfig, LsmTreeReader};
-pub use merger::TieredMerger;
 pub use metrics::IndexMetrics;
 pub use reader::{IndexLocation, IndexReader};
-pub use spiller::Spiller;
+pub use store::IndexStore;
 
 // Re-export for convenience
 pub use era_common::{BlockId, BlockLocation, ChunkHash, VolumeId};

@@ -1,10 +1,9 @@
-//! # IndexBuilder - In-memory Buffering with Bounded Memory
+//! # IndexBuilder — Redb-backed Index Construction
 //!
-//! Manages the MemTable and Bloom filter during index construction.
-
-use std::fs::File;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+//! Manages index construction with ACID guarantees via Redb.
+//! Entries are inserted into a staging Redb database during archive creation.
+//! At finalization, entries are read in sorted order and written as encrypted
+//! IndexPage blocks to the volume.
 
 use bloomfilter::Bloom;
 
@@ -12,50 +11,53 @@ use era_common::{BlockType, ChunkHash, EncryptedMacroBlock, EraError, Result};
 use era_crypto::{KeySession, VolumeKey};
 use era_storage::StorageWriter;
 
-use super::{IndexEntry, Spiller, TieredMerger};
+use crate::store::IndexStore;
+use crate::IndexEntry;
 
-/// Default MemTable size limit (64MB)
+/// Default memory limit (64MB) — used for bloom filter sizing
 const DEFAULT_MEM_LIMIT: usize = 64 * 1024 * 1024;
-
-/// Bloom filter expected items — derived from mem_limit / entry size
-/// to avoid an oversized bloom filter (previous 10M constant = ~12MB bloom).
-/// With 64MB mem_limit and ~64-byte entries, this yields ~1M expected items ≈ 1.2MB bloom.
-fn bloom_expected_items(mem_limit: usize) -> usize {
-    let entry_size = std::mem::size_of::<IndexEntry>().max(1);
-    // Use mem_limit capacity as upper bound, minimum 1024 to avoid degenerate bloom
-    (mem_limit / entry_size).max(1024)
-}
 
 /// Bloom filter false positive rate (1%)
 const BLOOM_FP_RATE: f64 = 0.01;
 
-/// IndexBuilder manages index construction with bounded memory
+/// Bloom filter expected items — derived from mem_limit / entry size
+fn bloom_expected_items(mem_limit: usize) -> usize {
+    let entry_size = std::mem::size_of::<IndexEntry>().max(1);
+    (mem_limit / entry_size).max(1024)
+}
+
+/// IndexBuilder manages index construction with Redb-backed ACID storage.
+///
+/// During archive creation, entries are inserted into a staging Redb database.
+/// At finalization, all entries are read in sorted order (Redb B-tree guarantees
+/// this) and written as encrypted IndexPage/IndexManifest blocks to the volume.
 pub struct IndexBuilder {
-    /// In-memory buffer for entries
-    memtable: Vec<IndexEntry>,
-    /// Global Bloom filter (survives spills)
-    bloom: Bloom<ChunkHash>,
-    /// Secure spiller for temp files
-    spiller: Spiller,
-    /// List of spill file paths
-    spilled_segments: Vec<PathBuf>,
-    /// Memory limit in bytes
-    mem_limit: usize,
-    /// Total entries inserted (in-memory + spilled)
-    total_entries: usize,
+    /// Redb-backed index store (replaces memtable + spiller + merger)
+    store: IndexStore,
 }
 
 impl IndexBuilder {
-    /// Create a new IndexBuilder with specified memory limit
+    /// Create a new IndexBuilder with specified memory limit.
+    ///
+    /// Creates a temporary Redb file for staging entries.
     pub fn new(mem_limit: usize) -> Self {
-        Self {
-            memtable: Vec::with_capacity(mem_limit / IndexEntry::memory_size()),
-            bloom: Bloom::new_for_fp_rate(bloom_expected_items(mem_limit), BLOOM_FP_RATE),
-            spiller: Spiller::new(),
-            spilled_segments: Vec::new(),
-            mem_limit,
-            total_entries: 0,
-        }
+        let temp_file = tempfile::Builder::new()
+            .prefix("era-staging-")
+            .suffix(".redb")
+            .tempfile()
+            .expect("Failed to create temp file for staging IndexStore");
+        let (_, temp_path) = temp_file
+            .keep()
+            .expect("Failed to persist temp file path");
+        let store = IndexStore::create(&temp_path, bloom_expected_items(mem_limit))
+            .expect("Failed to create staging IndexStore");
+        Self { store }
+    }
+
+    /// Create a new IndexBuilder with a specific path for the Redb file.
+    pub fn with_path(path: &std::path::Path, mem_limit: usize) -> Result<Self> {
+        let store = IndexStore::create(path, bloom_expected_items(mem_limit))?;
+        Ok(Self { store })
     }
 
     /// Create with default memory limit (64MB)
@@ -63,127 +65,39 @@ impl IndexBuilder {
         Self::new(DEFAULT_MEM_LIMIT)
     }
 
-    /// Insert an entry into the index
-    pub fn insert(&mut self, entry: IndexEntry, temp_dir: &Path) -> Result<()> {
-        // Update Bloom filter (RAM-resident, survives spills)
-        self.bloom.set(&entry.hash);
-
-        // Add to MemTable
-        self.memtable.push(entry);
-        self.total_entries += 1;
-
-        // Check if we need to spill
-        if self.memtable_size_bytes() >= self.mem_limit {
-            self.flush_memtable(temp_dir)?;
-        }
-
-        Ok(())
+    /// Insert an entry into the index.
+    ///
+    /// The entry is immediately written to the Redb staging database
+    /// with ACID guarantees.
+    pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
+        self.store.insert(&entry)
     }
 
-    /// Get current MemTable memory usage in bytes
-    pub fn memtable_size_bytes(&self) -> usize {
-        self.memtable.len() * IndexEntry::memory_size()
-    }
-
-    /// Get total number of entries inserted (in-memory + spilled)
+    /// Get total number of entries inserted
     pub fn entry_count(&self) -> usize {
-        self.total_entries
-    }
-
-    /// Get number of spill files created
-    pub fn spill_count(&self) -> usize {
-        self.spilled_segments.len()
+        self.store.entry_count()
     }
 
     /// Check if a hash exists in the Bloom filter
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
-        self.bloom.check(hash)
+        self.store.bloom_contains(hash)
     }
 
-    /// Get reference to spilled segment paths (for finalization)
-    pub fn spilled_segments(&self) -> &[PathBuf] {
-        &self.spilled_segments
-    }
-
-    /// Get reference to the spiller (for finalization)
-    pub fn spiller(&self) -> &Spiller {
-        &self.spiller
-    }
-
-    /// Get reference to the bloom filter (for finalization)
+    /// Get reference to the bloom filter
     pub fn bloom(&self) -> &Bloom<ChunkHash> {
-        &self.bloom
+        self.store.bloom()
     }
 
-    /// Get reference to the memtable (for finalization)
-    pub fn memtable(&self) -> &[IndexEntry] {
-        &self.memtable
+    /// Get reference to the underlying IndexStore
+    pub fn store(&self) -> &IndexStore {
+        &self.store
     }
 
-    /// Flush MemTable to encrypted spill file (made public for LsmTree)
-    pub fn flush_memtable(&mut self, temp_dir: &Path) -> Result<()> {
-        if self.memtable.is_empty() {
-            return Ok(());
-        }
-
-        // Sort entries before spilling
-        self.memtable.sort_unstable_by_key(|e| e.hash);
-
-        // Spill to encrypted temp file
-        let spill_path = self.spiller.spill(&self.memtable, temp_dir)?;
-        self.spilled_segments.push(spill_path);
-
-        // Clear MemTable
-        self.memtable.clear();
-
-        tracing::debug!(
-            "Flushed MemTable to spill file, total spills: {}",
-            self.spilled_segments.len()
-        );
-
-        Ok(())
-    }
-
-    /// Snapshot the Bloom filter to disk (for crash recovery)
-    pub fn snapshot_bloom(&self, path: &Path) -> Result<()> {
-        // Serialize Bloom filter using rkyv via bloom_serde
-        let bloom_bytes = super::serialize_bloom(&self.bloom)?;
-
-        // Write to file
-        let mut file = File::create(path).map_err(EraError::Io)?;
-        file.write_all(&bloom_bytes).map_err(EraError::Io)?;
-        file.sync_all().map_err(EraError::Io)?;
-
-        tracing::info!("Bloom filter snapshot written: {:?}", path);
-        Ok(())
-    }
-
-    /// Restore IndexBuilder from a Bloom filter snapshot
-    pub fn restore_from_snapshot(path: &Path) -> Result<Self> {
-        let mut file = File::open(path).map_err(EraError::Io)?;
-        let mut bloom_bytes = Vec::new();
-        file.read_to_end(&mut bloom_bytes).map_err(EraError::Io)?;
-
-        let bloom = super::deserialize_bloom(&bloom_bytes)?;
-
-        tracing::info!("Restored Bloom filter from snapshot: {:?}", path);
-
-        Ok(Self {
-            memtable: Vec::new(),
-            bloom,
-            spiller: Spiller::new(), // New ephemeral key for this session
-            spilled_segments: Vec::new(),
-            mem_limit: DEFAULT_MEM_LIMIT,
-            total_entries: 0,
-        })
-    }
-
-    /// Finalize the index (EMBEDDED MODE - writes to volume)
+    /// Finalize the index (EMBEDDED MODE — writes to volume)
     ///
-    /// **CRITICAL CHANGE:** Index pages are now written as typed blocks to the volume,
-    /// not as external files. This enables cold recovery.
-    ///
-    /// Returns the MetaIndex and its BlockLocation in the volume
+    /// Reads all entries from the Redb staging database in sorted order,
+    /// then writes encrypted IndexPage blocks and an IndexManifest block
+    /// to the volume. Returns the MetaIndex and its BlockLocation.
     pub async fn finalize<W: StorageWriter>(
         &mut self,
         volume_writer: &mut era_volume::VolumeWriter<W>,
@@ -194,27 +108,8 @@ impl IndexBuilder {
         use super::{IndexPage, ENTRIES_PER_PAGE};
         use era_common::BlockId;
 
-        // Flush any remaining entries in MemTable
-        if !self.memtable.is_empty() {
-            self.memtable.sort_unstable_by_key(|e| e.hash);
-        }
-
-        // Get sorted entries via tiered merge
-        let mut all_entries = if self.spilled_segments.is_empty() {
-            // No spills: just use sorted MemTable
-            self.memtable.clone()
-        } else {
-            // Merge all spill files
-            let merger = TieredMerger::new(self.spilled_segments.clone(), &self.spiller)?;
-            let mut merged: Vec<IndexEntry> = merger.collect();
-
-            // Add MemTable entries to the merged stream
-            merged.extend_from_slice(&self.memtable);
-            merged.sort_unstable_by_key(|e| e.hash);
-            merged
-        };
-        // Deduplicate by hash (last-write-wins)
-        all_entries.dedup_by_key(|e| e.hash);
+        // Read all entries from Redb in sorted order (B-tree guarantees sort)
+        let all_entries = self.store.drain_sorted()?;
 
         // Build L1 MetaIndex
         let mut meta = super::MetaIndex::new();
@@ -229,7 +124,7 @@ impl IndexBuilder {
             // Create IndexPage
             let page = IndexPage::new(page_entries.to_vec());
 
-            // Serialize page to rkyv (zero-copy)
+            // Serialize page to rkyv
             let page_bytes = rkyv::to_bytes::<_, 4096>(&page)
                 .map_err(|e| EraError::Serialization(e.to_string()))?;
 
@@ -250,7 +145,7 @@ impl IndexBuilder {
                 block_id,
                 data: encrypted_data,
                 original_size: page_bytes.len() as u32,
-                compressed_size: page_bytes.len() as u32, // No compression for index
+                compressed_size: page_bytes.len() as u32,
                 chunk_count: page_entries.len() as u16,
             };
 
@@ -265,13 +160,12 @@ impl IndexBuilder {
             block_id_counter += 1;
         }
 
-        // Serialize Bloom filter using rkyv via bloom_serde
-        // Rebuild a right-sized bloom from actual entries to avoid oversized on-disk bloom.
-        // The in-memory bloom (self.bloom) may be oversized for dedup during ingestion.
+        // Rebuild a right-sized bloom from actual entries for the on-disk format.
         let finalized_bloom = if all_entries.is_empty() {
-            self.bloom.clone()
+            self.store.bloom().clone()
         } else {
-            let mut compact = Bloom::new_for_fp_rate(all_entries.len().max(1024), BLOOM_FP_RATE);
+            let mut compact =
+                Bloom::new_for_fp_rate(all_entries.len().max(1024), BLOOM_FP_RATE);
             for entry in &all_entries {
                 compact.set(&entry.hash);
             }
@@ -280,9 +174,9 @@ impl IndexBuilder {
         let bloom_bytes = super::serialize_bloom(&finalized_bloom)?;
         meta.set_bloom_filter(bloom_bytes);
 
-        // Encrypt and write MetaIndex as IndexManifest block (using rkyv)
-        let meta_bytes =
-            rkyv::to_bytes::<_, 4096>(&meta).map_err(|e| EraError::Serialization(e.to_string()))?;
+        // Encrypt and write MetaIndex as IndexManifest block
+        let meta_bytes = rkyv::to_bytes::<_, 4096>(&meta)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let manifest_block_id = BlockId::new(block_id_counter);
         let manifest_key =
@@ -310,63 +204,15 @@ impl IndexBuilder {
 
         Ok((meta, manifest_location))
     }
+}
 
-    /// Finalize for external file storage (DEPRECATED)
-    ///
-    /// **WARNING:** This creates "Zombie Archives" - DO NOT USE in production
-    #[deprecated(
-        since = "8.1.0",
-        note = "Use finalize() with VolumeWriter for self-contained archives"
-    )]
-    pub fn finalize_external(&mut self, output_dir: &Path) -> Result<super::MetaIndex> {
-        use super::{IndexPage, ENTRIES_PER_PAGE};
-        use std::fs;
-
-        // Flush any remaining entries in MemTable
-        if !self.memtable.is_empty() {
-            self.memtable.sort_unstable_by_key(|e| e.hash);
+impl Drop for IndexBuilder {
+    fn drop(&mut self) {
+        // Best-effort cleanup of the staging Redb file
+        let path = self.store.path().to_path_buf();
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
         }
-
-        // Get sorted entries via tiered merge
-        let mut all_entries = if self.spilled_segments.is_empty() {
-            self.memtable.clone()
-        } else {
-            let merger = TieredMerger::new(self.spilled_segments.clone(), &self.spiller)?;
-            let mut merged: Vec<IndexEntry> = merger.collect();
-            merged.extend_from_slice(&self.memtable);
-            merged.sort_unstable_by_key(|e| e.hash);
-            merged
-        };
-        // Deduplicate by hash (last-write-wins)
-        all_entries.dedup_by_key(|e| e.hash);
-
-        let mut meta = super::MetaIndex::new();
-        let mut block_id_counter = 0u64;
-
-        for page_entries in all_entries.chunks(ENTRIES_PER_PAGE) {
-            if page_entries.is_empty() {
-                continue;
-            }
-
-            let page = IndexPage::new(page_entries.to_vec());
-            let page_bytes = rkyv::to_bytes::<_, 4096>(&page)
-                .map_err(|e| EraError::Serialization(e.to_string()))?;
-            let page_path = output_dir.join(format!("page_{}.bin", block_id_counter));
-            fs::write(&page_path, &page_bytes).map_err(EraError::Io)?;
-
-            meta.add_page(
-                page.min_hash,
-                page.max_hash,
-                era_common::BlockId::new(block_id_counter),
-            );
-
-            block_id_counter += 1;
-        }
-
-        let bloom_bytes = super::serialize_bloom(&self.bloom)?;
-        meta.set_bloom_filter(bloom_bytes);
-
-        Ok(meta)
     }
 }
 
@@ -374,7 +220,6 @@ impl IndexBuilder {
 mod tests {
     use super::*;
     use era_common::{BlockId, VolumeId};
-    use tempfile::TempDir;
 
     fn test_hash(value: u64) -> ChunkHash {
         let mut bytes = [0u8; 32];
@@ -383,36 +228,10 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_insert_and_spill() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut builder = IndexBuilder::new(1024 * 1024); // 1MB limit
+    fn test_builder_insert() {
+        let mut builder = IndexBuilder::new(1024 * 1024);
 
-        // Insert entries until spill is triggered
-        let entries_per_spill = 1024 * 1024 / IndexEntry::memory_size();
-
-        for i in 0..(entries_per_spill * 2) {
-            let entry = IndexEntry::new(
-                test_hash(i as u64),
-                VolumeId::new(),
-                BlockId::new(i as u64 / 100),
-                (i % 100) as u32 * 1024,
-                1024,
-            );
-            builder.insert(entry, temp_dir.path()).unwrap();
-        }
-
-        // Should have triggered at least one spill
-        assert!(builder.spill_count() >= 1);
-        assert!(builder.memtable_size_bytes() <= 1024 * 1024);
-    }
-
-    #[test]
-    fn test_bloom_filter() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut builder = IndexBuilder::new_default();
-
-        // Insert 1000 hashes
-        for i in 0..1000 {
+        for i in 0..100u64 {
             let entry = IndexEntry::new(
                 test_hash(i),
                 VolumeId::new(),
@@ -420,17 +239,35 @@ mod tests {
                 (i % 100) as u32 * 1024,
                 1024,
             );
-            builder.insert(entry, temp_dir.path()).unwrap();
+            builder.insert(entry).unwrap();
+        }
+
+        assert_eq!(builder.entry_count(), 100);
+    }
+
+    #[test]
+    fn test_bloom_filter() {
+        let mut builder = IndexBuilder::new_default();
+
+        for i in 0..1000u64 {
+            let entry = IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(i / 100),
+                (i % 100) as u32 * 1024,
+                1024,
+            );
+            builder.insert(entry).unwrap();
         }
 
         // Check all inserted hashes are found
-        for i in 0..1000 {
+        for i in 0..1000u64 {
             assert!(builder.bloom_contains(&test_hash(i)));
         }
 
         // Check false positive rate on non-existent hashes
         let mut false_positives = 0;
-        for i in 1000..2000 {
+        for i in 1000..2000u64 {
             if builder.bloom_contains(&test_hash(i)) {
                 false_positives += 1;
             }
@@ -438,35 +275,5 @@ mod tests {
 
         // Should be < 20 false positives (2% of 1000 queries)
         assert!(false_positives < 20);
-    }
-
-    #[test]
-    fn test_bloom_snapshot_and_restore() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut builder = IndexBuilder::new_default();
-
-        // Insert hashes
-        for i in 0..100 {
-            let entry = IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                i as u32 * 1024,
-                1024,
-            );
-            builder.insert(entry, temp_dir.path()).unwrap();
-        }
-
-        // Snapshot
-        let snapshot_path = temp_dir.path().join("bloom.snap");
-        builder.snapshot_bloom(&snapshot_path).unwrap();
-
-        // Restore
-        let restored = IndexBuilder::restore_from_snapshot(&snapshot_path).unwrap();
-
-        // Verify all hashes are present
-        for i in 0..100 {
-            assert!(restored.bloom_contains(&test_hash(i)));
-        }
     }
 }

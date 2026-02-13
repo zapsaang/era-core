@@ -93,7 +93,6 @@ async fn test_embedded_finalize_writes_typed_blocks() {
         builder
             .insert(
                 IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i / 10), 0, 1024),
-                temp_dir.path(),
             )
             .unwrap();
     }
@@ -279,32 +278,32 @@ fn test_index_page_binary_search_edge_cases() {
 /// Verify that IndexBuilder enforces memory limits and spills correctly.
 #[test]
 fn test_builder_memory_bound_enforcement() {
-    let temp_dir = TempDir::new().unwrap();
-    // Very small mem limit to force spills
-    let entry_size = IndexEntry::memory_size();
-    let mem_limit = entry_size * 10; // Only 10 entries before spill
-    let mut builder = IndexBuilder::new(mem_limit);
+    // With Redb backend, entries are stored in the database, not in memory.
+    // This test verifies that the builder correctly tracks entry counts.
+    let mut builder = IndexBuilder::new(1024 * 1024); // 1MB
 
     for i in 0..50u64 {
         builder
             .insert(
                 IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-                temp_dir.path(),
             )
             .unwrap();
     }
 
-    assert!(
-        builder.spill_count() >= 4,
-        "With 50 entries and limit of 10, must have >= 4 spills, got {}",
-        builder.spill_count()
+    assert_eq!(
+        builder.entry_count(),
+        50,
+        "Builder must track all 50 inserted entries"
     );
-    assert!(
-        builder.memtable_size_bytes() <= mem_limit,
-        "MemTable {} must not exceed limit {}",
-        builder.memtable_size_bytes(),
-        mem_limit
-    );
+
+    // Verify bloom filter contains all entries
+    for i in 0..50u64 {
+        assert!(
+            builder.bloom_contains(&test_hash(i)),
+            "Bloom filter must contain entry {}",
+            i
+        );
+    }
 }
 
 /// Verify no external files are created when using embedded finalize.
@@ -325,7 +324,6 @@ async fn test_no_external_files_after_embedded_finalize() {
         builder
             .insert(
                 IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-                temp_dir.path(),
             )
             .unwrap();
     }
@@ -359,23 +357,16 @@ async fn test_no_external_files_after_embedded_finalize() {
 }
 
 /// Verify spill files are cleaned up after finalize.
-/// Uses a single LsmTree for both spilling and finalize to verify its own cleanup.
+/// Verify Redb staging file lifecycle via IndexStore: create, insert, destroy.
 #[test]
-fn test_spill_files_cleaned_up() {
+fn test_redb_staging_file_lifecycle() {
     let temp_dir = TempDir::new().unwrap();
-    let spill_dir = temp_dir.path().join("spills");
-    fs::create_dir_all(&spill_dir).unwrap();
+    let redb_path = temp_dir.path().join("staging.redb");
 
-    let entry_size = IndexEntry::memory_size();
-    let mem_limit = entry_size * 10; // Force frequent spills
-
-    let config = era_index::LsmTreeConfig {
-        mem_limit,
-        temp_dir: spill_dir.clone(),
-    };
-    let mut tree = era_index::LsmTree::new(config);
+    // Create IndexStore at known path
+    let mut store = era_index::IndexStore::create(&redb_path, 1024).unwrap();
     for i in 0..50u64 {
-        tree.insert(IndexEntry::new(
+        store.insert(&IndexEntry::new(
             test_hash(i),
             VolumeId::new(),
             BlockId::new(0),
@@ -385,44 +376,17 @@ fn test_spill_files_cleaned_up() {
         .unwrap();
     }
 
-    let spill_count = tree.spill_count();
-    assert!(spill_count > 0, "Must have created spill files");
-
-    // Check spill files exist before finalize
-    let spill_files_before: Vec<_> = fs::read_dir(&spill_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .unwrap_or("")
-                .starts_with("era-spill-")
-        })
-        .collect();
-    assert_eq!(
-        spill_files_before.len(),
-        spill_count,
-        "Spill files must exist before finalize"
+    // Redb staging file should exist
+    assert!(
+        redb_path.exists(),
+        "Redb staging file must exist after inserts"
     );
 
-    // Finalize should clean up its own spill files
-    let _reader = tree.finalize().unwrap();
-
-    // Spill files should be cleaned up
-    let spill_files_after: Vec<_> = fs::read_dir(&spill_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .unwrap_or("")
-                .starts_with("era-spill-")
-        })
-        .collect();
-    assert_eq!(
-        spill_files_after.len(),
-        0,
-        "Spill files must be cleaned up after finalize"
+    // Destroy cleans up the file
+    store.destroy().unwrap();
+    assert!(
+        !redb_path.exists(),
+        "Redb staging file must be removed after destroy()"
     );
 }
 
@@ -456,7 +420,7 @@ async fn test_index_page_encryption_roundtrip() {
             1024,
         );
         expected_entries.push(entry);
-        builder.insert(entry, temp_dir.path()).unwrap();
+        builder.insert(entry).unwrap();
     }
 
     let (_meta, manifest_location) = builder
@@ -533,7 +497,6 @@ async fn test_wrong_key_cold_recovery_fails_cleanly() {
         builder
             .insert(
                 IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-                temp_dir.path(),
             )
             .unwrap();
     }
@@ -613,103 +576,6 @@ fn test_empty_index_page_panics() {
     let _ = era_index::IndexPage::new(vec![]);
 }
 
-/// Verify that Spiller rejects tampered ciphertext.
-#[test]
-fn test_spiller_rejects_tampered_ciphertext() {
-    use era_index::Spiller;
-
-    let temp_dir = TempDir::new().unwrap();
-    let spiller = Spiller::new();
-
-    let entries = vec![IndexEntry::new(
-        test_hash(42),
-        VolumeId::new(),
-        BlockId::new(0),
-        0,
-        1024,
-    )];
-
-    let path = spiller.spill(&entries, temp_dir.path()).unwrap();
-
-    // Tamper with the ciphertext (after magic + nonce = 32 bytes)
-    let mut data = fs::read(&path).unwrap();
-    if data.len() > 40 {
-        data[40] ^= 0xFF; // Flip bits in ciphertext
-    }
-    fs::write(&path, &data).unwrap();
-
-    let result = spiller.read_spill(&path);
-    assert!(
-        result.is_err(),
-        "Tampered spill ciphertext must be rejected by AEAD"
-    );
-}
-
-/// Verify that Spiller rejects corrupted magic header.
-#[test]
-fn test_spiller_rejects_corrupted_magic() {
-    use era_index::Spiller;
-
-    let temp_dir = TempDir::new().unwrap();
-    let spiller = Spiller::new();
-
-    let entries = vec![IndexEntry::new(
-        test_hash(1),
-        VolumeId::new(),
-        BlockId::new(0),
-        0,
-        1024,
-    )];
-
-    let path = spiller.spill(&entries, temp_dir.path()).unwrap();
-
-    // Corrupt magic header
-    let mut data = fs::read(&path).unwrap();
-    data[0] = 0x00; // Corrupt first byte of magic
-    fs::write(&path, &data).unwrap();
-
-    let result = spiller.read_spill(&path);
-    assert!(result.is_err(), "Corrupted magic header must be rejected");
-}
-
-/// Verify that the deprecated `finalize_external` produces a deprecation warning
-/// and that it still writes external files (the anti-pattern we want to prevent).
-#[test]
-fn test_deprecated_finalize_external_still_works() {
-    let temp_dir = TempDir::new().unwrap();
-    let output_dir = temp_dir.path().join("index_output");
-    fs::create_dir_all(&output_dir).unwrap();
-
-    let mut builder = IndexBuilder::new_default();
-    for i in 0..20u64 {
-        builder
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-                temp_dir.path(),
-            )
-            .unwrap();
-    }
-
-    #[allow(deprecated)]
-    let meta = builder.finalize_external(&output_dir).unwrap();
-
-    // External files SHOULD exist (this is the legacy path)
-    let page_files: Vec<_> = fs::read_dir(&output_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_str().unwrap_or("").starts_with("page_"))
-        .collect();
-
-    assert!(
-        !page_files.is_empty(),
-        "finalize_external must create external page files (legacy behavior)"
-    );
-    assert!(
-        !meta.pages.is_empty(),
-        "finalize_external must produce MetaIndex with pages"
-    );
-}
-
 /// Large index: 10,000 entries to verify pagination works correctly.
 #[tokio::test]
 async fn test_large_index_embedded_finalize() {
@@ -735,7 +601,6 @@ async fn test_large_index_embedded_finalize() {
                     (i % 1000) as u32 * 64,
                     64,
                 ),
-                temp_dir.path(),
             )
             .unwrap();
     }
@@ -829,7 +694,6 @@ async fn test_multiple_index_writes_uses_last() {
         builder1
             .insert(
                 IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-                temp_dir.path(),
             )
             .unwrap();
     }
@@ -844,7 +708,6 @@ async fn test_multiple_index_writes_uses_last() {
         builder2
             .insert(
                 IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(1), 0, 2048),
-                temp_dir.path(),
             )
             .unwrap();
     }
@@ -1201,7 +1064,6 @@ async fn test_footer_index_fields_populated_after_full_flow() {
         builder
             .insert(
                 IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-                temp_dir.path(),
             )
             .unwrap();
     }
@@ -1262,7 +1124,6 @@ async fn test_multi_page_index_recovery() {
                     (i % 5000) as u32 * 32,
                     32,
                 ),
-                temp_dir.path(),
             )
             .unwrap();
     }

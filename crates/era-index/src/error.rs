@@ -36,6 +36,10 @@ pub enum IndexError {
     /// Corruption detected
     #[error("Index corruption detected: {0}")]
     Corruption(String),
+
+    /// Database error (Redb)
+    #[error("Database error: {0}")]
+    Database(String),
 }
 
 impl From<IndexError> for era_common::EraError {

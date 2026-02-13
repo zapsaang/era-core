@@ -5,13 +5,16 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "LSM-Tree based chunk deduplication index for ERA archive system"
+description = "Redb-backed chunk deduplication index for ERA archive system"
 
 [dependencies]
 # Internal crates
 era-common = { path = "../era-common" }
 era-crypto = { path = "../era-crypto" }
 era-volume = { path = "../era-volume" }
+
+# Embedded database (RFC-023 mandated)
+redb = "2.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -32,13 +35,7 @@ parking_lot = "0.12"
 # Bloom filter
 bloomfilter = { version = "1.0", features = ["serde"] }
 
-# Random number generation (for ephemeral keys)
-rand = "0.8"
-
-# Zeroization (for secure key handling)
-zeroize = "1.7"
-
-# Temporary files (for secure spilling)
+# Temporary files (for Redb staging file)
 tempfile = "3.10"
 
 # Storage backend (needed for VolumeWriter trait bound)

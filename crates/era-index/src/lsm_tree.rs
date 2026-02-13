@@ -1,20 +1,13 @@
-//! # LsmTree - Native Log-Structured Merge Tree
+//! # LsmTree — Redb-backed Index Orchestrator
 //!
-//! Unified orchestrator for the ERA native index implementation.
-//! Replaces the deleted RocksDB wrapper with a 100% Rust-native solution.
+//! Unified orchestrator for the ERA index implementation.
+//! Uses Redb 2.1 for ACID-compliant staging per RFC-023.
 //!
 //! ## Architecture
 //!
-//! - **MemTable**: In-memory buffer (64MB default, configurable)
-//! - **Spiller**: Ephemeral encryption for temporary segments
-//! - **Merger**: Tiered k-way merge (MAX_FAN_IN=64)
-//! - **Reader**: Bloom + L1 + L2 hierarchical lookup
-//!
-//! ## Security
-//!
-//! - All spill files are encrypted with ephemeral session keys
-//! - Keys are generated at runtime and never persisted
-//! - Zero plaintext leakage during intermediate stages
+//! - **IndexBuilder**: Redb-backed staging database
+//! - **IndexReader**: Bloom + L1 + L2 hierarchical lookup
+//! - **No Spiller/Merger**: Redb handles durability and sorted iteration
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,9 +24,9 @@ use crate::{IndexBuilder, IndexEntry, IndexLocation, IndexReader, MetaIndex};
 /// Configuration for LsmTree
 #[derive(Debug, Clone)]
 pub struct LsmTreeConfig {
-    /// Memory limit for MemTable (bytes)
+    /// Memory limit for bloom filter sizing (bytes)
     pub mem_limit: usize,
-    /// Temporary directory for spill files
+    /// Directory for Redb staging file
     pub temp_dir: PathBuf,
 }
 
@@ -46,12 +39,12 @@ impl Default for LsmTreeConfig {
     }
 }
 
-/// Native Log-Structured Merge Tree
+/// Redb-backed index tree
 ///
-/// This is the primary index structure for ERA v2.1, providing:
-/// - Bounded memory usage during construction
-/// - Secure spilling with ephemeral encryption
+/// This is the primary index structure for ERA, providing:
+/// - ACID-compliant staging via Redb
 /// - Fast lookups via Bloom filters and hierarchical indexing
+/// - Sorted iteration for volume finalization
 ///
 /// ## Usage
 ///
@@ -85,9 +78,7 @@ impl Default for LsmTreeConfig {
 /// # }
 /// ```
 pub struct LsmTree {
-    /// Configuration
-    config: LsmTreeConfig,
-    /// Index builder (write path)
+    /// Index builder (write path) — backed by Redb
     builder: Option<IndexBuilder>,
     /// Index reader (read path)
     reader: Option<Arc<RwLock<IndexReader>>>,
@@ -106,10 +97,11 @@ enum TreeState {
 impl LsmTree {
     /// Create a new LsmTree for index construction
     pub fn new(config: LsmTreeConfig) -> Self {
+        // Use IndexBuilder::new() which creates a unique temp Redb file
+        // via tempfile::Builder (avoids filename collisions in parallel tests)
         let builder = IndexBuilder::new(config.mem_limit);
 
         Self {
-            config,
             builder: Some(builder),
             reader: None,
             state: TreeState::Building,
@@ -122,8 +114,6 @@ impl LsmTree {
     }
 
     /// Insert an entry into the index
-    ///
-    /// This will automatically spill to disk when memory limit is reached.
     pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
         if self.state != TreeState::Building {
             return Err(era_common::EraError::InvalidFormat(
@@ -134,9 +124,13 @@ impl LsmTree {
         let builder = self
             .builder
             .as_mut()
-            .expect("Builder must exist in Building state");
+            .ok_or_else(|| {
+                era_common::EraError::InvalidFormat(
+                    "Builder must exist in Building state".to_string(),
+                )
+            })?;
 
-        builder.insert(entry, &self.config.temp_dir)
+        builder.insert(entry)
     }
 
     /// Check if a hash exists in the Bloom filter (fast negative lookup)
@@ -147,33 +141,33 @@ impl LsmTree {
                 .as_ref()
                 .map(|b| b.bloom_contains(hash))
                 .unwrap_or(false),
-            TreeState::Finalized => {
-                // Use the IndexReader's bloom_contains method
-                self.reader
-                    .as_ref()
-                    .map(|r| r.read().bloom_contains(hash))
-                    .unwrap_or(false)
-            }
+            TreeState::Finalized => self
+                .reader
+                .as_ref()
+                .map(|r| r.read().bloom_contains(hash))
+                .unwrap_or(false),
         }
     }
 
-    /// Get the number of spill files created
+    /// Get the number of spill files created (always 0 with Redb — kept for API compat)
     pub fn spill_count(&self) -> usize {
-        self.builder.as_ref().map(|b| b.spill_count()).unwrap_or(0)
+        0
     }
 
-    /// Get current MemTable memory usage
+    /// Get current memory usage estimate (kept for API compat)
     pub fn memtable_size_bytes(&self) -> usize {
+        // With Redb, entries are on disk. Return entry_count * entry_size as estimate.
         self.builder
             .as_ref()
-            .map(|b| b.memtable_size_bytes())
+            .map(|b| b.entry_count() * IndexEntry::memory_size())
             .unwrap_or(0)
     }
 
     /// Finalize the index and transition to read mode
     ///
-    /// This performs the final merge of all spill segments and builds
-    /// the hierarchical index structure (Bloom + L1 + L2).
+    /// Reads all entries from the Redb staging database, builds the
+    /// hierarchical index structure (Bloom + L1 + L2), and returns
+    /// a read-only view.
     pub fn finalize(mut self) -> Result<LsmTreeReader> {
         if self.state != TreeState::Building {
             return Err(era_common::EraError::InvalidFormat(
@@ -181,75 +175,47 @@ impl LsmTree {
             ));
         }
 
-        let mut builder = self
+        let builder = self
             .builder
             .take()
-            .expect("Builder must exist in Building state");
+            .ok_or_else(|| {
+                era_common::EraError::InvalidFormat(
+                    "Builder must exist in Building state".to_string(),
+                )
+            })?;
 
-        // STEP 1: Flush remaining MemTable to spill segment
-        if !builder.memtable().is_empty() {
-            tracing::info!(
-                "Flushing final MemTable ({} entries)",
-                builder.memtable().len()
-            );
-            builder.flush_memtable(&self.config.temp_dir)?;
-        }
+        // Read all entries from Redb in sorted order
+        let merged_entries = builder.store().drain_sorted()?;
+        let bloom_clone = builder.bloom().clone();
+        let entries_count = merged_entries.len();
 
-        // STEP 2: Merge all spill segments using TieredMerger
-        tracing::info!(
-            "Merging {} spill segments",
-            builder.spilled_segments().len()
-        );
-        let merged_entries: Vec<IndexEntry> = if !builder.spilled_segments().is_empty() {
-            let merger = crate::merger::TieredMerger::new(
-                builder.spilled_segments().to_vec(),
-                builder.spiller(),
-            )?;
-            merger.collect()
-        } else {
-            Vec::new()
-        };
-
-        // STEP 3: Build MetaIndex from merged entries
-        // For in-memory index, we don't create pages, just store entries directly in reader
+        // Build MetaIndex + IndexReader from entries
         let meta = MetaIndex::new();
-
-        // STEP 4: Create IndexReader with Bloom filter
-        // Serialize the Bloom filter using rkyv via bloom_serde
-        let bloom_bytes = crate::serialize_bloom(builder.bloom())?;
-
+        let bloom_bytes = crate::serialize_bloom(&bloom_clone)?;
         let mut meta_with_bloom = meta;
         meta_with_bloom.set_bloom_filter(bloom_bytes);
 
-        // Create reader from memory (entries embedded, not on disk)
-        // We need to clone the bloom filter since we're consuming the builder
-        let bloom_clone = builder.bloom().clone();
-        let entries_count = merged_entries.len();
         let reader = IndexReader::from_memory(meta_with_bloom, bloom_clone, merged_entries)?;
-
-        // STEP 5: Clean up temporary spill files
-        for spill_path in builder.spilled_segments() {
-            if spill_path.exists() {
-                if let Err(e) = std::fs::remove_file(spill_path) {
-                    tracing::warn!("Failed to remove spill file {:?}: {}", spill_path, e);
-                }
-            }
-        }
 
         tracing::info!("Index finalized: {} total entries", entries_count);
 
         self.reader = Some(Arc::new(RwLock::new(reader)));
         self.state = TreeState::Finalized;
 
+        let reader_arc = self
+            .reader
+            .as_ref()
+            .ok_or_else(|| {
+                era_common::EraError::InvalidFormat("Reader must exist after finalization".into())
+            })?
+            .clone();
+
         Ok(LsmTreeReader {
-            reader: self.reader.clone().unwrap(),
+            reader: reader_arc,
         })
     }
 
     /// Recover an index from a volume (cold recovery)
-    ///
-    /// This enables zero-knowledge recovery from an orphaned .era file
-    /// with no external metadata.
     pub async fn recover_from_volume<R: StorageReader>(
         volume_reader: &VolumeReader<R>,
         session: &KeySession,
@@ -266,7 +232,7 @@ impl LsmTree {
     }
 }
 
-/// Read-only view of a finalized LsmTree
+/// Read-only view of a finalized index
 ///
 /// Provides fast lookups via Bloom filters and hierarchical indexing.
 #[derive(Clone)]
@@ -276,20 +242,11 @@ pub struct LsmTreeReader {
 
 impl LsmTreeReader {
     /// Lookup a chunk hash in the index
-    ///
-    /// Returns `None` if the chunk is not found (fast via Bloom filter).
     pub fn lookup(&self, hash: &ChunkHash) -> Result<Option<IndexLocation>> {
         self.reader.write().lookup(hash)
     }
 
     /// Check if a hash exists in the Bloom filter (fast O(1) negative lookup)
-    ///
-    /// This is much faster than `lookup()` as it only checks the bloom filter
-    /// without performing the full index traversal. Use this for fast
-    /// deduplication checks.
-    ///
-    /// Returns `false` if the hash is definitely NOT in the index.
-    /// Returns `true` if the hash MAY be in the index (bloom filters have false positives).
     #[inline]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         self.reader.read().bloom_contains(hash)
@@ -331,98 +288,34 @@ mod tests {
     }
 
     #[test]
-    fn test_lsm_tree_memory_tracking() {
-        let mut tree = LsmTree::new_default();
-
-        let initial_size = tree.memtable_size_bytes();
-        assert_eq!(initial_size, 0);
-
-        let entry = IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(0), 0, 4096);
-
-        tree.insert(entry).unwrap();
-
-        let after_insert = tree.memtable_size_bytes();
-        assert!(after_insert > initial_size);
-        assert_eq!(after_insert, IndexEntry::memory_size());
-    }
-
-    /// P0 BUG TEST: LsmTreeReader.bloom_contains() must use actual bloom filter
-    ///
-    /// This test proves the critical bug where LsmTreeReader.bloom_contains()
-    /// uses an inefficient workaround (calling lookup()) instead of directly
-    /// checking the bloom filter via IndexReader.bloom_contains().
-    ///
-    /// The current implementation in LsmTreeReader::bloom_contains():
-    /// ```
-    /// self.lookup(hash).ok().flatten().is_some()
-    /// ```
-    /// This is O(log n) instead of O(1) and defeats the purpose of bloom filters.
-    ///
-    /// Expected behavior: bloom_contains() should directly check the bloom filter
-    /// without performing a full lookup.
-    #[test]
     fn test_lsm_tree_reader_bloom_contains_efficiency() {
         let mut tree = LsmTree::new_default();
 
-        // Insert entries
         for i in 0..100u64 {
             let entry = IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i), 0, 4096);
             tree.insert(entry).unwrap();
         }
 
-        // Verify bloom works BEFORE finalization
-        assert!(
-            tree.bloom_contains(&test_hash(50)),
-            "bloom_contains should return true for inserted hash BEFORE finalize"
-        );
-        assert!(
-            !tree.bloom_contains(&test_hash(9999)),
-            "bloom_contains should return false for non-inserted hash BEFORE finalize"
-        );
+        assert!(tree.bloom_contains(&test_hash(50)));
+        assert!(!tree.bloom_contains(&test_hash(9999)));
 
-        // Finalize and get reader
         let reader = tree.finalize().expect("finalize should succeed");
 
-        // Reader's bloom_contains should work correctly
-        assert!(
-            reader.bloom_contains(&test_hash(50)),
-            "LsmTreeReader.bloom_contains should return true for inserted hash"
-        );
-        assert!(
-            reader.bloom_contains(&test_hash(0)),
-            "LsmTreeReader.bloom_contains should return true for first inserted hash"
-        );
-        assert!(
-            reader.bloom_contains(&test_hash(99)),
-            "LsmTreeReader.bloom_contains should return true for last inserted hash"
-        );
-
-        // Non-inserted hashes should return false
-        assert!(
-            !reader.bloom_contains(&test_hash(9999)),
-            "LsmTreeReader.bloom_contains should return false for non-inserted hash"
-        );
+        assert!(reader.bloom_contains(&test_hash(50)));
+        assert!(reader.bloom_contains(&test_hash(0)));
+        assert!(reader.bloom_contains(&test_hash(99)));
+        assert!(!reader.bloom_contains(&test_hash(9999)));
     }
 
-    /// P0 BUG TEST: IndexReader must expose bloom_contains() method
-    ///
-    /// This test verifies that IndexReader has a direct bloom_contains() method
-    /// that can be called without going through the full lookup() path.
-    ///
-    /// Currently IndexReader does NOT expose this method, forcing LsmTreeReader
-    /// to use the inefficient lookup() workaround.
     #[test]
     fn test_index_reader_bloom_contains_exists() {
         use crate::reader::IndexReader;
 
-        // Create a minimal IndexReader using from_memory
         let meta = crate::MetaIndex::new();
         let bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
         let reader = IndexReader::from_memory(meta, bloom, vec![])
             .expect("IndexReader creation should succeed");
 
-        // P0 BUG: IndexReader should have bloom_contains() method
-        // This test will fail to compile if the method doesn't exist
         let _result = reader.bloom_contains(&test_hash(25));
     }
 }
