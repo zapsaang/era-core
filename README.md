@@ -4,11 +4,11 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
 
-A post-quantum encrypted archival storage engine written in Rust, featuring 3-layer envelope encryption, content-defined chunking, erasure coding, and multi-party access control via Shamir's Secret Sharing.
+A post-quantum encrypted archival storage engine written in Rust, featuring 3-layer envelope encryption, content-defined chunking, Reed-Solomon erasure coding, and multi-party access control via Shamir's Secret Sharing.
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: February 12, 2026 — 795 tests passing, 0 failures, 32 ignored, 0 clippy warnings, 3 fuzz targets clean (~60M iterations).
+**Last Verified**: February 13, 2026 — 833 tests passing, 0 failures, 32 ignored, 0 clippy warnings, 3 fuzz targets clean (27M+ / 33M+ / 5M+ iterations respectively).
 
 ## Features
 
@@ -25,6 +25,7 @@ A post-quantum encrypted archival storage engine written in Rust, featuring 3-la
 - **Small File Packing**: Efficient storage of many small files via k-Bounded Best-Fit packing
 - **Context-Bound AEAD**: All encryption binds archive ID, epoch ID, and block index into the AAD to prevent cross-archive and cross-block splicing attacks
 - **Bounded Allocation**: All deserialization paths enforce strict size limits to prevent memory exhaustion from malicious inputs
+- **Archive Repair**: Reed-Solomon–based recovery of damaged archives
 
 ## Quick Start
 
@@ -33,7 +34,7 @@ A post-quantum encrypted archival storage engine written in Rust, featuring 3-la
 **Required:**
 - Rust stable 1.92+ (2021 Edition)
 - Linux: `build-essential`, `libacl1-dev`, `protobuf-compiler`
-- macOS: `protobuf` (via Homebrew: `brew install protobuf`)
+- macOS: `protobuf` (via Homebrew)
 
 **Optional:**
 - Rust nightly (for fuzzing): `rustup toolchain install nightly`
@@ -67,8 +68,14 @@ era extract --input archive.era --output /path/to/output --password "your-secret
 # List archive contents
 era list archive.era --password "your-secret"
 
+# Show archive metadata
+era info archive.era --password "your-secret"
+
 # Verify archive integrity
 era verify archive.era --password "your-secret"
+
+# Repair a damaged archive
+era repair archive.era --password "your-secret"
 ```
 
 ### Advanced Usage
@@ -77,13 +84,37 @@ era verify archive.era --password "your-secret"
 # Custom erasure coding (6 data + 3 parity shards)
 era create --output archive.era --password "secret" --erasure "6:3" /path/to/files
 
-# Certificate-based encryption (post-quantum hybrid)
+# Custom compression level (1-22, Zstd)
+era create --output archive.era --password "secret" --level 12 /path/to/files
+
+# Disable compression
+era create --output archive.era --password "secret" --no-compression /path/to/files
+
+# Certificate-based encryption (post-quantum hybrid KEM)
 era create --output archive.era --certificate public.pem /path/to/files
 era extract --input archive.era --output /restored --key private.pem
 
 # Multi-volume archive with size limit
 era create --output archive.era --password "secret" \
     --max-volume-size 4294967296 /path/to/large/files
+
+# Matrix shard distribution across multiple volumes
+era create --output archive.era --password "secret" \
+    --volumes 4 --matrix-distribution /path/to/files
+
+# Custom CDC parameters and packing
+era create --output archive.era --password "secret" \
+    --cdc-min 16384 --cdc-avg 65536 --cdc-max 262144 \
+    --packing-k 8 /path/to/files
+
+# Configuration file
+era create --output archive.era --password "secret" -C config.toml /path/to/files
+
+# Verbose verification
+era verify archive.era --password "your-secret" --verbose
+
+# Long listing format
+era list archive.era --password "your-secret" --long
 ```
 
 ## Architecture
@@ -92,7 +123,7 @@ era create --output archive.era --password "secret" \
 
 ```
 era-core/
-├── bins/era-cli/          CLI binary
+├── bins/era-cli/          CLI binary (era)
 ├── crates/
 │   ├── era-common/        Shared types, errors, protobuf definitions
 │   ├── era-crypto/        XChaCha20-Poly1305, Kyber-768, HKDF, secure memory
@@ -106,27 +137,35 @@ era-core/
 └── fuzz/                  Fuzzing targets (separate workspace)
 ```
 
-Layered dependency ordering (downward only):
+### Layered Dependency Ordering
+
+Dependencies flow downward only — no upward or circular references:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  L5: era-cli          Command-line interface                │
+│  L5: era-cli          Command-line interface (clap)         │
 ├─────────────────────────────────────────────────────────────┤
 │  L4: era-engine       Archive orchestration, async pipeline │
 ├─────────────────────────────────────────────────────────────┤
-│  L3: era-index        V2.1 embedded dedup index (Bloom+L1/L2)│
-│      era-ingest       FastCDC chunking, file reading        │
+│  L3: era-packing      k-Bounded Best-Fit MacroBlock packing│
+│      era-ingest       FastCDC chunking, file scanning       │
+│      era-index        V2.1 embedded dedup index (Bloom+L1/L2)│
 ├─────────────────────────────────────────────────────────────┤
-│  L2: era-packing      k-Bounded Best-Fit MacroBlock packing │
+│  L2: era-codec        Compression (Zstd/LZ4), Reed-Solomon  │
 │      era-volume       Volume format (v8.1), headers/footers │
 ├─────────────────────────────────────────────────────────────┤
-│  L1: era-codec        Compression (Zstd/LZ4), Reed-Solomon  │
-│      era-storage      Async storage backend abstraction     │
+│  L1: era-storage      Async storage backend abstraction     │
 ├─────────────────────────────────────────────────────────────┤
 │  L0: era-crypto       XChaCha20-Poly1305, Kyber-768, memory │
 │      era-common       Shared types, errors, Protobuf defs   │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Key Data Flow
+
+**Write path:** Files → FastCDC chunks → dedup check → k-Bounded Best-Fit packing into MacroBlocks → Zstd compress → XChaCha20-Poly1305 encrypt (per-block HKDF key) → Reed-Solomon encode → distribute shards across volumes
+
+**Read path:** Read shards from volumes → CRC verify → RS decode (exclude CRC-failed shards) → AEAD decrypt → decompress → extract chunks → reassemble files
 
 ### Volume Format (v8.1)
 
@@ -187,6 +226,7 @@ Layer 3: Volume Key (VK)
 | Hybrid KEM | X25519 + Kyber-768 | Post-quantum security |
 | Content hashing | BLAKE3 | 256-bit output |
 | Secret sharing | Shamir's (sharks crate) | T-of-N threshold |
+| Shard integrity | CRC32 | Per-shard verification |
 | RNG | OsRng only | No thread_rng in any code path |
 
 ### Security Guarantees
@@ -202,6 +242,7 @@ Layer 3: Volume Key (VK)
 - **Erasure validation**: Extraction fails explicitly when insufficient shards are available
 - **Path traversal prevention**: Filenames are sanitized on extraction — absolute paths, `..`, and symlinks are rejected
 - **Bounded deserialization**: All `TryFrom` conversions enforce maximum sizes to prevent allocation bombs from malicious headers
+- **Resilient shard pipeline**: `VerifiedShard` carries CRC status through the pipeline; `ResilientBlockUnpacker` uses 4-tier corruption detection: CRC flag → CRC re-verify → size check → all-same-byte heuristic
 
 ### Multi-Party Access Control
 
@@ -251,7 +292,8 @@ cargo test --workspace
 
 ### Testing
 
-795 tests across 9 crates covering:
+833 tests across 10 crates covering:
+
 - **219 adversarial audit tests** across 6 security audit suites (including V2.1 index persistence)
 - Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
 - Integration tests for archive create/extract roundtrips
@@ -261,14 +303,16 @@ cargo test --workspace
 - Memory hygiene, zeroization, and debug redaction tests
 - Context-bound AEAD verification (cross-archive splicing prevention)
 - Path traversal and bounded allocation tests
+- CLI integration tests (16 tests including roundtrip create/extract)
 
 ```bash
-cargo test --workspace                        # All tests
+cargo test --workspace                        # All 833 tests
 cargo test --package era-engine               # Engine crate only
 cargo test -p era-engine --test fourth_audit  # Specific audit suite
 cargo test -p era-engine --test second_audit  # Second audit suite
 cargo test -p era-engine --test third_audit   # Third audit suite
 cargo test -p era-index --test index_persistence_audit  # V2.1 index audit
+cargo test -p era-cli                         # CLI integration tests
 ```
 
 ### Fuzzing
@@ -280,24 +324,40 @@ rustup toolchain install nightly
 cargo install cargo-fuzz
 
 cd fuzz
-# Run each target
+# Run each target (60 seconds each)
 cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 cargo +nightly fuzz run fuzz_block_header_parse -- -max_total_time=60
 cargo +nightly fuzz run fuzz_super_header_parse -- -max_total_time=60
 ```
 
-| Target | Tests | Last Run |
-|--------|-------|----------|
-| `fuzz_footer_parse` | `Footer::from_bytes()` | 14M+ runs, 0 crashes |
-| `fuzz_block_header_parse` | `BlockHeader::from_bytes()`, `ShardHeader::from_bytes()` | 41M+ runs, 0 crashes |
-| `fuzz_super_header_parse` | `SuperHeader::from_bytes()` | 4.9M+ runs, 0 crashes |
+| Target | Parses | Throughput | Crashes |
+|--------|--------|------------|---------|
+| `fuzz_footer_parse` | `Footer::from_bytes()` | ~444K exec/s | 0 (27M+ runs) |
+| `fuzz_block_header_parse` | `BlockHeader::from_bytes()`, `ShardHeader::from_bytes()` | ~1.3M exec/s | 0 (33M+ runs) |
+| `fuzz_super_header_parse` | `SuperHeader::from_bytes()` | ~160K exec/s | 0 (5M+ runs) |
 
 ### Benchmarks
 
+Criterion benchmarks are available for performance-critical paths:
+
 ```bash
 cargo bench                          # All benchmarks
-cargo bench --package era-crypto     # Crypto benchmarks
-cargo bench --package era-engine     # Pipeline benchmarks
+cargo bench --package era-crypto     # Crypto benchmarks (AEAD, KDF, KEM)
+cargo bench --package era-engine     # Pipeline benchmarks (roundtrip, extraction)
+cargo bench --package era-codec      # Compression and erasure coding
+cargo bench --package era-index      # Index operations
+cargo bench --package era-packing    # Packing operations
+cargo bench --package era-ingest     # Chunking benchmarks
+```
+
+### Examples
+
+```bash
+# Batch file ingestion demo
+cargo run --example batch_files_demo -p era-cli
+
+# Guard pages security demonstration
+cargo run --example guard_pages_demo -p era-cli
 ```
 
 ## Performance
@@ -306,7 +366,7 @@ cargo bench --package era-engine     # Pipeline benchmarks
 - **Compression**: ~600 MB/s (Zstd level 3), ~2 GB/s (LZ4)
 - **Encryption**: ~3 GB/s (XChaCha20-Poly1305)
 - **Hashing**: ~2.5 GB/s (BLAKE3)
-- **Combined Pipeline**: ~300-500 MB/s (real-world with dedup)
+- **Combined Pipeline**: ~300–500 MB/s (real-world with dedup)
 
 ## Troubleshooting
 
@@ -314,24 +374,25 @@ cargo bench --package era-engine     # Pipeline benchmarks
 Fuzzing requires nightly: `rustup toolchain install nightly`
 
 **"protobuf compiler not found"**
-Install protobuf compiler (see Prerequisites).
+Install protobuf compiler — see Prerequisites.
 
 **"Failed to authenticate archive"**
 Wrong password or corrupted archive. Run `era verify` to check integrity.
 
 **"Not enough shards for recovery"**
-Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up to 2 volumes.
+Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up to 2 volumes. Try `era repair` first.
 
 ## Roadmap
 
-### Current (Q1-Q2 2026)
+### Current (Q1–Q2 2026)
 
 - [x] Core archive creation/extraction pipeline
 - [x] 3-layer envelope encryption (MK/IK/VK)
 - [x] Multi-party access control (Any-of-N + T-of-N threshold)
-- [x] Post-quantum hybrid KEM
+- [x] Post-quantum hybrid KEM (X25519 + Kyber-768)
 - [x] Erasure coding with strict shard validation
-- [x] Multi-volume support
+- [x] Multi-volume support with matrix distribution
+- [x] Archive repair via Reed-Solomon recovery
 - [x] Security audit — round 1: core crypto, nonce safety (44/44 passing)
 - [x] Security audit — round 2: key wrapping, secret sharing (42/42 passing)
 - [x] Security audit — round 3: memory zeroization, TryFrom bounds (43/43 passing)
@@ -341,11 +402,10 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - [x] Index persistence audit (30/30 passing)
 - [ ] CLI UX improvements
 
-### Near-term (Q3-Q4 2026)
+### Near-term (Q3–Q4 2026)
 
 - [ ] S3/MinIO storage backend
 - [ ] Incremental backup support
-- [ ] Archive repair tools
 - [ ] Streaming extraction API
 - [ ] Python bindings (PyO3)
 
@@ -368,20 +428,27 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - Zero clippy warnings (`-D warnings`)
 - `OsRng` only for all randomness — `thread_rng()` is forbidden
 - Never log key material at any level
-- Avoid `unwrap()` in runtime paths
+- No `unwrap()` in runtime paths — use `Result<T, EraError>`
 - CPU-heavy work must use `spawn_blocking`
 - All AEAD operations must bind context (archive ID, epoch ID, block index) as AAD
 - All `TryFrom` deserialization must enforce bounded allocation limits
+- Zero-copy via `Bytes` and `rkyv` — avoid cloning large buffers
+- Async I/O via Tokio in L0–L2
 
 ## Project Statistics
 
-- **Language**: Rust 100%
-- **Lines of Code**: ~55,500 (including tests)
-- **Tests**: 795 passing (0 failures, 32 ignored)
-- **Security Audit Tests**: 219 across 6 adversarial audit suites
-- **Fuzz Targets**: 3 (combined 60M+ runs, 0 crashes)
-- **Crates**: 9 library + 1 binary
-- **Build Time**: ~2 minutes (clean build)
+| Metric | Value |
+|--------|-------|
+| Language | Rust 100% |
+| Lines of Code | ~56,900 (including tests) |
+| Source Files | 137 `.rs` files |
+| Tests | 833 passing, 0 failures, 32 ignored |
+| Security Audit Tests | 219 across 6 adversarial audit suites |
+| Fuzz Targets | 3 (combined 65M+ runs, 0 crashes) |
+| Crates | 9 library + 1 binary |
+| CLI Commands | 6 (create, extract, list, info, verify, repair) |
+| Edition | 2021, resolver v2 |
+| Build Profile | LTO + codegen-units=1 + opt-level=3 (release) |
 
 ## License
 
@@ -392,8 +459,9 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
 - [RustCrypto](https://github.com/RustCrypto) — cryptographic primitives
 - [Tokio](https://tokio.rs) — async runtime
 - [sharks](https://github.com/c0dearm/sharks) — Shamir's Secret Sharing
-- [reed-solomon-erasure](https://github.com/rust-rse/reed-solomon-erasure) — erasure coding
+- [reed-solomon-simd](https://github.com/AndersTrier/reed-solomon-simd) — erasure coding
 - [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) — fuzzing infrastructure
+- [rkyv](https://github.com/rkyv/rkyv) — zero-copy serialization
 
 ---
 
