@@ -47,7 +47,8 @@ fn test_duplicate_hashes_deduplicated_after_fix() {
     let mut tree = LsmTree::new(LsmTreeConfig {
         mem_limit: 1024 * 1024,
         temp_dir: std::env::temp_dir(),
-    });
+    })
+    .unwrap();
 
     let hash = test_hash(42);
     let vol1 = VolumeId::new();
@@ -189,7 +190,8 @@ fn test_lsm_tree_redb_all_entries_survive() {
     let mut tree = LsmTree::new(LsmTreeConfig {
         mem_limit: 4096, // Small limit (affects bloom sizing only with Redb)
         temp_dir: temp_dir.path().to_path_buf(),
-    });
+    })
+    .unwrap();
 
     let count = 500u64;
     for i in 0..count {

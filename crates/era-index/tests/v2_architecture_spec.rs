@@ -13,9 +13,7 @@ use tempfile::TempDir;
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 
-use era_index::{
-    IndexBuilder, IndexEntry, IndexPage, IndexStore, MetaIndex, ENTRIES_PER_PAGE,
-};
+use era_index::{IndexBuilder, IndexEntry, IndexPage, IndexStore, MetaIndex, ENTRIES_PER_PAGE};
 
 /// Helper to create a deterministic ChunkHash for testing
 fn test_hash(value: u64) -> ChunkHash {
@@ -36,13 +34,15 @@ fn test_redb_store_insert_and_retrieve() {
 
     // Create test entries
     let entries: Vec<IndexEntry> = (0..1000)
-        .map(|i| IndexEntry::new(
-            test_hash(i),
-            VolumeId::new(),
-            BlockId::new(i / 100),
-            (i % 100) as u32 * 1024,
-            1024,
-        ))
+        .map(|i| {
+            IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(i / 100),
+                (i % 100) as u32 * 1024,
+                1024,
+            )
+        })
         .collect();
 
     // Insert via batch
@@ -70,13 +70,15 @@ fn test_redb_store_sorted_iteration() {
 
     // Insert in reverse order
     for i in (0..1000u64).rev() {
-        store.insert(&IndexEntry::new(
-            test_hash(i),
-            VolumeId::new(),
-            BlockId::new(i / 100),
-            (i % 100) as u32 * 1024,
-            1024,
-        )).unwrap();
+        store
+            .insert(&IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(i / 100),
+                (i % 100) as u32 * 1024,
+                1024,
+            ))
+            .unwrap();
     }
 
     // drain_sorted must return entries in hash-sorted order
@@ -97,7 +99,7 @@ fn test_redb_store_sorted_iteration() {
 
 #[test]
 fn test_bloom_filter_via_builder() {
-    let mut builder = IndexBuilder::new(64 * 1024 * 1024);
+    let mut builder = IndexBuilder::new(64 * 1024 * 1024).unwrap();
 
     // Insert 10,000 unique hashes
     for i in 0..10_000u64 {
@@ -182,13 +184,15 @@ fn test_redb_batch_insert() {
 #[test]
 fn test_index_page_layout() {
     let entries: Vec<IndexEntry> = (0..ENTRIES_PER_PAGE)
-        .map(|i| IndexEntry::new(
-            test_hash(i as u64),
-            VolumeId::new(),
-            BlockId::new(i as u64 / 100),
-            (i % 100) as u32 * 1024,
-            1024,
-        ))
+        .map(|i| {
+            IndexEntry::new(
+                test_hash(i as u64),
+                VolumeId::new(),
+                BlockId::new(i as u64 / 100),
+                (i % 100) as u32 * 1024,
+                1024,
+            )
+        })
         .collect();
 
     let page = IndexPage::new(entries.clone());
@@ -246,7 +250,7 @@ fn test_meta_index_lookup() {
 
 #[test]
 fn test_full_index_lifecycle() {
-    let mut builder = IndexBuilder::new(64 * 1024 * 1024);
+    let mut builder = IndexBuilder::new(64 * 1024 * 1024).unwrap();
 
     // Insert 50,000 entries
     for i in 0..50_000u64 {
@@ -274,16 +278,18 @@ fn test_full_index_lifecycle() {
 
 #[test]
 fn test_index_builder_bloom_lookup() {
-    let mut builder = IndexBuilder::new(64 * 1024 * 1024);
+    let mut builder = IndexBuilder::new(64 * 1024 * 1024).unwrap();
 
     let known_entries: Vec<IndexEntry> = (0..10_000u64)
-        .map(|i| IndexEntry::new(
-            test_hash(i * 2), // Only even numbers
-            VolumeId::new(),
-            BlockId::new(i / 100),
-            (i % 100) as u32 * 1024,
-            1024,
-        ))
+        .map(|i| {
+            IndexEntry::new(
+                test_hash(i * 2), // Only even numbers
+                VolumeId::new(),
+                BlockId::new(i / 100),
+                (i % 100) as u32 * 1024,
+                1024,
+            )
+        })
         .collect();
 
     for entry in &known_entries {
@@ -320,7 +326,7 @@ fn test_index_builder_bloom_lookup() {
 
 #[test]
 fn test_redb_entry_count_tracking() {
-    let mut builder = IndexBuilder::new(1024 * 1024);
+    let mut builder = IndexBuilder::new(1024 * 1024).unwrap();
 
     assert_eq!(builder.entry_count(), 0);
 
@@ -345,13 +351,15 @@ fn test_redb_entry_count_tracking() {
 #[test]
 fn test_index_page_compression_and_encryption() {
     let entries: Vec<IndexEntry> = (0..ENTRIES_PER_PAGE)
-        .map(|i| IndexEntry::new(
-            test_hash(i as u64),
-            VolumeId::new(),
-            BlockId::new(i as u64 / 100),
-            (i % 100) as u32 * 1024,
-            1024,
-        ))
+        .map(|i| {
+            IndexEntry::new(
+                test_hash(i as u64),
+                VolumeId::new(),
+                BlockId::new(i as u64 / 100),
+                (i % 100) as u32 * 1024,
+                1024,
+            )
+        })
         .collect();
 
     let page = IndexPage::new(entries);
@@ -379,13 +387,15 @@ fn test_redb_crash_recovery() {
     {
         let mut store = IndexStore::create(&db_path, 10_000).unwrap();
         for i in 0..5000u64 {
-            store.insert(&IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(i / 100),
-                (i % 100) as u32 * 1024,
-                1024,
-            )).unwrap();
+            store
+                .insert(&IndexEntry::new(
+                    test_hash(i),
+                    VolumeId::new(),
+                    BlockId::new(i / 100),
+                    (i % 100) as u32 * 1024,
+                    1024,
+                ))
+                .unwrap();
         }
         // Drop without cleanup — simulates crash
     }

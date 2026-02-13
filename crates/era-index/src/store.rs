@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use bloomfilter::Bloom;
 use redb::{Database, ReadableTable, ReadableTableMetadata};
+use rkyv::Deserialize;
 
 use era_common::{ChunkHash, EraError, Result};
 
@@ -28,13 +29,16 @@ const BLOOM_FP_RATE: f64 = 0.01;
 /// Deserialize an IndexEntry from potentially unaligned bytes.
 ///
 /// Redb value bytes are not guaranteed to be 8-byte aligned, but rkyv
-/// requires alignment for `check_archived_root` and `from_bytes`.
-/// This helper copies to an aligned buffer before deserializing.
+/// requires alignment for `check_archived_root`.
+/// This helper copies to an aligned buffer, validates via `check_archived_root`,
+/// then deserializes.
 fn deserialize_entry_aligned(bytes: &[u8]) -> Result<IndexEntry> {
     // rkyv::AlignedVec provides 16-byte alignment
     let mut aligned = rkyv::AlignedVec::with_capacity(bytes.len());
     aligned.extend_from_slice(bytes);
-    rkyv::from_bytes(&aligned).map_err(|e| EraError::Deserialization(e.to_string()))
+    let archived = rkyv::check_archived_root::<IndexEntry>(&aligned)
+        .map_err(|e| EraError::Deserialization(e.to_string()))?;
+    Ok(archived.deserialize(&mut rkyv::Infallible).unwrap())
 }
 
 /// IndexStore wraps a Redb database for ACID-compliant chunk indexing.
@@ -91,7 +95,8 @@ impl IndexStore {
             .map_err(|e| EraError::IndexError(e.to_string()))?;
         let len = table
             .len()
-            .map_err(|e: redb::StorageError| EraError::IndexError(e.to_string()))? as usize;
+            .map_err(|e: redb::StorageError| EraError::IndexError(e.to_string()))?
+            as usize;
 
         let mut bloom = Bloom::new_for_fp_rate(len.max(1024), BLOOM_FP_RATE);
         for result in table
@@ -115,8 +120,8 @@ impl IndexStore {
     pub fn insert(&mut self, entry: &IndexEntry) -> Result<()> {
         self.bloom.set(&entry.hash);
 
-        let value_bytes = rkyv::to_bytes::<_, 256>(entry)
-            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        let value_bytes =
+            rkyv::to_bytes::<_, 256>(entry).map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let write_txn = self
             .db
@@ -203,6 +208,12 @@ impl IndexStore {
     #[inline]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         self.bloom.check(hash)
+    }
+
+    /// Eagerly set a hash in the bloom filter (for buffered insert paths).
+    #[inline]
+    pub fn bloom_set(&mut self, hash: &ChunkHash) {
+        self.bloom.set(hash);
     }
 
     /// Get reference to bloom filter.

@@ -26,7 +26,7 @@ impl Default for IndexConfig {
         Self {
             path: PathBuf::from(".era-index"),
             memtable_size: 128 * 1024 * 1024, // 128MB
-            bloom_filter_bits: 10,             // ~1% false positive
+            bloom_filter_bits: 10,            // ~1% false positive
             enable_compression: true,
             block_cache_size: 64 * 1024 * 1024, // 64MB
         }

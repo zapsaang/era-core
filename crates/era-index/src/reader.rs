@@ -12,6 +12,7 @@ use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result}
 use era_crypto::{KeySession, VolumeKey};
 use era_storage::StorageReader;
 use era_volume::VolumeReader;
+use rkyv::Deserialize;
 
 #[allow(unused_imports)] // Used in tests
 use super::{IndexEntry, IndexPage, MetaIndex};
@@ -137,9 +138,10 @@ impl IndexReader {
                     &encrypted_block.data,
                 )?;
 
-                // Deserialize MetaIndex using rkyv
-                let meta = rkyv::from_bytes::<MetaIndex>(&decrypted_data)
+                // Deserialize MetaIndex using rkyv (check_archived_root + deserialize)
+                let archived = rkyv::check_archived_root::<MetaIndex>(&decrypted_data)
                     .map_err(|e| EraError::Deserialization(e.to_string()))?;
+                let meta: MetaIndex = archived.deserialize(&mut rkyv::Infallible).unwrap();
 
                 Some(meta)
             } else {
@@ -212,7 +214,9 @@ impl IndexReader {
                     &encrypted_block.data,
                 ) {
                     // Try to deserialize as MetaIndex using rkyv
-                    if let Ok(meta_candidate) = rkyv::from_bytes::<MetaIndex>(&decrypted_data) {
+                    if let Ok(archived) = rkyv::check_archived_root::<MetaIndex>(&decrypted_data) {
+                        let meta_candidate: MetaIndex =
+                            archived.deserialize(&mut rkyv::Infallible).unwrap();
                         // Verify this looks like a valid MetaIndex
                         if !meta_candidate.pages.is_empty() {
                             tracing::info!(
@@ -263,7 +267,8 @@ impl IndexReader {
                     &encrypted_block.data,
                 ) {
                     // Try to deserialize as IndexPage using rkyv
-                    if let Ok(page) = rkyv::from_bytes::<IndexPage>(&decrypted_data) {
+                    if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
+                        let page: IndexPage = archived.deserialize(&mut rkyv::Infallible).unwrap();
                         // Verify this is the right page by checking hash range
                         if page.min_hash == page_ptr.min_hash && page.max_hash == page_ptr.max_hash
                         {
@@ -358,9 +363,10 @@ impl IndexReader {
                 EraError::InvalidFormat(format!("Failed to read page {:?}: {}", page_path, e))
             })?;
 
-            // Deserialize IndexPage using rkyv
-            let page = rkyv::from_bytes::<IndexPage>(&page_bytes)
+            // Deserialize IndexPage using rkyv (check_archived_root + deserialize)
+            let archived = rkyv::check_archived_root::<IndexPage>(&page_bytes)
                 .map_err(|e| EraError::Deserialization(e.to_string()))?;
+            let page: IndexPage = archived.deserialize(&mut rkyv::Infallible).unwrap();
 
             self.page_cache.insert(block_id, page);
         }

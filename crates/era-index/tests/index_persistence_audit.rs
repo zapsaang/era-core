@@ -88,12 +88,16 @@ async fn test_embedded_finalize_writes_typed_blocks() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..50u64 {
         builder
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i / 10), 0, 1024),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(i / 10),
+                0,
+                1024,
+            ))
             .unwrap();
     }
 
@@ -280,13 +284,17 @@ fn test_index_page_binary_search_edge_cases() {
 fn test_builder_memory_bound_enforcement() {
     // With Redb backend, entries are stored in the database, not in memory.
     // This test verifies that the builder correctly tracks entry counts.
-    let mut builder = IndexBuilder::new(1024 * 1024); // 1MB
+    let mut builder = IndexBuilder::new(1024 * 1024).unwrap(); // 1MB
 
     for i in 0..50u64 {
         builder
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(0),
+                0,
+                1024,
+            ))
             .unwrap();
     }
 
@@ -319,12 +327,16 @@ async fn test_no_external_files_after_embedded_finalize() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..100u64 {
         builder
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(0),
+                0,
+                1024,
+            ))
             .unwrap();
     }
 
@@ -366,14 +378,15 @@ fn test_redb_staging_file_lifecycle() {
     // Create IndexStore at known path
     let mut store = era_index::IndexStore::create(&redb_path, 1024).unwrap();
     for i in 0..50u64 {
-        store.insert(&IndexEntry::new(
-            test_hash(i),
-            VolumeId::new(),
-            BlockId::new(0),
-            0,
-            1024,
-        ))
-        .unwrap();
+        store
+            .insert(&IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(0),
+                0,
+                1024,
+            ))
+            .unwrap();
     }
 
     // Redb staging file should exist
@@ -409,7 +422,7 @@ async fn test_index_page_encryption_roundtrip() {
         .unwrap();
 
     // Insert 200 entries across different blocks
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     let mut expected_entries = Vec::new();
     for i in 0..200u64 {
         let entry = IndexEntry::new(
@@ -492,12 +505,16 @@ async fn test_wrong_key_cold_recovery_fails_cleanly() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..10u64 {
         builder
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(0),
+                0,
+                1024,
+            ))
             .unwrap();
     }
 
@@ -590,18 +607,16 @@ async fn test_large_index_embedded_finalize() {
         .unwrap();
 
     let entry_count = 10_000u64;
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..entry_count {
         builder
-            .insert(
-                IndexEntry::new(
-                    test_hash(i),
-                    VolumeId::new(),
-                    BlockId::new(i / 1000),
-                    (i % 1000) as u32 * 64,
-                    64,
-                ),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(i / 1000),
+                (i % 1000) as u32 * 64,
+                64,
+            ))
             .unwrap();
     }
 
@@ -689,12 +704,16 @@ async fn test_multiple_index_writes_uses_last() {
         .unwrap();
 
     // First index write (small)
-    let mut builder1 = IndexBuilder::new_default();
+    let mut builder1 = IndexBuilder::new_default().unwrap();
     for i in 0..5u64 {
         builder1
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(0),
+                0,
+                1024,
+            ))
             .unwrap();
     }
     let (_, loc1) = builder1
@@ -703,12 +722,16 @@ async fn test_multiple_index_writes_uses_last() {
         .unwrap();
 
     // Second index write (larger, different entries)
-    let mut builder2 = IndexBuilder::new_default();
+    let mut builder2 = IndexBuilder::new_default().unwrap();
     for i in 100..120u64 {
         builder2
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(1), 0, 2048),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(1),
+                0,
+                2048,
+            ))
             .unwrap();
     }
     let (_, loc2) = builder2
@@ -924,7 +947,7 @@ fn test_footer_checksum_rejects_tampered_index_fields() {
 /// Inserting into a finalized LsmTree must return error.
 #[test]
 fn test_insert_after_finalize_rejected() {
-    let mut tree = era_index::LsmTree::new_default();
+    let mut tree = era_index::LsmTree::new_default().unwrap();
     tree.insert(IndexEntry::new(
         test_hash(0),
         VolumeId::new(),
@@ -943,7 +966,7 @@ fn test_insert_after_finalize_rejected() {
 /// LsmTree::finalize on empty tree should produce a valid empty reader.
 #[test]
 fn test_finalize_empty_tree() {
-    let tree = era_index::LsmTree::new_default();
+    let tree = era_index::LsmTree::new_default().unwrap();
     let reader = tree.finalize().unwrap();
 
     // Empty reader should not find anything
@@ -955,7 +978,7 @@ fn test_finalize_empty_tree() {
 /// Bloom filter must have zero false negatives after LsmTree finalize.
 #[test]
 fn test_bloom_zero_false_negatives_after_finalize() {
-    let mut tree = era_index::LsmTree::new_default();
+    let mut tree = era_index::LsmTree::new_default().unwrap();
     let count = 500u64;
 
     for i in 0..count {
@@ -984,7 +1007,7 @@ fn test_bloom_zero_false_negatives_after_finalize() {
 /// Verify that all unique hashes inserted are retrievable after finalize.
 #[test]
 fn test_all_entries_retrievable_after_finalize() {
-    let mut tree = era_index::LsmTree::new_default();
+    let mut tree = era_index::LsmTree::new_default().unwrap();
     let count = 300u64;
 
     for i in 0..count {
@@ -1013,7 +1036,7 @@ fn test_all_entries_retrievable_after_finalize() {
 /// Verify deduplication: same hash inserted twice should be findable.
 #[test]
 fn test_duplicate_hash_insertion() {
-    let mut tree = era_index::LsmTree::new_default();
+    let mut tree = era_index::LsmTree::new_default().unwrap();
     let hash = test_hash(42);
 
     // Insert same hash with different locations
@@ -1059,12 +1082,16 @@ async fn test_footer_index_fields_populated_after_full_flow() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..25u64 {
         builder
-            .insert(
-                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(0),
+                0,
+                1024,
+            ))
             .unwrap();
     }
 
@@ -1113,18 +1140,16 @@ async fn test_multi_page_index_recovery() {
 
     // ENTRIES_PER_PAGE = 8192, so 20,000 entries should give us 3 pages
     let entry_count = 20_000u64;
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..entry_count {
         builder
-            .insert(
-                IndexEntry::new(
-                    test_hash(i),
-                    VolumeId::new(),
-                    BlockId::new(i / 5000),
-                    (i % 5000) as u32 * 32,
-                    32,
-                ),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(i / 5000),
+                (i % 5000) as u32 * 32,
+                32,
+            ))
             .unwrap();
     }
 

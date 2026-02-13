@@ -325,9 +325,7 @@ impl Footer {
             )));
         }
         // catalog_offset must be 0 or at least HEADER_SIZE
-        if footer.catalog_offset != 0
-            && footer.catalog_offset < crate::header::HEADER_SIZE as u64
-        {
+        if footer.catalog_offset != 0 && footer.catalog_offset < crate::header::HEADER_SIZE as u64 {
             return Err(EraError::CorruptedFooter(format!(
                 "catalog_offset {} is below HEADER_SIZE {}",
                 footer.catalog_offset,
@@ -335,9 +333,7 @@ impl Footer {
             )));
         }
         // index_offset must be 0 or at least HEADER_SIZE
-        if footer.index_offset != 0
-            && footer.index_offset < crate::header::HEADER_SIZE as u64
-        {
+        if footer.index_offset != 0 && footer.index_offset < crate::header::HEADER_SIZE as u64 {
             return Err(EraError::CorruptedFooter(format!(
                 "index_offset {} is below HEADER_SIZE {}",
                 footer.index_offset,

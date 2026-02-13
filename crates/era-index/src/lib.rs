@@ -18,7 +18,7 @@
 //!
 //! # fn example() -> era_common::Result<()> {
 //! // Create a new index
-//! let mut tree = LsmTree::new_default();
+//! let mut tree = LsmTree::new_default()?;
 //!
 //! // Insert entries
 //! let entry = IndexEntry::new(
@@ -62,7 +62,6 @@ pub use store::IndexStore;
 pub use era_common::{BlockId, BlockLocation, ChunkHash, VolumeId};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
 
 /// Number of entries per L2 Index Page
 /// Targets ~320KB uncompressed (fits in CPU L2 cache)
@@ -70,18 +69,7 @@ pub const ENTRIES_PER_PAGE: usize = 8192;
 
 /// A single entry mapping a chunk hash to its physical location
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvDeserialize,
-    RkyvSerialize,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Archive, RkyvDeserialize, RkyvSerialize,
 )]
 #[archive(check_bytes)]
 pub struct IndexEntry {
@@ -122,7 +110,7 @@ impl IndexEntry {
 }
 
 /// An L2 Index Page (fundamental unit of storage)
-#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct IndexPage {
     /// Minimum hash in this page (for range queries)
@@ -184,7 +172,7 @@ impl IndexPage {
 }
 
 /// A pointer to an L2 Index Page
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone, Copy, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct PagePointer {
     /// Minimum hash in the target page
@@ -196,7 +184,7 @@ pub struct PagePointer {
 }
 
 /// The L1 Meta-Index (root directory)
-#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct MetaIndex {
     /// Sparse index of L2 pages

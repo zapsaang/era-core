@@ -10,5 +10,4 @@ use redb::TableDefinition;
 ///
 /// Key is the raw 32-byte BLAKE3 chunk fingerprint.
 /// Value is rkyv-serialized IndexEntry bytes (zero-copy readable via `check_archived_root`).
-pub const TABLE_CHUNKS: TableDefinition<&[u8; 32], &[u8]> =
-    TableDefinition::new("chunks_v1");
+pub const TABLE_CHUNKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("chunks_v1");

@@ -21,8 +21,8 @@
 use era_common::{ArchiveConfig, ArchiveId, BlockId, ChunkHash, VolumeId};
 use era_crypto::{KeySession, Salt};
 use era_index::{
-    serialize_bloom, BloomFilterData, IndexBuilder, IndexEntry, IndexPage, IndexReader,
-    IndexStore, MetaIndex,
+    serialize_bloom, BloomFilterData, IndexBuilder, IndexEntry, IndexPage, IndexReader, IndexStore,
+    MetaIndex,
 };
 use era_storage::LocalStorageBackend;
 use era_volume::{
@@ -99,7 +99,8 @@ fn test_a1_zero_copy_index_entry_access() {
     assert_eq!(archived.offset, 8192, "Archived offset must match original");
     assert_eq!(archived.length, 4096, "Archived length must match original");
     assert_eq!(
-        &archived.hash.0, entry.hash.as_bytes(),
+        &archived.hash.0,
+        entry.hash.as_bytes(),
         "Archived hash must be byte-identical to original"
     );
 }
@@ -110,8 +111,7 @@ fn test_a2_zero_copy_index_page_access() {
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
     let page = IndexPage::new(entries);
 
-    let bytes =
-        rkyv::to_bytes::<_, 4096>(&page).expect("IndexPage serialization must succeed");
+    let bytes = rkyv::to_bytes::<_, 4096>(&page).expect("IndexPage serialization must succeed");
 
     let archived = rkyv::check_archived_root::<IndexPage>(&bytes)
         .expect("check_archived_root must succeed for valid IndexPage bytes");
@@ -126,7 +126,11 @@ fn test_a2_zero_copy_index_page_access() {
         test_hash(99).as_bytes(),
         "Archived max_hash must match"
     );
-    assert_eq!(archived.entries.len(), 100, "Archived entries count must match");
+    assert_eq!(
+        archived.entries.len(),
+        100,
+        "Archived entries count must match"
+    );
     assert_eq!(
         archived.entries[50].offset,
         make_entry(50).offset,
@@ -145,8 +149,7 @@ fn test_a3_zero_copy_meta_index_access() {
     let bloom_bytes = serialize_bloom(&bloom).unwrap();
     meta.set_bloom_filter(bloom_bytes.clone());
 
-    let bytes =
-        rkyv::to_bytes::<_, 4096>(&meta).expect("MetaIndex serialization must succeed");
+    let bytes = rkyv::to_bytes::<_, 4096>(&meta).expect("MetaIndex serialization must succeed");
 
     let archived = rkyv::check_archived_root::<MetaIndex>(&bytes)
         .expect("check_archived_root must succeed for valid MetaIndex bytes");
@@ -282,7 +285,7 @@ async fn test_c1_zombie_recovery_garbage_appended_to_volume() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..500u64 {
         builder.insert(make_entry(i)).unwrap();
     }
@@ -294,7 +297,9 @@ async fn test_c1_zombie_recovery_garbage_appended_to_volume() {
 
     let _ = writer
         .finalize_with_catalog(
-            0, 0, 0,
+            0,
+            0,
+            0,
             manifest_loc.physical_offset,
             manifest_loc.encrypted_size,
             manifest_loc.slot_index,
@@ -319,7 +324,10 @@ async fn test_c1_zombie_recovery_garbage_appended_to_volume() {
     let footer = reader
         .footer()
         .expect("Footer must be readable despite trailing garbage");
-    assert!(footer.has_index(), "Footer must still report has_index()=true");
+    assert!(
+        footer.has_index(),
+        "Footer must still report has_index()=true"
+    );
 
     let mut recovered =
         IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
@@ -349,7 +357,7 @@ async fn test_c2_zombie_recovery_wrong_credentials_fails_cleanly() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..50u64 {
         builder.insert(make_entry(i)).unwrap();
     }
@@ -361,7 +369,9 @@ async fn test_c2_zombie_recovery_wrong_credentials_fails_cleanly() {
 
     let _ = writer
         .finalize_with_catalog(
-            0, 0, 0,
+            0,
+            0,
+            0,
             manifest_loc.physical_offset,
             manifest_loc.encrypted_size,
             manifest_loc.slot_index,
@@ -371,8 +381,7 @@ async fn test_c2_zombie_recovery_wrong_credentials_fails_cleanly() {
 
     let wrong_salt = Salt::generate();
     let wrong_params = era_crypto::KdfParams::fast();
-    let wrong_session =
-        KeySession::new(b"totally_wrong", &wrong_salt, &wrong_params).unwrap();
+    let wrong_session = KeySession::new(b"totally_wrong", &wrong_salt, &wrong_params).unwrap();
     let wrong_vk = wrong_session.generate_and_wrap_volume_key().unwrap().0;
     let wrong_nonce = *wrong_salt.as_bytes();
 
@@ -477,19 +486,11 @@ fn test_d6_store_uses_validated_deserialization() {
 fn test_d7_reader_deserialization_audit() {
     let reader_source = include_str!("../src/reader.rs");
 
-    let uses_from_bytes = reader_source.contains("rkyv::from_bytes");
-    assert!(
-        uses_from_bytes,
-        "reader.rs uses rkyv::from_bytes for deserialization"
-    );
-
     let uses_check_archived = reader_source.contains("check_archived_root");
-    if !uses_check_archived {
-        eprintln!(
-            "SPEC DEVIATION: reader.rs uses rkyv::from_bytes instead of \
-             check_archived_root. Safe (validation enabled) but not zero-copy."
-        );
-    }
+    assert!(
+        uses_check_archived,
+        "reader.rs must use check_archived_root for validated deserialization"
+    );
 }
 
 // ============================================================================
@@ -523,18 +524,23 @@ fn audit_source_for_io_unwrap(source: &str, filename: &str) {
             continue;
         }
 
-        if trimmed.contains(".unwrap()") {
+        if trimmed.contains(".unwrap()") || trimmed.contains(".expect(") {
             let is_io = trimmed.contains("File::")
                 || trimmed.contains("fs::")
                 || trimmed.contains(".read_to_end(")
                 || trimmed.contains(".write_all(")
                 || trimmed.contains(".open(")
                 || trimmed.contains(".create(")
-                || trimmed.contains(".sync_all(");
+                || trimmed.contains(".sync_all(")
+                || trimmed.contains("tempfile")
+                || trimmed.contains(".tempfile()")
+                || trimmed.contains(".keep()")
+                || trimmed.contains("Database::")
+                || trimmed.contains("IndexStore::");
 
             assert!(
                 !is_io,
-                "{} line {}: FORBIDDEN unwrap() on I/O operation: {}",
+                "{} line {}: FORBIDDEN unwrap()/expect() on I/O operation: {}",
                 filename,
                 line_num + 1,
                 trimmed

@@ -118,11 +118,11 @@ pub(crate) struct LsmChunkIndex {
 
 impl LsmChunkIndex {
     /// Create a new Redb-backed chunk index.
-    pub fn new() -> Self {
-        Self {
-            builder: Mutex::new(Some(IndexBuilder::new_default())),
+    pub fn new() -> EraResult<Self> {
+        Ok(Self {
+            builder: Mutex::new(Some(IndexBuilder::new_default()?)),
             lookup: RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     /// Take the `IndexBuilder` out for finalization.
@@ -197,7 +197,7 @@ impl ChunkIndex for LsmChunkIndex {
 
 /// Create a chunk index backed by Redb (default for production).
 pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
-    Ok(Arc::new(LsmChunkIndex::new()))
+    Ok(Arc::new(LsmChunkIndex::new()?))
 }
 
 #[cfg(test)]
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_lsm_chunk_index() {
-        let index = LsmChunkIndex::new();
+        let index = LsmChunkIndex::new().unwrap();
 
         let hash = ChunkHash::from_bytes([2u8; 32]);
         let location = create_test_location(1);

@@ -69,7 +69,7 @@ async fn test_cold_recovery_from_orphaned_volume() {
         .unwrap();
 
     // Build index with 1,000 test entries
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..1_000u64 {
         let entry = IndexEntry::new(
             test_hash(i),
@@ -206,18 +206,16 @@ async fn test_index_embedded_in_volume() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default();
+    let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..100u64 {
         builder
-            .insert(
-                IndexEntry::new(
-                    test_hash(i),
-                    VolumeId::new(),
-                    BlockId::new(0),
-                    i as u32 * 1024,
-                    1024,
-                ),
-            )
+            .insert(IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(0),
+                i as u32 * 1024,
+                1024,
+            ))
             .unwrap();
     }
 

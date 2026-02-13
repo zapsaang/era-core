@@ -26,56 +26,81 @@ fn bloom_expected_items(mem_limit: usize) -> usize {
     (mem_limit / entry_size).max(1024)
 }
 
+/// Number of entries to buffer before flushing to Redb in a single batch transaction
+const BATCH_SIZE: usize = 1000;
+
 /// IndexBuilder manages index construction with Redb-backed ACID storage.
 ///
-/// During archive creation, entries are inserted into a staging Redb database.
+/// During archive creation, entries are buffered in memory and flushed to the
+/// staging Redb database in batches of 1000 for optimal write performance.
 /// At finalization, all entries are read in sorted order (Redb B-tree guarantees
 /// this) and written as encrypted IndexPage/IndexManifest blocks to the volume.
 pub struct IndexBuilder {
     /// Redb-backed index store (replaces memtable + spiller + merger)
     store: IndexStore,
+    /// In-memory buffer for batch writes
+    buffer: Vec<IndexEntry>,
 }
 
 impl IndexBuilder {
     /// Create a new IndexBuilder with specified memory limit.
     ///
     /// Creates a temporary Redb file for staging entries.
-    pub fn new(mem_limit: usize) -> Self {
+    /// Returns an error if temp file creation or database initialization fails.
+    pub fn new(mem_limit: usize) -> Result<Self> {
         let temp_file = tempfile::Builder::new()
             .prefix("era-staging-")
             .suffix(".redb")
             .tempfile()
-            .expect("Failed to create temp file for staging IndexStore");
-        let (_, temp_path) = temp_file
-            .keep()
-            .expect("Failed to persist temp file path");
-        let store = IndexStore::create(&temp_path, bloom_expected_items(mem_limit))
-            .expect("Failed to create staging IndexStore");
-        Self { store }
+            .map_err(EraError::Io)?;
+        let (_, temp_path) = temp_file.keep().map_err(|e| EraError::Io(e.error))?;
+        let store = IndexStore::create(&temp_path, bloom_expected_items(mem_limit))?;
+        Ok(Self {
+            store,
+            buffer: Vec::with_capacity(BATCH_SIZE),
+        })
     }
 
     /// Create a new IndexBuilder with a specific path for the Redb file.
     pub fn with_path(path: &std::path::Path, mem_limit: usize) -> Result<Self> {
         let store = IndexStore::create(path, bloom_expected_items(mem_limit))?;
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            buffer: Vec::with_capacity(BATCH_SIZE),
+        })
     }
 
     /// Create with default memory limit (64MB)
-    pub fn new_default() -> Self {
+    pub fn new_default() -> Result<Self> {
         Self::new(DEFAULT_MEM_LIMIT)
     }
 
     /// Insert an entry into the index.
     ///
-    /// The entry is immediately written to the Redb staging database
-    /// with ACID guarantees.
+    /// Entries are buffered in memory and flushed to the Redb staging database
+    /// in batches of 1000 for optimal write performance.
     pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
-        self.store.insert(&entry)
+        // Eagerly update bloom so bloom_contains() reflects buffered entries
+        self.store.bloom_set(&entry.hash);
+        self.buffer.push(entry);
+        if self.buffer.len() >= BATCH_SIZE {
+            self.flush_buffer()?;
+        }
+        Ok(())
     }
 
-    /// Get total number of entries inserted
+    /// Flush the in-memory buffer to the Redb staging database.
+    fn flush_buffer(&mut self) -> Result<()> {
+        if !self.buffer.is_empty() {
+            self.store.insert_batch(&self.buffer)?;
+            self.buffer.clear();
+        }
+        Ok(())
+    }
+
+    /// Get total number of entries inserted (including buffered entries)
     pub fn entry_count(&self) -> usize {
-        self.store.entry_count()
+        self.store.entry_count() + self.buffer.len()
     }
 
     /// Check if a hash exists in the Bloom filter
@@ -93,6 +118,12 @@ impl IndexBuilder {
         &self.store
     }
 
+    /// Flush any buffered entries and drain all entries in sorted order.
+    pub fn drain_sorted(&mut self) -> Result<Vec<IndexEntry>> {
+        self.flush_buffer()?;
+        self.store.drain_sorted()
+    }
+
     /// Finalize the index (EMBEDDED MODE — writes to volume)
     ///
     /// Reads all entries from the Redb staging database in sorted order,
@@ -108,7 +139,8 @@ impl IndexBuilder {
         use super::{IndexPage, ENTRIES_PER_PAGE};
         use era_common::BlockId;
 
-        // Read all entries from Redb in sorted order (B-tree guarantees sort)
+        // Flush any remaining buffered entries, then read all from Redb in sorted order
+        self.flush_buffer()?;
         let all_entries = self.store.drain_sorted()?;
 
         // Build L1 MetaIndex
@@ -164,8 +196,7 @@ impl IndexBuilder {
         let finalized_bloom = if all_entries.is_empty() {
             self.store.bloom().clone()
         } else {
-            let mut compact =
-                Bloom::new_for_fp_rate(all_entries.len().max(1024), BLOOM_FP_RATE);
+            let mut compact = Bloom::new_for_fp_rate(all_entries.len().max(1024), BLOOM_FP_RATE);
             for entry in &all_entries {
                 compact.set(&entry.hash);
             }
@@ -175,8 +206,8 @@ impl IndexBuilder {
         meta.set_bloom_filter(bloom_bytes);
 
         // Encrypt and write MetaIndex as IndexManifest block
-        let meta_bytes = rkyv::to_bytes::<_, 4096>(&meta)
-            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        let meta_bytes =
+            rkyv::to_bytes::<_, 4096>(&meta).map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let manifest_block_id = BlockId::new(block_id_counter);
         let manifest_key =
@@ -229,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_builder_insert() {
-        let mut builder = IndexBuilder::new(1024 * 1024);
+        let mut builder = IndexBuilder::new(1024 * 1024).unwrap();
 
         for i in 0..100u64 {
             let entry = IndexEntry::new(
@@ -247,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_bloom_filter() {
-        let mut builder = IndexBuilder::new_default();
+        let mut builder = IndexBuilder::new_default().unwrap();
 
         for i in 0..1000u64 {
             let entry = IndexEntry::new(

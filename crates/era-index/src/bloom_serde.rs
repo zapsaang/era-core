@@ -54,9 +54,11 @@ impl BloomFilterData {
             .map_err(|e| EraError::Serialization(e.to_string()))
     }
 
-    /// Deserialize from bytes using rkyv
+    /// Deserialize from bytes using rkyv (check_archived_root + deserialize)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        rkyv::from_bytes::<Self>(bytes).map_err(|e| EraError::Deserialization(e.to_string()))
+        let archived = rkyv::check_archived_root::<Self>(bytes)
+            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        Ok(archived.deserialize(&mut rkyv::Infallible).unwrap())
     }
 }
 

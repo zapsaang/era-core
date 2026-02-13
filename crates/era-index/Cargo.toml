@@ -17,7 +17,6 @@ era-volume = { path = "../era-volume" }
 redb = "2.1"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
 rkyv = { workspace = true }
 
 # Bytes
@@ -33,7 +32,7 @@ tracing = "0.1"
 parking_lot = "0.12"
 
 # Bloom filter
-bloomfilter = { version = "1.0", features = ["serde"] }
+bloomfilter = "1.0"
 
 # Temporary files (for Redb staging file)
 tempfile = "3.10"

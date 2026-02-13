@@ -54,7 +54,7 @@ impl Default for LsmTreeConfig {
 ///
 /// # fn example() -> era_common::Result<()> {
 /// let config = LsmTreeConfig::default();
-/// let mut tree = LsmTree::new(config);
+/// let mut tree = LsmTree::new(config)?;
 ///
 /// // Insert entries during archive creation
 /// let entry = IndexEntry::new(
@@ -96,20 +96,20 @@ enum TreeState {
 
 impl LsmTree {
     /// Create a new LsmTree for index construction
-    pub fn new(config: LsmTreeConfig) -> Self {
+    pub fn new(config: LsmTreeConfig) -> Result<Self> {
         // Use IndexBuilder::new() which creates a unique temp Redb file
         // via tempfile::Builder (avoids filename collisions in parallel tests)
-        let builder = IndexBuilder::new(config.mem_limit);
+        let builder = IndexBuilder::new(config.mem_limit)?;
 
-        Self {
+        Ok(Self {
             builder: Some(builder),
             reader: None,
             state: TreeState::Building,
-        }
+        })
     }
 
     /// Create with default configuration
-    pub fn new_default() -> Self {
+    pub fn new_default() -> Result<Self> {
         Self::new(LsmTreeConfig::default())
     }
 
@@ -121,14 +121,9 @@ impl LsmTree {
             ));
         }
 
-        let builder = self
-            .builder
-            .as_mut()
-            .ok_or_else(|| {
-                era_common::EraError::InvalidFormat(
-                    "Builder must exist in Building state".to_string(),
-                )
-            })?;
+        let builder = self.builder.as_mut().ok_or_else(|| {
+            era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
+        })?;
 
         builder.insert(entry)
     }
@@ -175,17 +170,12 @@ impl LsmTree {
             ));
         }
 
-        let builder = self
-            .builder
-            .take()
-            .ok_or_else(|| {
-                era_common::EraError::InvalidFormat(
-                    "Builder must exist in Building state".to_string(),
-                )
-            })?;
+        let mut builder = self.builder.take().ok_or_else(|| {
+            era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
+        })?;
 
-        // Read all entries from Redb in sorted order
-        let merged_entries = builder.store().drain_sorted()?;
+        // Flush buffer and read all entries from Redb in sorted order
+        let merged_entries = builder.drain_sorted()?;
         let bloom_clone = builder.bloom().clone();
         let entries_count = merged_entries.len();
 
@@ -210,9 +200,7 @@ impl LsmTree {
             })?
             .clone();
 
-        Ok(LsmTreeReader {
-            reader: reader_arc,
-        })
+        Ok(LsmTreeReader { reader: reader_arc })
     }
 
     /// Recover an index from a volume (cold recovery)
@@ -271,14 +259,14 @@ mod tests {
 
     #[test]
     fn test_lsm_tree_creation() {
-        let tree = LsmTree::new_default();
+        let tree = LsmTree::new_default().unwrap();
         assert_eq!(tree.state, TreeState::Building);
         assert_eq!(tree.spill_count(), 0);
     }
 
     #[test]
     fn test_lsm_tree_insert() {
-        let mut tree = LsmTree::new_default();
+        let mut tree = LsmTree::new_default().unwrap();
 
         let entry = IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(0), 0, 4096);
 
@@ -289,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_lsm_tree_reader_bloom_contains_efficiency() {
-        let mut tree = LsmTree::new_default();
+        let mut tree = LsmTree::new_default().unwrap();
 
         for i in 0..100u64 {
             let entry = IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i), 0, 4096);
