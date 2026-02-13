@@ -79,7 +79,8 @@ impl RecoveryManager {
     /// Analyze the recovery situation for an archive
     ///
     /// **V2.2 Change:** Now checks the volume footer for checkpoint presence
-    /// instead of looking for sidecar files.
+    /// instead of looking for sidecar files. Populates `bytes_written` from
+    /// the footer's `data_end_offset` when a checkpoint exists.
     pub async fn analyze(archive_path: &Path) -> Result<RecoveryStatus> {
         let archive_exists = archive_path.exists();
 
@@ -103,13 +104,12 @@ impl RecoveryManager {
             });
         }
 
-        // Load checkpoint to analyze state
-        // Note: In V2.2, this would need to read from the volume
-        // For now, we return a status indicating recovery is needed
-        // but the actual checkpoint data must be loaded via read_checkpoint()
+        // Load footer to populate bytes_written from data_end_offset
+        let bytes_written = Self::read_footer_data_end(archive_path).await.unwrap_or(0);
+
         debug!(
-            "Checkpoint detected in volume footer for {:?}",
-            archive_path
+            "Checkpoint detected in volume footer for {:?}, data_end_offset={}",
+            archive_path, bytes_written
         );
 
         Ok(RecoveryStatus {
@@ -119,8 +119,22 @@ impl RecoveryManager {
             completed_files: Vec::new(), // Will be populated when checkpoint is loaded
             in_progress_file: None,      // Will be populated when checkpoint is loaded
             chunks_written: 0,           // Will be populated when checkpoint is loaded
-            bytes_written: 0,            // Will be populated when checkpoint is loaded
+            bytes_written,
         })
+    }
+
+    /// Read the footer's data_end_offset from the archive file.
+    async fn read_footer_data_end(archive_path: &Path) -> Result<u64> {
+        let parent_dir = archive_path.parent().unwrap_or(Path::new("."));
+        let backend = LocalStorageBackend::new(parent_dir);
+        let volume_name = archive_path.file_name().unwrap_or_default();
+
+        let reader = VolumeReader::open(&backend, Path::new(volume_name)).await?;
+        if let Some(footer) = reader.footer() {
+            Ok(footer.data_end_offset)
+        } else {
+            Ok(0)
+        }
     }
 
     /// Create a recovery manager for an archive
@@ -213,6 +227,42 @@ impl RecoveryManager {
             manager.delete()?;
         }
         Ok(())
+    }
+
+    /// Truncate the archive file to the last committed data boundary.
+    ///
+    /// Reads the footer's `data_end_offset` and truncates the file to that
+    /// size, removing any partial writes past the last committed point.
+    /// This implements CLAUDE.md §6 Step 4.
+    ///
+    /// Returns the new file size, or an error if the archive has no valid footer.
+    pub async fn truncate_to_checkpoint(&self) -> Result<u64> {
+        if !self.archive_path.exists() {
+            return Err(EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Archive not found: {:?}", self.archive_path),
+            )));
+        }
+
+        let data_end = Self::read_footer_data_end(&self.archive_path).await?;
+        if data_end == 0 {
+            return Err(EraError::InvalidConfig(
+                "Cannot truncate: no valid footer with data_end_offset".into(),
+            ));
+        }
+
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&self.archive_path)?;
+        file.set_len(data_end)?;
+        file.sync_all()?;
+
+        info!(
+            "Truncated {:?} to {} bytes (data_end_offset from footer)",
+            self.archive_path, data_end
+        );
+
+        Ok(data_end)
     }
 }
 
@@ -328,7 +378,7 @@ impl RecoverableWriter {
                 }
             }
             RecoveryStrategy::Resume => {
-                // Use existing checkpoint or create new
+                // Use existing checkpoint or error if none exists
                 let manager = match options.hmac_key {
                     Some(key) => {
                         CheckpointManager::load_or_create_with_key(archive_path, Some(key))?
@@ -338,7 +388,12 @@ impl RecoverableWriter {
                 if manager.checkpoint().completed_files.is_empty()
                     && manager.checkpoint().written_chunks.is_empty()
                 {
-                    debug!("No previous progress found, starting fresh");
+                    // No prior checkpoint data — Resume was requested but nothing to resume from
+                    return Err(EraError::CheckpointError(
+                        "Resume requested but no prior checkpoint exists. \
+                         Use StartFresh to begin a new archive."
+                            .into(),
+                    ));
                 } else {
                     info!(
                         "Resuming from checkpoint: {} files completed, {} chunks written",

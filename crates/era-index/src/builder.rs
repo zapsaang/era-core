@@ -41,6 +41,8 @@ pub struct IndexBuilder {
     spilled_segments: Vec<PathBuf>,
     /// Memory limit in bytes
     mem_limit: usize,
+    /// Total entries inserted (in-memory + spilled)
+    total_entries: usize,
 }
 
 impl IndexBuilder {
@@ -52,6 +54,7 @@ impl IndexBuilder {
             spiller: Spiller::new(),
             spilled_segments: Vec::new(),
             mem_limit,
+            total_entries: 0,
         }
     }
 
@@ -67,6 +70,7 @@ impl IndexBuilder {
 
         // Add to MemTable
         self.memtable.push(entry);
+        self.total_entries += 1;
 
         // Check if we need to spill
         if self.memtable_size_bytes() >= self.mem_limit {
@@ -79,6 +83,11 @@ impl IndexBuilder {
     /// Get current MemTable memory usage in bytes
     pub fn memtable_size_bytes(&self) -> usize {
         self.memtable.len() * IndexEntry::memory_size()
+    }
+
+    /// Get total number of entries inserted (in-memory + spilled)
+    pub fn entry_count(&self) -> usize {
+        self.total_entries
     }
 
     /// Get number of spill files created
@@ -165,6 +174,7 @@ impl IndexBuilder {
             spiller: Spiller::new(), // New ephemeral key for this session
             spilled_segments: Vec::new(),
             mem_limit: DEFAULT_MEM_LIMIT,
+            total_entries: 0,
         })
     }
 

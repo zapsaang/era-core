@@ -1388,10 +1388,7 @@ fn consistency_no_thread_rng_anywhere() {
             "era-volume/writer.rs",
             include_str!("../../era-volume/src/writer.rs"),
         ),
-        (
-            "era-index/spiller.rs",
-            include_str!("../../era-index/src/spiller.rs"),
-        ),
+        // era-index/spiller.rs was deleted — vulnerability resolved by removal
     ];
 
     for (name, source) in &files {

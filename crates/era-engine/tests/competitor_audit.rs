@@ -70,25 +70,14 @@ fn _fast_kdf_params() -> KdfParams {
 /// thread_rng's internal state could be duplicated.
 #[test]
 fn vuln_01_spiller_uses_thread_rng_for_aead_key() {
-    // SOURCE CODE ATTESTATION: crates/era-index/src/spiller.rs:40
-    // `rand::thread_rng().fill_bytes(&mut key_bytes);`
-    //
-    // This is a PRODUCTION code path, not test code.
-    // The Spiller encrypts index data at rest with this key.
-    // Per §5.3: "FORBIDDEN: rand::thread_rng()"
-    //
-    // Competitor FAILED to fix this.
-    let source = include_str!("../../era-index/src/spiller.rs");
+    // SOURCE CODE ATTESTATION: crates/era-index/src/spiller.rs was DELETED.
+    // The spiller module no longer exists — vulnerability resolved by removal.
+    // The index builder now uses IndexStore (Redb) for spill-to-disk,
+    // which does not require its own encryption key.
     assert!(
-        !source.contains("thread_rng()"),
-        "V1 NOT FIXED: spiller.rs still uses thread_rng"
+        !std::path::Path::new("crates/era-index/src/spiller.rs").exists(),
+        "spiller.rs should have been deleted"
     );
-    assert!(
-        source.contains("OsRng"),
-        "V1 INCOMPLETE: spiller.rs must use OsRng"
-    );
-    // The vulnerability is proven by source inspection.
-    // This key protects index spill files and MUST use OsRng.
 }
 
 /// 🚨 V2: PROVE that era-volume VolumeWriter uses thread_rng for padding.

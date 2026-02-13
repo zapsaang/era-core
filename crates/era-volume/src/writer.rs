@@ -26,8 +26,10 @@ pub struct VolumeWriter<W: StorageWriter> {
     header: SuperHeader,
     /// Current write position (after header)
     position: u64,
-    /// Number of blocks written
+    /// Number of canonical blocks written (does not include raw writes)
     block_count: u32,
+    /// Total bytes written via `write_raw()` (not counted in `block_count`)
+    raw_bytes_written: u64,
     /// Sequence number for footer
     sequence: u64,
     /// Maximum volume size (for padding)
@@ -67,6 +69,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             header,
             position: DATA_REGION_START,
             block_count: 0,
+            raw_bytes_written: 0,
             sequence: 0,
             max_size: None,
             last_checkpoint_offset: 0,
@@ -89,6 +92,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             header,
             position: footer.data_end_offset,
             block_count: footer.block_count,
+            raw_bytes_written: 0,
             sequence: footer.sequence_number,
             max_size: None,
             last_checkpoint_offset: footer.last_checkpoint_offset,
@@ -213,9 +217,19 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.position
     }
 
-    /// Get the number of blocks written
+    /// Get the number of canonical blocks written.
+    ///
+    /// This only counts blocks written via `write_canonical_block()`.
+    /// Raw writes via `write_raw()` are tracked separately.
     pub fn block_count(&self) -> u32 {
         self.block_count
+    }
+
+    /// Get the total bytes written via `write_raw()`.
+    ///
+    /// This is separate from `block_count()` which only tracks canonical blocks.
+    pub fn raw_bytes_written(&self) -> u64 {
+        self.raw_bytes_written
     }
 
     /// Write a canonical block with explicit BlockType
@@ -269,7 +283,10 @@ impl<W: StorageWriter> VolumeWriter<W> {
         Ok(location)
     }
 
-    /// Write raw bytes to the volume (for testing/low-level access)
+    /// Write raw bytes to the volume (for index embedding and low-level access).
+    ///
+    /// Raw writes are tracked separately via `raw_bytes_written()` and do NOT
+    /// increment `block_count()`, which only counts canonical typed blocks.
     pub async fn write_raw(&mut self, data: &[u8]) -> Result<u64> {
         let offset = self.position;
 
@@ -280,6 +297,8 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.writer.append(data).await?;
             self.position = self.writer.current_size();
         }
+
+        self.raw_bytes_written += data.len() as u64;
 
         Ok(offset)
     }
@@ -314,6 +333,20 @@ impl<W: StorageWriter> VolumeWriter<W> {
         index_size: u32,
         index_block_id: u32,
     ) -> Result<SuperHeader> {
+        // Validate offsets: non-zero offsets must not exceed current write position
+        if catalog_offset != 0 && catalog_offset > self.position {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "catalog_offset {} exceeds current position {}",
+                catalog_offset, self.position
+            )));
+        }
+        if index_offset != 0 && index_offset > self.position {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "index_offset {} exceeds current position {}",
+                index_offset, self.position
+            )));
+        }
+
         self.sequence += 1;
 
         // Random padding if max_size is set

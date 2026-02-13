@@ -38,8 +38,8 @@ async fn test_floating_footer_recovery() {
         let mut writer = backend.create(path).await.unwrap();
         writer.append(&header_bytes).await.unwrap();
 
-        // Write Block 1
-        let data1 = vec![0xAA; 100];
+        // Write enough data so data_end_offset >= HEADER_SIZE + FOOTER_SIZE (4224)
+        let data1 = vec![0xAA; 256];
         writer.append(&data1).await.unwrap();
         let block1_end = writer.current_size();
 

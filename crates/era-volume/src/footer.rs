@@ -8,6 +8,10 @@ use era_common::{EraError, Result};
 /// Magic bytes for footer: "ERAF"
 pub const FOOTER_MAGIC: [u8; 4] = [0x45, 0x52, 0x41, 0x46];
 
+/// Domain separation prefix for footer checksum.
+/// Prevents cross-protocol hash collisions.
+const FOOTER_DOMAIN: &[u8] = b"ERAFv1-footer\0";
+
 /// Footer size (128 bytes for atomic write within a single disk sector)
 pub const FOOTER_SIZE: usize = 128;
 
@@ -173,7 +177,7 @@ impl Footer {
         self.index_offset > 0 && self.index_size > 0
     }
 
-    /// Update the checksum field
+    /// Update the checksum field (domain-separated Blake3)
     fn update_checksum(&mut self) {
         // Zero out checksum for calculation
         self.checksum = [0u8; 32];
@@ -182,19 +186,23 @@ impl Footer {
         let mut data = [0u8; FOOTER_SIZE - 32];
         self.write_fields_to(&mut data);
 
-        // Calculate Blake3 hash
-        let hash = blake3::hash(&data);
-        self.checksum = *hash.as_bytes();
+        // Calculate Blake3 hash with domain separation prefix
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(FOOTER_DOMAIN);
+        hasher.update(&data);
+        self.checksum = *hasher.finalize().as_bytes();
     }
 
-    /// Verify the checksum
+    /// Verify the checksum (domain-separated Blake3)
     pub fn verify_checksum(&self) -> bool {
         // Serialize without checksum (first 96 bytes)
         let mut data = [0u8; FOOTER_SIZE - 32];
         self.write_fields_to(&mut data);
 
-        let hash = blake3::hash(&data);
-        hash.as_bytes() == &self.checksum
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(FOOTER_DOMAIN);
+        hasher.update(&data);
+        hasher.finalize().as_bytes() == &self.checksum
     }
 
     /// Write all fields except checksum to a buffer
@@ -305,6 +313,36 @@ impl Footer {
         // Validate checksum
         if !footer.verify_checksum() {
             return Err(EraError::CorruptedFooter("Checksum mismatch".to_string()));
+        }
+
+        // Validate field ranges (Defect #6):
+        // data_end_offset must be 0 or at least HEADER_SIZE + FOOTER_SIZE (minimum structural size)
+        let min_data_end = (crate::header::HEADER_SIZE + FOOTER_SIZE) as u64;
+        if footer.data_end_offset != 0 && footer.data_end_offset < min_data_end {
+            return Err(EraError::CorruptedFooter(format!(
+                "data_end_offset {} is below minimum structural size {}",
+                footer.data_end_offset, min_data_end
+            )));
+        }
+        // catalog_offset must be 0 or at least HEADER_SIZE
+        if footer.catalog_offset != 0
+            && footer.catalog_offset < crate::header::HEADER_SIZE as u64
+        {
+            return Err(EraError::CorruptedFooter(format!(
+                "catalog_offset {} is below HEADER_SIZE {}",
+                footer.catalog_offset,
+                crate::header::HEADER_SIZE
+            )));
+        }
+        // index_offset must be 0 or at least HEADER_SIZE
+        if footer.index_offset != 0
+            && footer.index_offset < crate::header::HEADER_SIZE as u64
+        {
+            return Err(EraError::CorruptedFooter(format!(
+                "index_offset {} is below HEADER_SIZE {}",
+                footer.index_offset,
+                crate::header::HEADER_SIZE
+            )));
         }
 
         Ok(footer)

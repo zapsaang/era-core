@@ -18,107 +18,74 @@ use parking_lot::{Mutex, RwLock};
 
 /// Trait for chunk deduplication index implementations.
 ///
-/// Both HashMap and LsmChunkIndex implement this trait, allowing
-/// ArchiveWriter to use either backend.
-#[allow(dead_code)]
+/// Provides a unified interface for looking up and recording chunk locations,
+/// whether backed by an in-memory HashMap or a persistent LSM-Tree.
 pub(crate) trait ChunkIndex: Send + Sync {
-    /// Check if a chunk exists in the index.
+    /// Check if a chunk hash exists in the index.
     fn contains(&self, hash: &ChunkHash) -> EraResult<bool>;
 
-    /// Get the location of a chunk.
+    /// Get the block location for a chunk hash, if it exists.
     fn get(&self, hash: &ChunkHash) -> EraResult<Option<BlockLocation>>;
 
-    /// Store a chunk location.
+    /// Record a chunk hash → block location mapping.
     fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()>;
 
-    /// Delete a chunk from the index.
+    /// Remove a chunk hash from the index.
     fn delete(&self, hash: &ChunkHash) -> EraResult<()>;
 
-    /// Get the approximate number of entries.
+    /// Return the number of entries in the index.
     fn len(&self) -> usize;
-
-    /// Check if empty.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 
     /// Flush any pending writes to stable storage.
     fn flush(&self) -> EraResult<()>;
 
-    /// Start batch mode for improved write throughput.
+    /// Begin a batch of operations (for transactional backends).
     fn start_batch(&self);
 
-    /// Commit batch writes.
+    /// Commit the current batch of operations.
     fn commit_batch(&self) -> EraResult<()>;
 
-    /// Downcast to concrete type for extraction.
+    /// Downcast support for accessing concrete implementations.
     fn as_any(&self) -> &dyn Any;
 }
 
-/// In-memory HashMap-based chunk index (legacy, for testing or small archives).
+/// Simple in-memory chunk index backed by a HashMap.
 ///
-/// ⚠️ WARNING: This implementation does NOT provide:
-/// - Persistence (all data lost on process exit)
-/// - Incremental backup support
-/// - Memory efficiency for large archives
-///
-/// Use `LsmChunkIndex` for production workloads.
-///
-/// This is internal only. Use era_index::v2 APIs for production.
-#[allow(dead_code)]
+/// Suitable for tests and small archives. Does not persist across restarts.
 pub(crate) struct MemoryChunkIndex {
-    inner: RwLock<HashMap<ChunkHash, BlockLocation>>,
+    map: RwLock<HashMap<ChunkHash, BlockLocation>>,
 }
 
-#[allow(dead_code)]
 impl MemoryChunkIndex {
-    /// Create a new empty in-memory index.
+    /// Create a new empty in-memory chunk index.
     pub fn new() -> Self {
         Self {
-            inner: RwLock::new(HashMap::new()),
+            map: RwLock::new(HashMap::new()),
         }
-    }
-
-    /// Create with pre-allocated capacity.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            inner: RwLock::new(HashMap::with_capacity(capacity)),
-        }
-    }
-
-    /// Get direct access to the underlying HashMap (for migration).
-    pub fn into_inner(self) -> HashMap<ChunkHash, BlockLocation> {
-        self.inner.into_inner()
-    }
-}
-
-impl Default for MemoryChunkIndex {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 impl ChunkIndex for MemoryChunkIndex {
     fn contains(&self, hash: &ChunkHash) -> EraResult<bool> {
-        Ok(self.inner.read().contains_key(hash))
+        Ok(self.map.read().contains_key(hash))
     }
 
     fn get(&self, hash: &ChunkHash) -> EraResult<Option<BlockLocation>> {
-        Ok(self.inner.read().get(hash).cloned())
+        Ok(self.map.read().get(hash).cloned())
     }
 
     fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
-        self.inner.write().insert(hash, location);
+        self.map.write().insert(hash, location);
         Ok(())
     }
 
     fn delete(&self, hash: &ChunkHash) -> EraResult<()> {
-        self.inner.write().remove(hash);
+        self.map.write().remove(hash);
         Ok(())
     }
 
     fn len(&self) -> usize {
-        self.inner.read().len()
+        self.map.read().len()
     }
 
     fn flush(&self) -> EraResult<()> {
@@ -183,16 +150,25 @@ impl ChunkIndex for LsmChunkIndex {
         // Insert into lookup map for point queries
         self.lookup.write().insert(hash, location.clone());
 
-        // Insert into IndexBuilder for volume finalization
-        if let Some(ref mut builder) = *self.builder.lock() {
-            let entry = IndexEntry::new(
-                hash,
-                location.volume_id,
-                BlockId::new(location.slot_index as u64),
-                0, // offset within block (not tracked at this level)
-                location.encrypted_size,
-            );
-            builder.insert(entry, &self.temp_dir)?;
+        // Insert into IndexBuilder for volume finalization.
+        // If builder has been taken (finalization started), reject the insert
+        // to prevent silent data loss in the volume index.
+        match *self.builder.lock() {
+            Some(ref mut builder) => {
+                let entry = IndexEntry::new(
+                    hash,
+                    location.volume_id,
+                    BlockId::new(location.slot_index as u64),
+                    0, // offset within block (not tracked at this level)
+                    location.encrypted_size,
+                );
+                builder.insert(entry, &self.temp_dir)?;
+            }
+            None => {
+                return Err(era_common::EraError::InvalidConfig(
+                    "Cannot insert after builder taken — finalization already started".into(),
+                ));
+            }
         }
 
         Ok(())

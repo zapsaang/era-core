@@ -1024,18 +1024,18 @@ async fn test_scan_finds_index_blocks_among_mixed_types() {
 #[test]
 fn test_footer_checksum_rejects_tampered_index_fields() {
     let footer = Footer::with_catalog(
-        4224, // data_end
+        8192, // data_end (must be >= HEADER_SIZE + FOOTER_SIZE = 4224)
         10,   // block_count
         1,    // sequence
-        1000, // catalog_offset
+        5000, // catalog_offset (must be >= HEADER_SIZE = 4096)
         500,  // catalog_size
         5,    // catalog_block_id
         0,    // checkpoint_offset
         0,    // checkpoint_block_id
-        2000, // index_offset
+        6000, // index_offset (must be >= HEADER_SIZE = 4096)
         300,  // index_size
         8,    // index_block_id
-        3000, // backup_header_offset
+        7000, // backup_header_offset
     );
 
     let bytes = footer.to_bytes().unwrap();

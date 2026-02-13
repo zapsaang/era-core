@@ -83,17 +83,14 @@ fn mock_encrypted_vk() -> EncryptedVolumeKey {
 // SECTION 0: VERIFY COMPETITOR'S V1-V7 FIXES (Regression Baseline)
 // ============================================================================
 
-/// ✅ Verify V1 fix: spiller.rs uses OsRng, not thread_rng
+/// ✅ Verify V1 fix: spiller.rs was deleted (vulnerability resolved by removal)
 #[test]
 fn verify_v1_spiller_uses_osrng() {
-    let source = include_str!("../../era-index/src/spiller.rs");
+    // spiller.rs was deleted — the index builder now uses IndexStore (Redb)
+    // for spill-to-disk, which does not require its own encryption key.
     assert!(
-        !source.contains("thread_rng"),
-        "REGRESSION V1: spiller.rs still contains thread_rng"
-    );
-    assert!(
-        source.contains("OsRng"),
-        "REGRESSION V1: spiller.rs must use OsRng"
+        !std::path::Path::new("crates/era-index/src/spiller.rs").exists(),
+        "spiller.rs should have been deleted"
     );
 }
 
@@ -504,10 +501,7 @@ fn nv4b_no_production_thread_rng_anywhere() {
             "era-crypto/src/key_session.rs",
             include_str!("../../era-crypto/src/key_session.rs"),
         ),
-        (
-            "era-index/src/spiller.rs",
-            include_str!("../../era-index/src/spiller.rs"),
-        ),
+        // spiller.rs was deleted — skipped
         (
             "era-volume/src/writer.rs",
             include_str!("../../era-volume/src/writer.rs"),

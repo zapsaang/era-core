@@ -198,11 +198,19 @@ impl CheckpointManager {
     /// Load or create a checkpoint (backward compatibility API)
     ///
     /// **MIGRATION WARNING:** Old sidecar checkpoints are NOT loaded.
-    /// This returns a fresh checkpoint. Cold recovery should be used instead.
+    /// This returns a fresh checkpoint. Full checkpoint recovery requires
+    /// `read_checkpoint()` with crypto params (VolumeReader + KeySession).
+    ///
+    /// If a checkpoint exists in the volume footer (detected via `exists()`),
+    /// a warning is logged. The caller should use `read_checkpoint()` for
+    /// full recovery.
     pub fn load_or_create(archive_path: impl AsRef<Path>) -> Result<Self> {
-        tracing::warn!(
-            "CheckpointManager::load_or_create() - old sidecar checkpoints are no longer supported"
-        );
+        if Self::exists(archive_path.as_ref()) {
+            tracing::warn!(
+                "CheckpointManager::load_or_create() - checkpoint exists in volume footer \
+                 but cannot be loaded without crypto context. Use read_checkpoint() for full recovery."
+            );
+        }
         Ok(Self {
             checkpoint: Checkpoint::new(0, 0, 0, 0, 0, HashMap::new()),
             archive_path: archive_path.as_ref().to_path_buf(),
@@ -217,10 +225,60 @@ impl CheckpointManager {
         Self::load_or_create(archive_path)
     }
 
-    /// Check if a checkpoint exists (always returns false for new implementation)
-    pub fn exists(_archive_path: impl AsRef<Path>) -> bool {
-        // Old sidecar checkpoints no longer supported
-        false
+    /// Check if a checkpoint exists by reading the volume footer.
+    ///
+    /// Reads the archive file synchronously and checks if the footer's
+    /// `last_checkpoint_offset > 0`. Returns `false` if the file doesn't
+    /// exist, is too small, or has no valid footer.
+    pub fn exists(archive_path: impl AsRef<Path>) -> bool {
+        let path = archive_path.as_ref();
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let file_len = metadata.len();
+        if file_len < era_volume::FOOTER_SIZE as u64 {
+            return false;
+        }
+        // Try reading the last FOOTER_SIZE bytes (primary footer location)
+        let mut file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        use std::io::{Read, Seek, SeekFrom};
+        if file
+            .seek(SeekFrom::End(-(era_volume::FOOTER_SIZE as i64)))
+            .is_err()
+        {
+            return false;
+        }
+        let mut buf = [0u8; era_volume::FOOTER_SIZE];
+        if file.read_exact(&mut buf).is_err() {
+            return false;
+        }
+        match era_volume::Footer::from_bytes(&buf) {
+            Ok(footer) => footer.last_checkpoint_offset > 0,
+            Err(_) => {
+                // Try backup footer at HEADER_SIZE offset
+                if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
+                    return false;
+                }
+                if file
+                    .seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
+                    .is_err()
+                {
+                    return false;
+                }
+                let mut backup_buf = [0u8; era_volume::FOOTER_SIZE];
+                if file.read_exact(&mut backup_buf).is_err() {
+                    return false;
+                }
+                match era_volume::Footer::from_bytes(&backup_buf) {
+                    Ok(footer) => footer.last_checkpoint_offset > 0,
+                    Err(_) => false,
+                }
+            }
+        }
     }
 
     /// Get mutable reference to checkpoint state
@@ -291,11 +349,13 @@ impl CheckpointManager {
         &self.checkpoint.written_chunks
     }
 
-    /// Sync checkpoint to disk (backward compatibility - no-op)
+    /// Sync checkpoint to disk (backward compatibility — no-op)
     ///
-    /// **DEPRECATED:** Checkpoints are now written via commit_to_volume().
+    /// **DEPRECATED:** This is a no-op. The backward-compat API cannot perform
+    /// volume-based persistence without `VolumeWriter`/`KeySession`/`VolumeKey`.
+    /// Real persistence is via `commit_to_volume()`.
     pub fn sync(&mut self) -> Result<()> {
-        // No-op in new implementation
+        // No-op: volume I/O requires crypto context not available here
         Ok(())
     }
 
@@ -306,7 +366,16 @@ impl CheckpointManager {
     }
 
     /// Update position (backward compatibility)
+    ///
+    /// Enforces monotonically increasing offset within the same volume.
+    /// Moving to a new volume resets the offset constraint.
     pub fn update_position(&mut self, volume: u16, offset: u64, bytes_written: u64) -> Result<()> {
+        if volume == self.checkpoint.current_volume && offset < self.checkpoint.current_offset {
+            return Err(EraError::InvalidConfig(format!(
+                "Position cannot go backwards on same volume: current_offset={}, new_offset={}",
+                self.checkpoint.current_offset, offset
+            )));
+        }
         self.checkpoint.current_volume = volume;
         self.checkpoint.current_offset = offset;
         self.checkpoint.total_bytes_written = bytes_written;
