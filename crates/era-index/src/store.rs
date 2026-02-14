@@ -38,7 +38,10 @@ fn deserialize_entry_aligned(bytes: &[u8]) -> Result<IndexEntry> {
     aligned.extend_from_slice(bytes);
     let archived = rkyv::check_archived_root::<IndexEntry>(&aligned)
         .map_err(|e| EraError::Deserialization(e.to_string()))?;
-    Ok(archived.deserialize(&mut rkyv::Infallible).unwrap())
+    Ok(match archived.deserialize(&mut rkyv::Infallible) {
+        Ok(val) => val,
+        Err(never) => match never {},
+    })
 }
 
 /// IndexStore wraps a Redb database for ACID-compliant chunk indexing.
@@ -51,6 +54,8 @@ pub struct IndexStore {
     bloom: Bloom<ChunkHash>,
     /// Total entries inserted
     entry_count: usize,
+    /// Whether this store was opened in read-only mode
+    read_only: bool,
 }
 
 impl IndexStore {
@@ -78,6 +83,7 @@ impl IndexStore {
             db_path: path.to_path_buf(),
             bloom: Bloom::new_for_fp_rate(items, BLOOM_FP_RATE),
             entry_count: 0,
+            read_only: false,
         })
     }
 
@@ -113,11 +119,17 @@ impl IndexStore {
             db_path: path.to_path_buf(),
             bloom,
             entry_count: len,
+            read_only: true,
         })
     }
 
     /// Insert a single chunk entry (one write transaction per call).
     pub fn insert(&mut self, entry: &IndexEntry) -> Result<()> {
+        if self.read_only {
+            return Err(EraError::IndexError(
+                "Cannot insert into a read-only IndexStore".into(),
+            ));
+        }
         self.bloom.set(&entry.hash);
 
         let value_bytes =
@@ -131,20 +143,31 @@ impl IndexStore {
             let mut table = write_txn
                 .open_table(TABLE_CHUNKS)
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
+            let is_new = table
+                .get(entry.hash.as_bytes())
+                .map_err(|e| EraError::IndexError(e.to_string()))?
+                .is_none();
             table
                 .insert(entry.hash.as_bytes(), value_bytes.as_slice())
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
+            if is_new {
+                self.entry_count += 1;
+            }
         }
         write_txn
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
-        self.entry_count += 1;
         Ok(())
     }
 
     /// Batch insert entries in a single transaction (much faster for bulk loads).
     pub fn insert_batch(&mut self, entries: &[IndexEntry]) -> Result<()> {
+        if self.read_only {
+            return Err(EraError::IndexError(
+                "Cannot insert into a read-only IndexStore".into(),
+            ));
+        }
         if entries.is_empty() {
             return Ok(());
         }
@@ -157,20 +180,28 @@ impl IndexStore {
             let mut table = write_txn
                 .open_table(TABLE_CHUNKS)
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
+            let mut new_count = 0usize;
             for entry in entries {
                 self.bloom.set(&entry.hash);
                 let value_bytes = rkyv::to_bytes::<_, 256>(entry)
                     .map_err(|e| EraError::Serialization(e.to_string()))?;
+                let is_new = table
+                    .get(entry.hash.as_bytes())
+                    .map_err(|e| EraError::IndexError(e.to_string()))?
+                    .is_none();
                 table
                     .insert(entry.hash.as_bytes(), value_bytes.as_slice())
                     .map_err(|e| EraError::IndexError(e.to_string()))?;
+                if is_new {
+                    new_count += 1;
+                }
             }
+            self.entry_count += new_count;
         }
         write_txn
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
-        self.entry_count += entries.len();
         Ok(())
     }
 

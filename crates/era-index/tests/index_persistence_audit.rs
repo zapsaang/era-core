@@ -459,7 +459,7 @@ async fn test_index_page_encryption_roundtrip() {
     let footer = reader.footer().unwrap();
     assert!(footer.has_index(), "Footer must indicate index presence");
 
-    let mut recovered =
+    let recovered =
         IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
             .await
             .unwrap();
@@ -646,7 +646,7 @@ async fn test_large_index_embedded_finalize() {
 
     // Recover and verify all entries
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
-    let mut recovered =
+    let recovered =
         IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
             .await
             .unwrap();
@@ -767,7 +767,7 @@ async fn test_multiple_index_writes_uses_last() {
 fn test_index_reader_from_memory_empty() {
     let meta = MetaIndex::new();
     let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);
-    let mut reader = IndexReader::from_memory(meta, bloom, vec![]).unwrap();
+    let reader = IndexReader::from_memory(meta, bloom, vec![]).unwrap();
 
     // Lookup on empty index must return None
     let result = reader.lookup(&test_hash(42)).unwrap();
@@ -800,7 +800,7 @@ fn test_index_reader_from_memory_with_entries() {
         })
         .collect();
 
-    let mut reader = IndexReader::from_memory(meta, bloom, entries).unwrap();
+    let reader = IndexReader::from_memory(meta, bloom, entries).unwrap();
 
     for i in 0..50u64 {
         let result = reader.lookup(&test_hash(i)).unwrap();
@@ -1177,7 +1177,7 @@ async fn test_multi_page_index_recovery() {
         .unwrap();
 
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
-    let mut recovered =
+    let recovered =
         IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
             .await
             .unwrap();

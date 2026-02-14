@@ -231,7 +231,7 @@ pub struct LsmTreeReader {
 impl LsmTreeReader {
     /// Lookup a chunk hash in the index
     pub fn lookup(&self, hash: &ChunkHash) -> Result<Option<IndexLocation>> {
-        self.reader.write().lookup(hash)
+        self.reader.read().lookup(hash)
     }
 
     /// Check if a hash exists in the Bloom filter (fast O(1) negative lookup)

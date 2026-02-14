@@ -146,6 +146,10 @@ impl IndexBuilder {
         // Build L1 MetaIndex
         let mut meta = super::MetaIndex::new();
 
+        // Domain-separated nonce context for index blocks (prevents nonce reuse with data blocks)
+        let mut index_nonce_context = nonce_context;
+        index_nonce_context[0] ^= 0xFF;
+
         // Write L2 pages as typed blocks to volume
         let mut block_id_counter = 0u64;
         for page_entries in all_entries.chunks(ENTRIES_PER_PAGE) {
@@ -163,11 +167,11 @@ impl IndexBuilder {
             // Encrypt page with session keys
             let block_id = BlockId::new(block_id_counter);
             let block_key =
-                session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
+                session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context);
             let derived_key = block_key.to_derived_key();
             let encrypted_data = era_crypto::encrypt_with_context(
                 &derived_key,
-                &nonce_context,
+                &index_nonce_context,
                 block_id,
                 &page_bytes,
             )?;
@@ -211,11 +215,11 @@ impl IndexBuilder {
 
         let manifest_block_id = BlockId::new(block_id_counter);
         let manifest_key =
-            session.derive_block_key(volume_key, manifest_block_id.sequence(), &nonce_context);
+            session.derive_block_key(volume_key, manifest_block_id.sequence(), &index_nonce_context);
         let manifest_derived_key = manifest_key.to_derived_key();
         let encrypted_manifest = era_crypto::encrypt_with_context(
             &manifest_derived_key,
-            &nonce_context,
+            &index_nonce_context,
             manifest_block_id,
             &meta_bytes,
         )?;
@@ -239,11 +243,23 @@ impl IndexBuilder {
 
 impl Drop for IndexBuilder {
     fn drop(&mut self) {
-        // Best-effort cleanup of the staging Redb file
-        let path = self.store.path().to_path_buf();
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
+        // Flush buffer to persist data for crash recovery
+        if let Err(e) = self.flush_buffer() {
+            tracing::error!("Failed to flush buffer in Drop: {}", e);
         }
+        // Staging file persists for crash recovery
+    }
+}
+
+impl IndexBuilder {
+    /// Explicitly discard the builder and remove the staging file.
+    pub fn discard(self) -> Result<()> {
+        let path = self.store.path().to_path_buf();
+        drop(self); // flush via Drop, then release DB handle
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(EraError::Io)?;
+        }
+        Ok(())
     }
 }
 

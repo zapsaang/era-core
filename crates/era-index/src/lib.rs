@@ -129,6 +129,8 @@ impl IndexPage {
         assert!(!entries.is_empty(), "IndexPage cannot be empty");
         // Ensure entries are sorted
         entries.sort_unstable_by_key(|e| e.hash);
+        // Remove duplicates by hash (keep first occurrence)
+        entries.dedup_by_key(|e| e.hash);
 
         let min_hash = entries.first().unwrap().hash;
         let max_hash = entries.last().unwrap().hash;
@@ -148,6 +150,8 @@ impl IndexPage {
             ));
         }
         entries.sort_unstable_by_key(|e| e.hash);
+        // Remove duplicates by hash (keep first occurrence)
+        entries.dedup_by_key(|e| e.hash);
         let min_hash = entries.first().unwrap().hash;
         let max_hash = entries.last().unwrap().hash;
         Ok(Self {

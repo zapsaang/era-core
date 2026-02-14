@@ -329,7 +329,7 @@ async fn test_c1_zombie_recovery_garbage_appended_to_volume() {
         "Footer must still report has_index()=true"
     );
 
-    let mut recovered =
+    let recovered =
         IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
             .await
             .unwrap();

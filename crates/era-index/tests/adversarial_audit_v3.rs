@@ -615,36 +615,29 @@ fn test_m2_dual_serialization_derives() {
     }
 }
 
-/// M3: `open_readonly()` does not enforce read-only mode.
+/// M3: `open_readonly()` enforces read-only mode.
 ///
-/// Redb 2.x `Database::open()` opens in read-write mode with exclusive lock.
-/// The returned IndexStore can call insert(), insert_batch(), compact().
+/// Verifies the fix: open_readonly() returns a store that rejects writes.
 #[test]
 fn test_m3_open_readonly_is_not_readonly() {
     let source = include_str!("../src/store.rs");
 
-    // Check open_readonly function
-    let fn_start = source
-        .find("pub fn open_readonly")
-        .expect("open_readonly must exist");
-    let fn_body = &source[fn_start..fn_start + 500];
-
-    // Check if it uses read-only database builder
-    let uses_readonly_builder = fn_body.contains("set_read_only")
-        || fn_body.contains("read_only")
-        || fn_body.contains("ReadOnlyDatabase");
+    // Check that IndexStore has a read_only field
+    let has_read_only_field = source.contains("read_only: bool");
 
     assert!(
-        !uses_readonly_builder,
-        "FINDING M3 CONFIRMED: open_readonly() uses Database::open() which opens in \
-         READ-WRITE mode with exclusive lock. It does NOT use Redb's \
-         DatabaseBuilder::set_read_only(). The returned IndexStore can mutate the database."
+        has_read_only_field,
+        "FIX M3 VERIFIED: IndexStore has a read_only field to enforce read-only access."
     );
 
-    // Prove it uses Database::open (read-write)
+    // Check that insert() guards against read-only mode
+    let insert_start = source
+        .find("pub fn insert(&mut self, entry: &IndexEntry)")
+        .expect("insert must exist");
+    let insert_body = &source[insert_start..insert_start + 300];
     assert!(
-        fn_body.contains("Database::open"),
-        "open_readonly uses Database::open (read-write mode)"
+        insert_body.contains("read_only"),
+        "FIX M3 VERIFIED: insert() checks read_only flag before writing"
     );
 }
 
@@ -723,10 +716,9 @@ fn test_n1_reader_load_page_has_unwrap() {
         .count();
 
     assert!(
-        unwrap_count >= 2,
-        "FINDING N1 CONFIRMED: reader.rs has {} .unwrap() calls in production code \
-         (load_page embedded_pages.get().unwrap() and page_cache.get().unwrap()). \
-         Per Iron Law 2, these must be ok_or_else().",
+        unwrap_count == 0,
+        "FIX N1 VERIFIED: reader.rs has {} .unwrap() calls in production code. \
+         load_page now uses if-let pattern instead of contains_key + unwrap().",
         unwrap_count
     );
 }
@@ -858,14 +850,14 @@ fn test_o2_redb_dedup_correctness() {
     store.insert(&entry1).unwrap();
     store.insert(&entry2).unwrap();
 
-    // entry_count is incremented for each insert, even duplicates
+    // entry_count now correctly tracks unique keys only
     assert_eq!(
         store.entry_count(),
-        2,
-        "entry_count is 2 (tracks inserts, not unique keys)"
+        1,
+        "FIX O2 VERIFIED: entry_count is 1 (tracks unique keys, not inserts)"
     );
 
-    // But drain_sorted should only have 1 entry (Redb B-tree dedup by key)
+    // drain_sorted should have 1 entry (Redb B-tree dedup by key)
     let sorted = store.drain_sorted().unwrap();
     assert_eq!(
         sorted.len(),
@@ -873,12 +865,11 @@ fn test_o2_redb_dedup_correctness() {
         "drain_sorted must return 1 entry (deduplicated by key)"
     );
 
-    // entry_count is now WRONG — it says 2 but there's only 1 unique entry
-    // This is a bookkeeping bug
-    eprintln!(
-        "FINDING O2: entry_count() returns {} but only {} unique entries exist. \
-         entry_count tracks inserts, not unique keys. This causes bloom filter \
-         over-sizing and misleading metrics.",
+    // entry_count now matches actual unique entries
+    assert_eq!(
+        store.entry_count(),
+        sorted.len(),
+        "FIX O2 VERIFIED: entry_count ({}) == unique entries ({})",
         store.entry_count(),
         sorted.len()
     );
@@ -908,19 +899,20 @@ fn test_o3_entry_count_bloom_sizing_mismatch() {
             .unwrap();
     }
 
+    // entry_count now correctly tracks unique keys
     assert_eq!(
         store.entry_count(),
-        100,
-        "entry_count thinks there are 100 entries"
+        1,
+        "FIX O3 VERIFIED: entry_count is 1 (only 1 unique key inserted)"
     );
 
     let sorted = store.drain_sorted().unwrap();
-    assert_eq!(sorted.len(), 1, "But there's only 1 unique entry");
+    assert_eq!(sorted.len(), 1, "Only 1 unique entry exists");
 
-    eprintln!(
-        "FINDING O3: entry_count()={} vs unique_entries={}. \
-         Bloom filter sized for 100 entries but only 1 exists. \
-         This wastes memory and misleads capacity planning.",
+    assert_eq!(
+        store.entry_count(),
+        sorted.len(),
+        "FIX O3 VERIFIED: entry_count ({}) == unique entries ({})",
         store.entry_count(),
         sorted.len()
     );

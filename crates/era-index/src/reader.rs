@@ -2,11 +2,12 @@
 //!
 //! Reads the finalized index structure efficiently.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use bloomfilter::Bloom;
+use parking_lot::Mutex;
 
 use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result};
 use era_crypto::{KeySession, VolumeKey};
@@ -34,7 +35,7 @@ pub struct IndexReader {
     /// Bloom filter (deserialized)
     bloom: Bloom<ChunkHash>,
     /// Cache of loaded L2 pages
-    page_cache: HashMap<BlockId, IndexPage>,
+    page_cache: Mutex<HashMap<BlockId, IndexPage>>,
     /// In-memory page storage (for cold recovery mode)
     embedded_pages: HashMap<BlockId, IndexPage>,
 }
@@ -49,7 +50,7 @@ impl IndexReader {
             index_dir: Some(index_dir.to_path_buf()),
             meta,
             bloom,
-            page_cache: HashMap::new(),
+            page_cache: Mutex::new(HashMap::new()),
             embedded_pages: HashMap::new(),
         })
     }
@@ -82,7 +83,7 @@ impl IndexReader {
             index_dir: None,
             meta,
             bloom,
-            page_cache: HashMap::new(),
+            page_cache: Mutex::new(HashMap::new()),
             embedded_pages,
         })
     }
@@ -102,6 +103,10 @@ impl IndexReader {
         nonce_context: [u8; 16],
     ) -> Result<Self> {
         tracing::info!("Starting cold recovery from volume");
+
+        // Domain-separated nonce context for index blocks (must match builder::finalize)
+        let mut index_nonce_context = nonce_context;
+        index_nonce_context[0] ^= 0xFF;
 
         // Step 1: Try to read MetaIndex from footer (fast path)
         let meta = if let Some(footer) = volume_reader.footer() {
@@ -129,11 +134,11 @@ impl IndexReader {
                 // Decrypt MetaIndex
                 let block_id = BlockId::new(footer.index_block_id as u64);
                 let block_key =
-                    session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
+                    session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context);
                 let derived_key = block_key.to_derived_key();
                 let decrypted_data = era_crypto::decrypt_with_context(
                     &derived_key,
-                    &nonce_context,
+                    &index_nonce_context,
                     block_id,
                     &encrypted_block.data,
                 )?;
@@ -141,7 +146,10 @@ impl IndexReader {
                 // Deserialize MetaIndex using rkyv (check_archived_root + deserialize)
                 let archived = rkyv::check_archived_root::<MetaIndex>(&decrypted_data)
                     .map_err(|e| EraError::Deserialization(e.to_string()))?;
-                let meta: MetaIndex = archived.deserialize(&mut rkyv::Infallible).unwrap();
+                let meta: MetaIndex = match archived.deserialize(&mut rkyv::Infallible) {
+                    Ok(val) => val,
+                    Err(never) => match never {},
+                };
 
                 Some(meta)
             } else {
@@ -180,22 +188,30 @@ impl IndexReader {
             let page_count_hint = page_blocks_for_hint.len() as u64;
 
             // Build candidate block IDs: start with the most likely (page_count),
-            // then try nearby values, then expand outward. This replaces the old
-            // hard-coded 0..100 limit that failed for indices with >100 pages.
+            // then try nearby values, then expand outward. Uses HashSet for O(1) dedup.
+            let mut seen: HashSet<u64> = HashSet::new();
             let mut candidates: Vec<u64> = Vec::with_capacity(512);
             // Most likely: manifest block_id == number of index pages
-            candidates.push(page_count_hint);
+            if seen.insert(page_count_hint) {
+                candidates.push(page_count_hint);
+            }
             // Try nearby values (off-by-one errors, partial writes)
             for delta in 1..=10 {
-                candidates.push(page_count_hint + delta);
+                let above = page_count_hint + delta;
+                if seen.insert(above) {
+                    candidates.push(above);
+                }
                 if page_count_hint >= delta {
-                    candidates.push(page_count_hint - delta);
+                    let below = page_count_hint - delta;
+                    if seen.insert(below) {
+                        candidates.push(below);
+                    }
                 }
             }
             // Fallback: scan 0..max(256, page_count_hint * 2) for robustness
             let upper_bound = (page_count_hint * 2).max(256);
             for id in 0..upper_bound {
-                if !candidates.contains(&id) {
+                if seen.insert(id) {
                     candidates.push(id);
                 }
             }
@@ -204,19 +220,22 @@ impl IndexReader {
             for candidate_id in candidates {
                 let block_id = BlockId::new(candidate_id);
                 let block_key =
-                    session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
+                    session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context);
                 let derived_key = block_key.to_derived_key();
 
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
-                    &nonce_context,
+                    &index_nonce_context,
                     block_id,
                     &encrypted_block.data,
                 ) {
                     // Try to deserialize as MetaIndex using rkyv
                     if let Ok(archived) = rkyv::check_archived_root::<MetaIndex>(&decrypted_data) {
                         let meta_candidate: MetaIndex =
-                            archived.deserialize(&mut rkyv::Infallible).unwrap();
+                            match archived.deserialize(&mut rkyv::Infallible) {
+                                Ok(val) => val,
+                                Err(never) => match never {},
+                            };
                         // Verify this looks like a valid MetaIndex
                         if !meta_candidate.pages.is_empty() {
                             tracing::info!(
@@ -244,46 +263,61 @@ impl IndexReader {
             .await?;
         tracing::info!("Found {} IndexPage blocks", page_blocks.len());
 
-        // Step 4: Load all pages into memory
-        // CRITICAL: We must try all possible block IDs from MetaIndex since scanner assigns arbitrary slot_index
+        // Step 4: Load all pages into memory using positional matching (O(P))
+        // Pages are written sequentially by finalize(), so page_blocks[i] corresponds to meta.pages[i]
         let mut embedded_pages = HashMap::new();
+        let page_key_map: HashMap<BlockId, &super::PagePointer> =
+            meta.pages.iter().map(|p| (p.block_id, p)).collect();
 
-        for location in &page_blocks {
+        for (page_index, location) in page_blocks.iter().enumerate() {
             let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
-
-            // Try to decrypt with each block ID from MetaIndex
             let mut successfully_decrypted = false;
-            for page_ptr in &meta.pages {
-                let block_id = page_ptr.block_id;
-                let block_key =
-                    session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
+
+            // Positional match: page_blocks[i] corresponds to meta.pages[i]
+            if let Some(expected_page) = meta.pages.get(page_index) {
+                let block_key = session.derive_block_key(
+                    volume_key,
+                    expected_page.block_id.sequence(),
+                    &index_nonce_context,
+                );
                 let derived_key = block_key.to_derived_key();
 
-                // Try decryption - if it fails, this isn't the right block ID
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
-                    &nonce_context,
-                    block_id,
+                    &index_nonce_context,
+                    expected_page.block_id,
                     &encrypted_block.data,
                 ) {
-                    // Try to deserialize as IndexPage using rkyv
                     if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
-                        let page: IndexPage = archived.deserialize(&mut rkyv::Infallible).unwrap();
-                        // Verify this is the right page by checking hash range
-                        if page.min_hash == page_ptr.min_hash && page.max_hash == page_ptr.max_hash
-                        {
-                            embedded_pages.insert(block_id, page);
-                            successfully_decrypted = true;
-                            break;
+                        let page: IndexPage = match archived.deserialize(&mut rkyv::Infallible) {
+                            Ok(val) => val,
+                            Err(never) => match never {},
+                        };
+                        if let Some(ptr) = page_key_map.get(&expected_page.block_id) {
+                            if page.min_hash == ptr.min_hash && page.max_hash == ptr.max_hash {
+                                embedded_pages.insert(expected_page.block_id, page);
+                                successfully_decrypted = true;
+                            }
                         }
                     }
                 }
             }
 
             if !successfully_decrypted {
-                tracing::warn!("Found IndexPage block at offset {} but couldn't decrypt with any known block ID",
-                    location.physical_offset);
+                tracing::warn!(
+                    "Failed to decrypt IndexPage block at offset {}",
+                    location.physical_offset
+                );
             }
+        }
+
+        // Completeness check: all expected pages must be recovered
+        if embedded_pages.len() < meta.pages.len() {
+            return Err(EraError::IndexError(format!(
+                "Incomplete recovery: expected {} pages, recovered {}",
+                meta.pages.len(),
+                embedded_pages.len()
+            )));
         }
 
         // Step 5: Deserialize Bloom filter using rkyv via bloom_serde
@@ -298,13 +332,13 @@ impl IndexReader {
             index_dir: None, // No external directory in recovery mode
             meta,
             bloom,
-            page_cache: HashMap::new(),
+            page_cache: Mutex::new(HashMap::new()),
             embedded_pages,
         })
     }
 
     /// Lookup a chunk hash
-    pub fn lookup(&mut self, hash: &ChunkHash) -> Result<Option<IndexLocation>> {
+    pub fn lookup(&self, hash: &ChunkHash) -> Result<Option<IndexLocation>> {
         // Step 1: Bloom filter check (fast negative lookup)
         if !self.bloom.check(hash) {
             return Ok(None);
@@ -343,35 +377,41 @@ impl IndexReader {
     }
 
     /// Load an L2 page (with caching)
-    fn load_page(&mut self, block_id: BlockId) -> Result<&IndexPage> {
+    fn load_page(&self, block_id: BlockId) -> Result<IndexPage> {
         // Check embedded pages first (cold recovery mode)
-        if self.embedded_pages.contains_key(&block_id) {
-            return Ok(self.embedded_pages.get(&block_id).unwrap());
+        if let Some(page) = self.embedded_pages.get(&block_id) {
+            return Ok(page.clone());
+        }
+
+        // Check cache
+        let mut cache = self.page_cache.lock();
+        if let Some(page) = cache.get(&block_id) {
+            return Ok(page.clone());
         }
 
         // Load from filesystem (legacy mode)
-        if !self.page_cache.contains_key(&block_id) {
-            let index_dir = self.index_dir.as_ref().ok_or_else(|| {
-                EraError::InvalidFormat(
-                    "IndexReader in recovery mode - pages should be embedded".into(),
-                )
-            })?;
+        let index_dir = self.index_dir.as_ref().ok_or_else(|| {
+            EraError::InvalidFormat(
+                "IndexReader in recovery mode - pages should be embedded".into(),
+            )
+        })?;
 
-            let page_path = index_dir.join(format!("page_{}.bin", block_id.sequence()));
+        let page_path = index_dir.join(format!("page_{}.bin", block_id.sequence()));
 
-            let page_bytes = fs::read(&page_path).map_err(|e| {
-                EraError::InvalidFormat(format!("Failed to read page {:?}: {}", page_path, e))
-            })?;
+        let page_bytes = fs::read(&page_path).map_err(|e| {
+            EraError::InvalidFormat(format!("Failed to read page {:?}: {}", page_path, e))
+        })?;
 
-            // Deserialize IndexPage using rkyv (check_archived_root + deserialize)
-            let archived = rkyv::check_archived_root::<IndexPage>(&page_bytes)
-                .map_err(|e| EraError::Deserialization(e.to_string()))?;
-            let page: IndexPage = archived.deserialize(&mut rkyv::Infallible).unwrap();
+        // Deserialize IndexPage using rkyv (check_archived_root + deserialize)
+        let archived = rkyv::check_archived_root::<IndexPage>(&page_bytes)
+            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        let page: IndexPage = match archived.deserialize(&mut rkyv::Infallible) {
+            Ok(val) => val,
+            Err(never) => match never {},
+        };
 
-            self.page_cache.insert(block_id, page);
-        }
-
-        Ok(self.page_cache.get(&block_id).unwrap())
+        cache.insert(block_id, page.clone());
+        Ok(page)
     }
 }
 
@@ -423,7 +463,7 @@ mod tests {
         meta.set_bloom_filter(bloom_bytes);
 
         // Create reader
-        let mut reader = IndexReader::open(&index_dir, meta).unwrap();
+        let reader = IndexReader::open(&index_dir, meta).unwrap();
 
         // Test positive lookup
         let result = reader.lookup(&test_hash(50)).unwrap();
