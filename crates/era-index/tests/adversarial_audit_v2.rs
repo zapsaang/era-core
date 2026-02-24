@@ -163,6 +163,8 @@ fn test_redb_store_tampered_file_rejected() {
         for i in 0..10u64 {
             store.insert(&make_entry(i)).unwrap();
         }
+        // Preserve file on drop so we can tamper with it below
+        store.keep_on_drop();
     }
 
     // Tamper with the file

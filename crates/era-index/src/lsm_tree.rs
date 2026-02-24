@@ -174,18 +174,18 @@ impl LsmTree {
             era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
         })?;
 
-        // Flush buffer and read all entries from Redb in sorted order
-        let merged_entries = builder.drain_sorted()?;
+        // Flush buffer and drain entries as pre-built pages (streaming, low-memory)
         let bloom_clone = builder.bloom().clone();
-        let entries_count = merged_entries.len();
+        let pages = builder.drain_sorted_pages()?;
+        let entries_count: usize = pages.iter().map(|(p, _)| p.entries.len()).sum();
 
-        // Build MetaIndex + IndexReader from entries
+        // Build MetaIndex + IndexReader from pages
         let meta = MetaIndex::new();
         let bloom_bytes = crate::serialize_bloom(&bloom_clone)?;
         let mut meta_with_bloom = meta;
         meta_with_bloom.set_bloom_filter(bloom_bytes);
 
-        let reader = IndexReader::from_memory(meta_with_bloom, bloom_clone, merged_entries)?;
+        let reader = IndexReader::from_pages(meta_with_bloom, bloom_clone, pages)?;
 
         tracing::info!("Index finalized: {} total entries", entries_count);
 

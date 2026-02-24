@@ -5,6 +5,8 @@
 //! At finalization, entries are read in sorted order and written as encrypted
 //! IndexPage blocks to the volume.
 
+use std::collections::HashSet;
+
 use bloomfilter::Bloom;
 
 use era_common::{BlockType, ChunkHash, EncryptedMacroBlock, EraError, Result};
@@ -98,9 +100,19 @@ impl IndexBuilder {
         Ok(())
     }
 
-    /// Get total number of entries inserted (including buffered entries)
+    /// Get total number of unique entries (including buffered entries not yet flushed)
+    ///
+    /// Deduplicates buffer hashes with a HashSet, then checks Redb for each
+    /// unique hash to count only genuinely new entries. Buffer is at most
+    /// BATCH_SIZE-1 entries, so this is cheap.
     pub fn entry_count(&self) -> usize {
-        self.store.entry_count() + self.buffer.len()
+        let unique_buffer_hashes: HashSet<ChunkHash> =
+            self.buffer.iter().map(|e| e.hash).collect();
+        let new_in_buffer = unique_buffer_hashes
+            .iter()
+            .filter(|h| self.store.get(h).ok().flatten().is_none())
+            .count();
+        self.store.entry_count() + new_in_buffer
     }
 
     /// Check if a hash exists in the Bloom filter
@@ -122,6 +134,14 @@ impl IndexBuilder {
     pub fn drain_sorted(&mut self) -> Result<Vec<IndexEntry>> {
         self.flush_buffer()?;
         self.store.drain_sorted()
+    }
+
+    /// Flush any buffered entries and drain as pre-built pages (streaming, low-memory).
+    pub fn drain_sorted_pages(
+        &mut self,
+    ) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
+        self.flush_buffer()?;
+        self.store.drain_sorted_pages()
     }
 
     /// Finalize the index (EMBEDDED MODE — writes to volume)
@@ -243,22 +263,18 @@ impl IndexBuilder {
 
 impl Drop for IndexBuilder {
     fn drop(&mut self) {
-        // Flush buffer to persist data for crash recovery
+        // Flush buffer to persist any remaining entries before store cleanup.
         if let Err(e) = self.flush_buffer() {
             tracing::error!("Failed to flush buffer in Drop: {}", e);
         }
-        // Staging file persists for crash recovery
+        // IndexStore::Drop handles staging file removal.
     }
 }
 
 impl IndexBuilder {
     /// Explicitly discard the builder and remove the staging file.
     pub fn discard(self) -> Result<()> {
-        let path = self.store.path().to_path_buf();
-        drop(self); // flush via Drop, then release DB handle
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(EraError::Io)?;
-        }
+        drop(self); // flush via IndexBuilder::Drop, cleanup via IndexStore::Drop
         Ok(())
     }
 }

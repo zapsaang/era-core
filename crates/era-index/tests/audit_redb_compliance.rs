@@ -199,7 +199,8 @@ fn test_b1_redb_crash_safety_committed_entries_survive() {
         for i in 0..1000u64 {
             store.insert(&make_entry(i)).unwrap();
         }
-        // "Crash" — drop store without explicit cleanup
+        // Simulate crash: preserve file on drop so recovery can reopen it
+        store.keep_on_drop();
     }
 
     // Reopen — Redb auto-recovers to last valid transaction
@@ -223,6 +224,8 @@ fn test_b2_redb_staging_file_survives_crash() {
         for i in 0..100u64 {
             store.insert(&make_entry(i)).unwrap();
         }
+        // Simulate crash: preserve file on drop
+        store.keep_on_drop();
     }
 
     assert!(

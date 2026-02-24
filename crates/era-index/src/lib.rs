@@ -208,8 +208,15 @@ impl MetaIndex {
 
     /// Add a page pointer to the meta-index
     ///
-    /// Pages must be added in sorted order (by min_hash).
+    /// Pages must be added in ascending, non-overlapping order (by min_hash).
+    /// Panics in debug builds if this invariant is violated.
     pub fn add_page(&mut self, min_hash: ChunkHash, max_hash: ChunkHash, block_id: BlockId) {
+        debug_assert!(
+            self.pages
+                .last()
+                .is_none_or(|p| min_hash > p.max_hash),
+            "Pages must be added in ascending, non-overlapping order"
+        );
         self.pages.push(PagePointer {
             min_hash,
             max_hash,

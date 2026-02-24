@@ -397,7 +397,8 @@ fn test_redb_crash_recovery() {
                 ))
                 .unwrap();
         }
-        // Drop without cleanup — simulates crash
+        // Simulate crash: preserve file on drop so recovery can reopen it
+        store.keep_on_drop();
     }
 
     // Recovery: reopen and verify

@@ -796,6 +796,8 @@ fn test_x1_open_readonly_accepts_writes() {
         for i in 0..10u64 {
             store.insert(&make_entry(i)).unwrap();
         }
+        // Preserve file on drop so open_readonly can reopen it
+        store.keep_on_drop();
     }
 
     // Open read-only — writes must fail
@@ -895,12 +897,10 @@ fn test_x4_finalize_batch_boundary() {
 // TEST Y: Architectural Weaknesses
 // ============================================================================
 
-/// Y1: from_memory creates a SINGLE page for ALL entries.
+/// Y1: from_memory now correctly chunks entries into multiple pages.
 ///
-/// IndexReader::from_memory() puts every entry into one IndexPage.
-/// This defeats the L1/L2 hierarchical lookup — instead of O(log P) pages
-/// then O(log E) within a page, it's O(log N) in one giant flat search.
-/// For 1M entries, this is 1M entries in one page vs ~122 pages × 8192 entries.
+/// IndexReader::from_memory() splits entries into pages of ENTRIES_PER_PAGE,
+/// enabling O(log P + log E) hierarchical lookup.
 #[test]
 fn test_y1_from_memory_single_page_architecture() {
     let source = include_str!("../src/reader.rs");
@@ -916,46 +916,43 @@ fn test_y1_from_memory_single_page_architecture() {
         .unwrap_or(production_code.len());
     let fn_body = &production_code[fn_start..fn_end];
 
-    // Check if it creates a single page for all entries
-    let single_page = fn_body.contains("IndexPage::new(entries)")
-        || fn_body.contains("let page = IndexPage::new(entries)");
+    // Verify it now chunks entries at ENTRIES_PER_PAGE boundaries
+    let uses_chunks = fn_body.contains("entries.chunks(");
 
     assert!(
-        single_page,
-        "FINDING Y1 CONFIRMED: from_memory() creates a SINGLE IndexPage for ALL entries. \
-         Comment says 'This is simpler than creating actual pages for small indices' \
-         but this is the primary code path for LsmTree::finalize(). \
-         With ENTRIES_PER_PAGE=8192, indices above 8192 entries should be split \
-         into multiple pages for O(log P + log E) lookup instead of O(log N)."
+        uses_chunks,
+        "FIXED: from_memory() should now chunk entries at ENTRIES_PER_PAGE boundaries."
     );
 }
 
-/// Y2: Behavioral proof — from_memory with 10000 entries creates 1 page.
+/// Y2: Behavioral proof — from_memory with 10000 entries creates multiple pages.
 ///
-/// This exceeds ENTRIES_PER_PAGE (8192) but everything goes in one page.
+/// 10000 entries exceeds ENTRIES_PER_PAGE (8192), so it should create 2 pages.
 #[test]
 fn test_y2_from_memory_exceeds_entries_per_page() {
     let entries: Vec<IndexEntry> = (0..10000u64).map(make_entry).collect();
 
     let meta = MetaIndex::new();
-    let bloom = bloomfilter::Bloom::new_for_fp_rate(10000, 0.01);
-    let _reader =
+    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(10000, 0.01);
+    for e in &entries {
+        bloom.set(&e.hash);
+    }
+    let reader =
         era_index::IndexReader::from_memory(meta, bloom, entries).expect("Creation should succeed");
 
-    // The reader should have created the index — let's count pages in meta
-    // We can't directly access meta, but we know from source it creates 1 page
-    // Test via lookup to prove it works (just poorly structured)
-    let source = include_str!("../src/reader.rs");
-    let fn_start = source.find("pub fn from_memory").unwrap();
-    let fn_body = &source[fn_start..fn_start + 800];
-
-    // Verify "single page" pattern
-    let creates_one_page = fn_body.contains("pages.insert(BlockId::new(0), page)");
-    assert!(
-        creates_one_page,
-        "FINDING Y2 CONFIRMED: 10,000 entries (> ENTRIES_PER_PAGE=8192) still go \
-         into a single page. The L1/L2 hierarchy is meaningless for in-memory indices."
+    // Verify it creates the expected number of pages
+    let expected_pages = 10000_usize.div_ceil(era_index::ENTRIES_PER_PAGE);
+    assert_eq!(
+        reader.meta_page_count(),
+        expected_pages,
+        "FIXED: 10,000 entries should create {} pages at ENTRIES_PER_PAGE={}.",
+        expected_pages,
+        era_index::ENTRIES_PER_PAGE
     );
+
+    // Verify lookups still work
+    assert!(reader.lookup(&test_hash(0)).unwrap().is_some());
+    assert!(reader.lookup(&test_hash(9999)).unwrap().is_some());
 }
 
 /// Y3: The "true zero-copy" claim is still technically false.

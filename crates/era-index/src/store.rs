@@ -52,6 +52,8 @@ pub struct IndexStore {
     db_path: PathBuf,
     /// In-memory Bloom filter (survives across transactions)
     bloom: Bloom<ChunkHash>,
+    /// Current bloom filter capacity (number of items it was sized for)
+    bloom_capacity: usize,
     /// Total entries inserted
     entry_count: usize,
     /// Whether this store was opened in read-only mode
@@ -82,6 +84,7 @@ impl IndexStore {
             db,
             db_path: path.to_path_buf(),
             bloom: Bloom::new_for_fp_rate(items, BLOOM_FP_RATE),
+            bloom_capacity: items,
             entry_count: 0,
             read_only: false,
         })
@@ -118,6 +121,7 @@ impl IndexStore {
             db,
             db_path: path.to_path_buf(),
             bloom,
+            bloom_capacity: len,
             entry_count: len,
             read_only: true,
         })
@@ -202,6 +206,42 @@ impl IndexStore {
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
+        // Resize bloom if overcapacity
+        self.rebuild_bloom_if_needed()?;
+
+        Ok(())
+    }
+
+    /// Rebuild the bloom filter at a larger capacity if entry count exceeds 2× the current capacity.
+    ///
+    /// New capacity is set to 4× the current entry count to avoid frequent rebuilds.
+    fn rebuild_bloom_if_needed(&mut self) -> Result<()> {
+        if self.entry_count <= self.bloom_capacity * 2 {
+            return Ok(());
+        }
+
+        let new_capacity = self.entry_count * 4;
+        let mut new_bloom = Bloom::new_for_fp_rate(new_capacity.max(1024), BLOOM_FP_RATE);
+
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let table = read_txn
+            .open_table(TABLE_CHUNKS)
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+
+        for result in table
+            .iter()
+            .map_err(|e| EraError::IndexError(e.to_string()))?
+        {
+            let (key, _) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
+            let hash = ChunkHash::from_bytes(*key.value());
+            new_bloom.set(&hash);
+        }
+
+        self.bloom = new_bloom;
+        self.bloom_capacity = new_capacity;
         Ok(())
     }
 
@@ -284,6 +324,55 @@ impl IndexStore {
         Ok(entries)
     }
 
+    /// Drain entries in sorted order, chunked into IndexPages of ENTRIES_PER_PAGE.
+    ///
+    /// Unlike `drain_sorted()`, this never holds more than one page of entries
+    /// in memory at a time. Returns pages paired with their sequential BlockIds.
+    pub fn drain_sorted_pages(&self) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
+        use era_common::BlockId;
+
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let table = read_txn
+            .open_table(TABLE_CHUNKS)
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+
+        let entries_per_page = crate::ENTRIES_PER_PAGE;
+        let estimated_pages = (self.entry_count + entries_per_page - 1) / entries_per_page.max(1);
+        let mut pages = Vec::with_capacity(estimated_pages);
+        let mut chunk = Vec::with_capacity(entries_per_page);
+        let mut block_id_counter = 0u64;
+
+        for result in table
+            .iter()
+            .map_err(|e| EraError::IndexError(e.to_string()))?
+        {
+            let (_, value) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
+            let bytes = value.value();
+            let entry = deserialize_entry_aligned(bytes)?;
+            chunk.push(entry);
+
+            if chunk.len() >= entries_per_page {
+                let page = crate::IndexPage::new(std::mem::replace(
+                    &mut chunk,
+                    Vec::with_capacity(entries_per_page),
+                ));
+                pages.push((page, BlockId::new(block_id_counter)));
+                block_id_counter += 1;
+            }
+        }
+
+        // Flush remaining entries
+        if !chunk.is_empty() {
+            let page = crate::IndexPage::new(chunk);
+            pages.push((page, BlockId::new(block_id_counter)));
+        }
+
+        Ok(pages)
+    }
+
     /// Compact the database (call before finalization for optimal read perf).
     pub fn compact(&mut self) -> Result<()> {
         self.db
@@ -293,18 +382,39 @@ impl IndexStore {
     }
 
     /// Destroy the staging database file.
+    ///
+    /// Consuming `self` triggers `Drop`, which handles file removal.
     pub fn destroy(self) -> Result<()> {
-        let path = self.db_path.clone();
-        drop(self.db); // Close database first
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(EraError::Io)?;
-        }
+        // Drop impl handles file cleanup
         Ok(())
     }
 
     /// Get the database path.
     pub fn path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Prevent the staging file from being removed on drop.
+    ///
+    /// Used for crash recovery scenarios where the file must persist
+    /// beyond the lifetime of this store instance.
+    pub fn keep_on_drop(&mut self) {
+        self.read_only = true;
+    }
+}
+
+impl Drop for IndexStore {
+    fn drop(&mut self) {
+        // Clean up staging Redb file to prevent /tmp leakage.
+        // Read-only stores (opened via open_readonly for crash recovery)
+        // don't own the file lifecycle.
+        if !self.read_only {
+            if let Err(e) = std::fs::remove_file(&self.db_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove staging file {:?}: {}", self.db_path, e);
+                }
+            }
+        }
     }
 }
 
@@ -402,13 +512,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.redb");
 
-        // Create, insert, drop (simulate crash)
+        // Create, insert, drop without cleanup (simulate crash)
         {
             let mut store = IndexStore::create(&db_path, 1024).unwrap();
             for i in 0..100u64 {
                 store.insert(&make_entry(i)).unwrap();
             }
-            // Drop without explicit cleanup — Redb auto-commits
+            // Mark keep_on_drop so Drop releases the DB lock but skips file deletion,
+            // simulating a crash where the staging file persists on disk.
+            store.keep_on_drop();
         }
 
         // Reopen and verify

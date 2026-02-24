@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use bloomfilter::Bloom;
 use parking_lot::Mutex;
 
-use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result};
+use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result, VolumeId};
 use era_crypto::{KeySession, VolumeKey};
 use era_storage::StorageReader;
 use era_volume::VolumeReader;
@@ -18,9 +18,10 @@ use rkyv::Deserialize;
 #[allow(unused_imports)] // Used in tests
 use super::{IndexEntry, IndexPage, MetaIndex};
 
-/// Simplified location result (for now, just the key fields)
+/// Simplified location result — includes volume_id for multi-volume lookups
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexLocation {
+    pub volume_id: VolumeId,
     pub block_id: BlockId,
     pub offset: u32,
     pub length: u32,
@@ -58,26 +59,51 @@ impl IndexReader {
     /// Create an in-memory index reader from finalized entries
     ///
     /// This is used by LsmTree::finalize() to create a reader from Redb entries
-    /// from merged entries without disk I/O.
+    /// from merged entries without disk I/O. Entries are chunked into pages of
+    /// ENTRIES_PER_PAGE to respect the L2 cache optimization.
     pub fn from_memory(
         meta: MetaIndex,
         bloom: Bloom<ChunkHash>,
         entries: Vec<IndexEntry>,
     ) -> Result<Self> {
-        // For in-memory mode, we store all entries as a single "page"
-        // This is simpler than creating actual pages for small indices
         let mut meta = meta;
         let embedded_pages = if !entries.is_empty() {
             let mut pages = HashMap::new();
-            let page = IndexPage::new(entries);
-            // CRITICAL: Register this page in the MetaIndex so lookup() can find it.
-            // Without this, meta.find_page() returns None and lookup() always fails.
-            meta.add_page(page.min_hash, page.max_hash, BlockId::new(0));
-            pages.insert(BlockId::new(0), page);
+            for (block_id, chunk) in entries.chunks(super::ENTRIES_PER_PAGE).enumerate() {
+                let page = IndexPage::new(chunk.to_vec());
+                let bid = BlockId::new(block_id as u64);
+                meta.add_page(page.min_hash, page.max_hash, bid);
+                pages.insert(bid, page);
+            }
             pages
         } else {
             HashMap::new()
         };
+
+        Ok(Self {
+            index_dir: None,
+            meta,
+            bloom,
+            page_cache: Mutex::new(HashMap::new()),
+            embedded_pages,
+        })
+    }
+
+    /// Create an in-memory index reader from pre-built pages.
+    ///
+    /// This avoids materializing all entries into a single Vec — each page
+    /// is already chunked at ENTRIES_PER_PAGE boundaries by the caller.
+    pub fn from_pages(
+        meta: MetaIndex,
+        bloom: Bloom<ChunkHash>,
+        pages: Vec<(IndexPage, BlockId)>,
+    ) -> Result<Self> {
+        let mut meta = meta;
+        let mut embedded_pages = HashMap::new();
+        for (page, block_id) in pages {
+            meta.add_page(page.min_hash, page.max_hash, block_id);
+            embedded_pages.insert(block_id, page);
+        }
 
         Ok(Self {
             index_dir: None,
@@ -356,6 +382,7 @@ impl IndexReader {
         // Step 4: Binary search within L2 page
         match page.find(hash) {
             Some(entry) => Ok(Some(IndexLocation {
+                volume_id: entry.volume_id,
                 block_id: entry.block_id,
                 offset: entry.offset,
                 length: entry.length,
@@ -374,6 +401,11 @@ impl IndexReader {
     #[inline]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         self.bloom.check(hash)
+    }
+
+    /// Get the number of pages in the L1 meta-index
+    pub fn meta_page_count(&self) -> usize {
+        self.meta.pages.len()
     }
 
     /// Load an L2 page (with caching)
