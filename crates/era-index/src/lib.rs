@@ -41,20 +41,16 @@
 
 mod bloom_serde;
 mod builder;
-mod config;
 mod error;
 mod lsm_tree;
-mod metrics;
 mod reader;
 mod schema;
 mod store;
 
 pub use bloom_serde::{deserialize_bloom, serialize_bloom, BloomFilterData};
 pub use builder::IndexBuilder;
-pub use config::{IndexConfig, IndexConfigBuilder};
 pub use error::IndexError;
 pub use lsm_tree::{LsmTree, LsmTreeConfig, LsmTreeReader};
-pub use metrics::IndexMetrics;
 pub use reader::{IndexLocation, IndexReader};
 pub use store::IndexStore;
 
@@ -114,35 +110,15 @@ impl IndexEntry {
 #[archive(check_bytes)]
 pub struct IndexPage {
     /// Minimum hash in this page (for range queries)
-    pub min_hash: ChunkHash,
+    min_hash: ChunkHash,
     /// Maximum hash in this page (for range queries)
-    pub max_hash: ChunkHash,
+    max_hash: ChunkHash,
     /// Sorted list of entries
-    pub entries: Vec<IndexEntry>,
+    entries: Vec<IndexEntry>,
 }
 
 impl IndexPage {
-    /// Create a new index page from sorted entries
-    ///
-    /// Returns an error if entries is empty.
-    pub fn new(mut entries: Vec<IndexEntry>) -> Self {
-        assert!(!entries.is_empty(), "IndexPage cannot be empty");
-        // Ensure entries are sorted
-        entries.sort_unstable_by_key(|e| e.hash);
-        // Remove duplicates by hash (keep first occurrence)
-        entries.dedup_by_key(|e| e.hash);
-
-        let min_hash = entries.first().unwrap().hash;
-        let max_hash = entries.last().unwrap().hash;
-
-        Self {
-            min_hash,
-            max_hash,
-            entries,
-        }
-    }
-
-    /// Create a new index page, returning an error if entries is empty.
+    /// Create a new index page from sorted entries, returning an error if entries is empty.
     pub fn try_new(mut entries: Vec<IndexEntry>) -> era_common::Result<Self> {
         if entries.is_empty() {
             return Err(era_common::EraError::InvalidFormat(
@@ -159,6 +135,31 @@ impl IndexPage {
             max_hash,
             entries,
         })
+    }
+
+    /// Get the minimum hash in this page
+    pub fn min_hash(&self) -> &ChunkHash {
+        &self.min_hash
+    }
+
+    /// Get the maximum hash in this page
+    pub fn max_hash(&self) -> &ChunkHash {
+        &self.max_hash
+    }
+
+    /// Get the sorted entries in this page
+    pub fn entries(&self) -> &[IndexEntry] {
+        &self.entries
+    }
+
+    /// Get the number of entries in this page
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if this page is empty
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// Binary search for a hash within this page
@@ -209,19 +210,26 @@ impl MetaIndex {
     /// Add a page pointer to the meta-index
     ///
     /// Pages must be added in ascending, non-overlapping order (by min_hash).
-    /// Panics in debug builds if this invariant is violated.
-    pub fn add_page(&mut self, min_hash: ChunkHash, max_hash: ChunkHash, block_id: BlockId) {
-        debug_assert!(
-            self.pages
-                .last()
-                .is_none_or(|p| min_hash > p.max_hash),
-            "Pages must be added in ascending, non-overlapping order"
-        );
+    /// Returns an error if this invariant is violated.
+    pub fn add_page(
+        &mut self,
+        min_hash: ChunkHash,
+        max_hash: ChunkHash,
+        block_id: BlockId,
+    ) -> era_common::Result<()> {
+        if let Some(last) = self.pages.last() {
+            if min_hash <= last.max_hash {
+                return Err(era_common::EraError::InvalidFormat(
+                    "Pages must be added in ascending, non-overlapping order".into(),
+                ));
+            }
+        }
         self.pages.push(PagePointer {
             min_hash,
             max_hash,
             block_id,
         });
+        Ok(())
     }
 
     /// Find the page that might contain a given hash
@@ -287,14 +295,14 @@ mod tests {
             IndexEntry::new(test_hash(200), VolumeId::new(), BlockId::new(0), 0, 1024),
         ];
 
-        let page = IndexPage::new(entries);
+        let page = IndexPage::try_new(entries).unwrap();
 
-        assert_eq!(page.min_hash, test_hash(100));
-        assert_eq!(page.max_hash, test_hash(300));
-        assert_eq!(page.entries.len(), 3);
-        assert_eq!(page.entries[0].hash, test_hash(100));
-        assert_eq!(page.entries[1].hash, test_hash(200));
-        assert_eq!(page.entries[2].hash, test_hash(300));
+        assert_eq!(*page.min_hash(), test_hash(100));
+        assert_eq!(*page.max_hash(), test_hash(300));
+        assert_eq!(page.len(), 3);
+        assert_eq!(page.entries()[0].hash, test_hash(100));
+        assert_eq!(page.entries()[1].hash, test_hash(200));
+        assert_eq!(page.entries()[2].hash, test_hash(300));
     }
 
     #[test]
@@ -305,7 +313,7 @@ mod tests {
             IndexEntry::new(test_hash(300), VolumeId::new(), BlockId::new(0), 2048, 1024),
         ];
 
-        let page = IndexPage::new(entries);
+        let page = IndexPage::try_new(entries).unwrap();
 
         assert!(page.find(&test_hash(200)).is_some());
         assert!(page.find(&test_hash(150)).is_none());
@@ -315,9 +323,12 @@ mod tests {
     #[test]
     fn test_meta_index_find() {
         let mut meta = MetaIndex::new();
-        meta.add_page(test_hash(0), test_hash(999), BlockId::new(0));
-        meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1));
-        meta.add_page(test_hash(2000), test_hash(2999), BlockId::new(2));
+        meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+            .unwrap();
+        meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+            .unwrap();
+        meta.add_page(test_hash(2000), test_hash(2999), BlockId::new(2))
+            .unwrap();
 
         assert_eq!(
             meta.find_page(&test_hash(500)).unwrap().block_id,

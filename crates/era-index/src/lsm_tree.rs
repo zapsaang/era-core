@@ -163,21 +163,25 @@ impl LsmTree {
     /// Reads all entries from the Redb staging database, builds the
     /// hierarchical index structure (Bloom + L1 + L2), and returns
     /// a read-only view.
-    pub fn finalize(mut self) -> Result<LsmTreeReader> {
+    ///
+    /// On success, the tree transitions to `Finalized` state and further
+    /// inserts/finalizations will return errors. On failure, the tree
+    /// remains in `Building` state and finalize can be retried.
+    pub fn finalize(&mut self) -> Result<LsmTreeReader> {
         if self.state != TreeState::Building {
             return Err(era_common::EraError::InvalidFormat(
                 "Index already finalized".to_string(),
             ));
         }
 
-        let mut builder = self.builder.take().ok_or_else(|| {
+        let builder = self.builder.as_mut().ok_or_else(|| {
             era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
         })?;
 
         // Flush buffer and drain entries as pre-built pages (streaming, low-memory)
         let bloom_clone = builder.bloom().clone();
-        let pages = builder.drain_sorted_pages()?;
-        let entries_count: usize = pages.iter().map(|(p, _)| p.entries.len()).sum();
+        let pages = builder.read_sorted_pages()?;
+        let entries_count: usize = pages.iter().map(|(p, _)| p.len()).sum();
 
         // Build MetaIndex + IndexReader from pages
         let meta = MetaIndex::new();

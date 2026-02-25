@@ -109,32 +109,37 @@ fn test_a1_zero_copy_index_entry_access() {
 #[test]
 fn test_a2_zero_copy_index_page_access() {
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
-    let page = IndexPage::new(entries);
+    let page = IndexPage::try_new(entries).unwrap();
 
     let bytes = rkyv::to_bytes::<_, 4096>(&page).expect("IndexPage serialization must succeed");
 
-    let archived = rkyv::check_archived_root::<IndexPage>(&bytes)
+    // Prove check_archived_root succeeds (zero-copy validation)
+    let _archived = rkyv::check_archived_root::<IndexPage>(&bytes)
         .expect("check_archived_root must succeed for valid IndexPage bytes");
 
+    // Deserialize and verify via getters (fields are private)
+    let deserialized: IndexPage =
+        rkyv::from_bytes(&bytes).expect("IndexPage deserialization must succeed");
+
     assert_eq!(
-        &archived.min_hash.0,
-        test_hash(0).as_bytes(),
-        "Archived min_hash must match"
+        *deserialized.min_hash(),
+        test_hash(0),
+        "Deserialized min_hash must match"
     );
     assert_eq!(
-        &archived.max_hash.0,
-        test_hash(99).as_bytes(),
-        "Archived max_hash must match"
+        *deserialized.max_hash(),
+        test_hash(99),
+        "Deserialized max_hash must match"
     );
     assert_eq!(
-        archived.entries.len(),
+        deserialized.len(),
         100,
-        "Archived entries count must match"
+        "Deserialized entries count must match"
     );
     assert_eq!(
-        archived.entries[50].offset,
+        deserialized.entries()[50].offset,
         make_entry(50).offset,
-        "Archived entry[50].offset must match original"
+        "Deserialized entry[50].offset must match original"
     );
 }
 
@@ -142,8 +147,10 @@ fn test_a2_zero_copy_index_page_access() {
 #[test]
 fn test_a3_zero_copy_meta_index_access() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0));
-    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1));
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+        .unwrap();
 
     let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);
     let bloom_bytes = serialize_bloom(&bloom).unwrap();
@@ -205,7 +212,7 @@ fn test_b1_redb_crash_safety_committed_entries_survive() {
 
     // Reopen — Redb auto-recovers to last valid transaction
     let store2 = IndexStore::open_readonly(&redb_path).unwrap();
-    let entries = store2.drain_sorted().unwrap();
+    let entries = store2.read_sorted().unwrap();
     assert_eq!(
         entries.len(),
         1000,
@@ -254,8 +261,8 @@ fn test_b3_redb_session_isolation() {
         store2.insert(&make_entry(i)).unwrap();
     }
 
-    let entries1 = store1.drain_sorted().unwrap();
-    let entries2 = store2.drain_sorted().unwrap();
+    let entries1 = store1.read_sorted().unwrap();
+    let entries2 = store2.read_sorted().unwrap();
 
     assert_eq!(entries1.len(), 50);
     assert_eq!(entries2.len(), 50);
@@ -332,10 +339,9 @@ async fn test_c1_zombie_recovery_garbage_appended_to_volume() {
         "Footer must still report has_index()=true"
     );
 
-    let recovered =
-        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
-            .await
-            .unwrap();
+    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+        .await
+        .unwrap();
 
     for i in 0..500u64 {
         let result = recovered.lookup(&test_hash(i)).unwrap();

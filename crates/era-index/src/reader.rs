@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bloomfilter::Bloom;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 
 use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result, VolumeId};
 use era_crypto::{KeySession, VolumeKey};
@@ -36,7 +36,7 @@ pub struct IndexReader {
     /// Bloom filter (deserialized)
     bloom: Bloom<ChunkHash>,
     /// Cache of loaded L2 pages
-    page_cache: Mutex<HashMap<BlockId, IndexPage>>,
+    page_cache: RwLock<HashMap<BlockId, IndexPage>>,
     /// In-memory page storage (for cold recovery mode)
     embedded_pages: HashMap<BlockId, IndexPage>,
 }
@@ -51,7 +51,7 @@ impl IndexReader {
             index_dir: Some(index_dir.to_path_buf()),
             meta,
             bloom,
-            page_cache: Mutex::new(HashMap::new()),
+            page_cache: RwLock::new(HashMap::new()),
             embedded_pages: HashMap::new(),
         })
     }
@@ -70,9 +70,9 @@ impl IndexReader {
         let embedded_pages = if !entries.is_empty() {
             let mut pages = HashMap::new();
             for (block_id, chunk) in entries.chunks(super::ENTRIES_PER_PAGE).enumerate() {
-                let page = IndexPage::new(chunk.to_vec());
+                let page = IndexPage::try_new(chunk.to_vec())?;
                 let bid = BlockId::new(block_id as u64);
-                meta.add_page(page.min_hash, page.max_hash, bid);
+                meta.add_page(*page.min_hash(), *page.max_hash(), bid)?;
                 pages.insert(bid, page);
             }
             pages
@@ -84,7 +84,7 @@ impl IndexReader {
             index_dir: None,
             meta,
             bloom,
-            page_cache: Mutex::new(HashMap::new()),
+            page_cache: RwLock::new(HashMap::new()),
             embedded_pages,
         })
     }
@@ -101,7 +101,7 @@ impl IndexReader {
         let mut meta = meta;
         let mut embedded_pages = HashMap::new();
         for (page, block_id) in pages {
-            meta.add_page(page.min_hash, page.max_hash, block_id);
+            meta.add_page(*page.min_hash(), *page.max_hash(), block_id)?;
             embedded_pages.insert(block_id, page);
         }
 
@@ -109,7 +109,7 @@ impl IndexReader {
             index_dir: None,
             meta,
             bloom,
-            page_cache: Mutex::new(HashMap::new()),
+            page_cache: RwLock::new(HashMap::new()),
             embedded_pages,
         })
     }
@@ -234,8 +234,15 @@ impl IndexReader {
                     }
                 }
             }
-            // Fallback: scan 0..max(256, page_count_hint * 2) for robustness
-            let upper_bound = (page_count_hint * 2).max(256);
+            // Fallback: use volume block_count as upper bound when available,
+            // otherwise use a generous estimate. This ensures manifests at any
+            // block_id are recoverable (fixes V6-F2: hint=0 missed block_id>=256).
+            let volume_block_count = volume_reader.block_count() as u64;
+            let upper_bound = if volume_block_count > 0 {
+                volume_block_count + 1
+            } else {
+                (page_count_hint + 1).saturating_mul(4).max(1024)
+            };
             for id in 0..upper_bound {
                 if seen.insert(id) {
                     candidates.push(id);
@@ -289,21 +296,25 @@ impl IndexReader {
             .await?;
         tracing::info!("Found {} IndexPage blocks", page_blocks.len());
 
-        // Step 4: Load all pages into memory using positional matching (O(P))
-        // Pages are written sequentially by finalize(), so page_blocks[i] corresponds to meta.pages[i]
+        // Step 4: Load all pages — content-addressed matching (order-independent)
+        // Instead of assuming page_blocks[i] == meta.pages[i] (positional matching),
+        // we try each scanned block against all unrecovered meta entries. This is
+        // robust against volume scanners returning pages in any order.
         let mut embedded_pages = HashMap::new();
-        let page_key_map: HashMap<BlockId, &super::PagePointer> =
-            meta.pages.iter().map(|p| (p.block_id, p)).collect();
 
-        for (page_index, location) in page_blocks.iter().enumerate() {
+        for location in page_blocks.iter() {
             let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
-            let mut successfully_decrypted = false;
+            let mut matched = false;
 
-            // Positional match: page_blocks[i] corresponds to meta.pages[i]
-            if let Some(expected_page) = meta.pages.get(page_index) {
+            // Try every unrecovered meta.pages entry until one decrypts + validates
+            for page_ptr in &meta.pages {
+                if embedded_pages.contains_key(&page_ptr.block_id) {
+                    continue; // Already recovered this page
+                }
+
                 let block_key = session.derive_block_key(
                     volume_key,
-                    expected_page.block_id.sequence(),
+                    page_ptr.block_id.sequence(),
                     &index_nonce_context,
                 );
                 let derived_key = block_key.to_derived_key();
@@ -311,7 +322,7 @@ impl IndexReader {
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
                     &index_nonce_context,
-                    expected_page.block_id,
+                    page_ptr.block_id,
                     &encrypted_block.data,
                 ) {
                     if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
@@ -319,19 +330,20 @@ impl IndexReader {
                             Ok(val) => val,
                             Err(never) => match never {},
                         };
-                        if let Some(ptr) = page_key_map.get(&expected_page.block_id) {
-                            if page.min_hash == ptr.min_hash && page.max_hash == ptr.max_hash {
-                                embedded_pages.insert(expected_page.block_id, page);
-                                successfully_decrypted = true;
-                            }
+                        if *page.min_hash() == page_ptr.min_hash
+                            && *page.max_hash() == page_ptr.max_hash
+                        {
+                            embedded_pages.insert(page_ptr.block_id, page);
+                            matched = true;
+                            break;
                         }
                     }
                 }
             }
 
-            if !successfully_decrypted {
+            if !matched {
                 tracing::warn!(
-                    "Failed to decrypt IndexPage block at offset {}",
+                    "Failed to match IndexPage block at offset {}",
                     location.physical_offset
                 );
             }
@@ -358,7 +370,7 @@ impl IndexReader {
             index_dir: None, // No external directory in recovery mode
             meta,
             bloom,
-            page_cache: Mutex::new(HashMap::new()),
+            page_cache: RwLock::new(HashMap::new()),
             embedded_pages,
         })
     }
@@ -415,13 +427,15 @@ impl IndexReader {
             return Ok(page.clone());
         }
 
-        // Check cache
-        let mut cache = self.page_cache.lock();
-        if let Some(page) = cache.get(&block_id) {
-            return Ok(page.clone());
+        // Check cache with read lock (fast path — concurrent readers allowed)
+        {
+            let cache = self.page_cache.read();
+            if let Some(page) = cache.get(&block_id) {
+                return Ok(page.clone());
+            }
         }
 
-        // Load from filesystem (legacy mode)
+        // Cache miss — load from filesystem (legacy mode)
         let index_dir = self.index_dir.as_ref().ok_or_else(|| {
             EraError::InvalidFormat(
                 "IndexReader in recovery mode - pages should be embedded".into(),
@@ -442,6 +456,11 @@ impl IndexReader {
             Err(never) => match never {},
         };
 
+        // Insert into cache with write lock (double-check after acquiring)
+        let mut cache = self.page_cache.write();
+        if let Some(existing) = cache.get(&block_id) {
+            return Ok(existing.clone());
+        }
         cache.insert(block_id, page.clone());
         Ok(page)
     }
@@ -476,14 +495,15 @@ mod tests {
             })
             .collect();
 
-        let page = IndexPage::new(entries.clone());
+        let page = IndexPage::try_new(entries.clone()).unwrap();
         // Serialize page using rkyv
         let page_bytes = rkyv::to_bytes::<_, 4096>(&page).unwrap();
         fs::write(index_dir.join("page_0.bin"), &page_bytes).unwrap();
 
         // Create meta-index
         let mut meta = MetaIndex::new();
-        meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+        meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+            .unwrap();
 
         // Create a simple bloom filter
         let mut bloom = Bloom::new_for_fp_rate(1000, 0.01);

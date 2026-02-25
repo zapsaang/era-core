@@ -8,7 +8,7 @@
 //!
 //! - **Staging**: Created via `IndexStore::create()` during ingest.
 //!   Entries are inserted via `insert()`. Redb provides ACID guarantees.
-//! - **Finalization**: `drain_sorted()` returns all entries in hash order
+//! - **Finalization**: `read_sorted()` returns all entries in hash order
 //!   for writing as encrypted IndexPage blocks to the volume.
 //! - **Cleanup**: `destroy()` removes the temp Redb file.
 
@@ -107,6 +107,13 @@ impl IndexStore {
             .map_err(|e: redb::StorageError| EraError::IndexError(e.to_string()))?
             as usize;
 
+        if len > 1_000_000 {
+            tracing::warn!(
+                "open_readonly: rebuilding bloom filter for {} entries — this may be slow",
+                len
+            );
+        }
+
         let mut bloom = Bloom::new_for_fp_rate(len.max(1024), BLOOM_FP_RATE);
         for result in table
             .iter()
@@ -128,6 +135,9 @@ impl IndexStore {
     }
 
     /// Insert a single chunk entry (one write transaction per call).
+    ///
+    /// Uses first-write-wins semantics: if the hash already exists, the
+    /// existing entry is preserved and the new one is silently dropped.
     pub fn insert(&mut self, entry: &IndexEntry) -> Result<()> {
         if self.read_only {
             return Err(EraError::IndexError(
@@ -135,9 +145,6 @@ impl IndexStore {
             ));
         }
         self.bloom.set(&entry.hash);
-
-        let value_bytes =
-            rkyv::to_bytes::<_, 256>(entry).map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let write_txn = self
             .db
@@ -151,10 +158,12 @@ impl IndexStore {
                 .get(entry.hash.as_bytes())
                 .map_err(|e| EraError::IndexError(e.to_string()))?
                 .is_none();
-            table
-                .insert(entry.hash.as_bytes(), value_bytes.as_slice())
-                .map_err(|e| EraError::IndexError(e.to_string()))?;
             if is_new {
+                let value_bytes = rkyv::to_bytes::<_, 256>(entry)
+                    .map_err(|e| EraError::Serialization(e.to_string()))?;
+                table
+                    .insert(entry.hash.as_bytes(), value_bytes.as_slice())
+                    .map_err(|e| EraError::IndexError(e.to_string()))?;
                 self.entry_count += 1;
             }
         }
@@ -166,6 +175,8 @@ impl IndexStore {
     }
 
     /// Batch insert entries in a single transaction (much faster for bulk loads).
+    ///
+    /// Uses first-write-wins semantics: existing entries are preserved.
     pub fn insert_batch(&mut self, entries: &[IndexEntry]) -> Result<()> {
         if self.read_only {
             return Err(EraError::IndexError(
@@ -187,16 +198,16 @@ impl IndexStore {
             let mut new_count = 0usize;
             for entry in entries {
                 self.bloom.set(&entry.hash);
-                let value_bytes = rkyv::to_bytes::<_, 256>(entry)
-                    .map_err(|e| EraError::Serialization(e.to_string()))?;
                 let is_new = table
                     .get(entry.hash.as_bytes())
                     .map_err(|e| EraError::IndexError(e.to_string()))?
                     .is_none();
-                table
-                    .insert(entry.hash.as_bytes(), value_bytes.as_slice())
-                    .map_err(|e| EraError::IndexError(e.to_string()))?;
                 if is_new {
+                    let value_bytes = rkyv::to_bytes::<_, 256>(entry)
+                        .map_err(|e| EraError::Serialization(e.to_string()))?;
+                    table
+                        .insert(entry.hash.as_bytes(), value_bytes.as_slice())
+                        .map_err(|e| EraError::IndexError(e.to_string()))?;
                     new_count += 1;
                 }
             }
@@ -302,7 +313,7 @@ impl IndexStore {
     /// Redb's B-tree stores keys in sorted order, so iteration
     /// yields entries sorted by ChunkHash bytes — exactly what
     /// the finalization pipeline needs.
-    pub fn drain_sorted(&self) -> Result<Vec<IndexEntry>> {
+    pub fn read_sorted(&self) -> Result<Vec<IndexEntry>> {
         let read_txn = self
             .db
             .begin_read()
@@ -326,9 +337,9 @@ impl IndexStore {
 
     /// Drain entries in sorted order, chunked into IndexPages of ENTRIES_PER_PAGE.
     ///
-    /// Unlike `drain_sorted()`, this never holds more than one page of entries
+    /// Unlike `read_sorted()`, this never holds more than one page of entries
     /// in memory at a time. Returns pages paired with their sequential BlockIds.
-    pub fn drain_sorted_pages(&self) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
+    pub fn read_sorted_pages(&self) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
         use era_common::BlockId;
 
         let read_txn = self
@@ -355,10 +366,10 @@ impl IndexStore {
             chunk.push(entry);
 
             if chunk.len() >= entries_per_page {
-                let page = crate::IndexPage::new(std::mem::replace(
+                let page = crate::IndexPage::try_new(std::mem::replace(
                     &mut chunk,
                     Vec::with_capacity(entries_per_page),
-                ));
+                ))?;
                 pages.push((page, BlockId::new(block_id_counter)));
                 block_id_counter += 1;
             }
@@ -366,7 +377,7 @@ impl IndexStore {
 
         // Flush remaining entries
         if !chunk.is_empty() {
-            let page = crate::IndexPage::new(chunk);
+            let page = crate::IndexPage::try_new(chunk)?;
             pages.push((page, BlockId::new(block_id_counter)));
         }
 
@@ -400,6 +411,26 @@ impl IndexStore {
     /// beyond the lifetime of this store instance.
     pub fn keep_on_drop(&mut self) {
         self.read_only = true;
+    }
+
+    /// Discard the staging database: remove the file while still holding the DB lock.
+    ///
+    /// This eliminates the TOCTOU window in Drop where another process could
+    /// open the file between DB handle release and file removal (V6-F10 fix).
+    /// On Unix, remove_file on an open fd unlinks the directory entry immediately;
+    /// the file data persists until the last fd is closed.
+    pub fn discard(&mut self) -> Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
+        if let Err(e) = std::fs::remove_file(&self.db_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(EraError::Io(e));
+            }
+        }
+        // Mark as read-only so Drop doesn't try to remove again
+        self.read_only = true;
+        Ok(())
     }
 }
 
@@ -488,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_drain_sorted() {
+    fn test_store_read_sorted() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.redb");
         let mut store = IndexStore::create(&db_path, 1024).unwrap();
@@ -498,7 +529,7 @@ mod tests {
             store.insert(&make_entry(i)).unwrap();
         }
 
-        let sorted = store.drain_sorted().unwrap();
+        let sorted = store.read_sorted().unwrap();
         assert_eq!(sorted.len(), 100);
 
         // Verify sorted by hash
@@ -526,7 +557,7 @@ mod tests {
         // Reopen and verify
         let store = IndexStore::open_readonly(&db_path).unwrap();
         assert_eq!(store.entry_count(), 100);
-        let entries = store.drain_sorted().unwrap();
+        let entries = store.read_sorted().unwrap();
         assert_eq!(entries.len(), 100);
     }
 
@@ -543,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_dedup_last_write_wins() {
+    fn test_store_dedup_first_write_wins() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.redb");
         let mut store = IndexStore::create(&db_path, 1024).unwrap();
@@ -555,13 +586,13 @@ mod tests {
         store.insert(&entry1).unwrap();
         store.insert(&entry2).unwrap();
 
-        // Last write wins in Redb
+        // First write wins — entry1's values are preserved
         let result = store.get(&test_hash(1)).unwrap().unwrap();
-        assert_eq!(result.offset, 4096);
-        assert_eq!(result.length, 2048);
+        assert_eq!(result.offset, 0);
+        assert_eq!(result.length, 1024);
 
-        // drain_sorted should have exactly 1 entry (deduped by key)
-        let sorted = store.drain_sorted().unwrap();
+        // read_sorted should have exactly 1 entry (deduped by key)
+        let sorted = store.read_sorted().unwrap();
         assert_eq!(sorted.len(), 1);
     }
 }

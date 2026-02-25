@@ -26,12 +26,13 @@ fn make_entry(i: u64) -> IndexEntry {
     )
 }
 
-/// FINDING-IDX-4: IndexPage::new with empty vec panics.
-/// IndexPage::try_new returns Result instead.
+/// FINDING-IDX-4: IndexPage::try_new with empty vec returns Err (panicking new() removed).
 #[test]
-#[should_panic(expected = "IndexPage cannot be empty")]
 fn test_index_page_empty_panics() {
-    let _page = IndexPage::new(vec![]);
+    assert!(
+        IndexPage::try_new(vec![]).is_err(),
+        "try_new with empty vec must return Err"
+    );
 }
 
 /// FINDING-IDX-4b: IndexPage::try_new with empty vec returns Err (safe API).
@@ -82,7 +83,8 @@ fn test_meta_index_binary_search_correctness() {
     let mut meta = MetaIndex::new();
 
     for i in 0..10u64 {
-        meta.add_page(be_hash(i * 100), be_hash(i * 100 + 99), BlockId::new(i));
+        meta.add_page(be_hash(i * 100), be_hash(i * 100 + 99), BlockId::new(i))
+            .unwrap();
     }
 
     assert_eq!(
@@ -112,7 +114,7 @@ fn test_meta_index_le_hashes_no_wrong_page() {
     for i in 0..10u64 {
         let min = test_hash(i * 100);
         let max = test_hash(i * 100 + 99);
-        meta.add_page(min, max, BlockId::new(i));
+        meta.add_page(min, max, BlockId::new(i)).unwrap();
     }
 
     let target = test_hash(950);
@@ -141,8 +143,8 @@ fn test_redb_store_different_instances_isolated() {
     store1.insert_batch(&entries).unwrap();
     store2.insert_batch(&entries).unwrap();
 
-    let sorted1 = store1.drain_sorted().unwrap();
-    let sorted2 = store2.drain_sorted().unwrap();
+    let sorted1 = store1.read_sorted().unwrap();
+    let sorted2 = store2.read_sorted().unwrap();
 
     // Both stores should have identical data but be independent
     assert_eq!(sorted1.len(), sorted2.len());
@@ -179,7 +181,7 @@ fn test_redb_store_tampered_file_rejected() {
     // Redb may detect corruption on open or on first read
     if let Ok(store) = result {
         // If open succeeds, drain should fail or produce different data
-        let _ = store.drain_sorted();
+        let _ = store.read_sorted();
         // We don't assert failure here because Redb may not detect all corruption
         // at open time — the important thing is no panic
     }

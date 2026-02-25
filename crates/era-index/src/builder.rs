@@ -19,9 +19,6 @@ use crate::IndexEntry;
 /// Default memory limit (64MB) — used for bloom filter sizing
 const DEFAULT_MEM_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Bloom filter false positive rate (1%)
-const BLOOM_FP_RATE: f64 = 0.01;
-
 /// Bloom filter expected items — derived from mem_limit / entry size
 fn bloom_expected_items(mem_limit: usize) -> usize {
     let entry_size = std::mem::size_of::<IndexEntry>().max(1);
@@ -82,9 +79,11 @@ impl IndexBuilder {
     /// Entries are buffered in memory and flushed to the Redb staging database
     /// in batches of 1000 for optimal write performance.
     pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
-        // Eagerly update bloom so bloom_contains() reflects buffered entries
-        self.store.bloom_set(&entry.hash);
+        // Push to buffer first, then update bloom — ensures bloom never
+        // contains entries that aren't at least in the buffer (V6-F9 fix)
+        let hash = entry.hash;
         self.buffer.push(entry);
+        self.store.bloom_set(&hash);
         if self.buffer.len() >= BATCH_SIZE {
             self.flush_buffer()?;
         }
@@ -106,8 +105,7 @@ impl IndexBuilder {
     /// unique hash to count only genuinely new entries. Buffer is at most
     /// BATCH_SIZE-1 entries, so this is cheap.
     pub fn entry_count(&self) -> usize {
-        let unique_buffer_hashes: HashSet<ChunkHash> =
-            self.buffer.iter().map(|e| e.hash).collect();
+        let unique_buffer_hashes: HashSet<ChunkHash> = self.buffer.iter().map(|e| e.hash).collect();
         let new_in_buffer = unique_buffer_hashes
             .iter()
             .filter(|h| self.store.get(h).ok().flatten().is_none())
@@ -131,24 +129,23 @@ impl IndexBuilder {
     }
 
     /// Flush any buffered entries and drain all entries in sorted order.
-    pub fn drain_sorted(&mut self) -> Result<Vec<IndexEntry>> {
+    pub fn read_sorted(&mut self) -> Result<Vec<IndexEntry>> {
         self.flush_buffer()?;
-        self.store.drain_sorted()
+        self.store.read_sorted()
     }
 
     /// Flush any buffered entries and drain as pre-built pages (streaming, low-memory).
-    pub fn drain_sorted_pages(
-        &mut self,
-    ) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
+    pub fn read_sorted_pages(&mut self) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
         self.flush_buffer()?;
-        self.store.drain_sorted_pages()
+        self.store.read_sorted_pages()
     }
 
     /// Finalize the index (EMBEDDED MODE — writes to volume)
     ///
-    /// Reads all entries from the Redb staging database in sorted order,
-    /// then writes encrypted IndexPage blocks and an IndexManifest block
-    /// to the volume. Returns the MetaIndex and its BlockLocation.
+    /// Reads all entries from the Redb staging database as pre-built pages
+    /// (streaming, low-memory), then writes encrypted IndexPage blocks and
+    /// an IndexManifest block to the volume. Returns the MetaIndex and its
+    /// BlockLocation.
     pub async fn finalize<W: StorageWriter>(
         &mut self,
         volume_writer: &mut era_volume::VolumeWriter<W>,
@@ -156,12 +153,11 @@ impl IndexBuilder {
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
     ) -> Result<(super::MetaIndex, era_common::BlockLocation)> {
-        use super::{IndexPage, ENTRIES_PER_PAGE};
         use era_common::BlockId;
 
-        // Flush any remaining buffered entries, then read all from Redb in sorted order
+        // Flush any remaining buffered entries, then stream pages from Redb
         self.flush_buffer()?;
-        let all_entries = self.store.drain_sorted()?;
+        let pages = self.store.read_sorted_pages()?;
 
         // Build L1 MetaIndex
         let mut meta = super::MetaIndex::new();
@@ -172,16 +168,9 @@ impl IndexBuilder {
 
         // Write L2 pages as typed blocks to volume
         let mut block_id_counter = 0u64;
-        for page_entries in all_entries.chunks(ENTRIES_PER_PAGE) {
-            if page_entries.is_empty() {
-                continue;
-            }
-
-            // Create IndexPage
-            let page = IndexPage::new(page_entries.to_vec());
-
+        for (page, _page_block_id) in &pages {
             // Serialize page to rkyv
-            let page_bytes = rkyv::to_bytes::<_, 4096>(&page)
+            let page_bytes = rkyv::to_bytes::<_, 4096>(page)
                 .map_err(|e| EraError::Serialization(e.to_string()))?;
 
             // Encrypt page with session keys
@@ -202,7 +191,7 @@ impl IndexBuilder {
                 data: encrypted_data,
                 original_size: page_bytes.len() as u32,
                 compressed_size: page_bytes.len() as u32,
-                chunk_count: page_entries.len() as u16,
+                chunk_count: page.len() as u16,
             };
 
             // Write as canonical block to volume
@@ -211,22 +200,13 @@ impl IndexBuilder {
                 .await?;
 
             // Add PagePointer to L1
-            meta.add_page(page.min_hash, page.max_hash, block_id);
+            meta.add_page(*page.min_hash(), *page.max_hash(), block_id)?;
 
             block_id_counter += 1;
         }
 
-        // Rebuild a right-sized bloom from actual entries for the on-disk format.
-        let finalized_bloom = if all_entries.is_empty() {
-            self.store.bloom().clone()
-        } else {
-            let mut compact = Bloom::new_for_fp_rate(all_entries.len().max(1024), BLOOM_FP_RATE);
-            for entry in &all_entries {
-                compact.set(&entry.hash);
-            }
-            compact
-        };
-        let bloom_bytes = super::serialize_bloom(&finalized_bloom)?;
+        // Reuse the builder's existing bloom — it already contains all entries.
+        let bloom_bytes = super::serialize_bloom(self.store.bloom())?;
         meta.set_bloom_filter(bloom_bytes);
 
         // Encrypt and write MetaIndex as IndexManifest block
@@ -234,8 +214,11 @@ impl IndexBuilder {
             rkyv::to_bytes::<_, 4096>(&meta).map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let manifest_block_id = BlockId::new(block_id_counter);
-        let manifest_key =
-            session.derive_block_key(volume_key, manifest_block_id.sequence(), &index_nonce_context);
+        let manifest_key = session.derive_block_key(
+            volume_key,
+            manifest_block_id.sequence(),
+            &index_nonce_context,
+        );
         let manifest_derived_key = manifest_key.to_derived_key();
         let encrypted_manifest = era_crypto::encrypt_with_context(
             &manifest_derived_key,
@@ -273,9 +256,14 @@ impl Drop for IndexBuilder {
 
 impl IndexBuilder {
     /// Explicitly discard the builder and remove the staging file.
-    pub fn discard(self) -> Result<()> {
-        drop(self); // flush via IndexBuilder::Drop, cleanup via IndexStore::Drop
+    ///
+    /// Removes the staging file while the DB handle is still held,
+    /// eliminating the TOCTOU window in Drop (V6-F10 fix).
+    pub fn discard(mut self) -> Result<()> {
+        self.flush_buffer()?;
+        self.store.discard()?;
         Ok(())
+        // Drop runs but store.read_only=true, so no double-remove
     }
 }
 

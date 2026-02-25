@@ -81,8 +81,8 @@ fn test_redb_store_sorted_iteration() {
             .unwrap();
     }
 
-    // drain_sorted must return entries in hash-sorted order
-    let sorted = store.drain_sorted().unwrap();
+    // read_sorted must return entries in hash-sorted order
+    let sorted = store.read_sorted().unwrap();
     assert_eq!(sorted.len(), 1000);
     for i in 1..sorted.len() {
         assert!(
@@ -164,7 +164,7 @@ fn test_redb_batch_insert() {
     }
 
     // Verify all 20,000 entries
-    let sorted = store.drain_sorted().unwrap();
+    let sorted = store.read_sorted().unwrap();
     assert_eq!(sorted.len(), 20_000);
 
     // Verify sorted order
@@ -195,13 +195,13 @@ fn test_index_page_layout() {
         })
         .collect();
 
-    let page = IndexPage::new(entries.clone());
+    let page = IndexPage::try_new(entries.clone()).unwrap();
 
-    assert_eq!(page.min_hash, test_hash(0));
-    assert_eq!(page.max_hash, test_hash((ENTRIES_PER_PAGE - 1) as u64));
-    assert_eq!(page.entries.len(), ENTRIES_PER_PAGE);
+    assert_eq!(*page.min_hash(), test_hash(0));
+    assert_eq!(*page.max_hash(), test_hash((ENTRIES_PER_PAGE - 1) as u64));
+    assert_eq!(page.len(), ENTRIES_PER_PAGE);
 
-    for (i, entry) in page.entries.iter().enumerate() {
+    for (i, entry) in page.entries().iter().enumerate() {
         assert_eq!(entry.hash, test_hash(i as u64));
     }
 
@@ -226,7 +226,8 @@ fn test_meta_index_lookup() {
             test_hash(i * 1000),
             test_hash((i + 1) * 1000 - 1),
             BlockId::new(100 + i),
-        );
+        )
+        .unwrap();
     }
 
     assert_eq!(
@@ -362,7 +363,7 @@ fn test_index_page_compression_and_encryption() {
         })
         .collect();
 
-    let page = IndexPage::new(entries);
+    let page = IndexPage::try_new(entries).unwrap();
 
     let uncompressed = rkyv::to_bytes::<_, 4096>(&page).unwrap();
     let uncompressed_size = uncompressed.len();

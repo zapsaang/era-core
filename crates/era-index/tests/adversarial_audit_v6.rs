@@ -24,7 +24,7 @@
 //! | V6-F1  | CRITICAL | Positional matching fragility — O(P) assumes page order |
 //! | V6-F2  | CRITICAL | Manifest brute-force persists — O(max(256, 2P)) candidates |
 //! | V6-F3  | CRITICAL | Single-page violation at scale — 100K entries in one page |
-//! | V6-F4  | HIGH     | drain_sorted doesn't drain — data persists after call |
+//! | V6-F4  | HIGH     | read_sorted doesn't drain — data persists after call |
 //! | V6-F5  | HIGH     | IndexLocation drops volume_id — multi-volume blind spot |
 //! | V6-F6  | HIGH     | finalize() non-reversible — consumes tree, no retry |
 //! | V6-F7  | HIGH     | page_cache Mutex contention — serializes cache misses |
@@ -98,7 +98,7 @@ fn test_v6_1a_positional_contract_verification() {
     for i in 0..10u64 {
         let min = test_hash(i * 1000);
         let max = test_hash(i * 1000 + 999);
-        meta.add_page(min, max, BlockId::new(i));
+        meta.add_page(min, max, BlockId::new(i)).unwrap();
     }
 
     // Verify positional contract: meta.pages[i].block_id == BlockId::new(i)
@@ -125,9 +125,12 @@ fn test_v6_1b_meta_index_order_independence() {
     let mut meta = MetaIndex::new();
 
     // Add pages in sequential order (as finalize does)
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1));
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2));
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+        .unwrap();
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+        .unwrap();
 
     // Verify lookups work for each page's range
     assert_eq!(
@@ -170,9 +173,12 @@ fn test_v6_1b_meta_index_order_independence() {
 fn test_v6_1c_completeness_check_catches_missing_pages() {
     // Create a MetaIndex that expects 3 pages
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1));
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2));
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+        .unwrap();
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+        .unwrap();
 
     assert_eq!(meta.pages.len(), 3, "MetaIndex should have 3 pages");
 
@@ -206,15 +212,17 @@ fn test_v6_1d_page_blocks_fewer_than_meta_pages() {
     // This is a structural test: verify that MetaIndex with N pages
     // but only M < N embedded pages results in incomplete lookups.
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0));
-    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1));
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+        .unwrap();
 
     // Only provide page 0, not page 1
     let entries_page0: Vec<IndexEntry> = (0..1000).map(make_entry).collect();
-    let page0 = IndexPage::new(entries_page0);
+    let page0 = IndexPage::try_new(entries_page0).unwrap();
 
     // Verify page 0 has the expected range
-    assert_eq!(page0.min_hash, test_hash(0));
+    assert_eq!(*page0.min_hash(), test_hash(0));
     assert!(page0.find(&test_hash(500)).is_some());
 
     // If we only have page 0 but meta expects 2 pages,
@@ -488,10 +496,10 @@ fn test_v6_3c_index_page_no_size_guard() {
     let count = 50_000u64;
     let entries: Vec<IndexEntry> = (0..count).map(make_entry).collect();
 
-    let page = IndexPage::new(entries);
+    let page = IndexPage::try_new(entries).unwrap();
 
     assert_eq!(
-        page.entries.len(),
+        page.len(),
         count as usize,
         "V6-F3: IndexPage accepted {} entries without error. \
          ENTRIES_PER_PAGE={} is not enforced.",
@@ -516,10 +524,10 @@ fn test_v6_3d_entries_per_page_is_advisory_not_enforced() {
     // Create a page with 2x ENTRIES_PER_PAGE — no error
     let count = ENTRIES_PER_PAGE * 2;
     let entries: Vec<IndexEntry> = (0..count as u64).map(make_entry).collect();
-    let page = IndexPage::new(entries);
+    let page = IndexPage::try_new(entries).unwrap();
 
     assert_eq!(
-        page.entries.len(),
+        page.len(),
         count,
         "V6-F3: IndexPage accepted {}x ENTRIES_PER_PAGE entries. \
          The constant is advisory only — no runtime enforcement exists.",
@@ -536,13 +544,16 @@ fn test_v6_3d_entries_per_page_is_advisory_not_enforced() {
 
     // All entries findable despite violating page size contract
     assert!(reader.lookup(&test_hash(0)).unwrap().is_some());
-    assert!(reader.lookup(&test_hash(count as u64 - 1)).unwrap().is_some());
+    assert!(reader
+        .lookup(&test_hash(count as u64 - 1))
+        .unwrap()
+        .is_some());
 }
 
 // ============================================================================
-// V6-4: drain_sorted Semantic Violation (3 tests)
+// V6-4: read_sorted Semantic Violation (3 tests)
 //
-// drain_sorted takes &self, data persists. Double-processing risk.
+// read_sorted takes &self, data persists. Double-processing risk.
 // ============================================================================
 
 /// V6-4a: drain then insert then drain — second drain includes old + new entries.
@@ -556,7 +567,7 @@ fn test_v6_4a_drain_then_insert_then_drain() {
     let batch1: Vec<IndexEntry> = (0..500).map(make_entry).collect();
     store.insert_batch(&batch1).unwrap();
 
-    let first_drain = store.drain_sorted().unwrap();
+    let first_drain = store.read_sorted().unwrap();
     assert_eq!(first_drain.len(), 500);
 
     // Insert batch 2 (new entries)
@@ -564,12 +575,12 @@ fn test_v6_4a_drain_then_insert_then_drain() {
     store.insert_batch(&batch2).unwrap();
 
     // Second drain includes ALL entries (old + new)
-    let second_drain = store.drain_sorted().unwrap();
+    let second_drain = store.read_sorted().unwrap();
     assert_eq!(
         second_drain.len(),
         1000,
         "V6-F4: Second drain returns {} entries (expected 1000). \
-         drain_sorted does NOT drain — old entries persist alongside new ones.",
+         read_sorted does NOT drain — old entries persist alongside new ones.",
         second_drain.len()
     );
 }
@@ -584,15 +595,15 @@ fn test_v6_4b_builder_drain_includes_all_batches() {
         builder.insert(make_entry(i)).unwrap();
     }
 
-    let first = builder.drain_sorted().unwrap();
+    let first = builder.read_sorted().unwrap();
     assert_eq!(first.len(), 2500);
 
     // Drain again — same data
-    let second = builder.drain_sorted().unwrap();
+    let second = builder.read_sorted().unwrap();
     assert_eq!(
         second.len(),
         2500,
-        "V6-F4: Builder drain_sorted is non-destructive. \
+        "V6-F4: Builder read_sorted is non-destructive. \
          Second call returns same {} entries.",
         second.len()
     );
@@ -600,7 +611,7 @@ fn test_v6_4b_builder_drain_includes_all_batches() {
 
 /// V6-4c: Double finalize data duplication risk.
 ///
-/// drain_sorted returns same data on repeated calls, meaning if finalize()
+/// read_sorted returns same data on repeated calls, meaning if finalize()
 /// were called twice (hypothetically), it would process the same entries twice.
 #[test]
 fn test_v6_4c_double_finalize_data_duplication_risk() {
@@ -612,9 +623,9 @@ fn test_v6_4c_double_finalize_data_duplication_risk() {
     store.insert_batch(&entries).unwrap();
 
     // Three consecutive drains return identical data
-    let d1 = store.drain_sorted().unwrap();
-    let d2 = store.drain_sorted().unwrap();
-    let d3 = store.drain_sorted().unwrap();
+    let d1 = store.read_sorted().unwrap();
+    let d2 = store.read_sorted().unwrap();
+    let d3 = store.read_sorted().unwrap();
 
     assert_eq!(d1.len(), d2.len());
     assert_eq!(d2.len(), d3.len());
@@ -625,7 +636,7 @@ fn test_v6_4c_double_finalize_data_duplication_risk() {
     }
 
     eprintln!(
-        "V6-F4: drain_sorted called 3 times returns {} entries each time. \
+        "V6-F4: read_sorted called 3 times returns {} entries each time. \
          The method is a read, not a drain. Naming violates Rust conventions \
          where 'drain' implies consumption (Vec::drain, HashMap::drain).",
         d1.len()
@@ -710,7 +721,10 @@ fn test_v6_5c_entry_to_location_information_loss() {
     // Location now has block_id, offset, length, AND volume_id
     assert_eq!(location.offset, entry.offset);
     assert_eq!(location.length, entry.length);
-    assert_eq!(location.volume_id, vol, "volume_id is now preserved in IndexLocation");
+    assert_eq!(
+        location.volume_id, vol,
+        "volume_id is now preserved in IndexLocation"
+    );
 }
 
 // ============================================================================
@@ -731,30 +745,40 @@ fn test_v6_6a_redb_file_survives_finalize() {
     }
 
     // Drain (simulating what finalize does internally)
-    let entries = builder.drain_sorted().unwrap();
+    let entries = builder.read_sorted().unwrap();
     assert_eq!(entries.len(), 1000);
 
     // The Redb file should still exist (drain doesn't delete)
     assert!(
         db_path.exists(),
-        "V6-F6: Redb staging file must persist after drain_sorted(). \
+        "V6-F6: Redb staging file must persist after read_sorted(). \
          This is the recovery point if finalize fails after drain."
     );
 
     // Verify data is still accessible
-    let second_drain = builder.drain_sorted().unwrap();
+    let second_drain = builder.read_sorted().unwrap();
     assert_eq!(second_drain.len(), 1000, "Data survives drain");
 }
 
 /// V6-6b: finalize consumes self — tree is gone after call.
 #[test]
-fn test_v6_6b_finalize_consumes_self() {
-    let tree = LsmTree::new_default().unwrap();
+fn test_v6_6b_finalize_is_retryable() {
+    let mut tree = LsmTree::new_default().unwrap();
     // Empty finalize should work
     let reader = tree.finalize().unwrap();
 
-    // Tree is consumed — can't use it anymore (this is a compile-time guarantee)
-    // We verify the reader works
+    // Tree is still alive but in Finalized state — insert returns error
+    let result = tree.insert(make_entry(1));
+    assert!(
+        result.is_err(),
+        "V6-F6: insert after finalize must return Err"
+    );
+
+    // Second finalize also returns error
+    let result = tree.finalize();
+    assert!(result.is_err(), "V6-F6: second finalize must return Err");
+
+    // Reader still works
     let result = reader.lookup(&test_hash(0)).unwrap();
     assert!(result.is_none(), "Empty index should return None");
 }
@@ -771,20 +795,20 @@ fn test_v6_6c_builder_drain_then_error_simulation() {
     }
 
     // Drain entries (simulating finalize's first step)
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(drained.len(), 500);
 
     // Simulate: "finalize fails after drain"
     // Drop the drained Vec (data in memory is lost)
     drop(drained);
 
-    // But Redb still has the data! drain_sorted is non-destructive.
-    let recovered = builder.drain_sorted().unwrap();
+    // But Redb still has the data! read_sorted is non-destructive.
+    let recovered = builder.read_sorted().unwrap();
     assert_eq!(
         recovered.len(),
         500,
         "V6-F6: After drain + simulated failure, entries are still in Redb. \
-         drain_sorted's non-destructive behavior is actually a SAFETY NET here."
+         read_sorted's non-destructive behavior is actually a SAFETY NET here."
     );
 }
 
@@ -841,8 +865,8 @@ fn test_v6_7a_concurrent_lookup_throughput() {
         "All lookups must succeed"
     );
 
-    let speedup = single_elapsed.as_nanos() as f64 / multi_elapsed.as_nanos() as f64
-        * num_threads as f64;
+    let speedup =
+        single_elapsed.as_nanos() as f64 / multi_elapsed.as_nanos() as f64 * num_threads as f64;
 
     eprintln!(
         "V6-F7: Single-threaded: {:?}, Multi-threaded ({}T): {:?}, \
@@ -898,9 +922,14 @@ fn test_v6_7c_concurrent_mixed_hit_miss() {
         .map(|h| h.join().unwrap())
         .fold((0, 0), |(ah, am), (h, m)| (ah + h, am + m));
 
-    assert_eq!(total_hits, 4 * 5_000, "Each thread should find 5000 entries");
     assert_eq!(
-        total_misses, 4 * 5_000,
+        total_hits,
+        4 * 5_000,
+        "Each thread should find 5000 entries"
+    );
+    assert_eq!(
+        total_misses,
+        4 * 5_000,
         "Each thread should miss 5000 entries"
     );
 }
@@ -1039,11 +1068,13 @@ fn test_v6_8b_filesystem_mode_concurrent_cache_miss() {
 // isn't used by finalize().
 // ============================================================================
 
-/// V6-9a: IndexPage::new() panics on empty input.
+/// V6-9a: IndexPage::try_new() returns Err on empty input (panicking new() removed).
 #[test]
-#[should_panic(expected = "IndexPage cannot be empty")]
 fn test_v6_9a_new_panics_on_empty() {
-    let _ = IndexPage::new(vec![]);
+    assert!(
+        IndexPage::try_new(vec![]).is_err(),
+        "V6-F8: try_new(empty) must return Err, not panic"
+    );
 }
 
 /// V6-9b: IndexPage::try_new() returns Err on empty input — safe alternative.
@@ -1071,7 +1102,7 @@ fn test_v6_9b_try_new_returns_err() {
 /// The from_memory path handles empty entries by creating no pages.
 #[test]
 fn test_v6_9c_finalize_empty_guard_works() {
-    let tree = LsmTree::new_default().unwrap();
+    let mut tree = LsmTree::new_default().unwrap();
 
     // Finalize with 0 entries — should NOT panic
     let reader = tree.finalize().unwrap();
@@ -1295,7 +1326,7 @@ fn test_v6_12b_duplicate_heavy_count_accuracy() {
     }
 
     // Drain to get actual unique count
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(
         drained.len(),
         1000,
@@ -1319,7 +1350,7 @@ fn test_v6_12c_count_after_drain_and_reinsert() {
     assert_eq!(store.entry_count(), 500);
 
     // Drain (non-destructive)
-    let _ = store.drain_sorted().unwrap();
+    let _ = store.read_sorted().unwrap();
     assert_eq!(
         store.entry_count(),
         500,
@@ -1347,9 +1378,11 @@ fn test_v6_12c_count_after_drain_and_reinsert() {
 #[test]
 fn test_v6_13a_gap_between_pages() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+        .unwrap();
     // Gap: 100..199 has no page
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1));
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1))
+        .unwrap();
 
     // Hashes in the gap should return None
     assert!(
@@ -1375,9 +1408,12 @@ fn test_v6_13a_gap_between_pages() {
 fn test_v6_13b_single_entry_pages() {
     let mut meta = MetaIndex::new();
     // Each page has min_hash == max_hash (single entry)
-    meta.add_page(test_hash(100), test_hash(100), BlockId::new(0));
-    meta.add_page(test_hash(200), test_hash(200), BlockId::new(1));
-    meta.add_page(test_hash(300), test_hash(300), BlockId::new(2));
+    meta.add_page(test_hash(100), test_hash(100), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(200), test_hash(200), BlockId::new(1))
+        .unwrap();
+    meta.add_page(test_hash(300), test_hash(300), BlockId::new(2))
+        .unwrap();
 
     // Exact matches
     assert_eq!(
@@ -1403,9 +1439,12 @@ fn test_v6_13b_single_entry_pages() {
 #[test]
 fn test_v6_13c_adjacent_pages_no_overlap() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1));
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2));
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+        .unwrap();
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+        .unwrap();
 
     // Boundary: hash 99 → page 0 (max_hash of page 0)
     assert_eq!(
@@ -1433,8 +1472,10 @@ fn test_v6_13c_adjacent_pages_no_overlap() {
 #[test]
 fn test_v6_13d_max_hash_boundary() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0));
-    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1));
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+        .unwrap();
 
     // Exact max_hash of page 0
     let result = meta.find_page(&test_hash(999));
@@ -1474,7 +1515,7 @@ fn test_v6_14a_read_during_write() {
     store.insert_batch(&batch1).unwrap();
 
     // Read current state
-    let before = store.drain_sorted().unwrap();
+    let before = store.read_sorted().unwrap();
     assert_eq!(before.len(), 100);
 
     // Insert more
@@ -1482,11 +1523,11 @@ fn test_v6_14a_read_during_write() {
     store.insert_batch(&batch2).unwrap();
 
     // Read new state
-    let after = store.drain_sorted().unwrap();
+    let after = store.read_sorted().unwrap();
     assert_eq!(after.len(), 200);
 
     // The first read should have seen 100, second sees 200
-    // This proves transaction isolation (each drain_sorted opens its own read txn)
+    // This proves transaction isolation (each read_sorted opens its own read txn)
     assert_ne!(before.len(), after.len());
 }
 
@@ -1507,7 +1548,7 @@ fn test_v6_14b_crash_recovery_acid() {
 
     // Reopen and verify
     let store = IndexStore::open_readonly(&db_path).unwrap();
-    let entries = store.drain_sorted().unwrap();
+    let entries = store.read_sorted().unwrap();
     assert_eq!(
         entries.len(),
         500,
@@ -1595,7 +1636,10 @@ fn test_v6_15a_500k_entries_zero_loss() {
     );
 
     // Also check boundaries
-    assert!(reader.lookup(&test_hash(0)).unwrap().is_some(), "First entry");
+    assert!(
+        reader.lookup(&test_hash(0)).unwrap().is_some(),
+        "First entry"
+    );
     assert!(
         reader.lookup(&test_hash(n - 1)).unwrap().is_some(),
         "Last entry"
@@ -1677,7 +1721,7 @@ fn test_v6_15c_sequential_batch_boundary_stress() {
     }
 
     // Drain and verify all entries
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(
         drained.len(),
         total as usize,

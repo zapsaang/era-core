@@ -16,7 +16,7 @@
 //! 2. **Three V6 CRITICAL findings remain UNFIXED**: from_memory() single-page,
 //!    IndexLocation drops volume_id, bloom never resized.
 //!
-//! 3. **Novel findings**: Dedup semantic divergence, drain_sorted memory bomb,
+//! 3. **Novel findings**: Dedup semantic divergence, read_sorted memory bomb,
 //!    MetaIndex ordering invariant unenforced, page integrity unverified,
 //!    finalize double-iteration, concurrent lookup false-negative window.
 //!
@@ -29,7 +29,7 @@
 //! | V7-F3   | CRITICAL | Dedup strategy divergence: Redb last-write-wins vs IndexPage first-wins |
 //! | V7-F4   | HIGH     | Bloom filter never resized — 10× overcapacity → 30%+ FP (UNFIXED V5) |
 //! | V7-F5   | HIGH     | IndexLocation drops volume_id (UNFIXED from V6-F5) |
-//! | V7-F6   | HIGH     | drain_sorted O(N) RAM — loads entire index into Vec |
+//! | V7-F6   | HIGH     | read_sorted O(N) RAM — loads entire index into Vec |
 //! | V7-F7   | HIGH     | MetaIndex add_page has no ordering validation |
 //! | V7-F8   | HIGH     | finalize() rebuilds bloom by re-iterating all entries (2× data scan) |
 //! | V7-F9   | MEDIUM   | No post-construction page integrity verification |
@@ -114,11 +114,11 @@ fn test_v7_f1a_within_buffer_duplicate_overcounting() {
     );
 
     // After flush+drain, Redb dedupes and we get the correct unique count
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(
         drained.len(),
         1,
-        "V7-F1: drain_sorted returns {} entries — Redb correctly dedupes to 1.",
+        "V7-F1: read_sorted returns {} entries — Redb correctly dedupes to 1.",
         drained.len()
     );
 }
@@ -156,7 +156,7 @@ fn test_v7_f1b_cross_buffer_duplicate_overcounting() {
     );
 
     // Verify drain shows the true unique count
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(drained.len(), 1000, "True unique count is 1000");
 }
 
@@ -357,19 +357,18 @@ fn test_v7_f2c_from_memory_always_one_page() {
 // ============================================================================
 // V7-F3: Dedup Strategy Divergence [CRITICAL]
 //
-// Two code paths have OPPOSITE dedup semantics:
-//   - IndexStore (Redb): table.insert() OVERWRITES → LAST write wins
+// Both code paths now use FIRST-WRITE-WINS / FIRST-OCCURRENCE-WINS:
+//   - IndexStore (Redb): skip-if-exists → FIRST write wins
 //   - IndexPage::new(): Vec::dedup_by_key → FIRST occurrence wins
 //
-// If the same hash is inserted with different offsets, the stored offset
-// depends on which code path resolves the duplicate.
+// This eliminates the dedup strategy divergence identified in V7-F3.
 // ============================================================================
 
-/// V7-F3a: Redb insert is LAST-WRITE-WINS.
+/// V7-F3a: Redb insert is FIRST-WRITE-WINS.
 ///
-/// Insert same hash twice with different offsets. The second insert overwrites.
+/// Insert same hash twice with different offsets. The first insert is preserved.
 #[test]
-fn test_v7_f3a_redb_last_write_wins() {
+fn test_v7_f3a_redb_first_write_wins() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("v7_f3a.redb");
     let mut store = IndexStore::create(&db_path, 10_000).unwrap();
@@ -382,11 +381,11 @@ fn test_v7_f3a_redb_last_write_wins() {
 
     let result = store.get(&test_hash(42)).unwrap().unwrap();
     assert_eq!(
-        result.offset, 4096,
-        "V7-F3: Redb uses LAST-WRITE-WINS. offset={} (expected 4096)",
+        result.offset, 0,
+        "V7-F3: Redb uses FIRST-WRITE-WINS. offset={} (expected 0)",
         result.offset
     );
-    assert_eq!(result.length, 2048);
+    assert_eq!(result.length, 1024);
 }
 
 /// V7-F3b: IndexPage::new() is FIRST-OCCURRENCE-WINS.
@@ -397,61 +396,55 @@ fn test_v7_f3b_index_page_first_occurrence_wins() {
     let entry1 = make_entry_with_offset(42, 0, 1024);
     let entry2 = make_entry_with_offset(42, 4096, 2048);
 
-    let page = IndexPage::new(vec![entry1, entry2]);
+    let page = IndexPage::try_new(vec![entry1, entry2]).unwrap();
 
     let result = page.find(&test_hash(42)).unwrap();
     // dedup_by_key on a sorted vec keeps the first of consecutive duplicates
     // Since both have the same hash, after sort they're adjacent, and the first is kept
     assert_eq!(
         result.offset, 0,
-        "V7-F3: IndexPage::new() uses FIRST-OCCURRENCE-WINS via dedup_by_key. \
+        "V7-F3: IndexPage::try_new() uses FIRST-OCCURRENCE-WINS via dedup_by_key. \
          offset={} (expected 0). This is OPPOSITE of Redb's LAST-WRITE-WINS.",
         result.offset
     );
     assert_eq!(result.length, 1024);
 }
 
-/// V7-F3c: End-to-end divergence — same sequence, different result paths.
+/// V7-F3c: End-to-end consistency — both paths now agree on first-write-wins.
 ///
-/// Insert same hash twice through builder (Redb resolves → last wins),
-/// then verify that if someone constructs an IndexPage from duplicates
-/// directly, they get first-wins instead.
+/// Insert same hash twice through builder (Redb resolves → first wins),
+/// then verify that IndexPage from duplicates also gives first-wins.
 #[test]
-fn test_v7_f3c_end_to_end_dedup_divergence() {
-    // Path 1: Through IndexBuilder → Redb (last-write-wins)
+fn test_v7_f3c_end_to_end_dedup_consistency() {
+    // Path 1: Through IndexBuilder → Redb (first-write-wins)
     let mut builder = IndexBuilder::new_default().unwrap();
     builder.insert(make_entry_with_offset(42, 0, 1024)).unwrap();
     builder
         .insert(make_entry_with_offset(42, 4096, 2048))
         .unwrap();
 
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(drained.len(), 1);
     let redb_result_offset = drained[0].offset;
 
     // Path 2: Direct IndexPage construction (first-occurrence-wins)
-    let page = IndexPage::new(vec![
+    let page = IndexPage::try_new(vec![
         make_entry_with_offset(42, 0, 1024),
         make_entry_with_offset(42, 4096, 2048),
-    ]);
+    ])
+    .unwrap();
     let page_result_offset = page.find(&test_hash(42)).unwrap().offset;
 
-    // The two paths give DIFFERENT results for the same input!
-    eprintln!(
-        "V7-F3: DIVERGENCE CONFIRMED — \
-         Redb path: offset={} (last-write-wins), \
-         IndexPage path: offset={} (first-occurrence-wins). \
-         Same hash, same insertion order, DIFFERENT results depending on code path.",
-        redb_result_offset, page_result_offset
-    );
-
-    // This documents the inconsistency. If both gave the same answer, the
-    // dedup strategy would be consistent. Different answers = semantic divergence.
-    assert_ne!(
+    // FIXED: Both paths now give the same result (first-write-wins)
+    assert_eq!(
         redb_result_offset, page_result_offset,
-        "V7-F3: Both paths should give the same result, but they diverge. \
+        "V7-F3: Both paths should give the same result. \
          Redb={}, IndexPage={}.",
         redb_result_offset, page_result_offset
+    );
+    assert_eq!(
+        redb_result_offset, 0,
+        "Both paths should return offset=0 (first write)"
     );
 }
 
@@ -653,11 +646,7 @@ fn test_v7_f5b_information_loss_quantification() {
         "V7-F5: IndexEntry={} bytes → IndexLocation={} bytes. \
          Lost: {} bytes per lookup (ChunkHash={} bytes, which the caller already has). \
          VolumeId={} bytes is retained.",
-        entry_size,
-        loc_size,
-        bytes_lost,
-        chunk_hash_size,
-        volume_id_size,
+        entry_size, loc_size, bytes_lost, chunk_hash_size, volume_id_size,
     );
 
     // With volume_id included, the only info lost is the ChunkHash
@@ -670,16 +659,16 @@ fn test_v7_f5b_information_loss_quantification() {
 }
 
 // ============================================================================
-// V7-F6: drain_sorted O(N) RAM [HIGH]
+// V7-F6: read_sorted O(N) RAM [HIGH]
 //
-// drain_sorted() loads the ENTIRE Redb database into a Vec<IndexEntry>.
+// read_sorted() loads the ENTIRE Redb database into a Vec<IndexEntry>.
 // No streaming/iterator API. For a 10M-entry index with ~80 bytes/entry,
 // that's ~800MB in a single allocation.
 // ============================================================================
 
-/// V7-F6a: Measure drain_sorted memory allocation scaling.
+/// V7-F6a: Measure read_sorted memory allocation scaling.
 #[test]
-fn test_v7_f6a_drain_sorted_memory_scaling() {
+fn test_v7_f6a_read_sorted_memory_scaling() {
     let sizes = [1_000, 5_000, 20_000];
     let entry_size = std::mem::size_of::<IndexEntry>();
 
@@ -690,7 +679,7 @@ fn test_v7_f6a_drain_sorted_memory_scaling() {
         }
 
         let start = Instant::now();
-        let drained = builder.drain_sorted().unwrap();
+        let drained = builder.read_sorted().unwrap();
         let elapsed = start.elapsed();
 
         let ram_bytes = drained.len() * entry_size;
@@ -699,7 +688,7 @@ fn test_v7_f6a_drain_sorted_memory_scaling() {
         assert_eq!(drained.len(), n);
 
         eprintln!(
-            "V7-F6: drain_sorted({} entries): {:.2}MB RAM, {:?}. \
+            "V7-F6: read_sorted({} entries): {:.2}MB RAM, {:?}. \
              At 10M entries this would be {:.0}MB.",
             n,
             ram_mb,
@@ -709,16 +698,16 @@ fn test_v7_f6a_drain_sorted_memory_scaling() {
     }
 }
 
-/// V7-F6b: drain_sorted is called TWICE during finalize.
+/// V7-F6b: read_sorted is called TWICE during finalize.
 ///
-/// LsmTree::finalize() calls builder.drain_sorted() to get all entries,
+/// LsmTree::finalize() calls builder.read_sorted() to get all entries,
 /// then iterates them to build pages. There's no streaming alternative.
 /// If finalize also rebuilds the bloom (iterating entries again), that's
 /// 3× data traversal for a single finalize call.
 #[test]
 fn test_v7_f6b_finalize_data_traversal_count() {
     // We can't instrument the internal code, but we can verify that:
-    // 1. drain_sorted returns all entries (1 full traversal)
+    // 1. read_sorted returns all entries (1 full traversal)
     // 2. bloom rebuild iterates all entries (another traversal, done in finalize)
     // This test proves the data exists in memory as a full Vec.
 
@@ -729,7 +718,7 @@ fn test_v7_f6b_finalize_data_traversal_count() {
     }
 
     let start = Instant::now();
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     let drain_time = start.elapsed();
 
     // Simulate the bloom rebuild that finalize() does
@@ -759,44 +748,47 @@ fn test_v7_f6b_finalize_data_traversal_count() {
 // out of order, binary search silently returns wrong results.
 // ============================================================================
 
-/// V7-F7a: Out-of-order add_page now panics in debug builds.
+/// V7-F7a: Out-of-order add_page now returns Err.
 #[test]
-#[should_panic(expected = "ascending")]
 fn test_v7_f7a_out_of_order_add_page_breaks_search() {
     let mut meta = MetaIndex::new();
 
-    // Add pages OUT OF ORDER — should panic on the second add_page
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2));
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+    // Add pages OUT OF ORDER — should return Err on the second add_page
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+        .unwrap();
+    let result = meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+    assert!(result.is_err(), "Out-of-order add_page must return Err");
 }
 
-/// V7-F7b: add_page now rejects unsorted input with a debug_assert panic.
+/// V7-F7b: add_page now rejects unsorted input with an Err.
 #[test]
-#[should_panic(expected = "ascending")]
 fn test_v7_f7b_add_page_accepts_unsorted_input() {
     let mut meta = MetaIndex::new();
 
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1));
-    // This should panic — min_hash(0) < previous max_hash(199)
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+        .unwrap();
+    // This should return Err — min_hash(0) < previous max_hash(199)
+    let result = meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+    assert!(result.is_err(), "Unsorted add_page must return Err");
 }
 
-/// V7-F7c: Overlapping page ranges now trigger debug_assert panic.
+/// V7-F7c: Overlapping page ranges now return Err.
 #[test]
-#[should_panic(expected = "ascending")]
 fn test_v7_f7c_overlapping_page_ranges_accepted() {
     let mut meta = MetaIndex::new();
 
     // Page 0: [0, 199]
-    meta.add_page(test_hash(0), test_hash(199), BlockId::new(0));
-    // Page 1: [100, 299] — overlaps with page 0 on [100, 199], should panic
-    meta.add_page(test_hash(100), test_hash(299), BlockId::new(1));
+    meta.add_page(test_hash(0), test_hash(199), BlockId::new(0))
+        .unwrap();
+    // Page 1: [100, 299] — overlaps with page 0 on [100, 199], should return Err
+    let result = meta.add_page(test_hash(100), test_hash(299), BlockId::new(1));
+    assert!(result.is_err(), "Overlapping add_page must return Err");
 }
 
 // ============================================================================
 // V7-F8: finalize() Rebuilds Bloom (2× Data Scan) [HIGH]
 //
-// finalize() calls drain_sorted() to get all entries, builds pages,
+// finalize() calls read_sorted() to get all entries, builds pages,
 // then REBUILDS the bloom from scratch by iterating all_entries again.
 // This is a 2× data scan that could be avoided by reusing the builder's
 // existing bloom.
@@ -838,32 +830,20 @@ fn test_v7_f8a_bloom_rebuild_cost() {
 // or have valid offsets. A corrupted page could pass through undetected.
 // ============================================================================
 
-/// V7-F9a: Manually construct a page with unsorted entries — no validation.
+/// V7-F9a: Direct struct construction is no longer possible — fields are private.
+/// Verify that try_new rejects empty entries and new() works for valid entries.
 #[test]
 fn test_v7_f9a_manual_page_construction_no_validation() {
-    // IndexPage has pub fields — anyone can construct an invalid page
-    let page = IndexPage {
-        min_hash: test_hash(100),
-        max_hash: test_hash(0), // INVALID: max < min
-        entries: vec![
-            make_entry(200), // Outside declared range!
-            make_entry(50),  // Unsorted AND outside range
-        ],
-    };
+    // IndexPage fields are now private — direct construction is impossible.
+    // Verify that try_new rejects empty entries.
+    let result = IndexPage::try_new(vec![]);
+    assert!(result.is_err(), "try_new(vec![]) must return Err");
 
-    // No validation occurs — the page exists
-    assert_eq!(page.entries.len(), 2);
-
-    // The find() function may return wrong results on this corrupt page
-    // because binary search assumes sorted order
-    let result = page.find(&test_hash(200));
-
-    // Binary search on unsorted data is undefined — result is unpredictable
-    eprintln!(
-        "V7-F9: Manually constructed invalid page (max<min, unsorted entries) — \
-         no validation. find(200) = {:?}. Page has pub fields with no invariant enforcement.",
-        result.map(|e| e.offset)
-    );
+    // Verify that try_new() still works for valid entries
+    let page = IndexPage::try_new(vec![make_entry(200), make_entry(50)]).unwrap();
+    // Entries are sorted by try_new(), so find works correctly
+    assert!(page.find(&test_hash(200)).is_some());
+    assert!(page.find(&test_hash(50)).is_some());
 }
 
 /// V7-F9b: Page with entries outside declared [min_hash, max_hash] range.
@@ -875,8 +855,10 @@ fn test_v7_f9a_manual_page_construction_no_validation() {
 fn test_v7_f9b_entry_outside_page_range_invisible() {
     // Build a valid multi-page MetaIndex
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1));
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+        .unwrap();
 
     // Page 0 correctly contains entries 0..100
     // But what if page 1 has an entry with hash=500?
@@ -1193,7 +1175,7 @@ fn test_v7_bench_finalize_scaling() {
 /// V7-EDGE-1: Zero-entry builder finalize succeeds.
 #[test]
 fn test_v7_edge_zero_entry_finalize() {
-    let tree = LsmTree::new_default().unwrap();
+    let mut tree = LsmTree::new_default().unwrap();
     let reader = tree.finalize().unwrap();
     assert!(reader.lookup(&test_hash(0)).unwrap().is_none());
 }
@@ -1217,7 +1199,7 @@ fn test_v7_edge_exact_batch_size() {
         builder.insert(make_entry(i)).unwrap();
     }
     assert_eq!(builder.entry_count(), 1000);
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(drained.len(), 1000);
 }
 
@@ -1229,7 +1211,7 @@ fn test_v7_edge_batch_size_plus_one() {
         builder.insert(make_entry(i)).unwrap();
     }
     assert_eq!(builder.entry_count(), 1001);
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(drained.len(), 1001);
 }
 
@@ -1245,18 +1227,17 @@ fn test_v7_edge_all_same_hash() {
             .unwrap();
     }
 
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     // Redb deduplicates by hash key — only 1 unique entry survives
     assert_eq!(
         drained.len(),
         1,
         "V7-EDGE: 500 entries with same hash → {} after Redb dedup. \
-         Last-write-wins: offset should be {}.",
+         First-write-wins: offset should be 0.",
         drained.len(),
-        499 * 1024
     );
-    // Last-write-wins: the last inserted entry's offset should survive
-    assert_eq!(drained[0].offset, 499 * 1024);
+    // First-write-wins: the first inserted entry's offset should survive
+    assert_eq!(drained[0].offset, 0);
 }
 
 /// V7-EDGE-6: Consecutive hashes — verify sort order is correct.
@@ -1269,7 +1250,7 @@ fn test_v7_edge_sort_order_correctness() {
         builder.insert(make_entry(i)).unwrap();
     }
 
-    let drained = builder.drain_sorted().unwrap();
+    let drained = builder.read_sorted().unwrap();
     assert_eq!(drained.len(), 5000);
 
     // Must be sorted by hash
@@ -1315,8 +1296,8 @@ fn test_v7_edge_extreme_hash_values() {
 #[test]
 fn test_v7_edge_exact_entries_per_page() {
     let entries: Vec<IndexEntry> = (0..ENTRIES_PER_PAGE as u64).map(make_entry).collect();
-    let page = IndexPage::new(entries);
-    assert_eq!(page.entries.len(), ENTRIES_PER_PAGE);
+    let page = IndexPage::try_new(entries).unwrap();
+    assert_eq!(page.len(), ENTRIES_PER_PAGE);
 
     // First and last should be findable
     assert!(page.find(&test_hash(0)).is_some());

@@ -26,6 +26,7 @@
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{IndexEntry, IndexPage, IndexStore, LsmTree, MetaIndex};
+use std::path::Path;
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -103,14 +104,13 @@ fn test_g1_builder_new_uses_expect_on_io() {
     );
 }
 
-/// G2: `IndexPage::new()` panics on empty input via `assert!`.
-///
-/// The `try_new()` fallible alternative exists, but production code
-/// (builder.rs finalize) calls `IndexPage::new()`, not `try_new()`.
+/// G2: `IndexPage::try_new()` returns Err on empty input (panicking `new()` removed).
 #[test]
-#[should_panic(expected = "IndexPage cannot be empty")]
-fn test_g2_index_page_new_panics_on_empty() {
-    let _ = IndexPage::new(vec![]);
+fn test_g2_index_page_try_new_returns_err_on_empty() {
+    assert!(
+        IndexPage::try_new(vec![]).is_err(),
+        "try_new with empty vec must return Err"
+    );
 }
 
 /// G3: `IndexPage::try_new()` uses `.unwrap()` internally.
@@ -136,34 +136,6 @@ fn test_g3_try_new_contains_unwrap() {
         "FINDING G3 CONFIRMED: IndexPage::try_new() contains .unwrap() calls. \
          Per Iron Law 2, guarded unwraps must be converted to ok_or_else(). \
          The 'safe' alternative is not fully safe."
-    );
-}
-
-/// G4: `IndexPage::new()` contains `.unwrap()` guarded only by `assert!`.
-///
-/// If the assert somehow passes with an empty vec (impossible today, but
-/// a refactor removing the assert would expose the unwrap), this panics.
-#[test]
-fn test_g4_index_page_new_contains_unwrap() {
-    let source = include_str!("../src/lib.rs");
-
-    let new_start = source
-        .find("pub fn new(mut entries: Vec<IndexEntry>) -> Self")
-        .expect("IndexPage::new must exist");
-    let new_body = &source[new_start..];
-    let func_end = new_body.find("\n    pub fn ").unwrap_or(new_body.len());
-    let new_code = &new_body[..func_end];
-
-    let has_unwrap = new_code.contains(".unwrap()");
-    let has_assert = new_code.contains("assert!");
-
-    assert!(
-        has_unwrap,
-        "FINDING G4 CONFIRMED: IndexPage::new() uses .unwrap() on .first()/.last()"
-    );
-    assert!(
-        has_assert,
-        "The unwrap is 'guarded' by assert!, not by Result propagation"
     );
 }
 
@@ -425,8 +397,8 @@ fn test_j3_single_vs_batch_performance_gap() {
     let batch_elapsed = start_batch.elapsed();
 
     // Both should produce same data
-    let sorted1 = store1.drain_sorted().unwrap();
-    let sorted2 = store2.drain_sorted().unwrap();
+    let sorted1 = store1.read_sorted().unwrap();
+    let sorted2 = store2.read_sorted().unwrap();
     assert_eq!(sorted1.len(), sorted2.len());
 
     let speedup = single_elapsed.as_micros() as f64 / batch_elapsed.as_micros().max(1) as f64;
@@ -542,22 +514,27 @@ fn test_l2_api_fossils_from_lsm() {
     );
 }
 
-/// L3: config.rs still references memtable sizing and block cache (LSM concepts).
+/// L3: config.rs dead code has been removed.
+///
+/// REMEDIATION: config.rs deleted — LSM terminology (memtable_size, block_cache_size,
+/// bloom_filter_bits) no longer ships. Module and exports removed from lib.rs.
 #[test]
 fn test_l3_config_lsm_terminology() {
-    let source = include_str!("../src/config.rs");
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config.rs");
+    assert!(
+        !config_path.exists(),
+        "REMEDIATION L3 VERIFIED: config.rs should be removed — dead code with LSM terminology"
+    );
 
+    let lib_source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
     assert!(
-        source.contains("memtable_size"),
-        "FINDING L3a: IndexConfig has 'memtable_size' field — LSM terminology in Redb config"
+        !lib_source.contains("mod config"),
+        "mod config should be removed from lib.rs"
     );
     assert!(
-        source.contains("block_cache_size"),
-        "FINDING L3b: IndexConfig has 'block_cache_size' field — LSM terminology in Redb config"
-    );
-    assert!(
-        source.contains("bloom_filter_bits"),
-        "FINDING L3c: IndexConfig has 'bloom_filter_bits' field — not used by Redb B-tree"
+        !lib_source.contains("IndexConfig"),
+        "IndexConfig should not be exported from lib.rs"
     );
 }
 
@@ -725,8 +702,8 @@ fn test_n1_reader_load_page_has_unwrap() {
 
 /// N2: lib.rs IndexPage methods have .unwrap() in production code.
 ///
-/// IndexPage::new() and IndexPage::try_new() both use .unwrap() on
-/// .first() and .last() — 4 total unwrap calls in production code.
+/// IndexPage::try_new() uses .unwrap() on .first() and .last() — 2 total
+/// unwrap calls in production code (panicking new() was removed).
 #[test]
 fn test_n2_index_page_methods_have_unwrap() {
     let source = include_str!("../src/lib.rs");
@@ -745,9 +722,9 @@ fn test_n2_index_page_methods_have_unwrap() {
         .count();
 
     assert!(
-        unwrap_in_production >= 4,
+        unwrap_in_production >= 2,
         "FINDING N2 CONFIRMED: lib.rs has {} .unwrap() calls in production code \
-         (IndexPage::new and IndexPage::try_new, .first()/.last() calls). \
+         (IndexPage::try_new, .first()/.last() calls). \
          Per Iron Law 2, all must be converted to ok_or_else().",
         unwrap_in_production
     );
@@ -766,9 +743,7 @@ fn test_n3_comprehensive_panic_audit() {
         ("lsm_tree.rs", include_str!("../src/lsm_tree.rs")),
         ("lib.rs", include_str!("../src/lib.rs")),
         ("bloom_serde.rs", include_str!("../src/bloom_serde.rs")),
-        ("config.rs", include_str!("../src/config.rs")),
         ("error.rs", include_str!("../src/error.rs")),
-        ("metrics.rs", include_str!("../src/metrics.rs")),
     ];
 
     let mut total_violations = 0;
@@ -857,12 +832,12 @@ fn test_o2_redb_dedup_correctness() {
         "FIX O2 VERIFIED: entry_count is 1 (tracks unique keys, not inserts)"
     );
 
-    // drain_sorted should have 1 entry (Redb B-tree dedup by key)
-    let sorted = store.drain_sorted().unwrap();
+    // read_sorted should have 1 entry (Redb B-tree dedup by key)
+    let sorted = store.read_sorted().unwrap();
     assert_eq!(
         sorted.len(),
         1,
-        "drain_sorted must return 1 entry (deduplicated by key)"
+        "read_sorted must return 1 entry (deduplicated by key)"
     );
 
     // entry_count now matches actual unique entries
@@ -906,7 +881,7 @@ fn test_o3_entry_count_bloom_sizing_mismatch() {
         "FIX O3 VERIFIED: entry_count is 1 (only 1 unique key inserted)"
     );
 
-    let sorted = store.drain_sorted().unwrap();
+    let sorted = store.read_sorted().unwrap();
     assert_eq!(sorted.len(), 1, "Only 1 unique entry exists");
 
     assert_eq!(
@@ -925,7 +900,7 @@ fn test_o3_entry_count_bloom_sizing_mismatch() {
 /// P1: Empty index finalization — verify graceful handling.
 #[test]
 fn test_p1_empty_index_finalization() {
-    let tree = LsmTree::new_default().unwrap();
+    let mut tree = LsmTree::new_default().unwrap();
     let reader = tree.finalize().unwrap();
 
     // Lookup on empty index should return None, not error
@@ -973,8 +948,10 @@ fn test_p2_large_bloom_filter_sizing_causes_panic() {
 #[test]
 fn test_p3_page_boundary_lookup() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1));
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+        .unwrap();
 
     // Exact boundary: hash 99 (last in page 0)
     assert_eq!(

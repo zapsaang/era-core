@@ -157,9 +157,12 @@ async fn test_embedded_finalize_writes_typed_blocks() {
 #[test]
 fn test_meta_index_rkyv_roundtrip() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1));
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2));
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+        .unwrap();
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+        .unwrap();
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+        .unwrap();
 
     // Add a bloom filter
     let mut bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
@@ -237,13 +240,14 @@ fn test_index_page_binary_search_edge_cases() {
     use era_index::IndexEntry;
 
     // Single entry page
-    let page = era_index::IndexPage::new(vec![IndexEntry::new(
+    let page = era_index::IndexPage::try_new(vec![IndexEntry::new(
         test_hash(42),
         VolumeId::new(),
         BlockId::new(0),
         0,
         1024,
-    )]);
+    )])
+    .unwrap();
     assert!(page.find(&test_hash(42)).is_some());
     assert!(page.find(&test_hash(41)).is_none());
     assert!(page.find(&test_hash(43)).is_none());
@@ -252,7 +256,7 @@ fn test_index_page_binary_search_edge_cases() {
     let entries: Vec<IndexEntry> = (0..5)
         .map(|i| IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(i), 0, 1024))
         .collect();
-    let page = era_index::IndexPage::new(entries);
+    let page = era_index::IndexPage::try_new(entries).unwrap();
     // binary_search_by_key will find one of them
     assert!(page.find(&test_hash(100)).is_some());
 
@@ -273,7 +277,7 @@ fn test_index_page_binary_search_edge_cases() {
             1024,
         ),
     ];
-    let page = era_index::IndexPage::new(entries);
+    let page = era_index::IndexPage::try_new(entries).unwrap();
     assert!(page.find(&ChunkHash::from_bytes([0u8; 32])).is_some());
     assert!(page.find(&ChunkHash::from_bytes([0xFF; 32])).is_some());
     assert!(page.find(&ChunkHash::from_bytes([0x80; 32])).is_none());
@@ -459,10 +463,9 @@ async fn test_index_page_encryption_roundtrip() {
     let footer = reader.footer().unwrap();
     assert!(footer.has_index(), "Footer must indicate index presence");
 
-    let recovered =
-        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
-            .await
-            .unwrap();
+    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+        .await
+        .unwrap();
 
     // Verify ALL 200 entries are recoverable
     for i in 0..200u64 {
@@ -585,12 +588,14 @@ fn test_empty_bloom_filter_rejected() {
     assert!(result.is_err(), "Empty bloom filter must be rejected");
 }
 
-/// Verify that IndexPage with zero entries panics on construction
-/// (this is the expected behavior from the current code).
+/// Verify that IndexPage with zero entries returns Err on construction
+/// (panicking new() has been removed, only try_new() exists).
 #[test]
-#[should_panic(expected = "IndexPage cannot be empty")]
 fn test_empty_index_page_panics() {
-    let _ = era_index::IndexPage::new(vec![]);
+    assert!(
+        era_index::IndexPage::try_new(vec![]).is_err(),
+        "try_new with empty vec must return Err"
+    );
 }
 
 /// Large index: 10,000 entries to verify pagination works correctly.
@@ -646,10 +651,9 @@ async fn test_large_index_embedded_finalize() {
 
     // Recover and verify all entries
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
-    let recovered =
-        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
-            .await
-            .unwrap();
+    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+        .await
+        .unwrap();
 
     // Sample verification (checking all 10k would be slow)
     for i in (0..entry_count).step_by(100) {
@@ -966,7 +970,7 @@ fn test_insert_after_finalize_rejected() {
 /// LsmTree::finalize on empty tree should produce a valid empty reader.
 #[test]
 fn test_finalize_empty_tree() {
-    let tree = era_index::LsmTree::new_default().unwrap();
+    let mut tree = era_index::LsmTree::new_default().unwrap();
     let reader = tree.finalize().unwrap();
 
     // Empty reader should not find anything
@@ -1177,10 +1181,9 @@ async fn test_multi_page_index_recovery() {
         .unwrap();
 
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
-    let recovered =
-        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
-            .await
-            .unwrap();
+    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+        .await
+        .unwrap();
 
     // Verify entries from each page
     let test_indices = [0, 1000, 5000, 8191, 8192, 10000, 15000, 19999];
