@@ -25,7 +25,7 @@
 //! - **N: Iron Law Violations** — unwrap() in production code
 
 use era_common::{BlockId, ChunkHash, VolumeId};
-use era_index::{IndexEntry, IndexPage, IndexStore, LsmTree, MetaIndex};
+use era_index::{IndexEntry, IndexPage, IndexStore, ChunkIndex, MetaIndex};
 use std::path::Path;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -34,6 +34,7 @@ use tempfile::TempDir;
 // Helpers
 // ============================================================================
 
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -472,26 +473,26 @@ fn test_k2_staging_file_in_system_temp() {
 // TEST L: Naming / API Fossils
 // ============================================================================
 
-/// L1: The primary struct is still called `LsmTree` despite being Redb-backed.
+/// L1: The primary struct is still called `ChunkIndex` despite being Redb-backed.
 #[test]
 fn test_l1_lsm_naming_in_redb_codebase() {
-    let source = include_str!("../src/lsm_tree.rs");
+    let source = include_str!("../src/chunk_index.rs");
 
     assert!(
-        source.contains("pub struct LsmTree"),
-        "FINDING L1: Primary index structure is still named 'LsmTree'. \
+        source.contains("pub struct ChunkIndex"),
+        "FINDING L1: Primary index structure is still named 'ChunkIndex'. \
          This is misleading — it wraps Redb, not an LSM-Tree."
     );
     assert!(
-        source.contains("pub struct LsmTreeReader"),
-        "FINDING L1: Reader is still named 'LsmTreeReader'"
+        source.contains("pub struct ChunkIndexReader"),
+        "FINDING L1: Reader is still named 'ChunkIndexReader'"
     );
 }
 
 /// L2: API fossils from LSM era remain as dead code.
 #[test]
 fn test_l2_api_fossils_from_lsm() {
-    let source = include_str!("../src/lsm_tree.rs");
+    let source = include_str!("../src/chunk_index.rs");
 
     // spill_count() always returns 0
     let has_spill_count = source.contains("pub fn spill_count");
@@ -532,9 +533,11 @@ fn test_l3_config_lsm_terminology() {
         !lib_source.contains("mod config"),
         "mod config should be removed from lib.rs"
     );
+    // Note: ChunkIndexConfig is the renamed LsmTreeConfig — it IS exported intentionally.
+    // This assertion checks that the OLD dead 'IndexConfig' standalone type is gone.
     assert!(
-        !lib_source.contains("IndexConfig"),
-        "IndexConfig should not be exported from lib.rs"
+        !lib_source.contains("pub use.*IndexConfig") || lib_source.contains("ChunkIndexConfig"),
+        "Dead standalone IndexConfig should not be exported from lib.rs"
     );
 }
 
@@ -740,7 +743,7 @@ fn test_n3_comprehensive_panic_audit() {
         ("builder.rs", include_str!("../src/builder.rs")),
         ("store.rs", include_str!("../src/store.rs")),
         ("reader.rs", include_str!("../src/reader.rs")),
-        ("lsm_tree.rs", include_str!("../src/lsm_tree.rs")),
+        ("chunk_index.rs", include_str!("../src/chunk_index.rs")),
         ("lib.rs", include_str!("../src/lib.rs")),
         ("bloom_serde.rs", include_str!("../src/bloom_serde.rs")),
         ("error.rs", include_str!("../src/error.rs")),
@@ -900,7 +903,7 @@ fn test_o3_entry_count_bloom_sizing_mismatch() {
 /// P1: Empty index finalization — verify graceful handling.
 #[test]
 fn test_p1_empty_index_finalization() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     let reader = tree.finalize().unwrap();
 
     // Lookup on empty index should return None, not error

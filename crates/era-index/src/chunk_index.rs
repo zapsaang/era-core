@@ -1,4 +1,4 @@
-//! # LsmTree — Redb-backed Index Orchestrator
+//! # ChunkIndex — Redb-backed Index Orchestrator
 //!
 //! Unified orchestrator for the ERA index implementation.
 //! Uses Redb 2.1 for ACID-compliant staging per RFC-023.
@@ -21,16 +21,16 @@ use era_volume::VolumeReader;
 
 use crate::{IndexBuilder, IndexEntry, IndexLocation, IndexReader, MetaIndex};
 
-/// Configuration for LsmTree
+/// Configuration for ChunkIndex
 #[derive(Debug, Clone)]
-pub struct LsmTreeConfig {
+pub struct ChunkIndexConfig {
     /// Memory limit for bloom filter sizing (bytes)
     pub mem_limit: usize,
     /// Directory for Redb staging file
     pub temp_dir: PathBuf,
 }
 
-impl Default for LsmTreeConfig {
+impl Default for ChunkIndexConfig {
     fn default() -> Self {
         Self {
             mem_limit: 64 * 1024 * 1024, // 64MB
@@ -49,12 +49,12 @@ impl Default for LsmTreeConfig {
 /// ## Usage
 ///
 /// ```no_run
-/// use era_index::{LsmTree, LsmTreeConfig, IndexEntry};
+/// use era_index::{ChunkIndex, ChunkIndexConfig, IndexEntry};
 /// use era_common::{ChunkHash, VolumeId, BlockId};
 ///
 /// # fn example() -> era_common::Result<()> {
-/// let config = LsmTreeConfig::default();
-/// let mut tree = LsmTree::new(config)?;
+/// let config = ChunkIndexConfig::default();
+/// let mut tree = ChunkIndex::new(config)?;
 ///
 /// // Insert entries during archive creation
 /// let entry = IndexEntry::new(
@@ -77,26 +77,26 @@ impl Default for LsmTreeConfig {
 /// # Ok(())
 /// # }
 /// ```
-pub struct LsmTree {
+pub struct ChunkIndex {
     /// Index builder (write path) — backed by Redb
     builder: Option<IndexBuilder>,
     /// Index reader (read path)
     reader: Option<Arc<RwLock<IndexReader>>>,
     /// State tracking
-    state: TreeState,
+    state: IndexState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TreeState {
+enum IndexState {
     /// Building index (write mode)
     Building,
     /// Index finalized (read mode)
     Finalized,
 }
 
-impl LsmTree {
-    /// Create a new LsmTree for index construction
-    pub fn new(config: LsmTreeConfig) -> Result<Self> {
+impl ChunkIndex {
+    /// Create a new ChunkIndex for index construction
+    pub fn new(config: ChunkIndexConfig) -> Result<Self> {
         // Use IndexBuilder::new() which creates a unique temp Redb file
         // via tempfile::Builder (avoids filename collisions in parallel tests)
         let builder = IndexBuilder::new(config.mem_limit)?;
@@ -104,18 +104,18 @@ impl LsmTree {
         Ok(Self {
             builder: Some(builder),
             reader: None,
-            state: TreeState::Building,
+            state: IndexState::Building,
         })
     }
 
     /// Create with default configuration
     pub fn new_default() -> Result<Self> {
-        Self::new(LsmTreeConfig::default())
+        Self::new(ChunkIndexConfig::default())
     }
 
     /// Insert an entry into the index
     pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
-        if self.state != TreeState::Building {
+        if self.state != IndexState::Building {
             return Err(era_common::EraError::InvalidFormat(
                 "Cannot insert into finalized index".to_string(),
             ));
@@ -131,12 +131,12 @@ impl LsmTree {
     /// Check if a hash exists in the Bloom filter (fast negative lookup)
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         match self.state {
-            TreeState::Building => self
+            IndexState::Building => self
                 .builder
                 .as_ref()
                 .map(|b| b.bloom_contains(hash))
                 .unwrap_or(false),
-            TreeState::Finalized => self
+            IndexState::Finalized => self
                 .reader
                 .as_ref()
                 .map(|r| r.read().bloom_contains(hash))
@@ -167,8 +167,8 @@ impl LsmTree {
     /// On success, the tree transitions to `Finalized` state and further
     /// inserts/finalizations will return errors. On failure, the tree
     /// remains in `Building` state and finalize can be retried.
-    pub fn finalize(&mut self) -> Result<LsmTreeReader> {
-        if self.state != TreeState::Building {
+    pub fn finalize(&mut self) -> Result<ChunkIndexReader> {
+        if self.state != IndexState::Building {
             return Err(era_common::EraError::InvalidFormat(
                 "Index already finalized".to_string(),
             ));
@@ -194,7 +194,7 @@ impl LsmTree {
         tracing::info!("Index finalized: {} total entries", entries_count);
 
         self.reader = Some(Arc::new(RwLock::new(reader)));
-        self.state = TreeState::Finalized;
+        self.state = IndexState::Finalized;
 
         let reader_arc = self
             .reader
@@ -204,7 +204,7 @@ impl LsmTree {
             })?
             .clone();
 
-        Ok(LsmTreeReader { reader: reader_arc })
+        Ok(ChunkIndexReader { reader: reader_arc })
     }
 
     /// Recover an index from a volume (cold recovery)
@@ -213,12 +213,12 @@ impl LsmTree {
         session: &KeySession,
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
-    ) -> Result<LsmTreeReader> {
+    ) -> Result<ChunkIndexReader> {
         let reader =
             IndexReader::recover_from_volume(volume_reader, session, volume_key, nonce_context)
                 .await?;
 
-        Ok(LsmTreeReader {
+        Ok(ChunkIndexReader {
             reader: Arc::new(RwLock::new(reader)),
         })
     }
@@ -228,11 +228,11 @@ impl LsmTree {
 ///
 /// Provides fast lookups via Bloom filters and hierarchical indexing.
 #[derive(Clone)]
-pub struct LsmTreeReader {
+pub struct ChunkIndexReader {
     reader: Arc<RwLock<IndexReader>>,
 }
 
-impl LsmTreeReader {
+impl ChunkIndexReader {
     /// Lookup a chunk hash in the index
     pub fn lookup(&self, hash: &ChunkHash) -> Result<Option<IndexLocation>> {
         self.reader.read().lookup(hash)
@@ -262,15 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn test_lsm_tree_creation() {
-        let tree = LsmTree::new_default().unwrap();
-        assert_eq!(tree.state, TreeState::Building);
+    fn test_chunk_index_creation() {
+        let tree = ChunkIndex::new_default().unwrap();
+        assert_eq!(tree.state, IndexState::Building);
         assert_eq!(tree.spill_count(), 0);
     }
 
     #[test]
-    fn test_lsm_tree_insert() {
-        let mut tree = LsmTree::new_default().unwrap();
+    fn test_chunk_index_insert() {
+        let mut tree = ChunkIndex::new_default().unwrap();
 
         let entry = IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(0), 0, 4096);
 
@@ -280,8 +280,8 @@ mod tests {
     }
 
     #[test]
-    fn test_lsm_tree_reader_bloom_contains_efficiency() {
-        let mut tree = LsmTree::new_default().unwrap();
+    fn test_chunk_index_reader_bloom_contains_efficiency() {
+        let mut tree = ChunkIndex::new_default().unwrap();
 
         for i in 0..100u64 {
             let entry = IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i), 0, 4096);

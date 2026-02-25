@@ -29,7 +29,7 @@
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexPage, IndexStore, LsmTree, LsmTreeConfig, MetaIndex,
+    IndexBuilder, IndexEntry, IndexPage, IndexStore, ChunkIndex, ChunkIndexConfig, MetaIndex,
 };
 use std::path::Path;
 use std::time::Instant;
@@ -39,6 +39,7 @@ use tempfile::TempDir;
 // Helpers
 // ============================================================================
 
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -193,7 +194,7 @@ fn test_q4_total_infallible_unwrap_epidemic() {
         ("reader.rs", include_str!("../src/reader.rs")),
         ("bloom_serde.rs", include_str!("../src/bloom_serde.rs")),
         ("builder.rs", include_str!("../src/builder.rs")),
-        ("lsm_tree.rs", include_str!("../src/lsm_tree.rs")),
+        ("chunk_index.rs", include_str!("../src/chunk_index.rs")),
         ("lib.rs", include_str!("../src/lib.rs")),
     ];
 
@@ -684,8 +685,8 @@ fn test_w1_index_config_disconnected_from_builder() {
         "mod config should be removed from lib.rs"
     );
     assert!(
-        !lib_source.contains("IndexConfig"),
-        "IndexConfig should not be exported from lib.rs"
+        !lib_source.contains("pub use config"),
+        "Dead standalone IndexConfig should not be exported from lib.rs"
     );
 }
 
@@ -732,16 +733,16 @@ fn test_w3_index_metrics_is_dead_code() {
     );
 }
 
-/// W4: LsmTreeConfig.temp_dir is ignored — builder uses tempfile::Builder instead.
+/// W4: ChunkIndexConfig.temp_dir is ignored — builder uses tempfile::Builder instead.
 #[test]
-fn test_w4_lsm_tree_config_temp_dir_ignored() {
-    let source = include_str!("../src/lsm_tree.rs");
+fn test_w4_chunk_index_config_temp_dir_ignored() {
+    let source = include_str!("../src/chunk_index.rs");
     let production_code = extract_production_code(source);
 
-    // Find LsmTree::new
+    // Find ChunkIndex::new
     let fn_start = production_code
-        .find("pub fn new(config: LsmTreeConfig)")
-        .expect("LsmTree::new must exist");
+        .find("pub fn new(config: ChunkIndexConfig)")
+        .expect("ChunkIndex::new must exist");
     let fn_end = production_code[fn_start..]
         .find("\n    pub fn ")
         .map(|i| fn_start + i)
@@ -753,9 +754,9 @@ fn test_w4_lsm_tree_config_temp_dir_ignored() {
 
     assert!(
         !uses_temp_dir,
-        "FINDING W4 CONFIRMED: LsmTree::new() ignores config.temp_dir. \
+        "FINDING W4 CONFIRMED: ChunkIndex::new() ignores config.temp_dir. \
          It delegates to IndexBuilder::new(config.mem_limit) which uses \
-         tempfile::Builder (always goes to system /tmp). The LsmTreeConfig.temp_dir \
+         tempfile::Builder (always goes to system /tmp). The ChunkIndexConfig.temp_dir \
          field is dead configuration."
     );
 }
@@ -823,13 +824,13 @@ fn test_x2_index_page_does_not_dedup() {
     );
 }
 
-/// X3: LsmTree state machine — insert after finalize fails correctly.
+/// X3: ChunkIndex state machine — insert after finalize fails correctly.
 ///
-/// LsmTree::finalize() consumes self, so you can't call insert() after.
+/// ChunkIndex::finalize() consumes self, so you can't call insert() after.
 /// But let's verify the state check INSIDE finalize works correctly.
 #[test]
-fn test_x3_lsm_tree_state_machine() {
-    let mut tree = LsmTree::new_default().unwrap();
+fn test_x3_chunk_index_state_machine() {
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Insert works in Building state
     tree.insert(make_entry(1)).unwrap();
@@ -847,12 +848,12 @@ fn test_x3_lsm_tree_state_machine() {
     assert!(result2.is_some(), "Entry 2 should be in finalized index");
 }
 
-/// X4: LsmTree finalize with large dataset exercises the batch flush path.
+/// X4: ChunkIndex finalize with large dataset exercises the batch flush path.
 ///
 /// Insert > BATCH_SIZE entries, verify all survive finalization.
 #[test]
 fn test_x4_finalize_batch_boundary() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Insert 2500 entries (crossing 2 batch boundaries at BATCH_SIZE=1000)
     for i in 0..2500u64 {
@@ -1198,15 +1199,15 @@ fn test_z13_destroy_removes_file() {
     assert!(!db_path.exists(), "destroy() must remove the Redb file");
 }
 
-/// Z14: LsmTree with custom config.
+/// Z14: ChunkIndex with custom config.
 #[test]
-fn test_z14_lsm_tree_custom_config() {
-    let config = LsmTreeConfig {
+fn test_z14_chunk_index_custom_config() {
+    let config = ChunkIndexConfig {
         mem_limit: 1024 * 1024,
         temp_dir: std::env::temp_dir(),
     };
-    let tree = LsmTree::new(config);
-    assert!(tree.is_ok(), "LsmTree with custom config should succeed");
+    let tree = ChunkIndex::new(config);
+    assert!(tree.is_ok(), "ChunkIndex with custom config should succeed");
 }
 
 // ============================================================================
@@ -1308,11 +1309,11 @@ fn test_aa3_batch_size_not_configurable() {
 /// The finalize method is async — it requires a Tokio runtime. This means
 /// IndexBuilder cannot be used in synchronous contexts (CLI tools, tests
 /// without async runtime) without wrapping in block_on.
-/// Meanwhile, LsmTree::finalize() is sync — API inconsistency.
+/// Meanwhile, ChunkIndex::finalize() is sync — API inconsistency.
 #[test]
 fn test_aa4_finalize_async_sync_inconsistency() {
     let builder_source = include_str!("../src/builder.rs");
-    let lsm_source = include_str!("../src/lsm_tree.rs");
+    let lsm_source = include_str!("../src/chunk_index.rs");
 
     let builder_finalize_async = builder_source.contains("pub async fn finalize");
     let lsm_finalize_sync = lsm_source.contains("pub fn finalize(&mut self)");
@@ -1320,14 +1321,14 @@ fn test_aa4_finalize_async_sync_inconsistency() {
     assert!(builder_finalize_async, "IndexBuilder::finalize is async");
     assert!(
         lsm_finalize_sync,
-        "LsmTree::finalize is sync (retryable via &mut self)"
+        "ChunkIndex::finalize is sync (retryable via &mut self)"
     );
 
     eprintln!(
-        "FINDING AA4: IndexBuilder::finalize is async, LsmTree::finalize is sync. \
+        "FINDING AA4: IndexBuilder::finalize is async, ChunkIndex::finalize is sync. \
          This means: \n\
          - IndexBuilder.finalize() requires a Tokio runtime \n\
-         - LsmTree.finalize() works anywhere \n\
+         - ChunkIndex.finalize() works anywhere \n\
          The two APIs have fundamentally different invocation requirements."
     );
 }
@@ -1346,7 +1347,7 @@ fn test_bb1_total_panic_surface() {
         ("builder.rs", include_str!("../src/builder.rs")),
         ("store.rs", include_str!("../src/store.rs")),
         ("reader.rs", include_str!("../src/reader.rs")),
-        ("lsm_tree.rs", include_str!("../src/lsm_tree.rs")),
+        ("chunk_index.rs", include_str!("../src/chunk_index.rs")),
         ("lib.rs", include_str!("../src/lib.rs")),
         ("bloom_serde.rs", include_str!("../src/bloom_serde.rs")),
         ("error.rs", include_str!("../src/error.rs")),

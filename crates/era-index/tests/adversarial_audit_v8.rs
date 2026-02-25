@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexPage, IndexReader, LsmTree, MetaIndex, ENTRIES_PER_PAGE,
+    IndexBuilder, IndexEntry, IndexPage, IndexReader, ChunkIndex, MetaIndex, ENTRIES_PER_PAGE,
 };
 use rkyv::Deserialize;
 
@@ -25,7 +25,7 @@ use rkyv::Deserialize;
 // Helpers
 // ============================================================================
 
-/// Deterministic test hash using big-endian in last 8 bytes (matches store.rs convention)
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -543,7 +543,7 @@ fn f7a_page_cache_grows_without_limit() {
 #[test]
 fn f8a_benchmark_proof_insert_throughput() {
     // Since benchmarks are disabled, we provide inline performance tests
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let start = Instant::now();
     let count = 50_000u64;
@@ -570,7 +570,7 @@ fn f8a_benchmark_proof_insert_throughput() {
 
 #[test]
 fn f8b_benchmark_proof_lookup_throughput() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let count = 10_000u64;
     for i in 0..count {
@@ -616,7 +616,7 @@ fn f8c_benchmark_proof_finalize_throughput() {
     let counts = [1_000, 10_000, 50_000];
 
     for &count in &counts {
-        let mut tree = LsmTree::new_default().unwrap();
+        let mut tree = ChunkIndex::new_default().unwrap();
         for i in 0..count as u64 {
             tree.insert(make_entry(i)).unwrap();
         }
@@ -841,7 +841,7 @@ fn f12b_from_pages_empty_is_valid() {
 //   - builder.rs tests: bytes[..8] with to_le_bytes
 //   - store.rs tests:   bytes[24..32] with to_be_bytes
 //   - reader.rs tests:  bytes[..8] with to_le_bytes
-//   - lsm_tree.rs tests: bytes[24..32] with to_be_bytes
+//   - chunk_index.rs tests: bytes[24..32] with to_be_bytes
 //
 // This means hash ordering differs between files, and tests that pass
 // locally may fail if functions are composed across test boundaries.
@@ -856,7 +856,7 @@ fn f13a_test_hash_ordering_inconsistency() {
         ChunkHash::from_bytes(bytes)
     }
 
-    // Implementation 2: BE at bytes[24..32] (store.rs, lsm_tree.rs, lib.rs)
+    // Implementation 2: BE at bytes[24..32] (store.rs, chunk_index.rs, lib.rs)
     fn test_hash_be(value: u64) -> ChunkHash {
         let mut bytes = [0u8; 32];
         bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -890,7 +890,7 @@ fn f13a_test_hash_ordering_inconsistency() {
 }
 
 // ============================================================================
-// V8-F14: LsmTree finalize rejects double-finalize but state is inconsistent
+// V8-F14: ChunkIndex finalize rejects double-finalize but state is inconsistent
 //
 // After finalize(), the builder is still Some (finalize only sets state=Finalized).
 // The Redb staging database is not cleaned up until Drop.
@@ -898,7 +898,7 @@ fn f13a_test_hash_ordering_inconsistency() {
 
 #[test]
 fn f14a_double_finalize_rejected() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(make_entry(1)).unwrap();
 
     let _reader = tree.finalize().unwrap();
@@ -910,7 +910,7 @@ fn f14a_double_finalize_rejected() {
 
 #[test]
 fn f14b_insert_after_finalize_rejected() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(make_entry(1)).unwrap();
 
     let _reader = tree.finalize().unwrap();
@@ -921,7 +921,7 @@ fn f14b_insert_after_finalize_rejected() {
 
 #[test]
 fn f14c_finalize_empty_index() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Finalize with zero entries should succeed (empty index is valid)
     let reader = tree.finalize().unwrap();
@@ -999,7 +999,7 @@ fn f16a_concurrent_lookups_correctness() {
     use std::sync::Arc;
     use std::thread;
 
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let count = 10_000u64;
     for i in 0..count {
@@ -1085,7 +1085,7 @@ fn f17a_bloom_zero_false_negatives() {
 
 #[test]
 fn f17b_bloom_zero_false_negatives_after_finalize() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let count = 10_000u64;
     for i in 0..count {
@@ -1237,7 +1237,7 @@ fn f19e_find_page_after_all_pages() {
 
 #[test]
 fn f20a_roundtrip_10k_entries() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let count = 10_000u64;
     let vol = VolumeId::new();
@@ -1293,7 +1293,7 @@ fn f20a_roundtrip_10k_entries() {
 
 #[test]
 fn f20b_roundtrip_with_heavy_dedup() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let vol = VolumeId::new();
 
@@ -1460,7 +1460,7 @@ fn f23d_page_contains_range_boundaries() {
 
 #[test]
 fn f24a_multi_volume_entries_distinguishable() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let vol1 = VolumeId::new();
     let vol2 = VolumeId::new();
@@ -1548,7 +1548,7 @@ fn f25b_first_write_wins_within_batch() {
 
 #[test]
 fn f26a_stress_100k_entries_zero_loss() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let count = 100_000u64;
     let vol = VolumeId::new();
@@ -1646,7 +1646,7 @@ fn f27a_serialization_sizes() {
 
 #[test]
 fn f28a_extreme_hash_values() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // All zeros
     let entry_zero = IndexEntry::new(

@@ -66,7 +66,7 @@ impl IndexReader {
 
     /// Create an in-memory index reader from finalized entries
     ///
-    /// This is used by LsmTree::finalize() to create a reader from Redb entries
+    /// This is used by ChunkIndex::finalize() to create a reader from Redb entries
     /// from merged entries without disk I/O. Entries are chunked into pages of
     /// ENTRIES_PER_PAGE to respect the L2 cache optimization.
     pub fn from_memory(

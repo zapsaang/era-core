@@ -4,7 +4,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use era_common::{BlockId, ChunkHash, VolumeId};
-use era_index::{IndexEntry, LsmTree, LsmTreeConfig};
+use era_index::{IndexEntry, ChunkIndex, ChunkIndexConfig};
 use rand::RngCore;
 
 fn random_hash() -> ChunkHash {
@@ -28,7 +28,7 @@ fn insert_throughput(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let hashes: Vec<ChunkHash> = (0..10_000).map(|_| random_hash()).collect();
-                let tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+                let tree = ChunkIndex::new(ChunkIndexConfig::default()).unwrap();
                 (tree, hashes)
             },
             |(mut tree, hashes)| {
@@ -42,7 +42,7 @@ fn insert_throughput(c: &mut Criterion) {
 }
 
 fn lookup_hit(c: &mut Criterion) {
-    let mut tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+    let mut tree = ChunkIndex::new(ChunkIndexConfig::default()).unwrap();
     let mut hashes = Vec::with_capacity(5_000);
     for i in 0..5_000u64 {
         let hash = random_hash();
@@ -63,7 +63,7 @@ fn lookup_hit(c: &mut Criterion) {
 }
 
 fn lookup_miss(c: &mut Criterion) {
-    let mut tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+    let mut tree = ChunkIndex::new(ChunkIndexConfig::default()).unwrap();
     for i in 0..5_000u64 {
         tree.insert(make_entry(random_hash(), i)).unwrap();
     }
@@ -84,7 +84,7 @@ fn finalize(c: &mut Criterion) {
     c.bench_function("finalize", |b| {
         b.iter_with_setup(
             || {
-                let mut tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+                let mut tree = ChunkIndex::new(ChunkIndexConfig::default()).unwrap();
                 for i in 0..5_000u64 {
                     tree.insert(make_entry(random_hash(), i)).unwrap();
                 }

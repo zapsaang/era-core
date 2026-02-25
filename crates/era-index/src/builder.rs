@@ -35,7 +35,7 @@ const BATCH_SIZE: usize = 1000;
 /// At finalization, all entries are read in sorted order (Redb B-tree guarantees
 /// this) and written as encrypted IndexPage/IndexManifest blocks to the volume.
 pub struct IndexBuilder {
-    /// Redb-backed index store (replaces memtable + spiller + merger)
+    /// Redb-backed index store
     store: IndexStore,
     /// In-memory buffer for batch writes
     buffer: Vec<IndexEntry>,

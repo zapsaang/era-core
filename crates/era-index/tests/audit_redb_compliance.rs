@@ -37,6 +37,7 @@ use tempfile::TempDir;
 // Helpers
 // ============================================================================
 
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -581,9 +582,9 @@ fn test_e3_reader_no_unwrap_on_io() {
 }
 
 #[test]
-fn test_e4_lsm_tree_no_unwrap_on_io() {
-    let source = include_str!("../src/lsm_tree.rs");
-    audit_source_for_io_unwrap(source, "lsm_tree.rs");
+fn test_e4_chunk_index_no_unwrap_on_io() {
+    let source = include_str!("../src/chunk_index.rs");
+    audit_source_for_io_unwrap(source, "chunk_index.rs");
 }
 
 // ============================================================================

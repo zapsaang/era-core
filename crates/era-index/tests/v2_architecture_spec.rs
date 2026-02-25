@@ -15,7 +15,7 @@ use era_common::{BlockId, ChunkHash, VolumeId};
 
 use era_index::{IndexBuilder, IndexEntry, IndexPage, IndexStore, MetaIndex, ENTRIES_PER_PAGE};
 
-/// Helper to create a deterministic ChunkHash for testing
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -246,7 +246,7 @@ fn test_meta_index_lookup() {
 }
 
 // ============================================================================
-// TEST 6: Full Lifecycle — Insert → Finalize via LsmTree
+// TEST 6: Full Lifecycle — Insert → Finalize via ChunkIndex
 // ============================================================================
 
 #[test]

@@ -36,8 +36,8 @@
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexReader, IndexStore, LsmTree,
-    LsmTreeReader, MetaIndex, ENTRIES_PER_PAGE,
+    IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexReader, IndexStore, ChunkIndex,
+    ChunkIndexReader, MetaIndex, ENTRIES_PER_PAGE,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,6 +48,7 @@ use tempfile::TempDir;
 // Helpers — zero source scanning, pure behavioral
 // ============================================================================
 
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -413,17 +414,17 @@ fn test_v6_2c_hint_zero_misses_high_block_ids() {
 // ============================================================================
 // V6-3: Single-Page Violation at Scale (4 tests)
 //
-// LsmTree::finalize() → from_memory() puts ALL entries in one page.
+// ChunkIndex::finalize() → from_memory() puts ALL entries in one page.
 // 100K entries = ~8MB page, violating ENTRIES_PER_PAGE=8192 and L2 cache.
 // ============================================================================
 
-/// V6-3a: Insert 100K entries via LsmTree, measure lookup latency.
+/// V6-3a: Insert 100K entries via ChunkIndex, measure lookup latency.
 ///
 /// With all entries in a single page, binary search touches scattered memory
 /// across an ~8MB array. This exceeds typical L2 cache (256KB-1MB).
 #[test]
 fn test_v6_3a_single_page_100k_lookup_latency() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..100_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -458,11 +459,11 @@ fn test_v6_3a_single_page_100k_lookup_latency() {
 /// V6-3b: Compare lookup latency: single 100K-entry page vs 13 pages of 8192.
 ///
 /// Manually construct a multi-page reader and compare lookup performance
-/// against the single-page reader from LsmTree::finalize().
+/// against the single-page reader from ChunkIndex::finalize().
 #[test]
 fn test_v6_3b_multi_page_vs_single_page_comparison() {
-    // Single-page path (LsmTree::finalize)
-    let mut tree = LsmTree::new_default().unwrap();
+    // Single-page path (ChunkIndex::finalize)
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..50_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -647,7 +648,7 @@ fn test_v6_5a_two_volumes_indistinguishable() {
     let vol_b = VolumeId::new();
     assert_ne!(vol_a, vol_b, "Test requires distinct VolumeIds");
 
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Insert entries from volume A (hashes 0..499)
     for i in 0..500u64 {
@@ -702,7 +703,7 @@ fn test_v6_5c_entry_to_location_information_loss() {
     // Entry has volume_id
     assert_eq!(entry.volume_id, vol);
 
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(entry).unwrap();
     let reader = tree.finalize().unwrap();
 
@@ -753,7 +754,7 @@ fn test_v6_6a_redb_file_survives_finalize() {
 /// V6-6b: finalize consumes self — tree is gone after call.
 #[test]
 fn test_v6_6b_finalize_is_retryable() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     // Empty finalize should work
     let reader = tree.finalize().unwrap();
 
@@ -811,7 +812,7 @@ fn test_v6_6c_builder_drain_then_error_simulation() {
 /// V6-7a: Concurrent lookup throughput — 4 threads × 10K lookups.
 #[test]
 fn test_v6_7a_concurrent_lookup_throughput() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..10_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -865,24 +866,24 @@ fn test_v6_7a_concurrent_lookup_throughput() {
     );
 }
 
-/// V6-7b: LsmTreeReader is Send + Sync — static assertion.
+/// V6-7b: ChunkIndexReader is Send + Sync — static assertion.
 #[test]
 fn test_v6_7b_reader_is_send_sync() {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
 
-    assert_send::<LsmTreeReader>();
-    assert_sync::<LsmTreeReader>();
+    assert_send::<ChunkIndexReader>();
+    assert_sync::<ChunkIndexReader>();
 
-    // Also verify Arc<LsmTreeReader> works (needed for multi-threaded use)
-    assert_send::<Arc<LsmTreeReader>>();
-    assert_sync::<Arc<LsmTreeReader>>();
+    // Also verify Arc<ChunkIndexReader> works (needed for multi-threaded use)
+    assert_send::<Arc<ChunkIndexReader>>();
+    assert_sync::<Arc<ChunkIndexReader>>();
 }
 
 /// V6-7c: Concurrent mixed hit/miss — 4 threads with 50% hits / 50% misses.
 #[test]
 fn test_v6_7c_concurrent_mixed_hit_miss() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..5_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -927,7 +928,7 @@ fn test_v6_7c_concurrent_mixed_hit_miss() {
 /// V6-7d: Concurrent correctness — all threads must find the same entries.
 #[test]
 fn test_v6_7d_concurrent_correctness() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..1_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -983,7 +984,7 @@ fn test_v6_7d_concurrent_correctness() {
 /// only hit for filesystem mode cache misses.
 #[test]
 fn test_v6_8a_embedded_mode_bypasses_mutex() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..10_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -1023,7 +1024,7 @@ fn test_v6_8b_filesystem_mode_concurrent_cache_miss() {
 
     // Verify that IndexReader uses Mutex (not RwLock) for page_cache
     // by checking that concurrent embedded lookups don't block each other.
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..5_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -1088,11 +1089,11 @@ fn test_v6_9b_try_new_returns_err() {
 
 /// V6-9c: finalize with 0 entries doesn't panic.
 ///
-/// LsmTree::finalize() with no entries should succeed (empty index).
+/// ChunkIndex::finalize() with no entries should succeed (empty index).
 /// The from_memory path handles empty entries by creating no pages.
 #[test]
 fn test_v6_9c_finalize_empty_guard_works() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Finalize with 0 entries — should NOT panic
     let reader = tree.finalize().unwrap();
@@ -1549,17 +1550,17 @@ fn test_v6_14b_crash_recovery_acid() {
 /// V6-14c: Concurrent readers — multiple threads reading from the same finalized index.
 ///
 /// Redb enforces single-process file locking, so concurrent readers must share
-/// a single Database handle. LsmTreeReader (Arc<RwLock<IndexReader>>) enables this.
+/// a single Database handle. ChunkIndexReader (Arc<RwLock<IndexReader>>) enables this.
 #[test]
 fn test_v6_14c_concurrent_readers() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     let entries: Vec<IndexEntry> = (0..1000).map(make_entry).collect();
     for e in entries {
         tree.insert(e).unwrap();
     }
     let reader = Arc::new(tree.finalize().unwrap());
 
-    // Multiple threads reading concurrently via shared LsmTreeReader
+    // Multiple threads reading concurrently via shared ChunkIndexReader
     let handles: Vec<_> = (0..4)
         .map(|_| {
             let r = Arc::clone(&reader);
@@ -1596,7 +1597,7 @@ fn test_v6_14c_concurrent_readers() {
 /// V6-15a: 500K entries zero loss — insert 500K unique entries, verify all found.
 #[test]
 fn test_v6_15a_500k_entries_zero_loss() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let n = 500_000u64;
     for i in 0..n {
@@ -1645,7 +1646,7 @@ fn test_v6_15a_500k_entries_zero_loss() {
 /// V6-15b: 100K with 25% duplicates — verify exact unique count.
 #[test]
 fn test_v6_15b_100k_with_25pct_duplicates() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let unique_count = 100_000u64;
     let dup_count = 25_000u64;

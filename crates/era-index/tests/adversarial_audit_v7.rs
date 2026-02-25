@@ -46,7 +46,7 @@ use tempfile::TempDir;
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexStore, LsmTree, MetaIndex,
+    IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexStore, ChunkIndex, MetaIndex,
     ENTRIES_PER_PAGE,
 };
 
@@ -54,6 +54,7 @@ use era_index::{
 // Helpers — all behavioral, zero source scanning
 // ============================================================================
 
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -230,7 +231,7 @@ fn test_v7_f1d_entry_count_divergence_tracking() {
 // ============================================================================
 // V7-F2: from_memory() Single-Page Violation [CRITICAL — UNFIXED from V6-F3]
 //
-// LsmTree::finalize() → from_memory() puts ALL entries in one IndexPage.
+// ChunkIndex::finalize() → from_memory() puts ALL entries in one IndexPage.
 // ENTRIES_PER_PAGE=8192 is advisory only. 100K entries → ~8MB page.
 // ============================================================================
 
@@ -240,7 +241,7 @@ fn test_v7_f2a_page_oversizing_quantification() {
     let test_sizes: [usize; 3] = [1000, 8192, 16384];
 
     for &n in &test_sizes {
-        let mut tree = LsmTree::new_default().unwrap();
+        let mut tree = ChunkIndex::new_default().unwrap();
         for i in 0..n as u64 {
             tree.insert(make_entry(i)).unwrap();
         }
@@ -281,14 +282,14 @@ fn test_v7_f2a_page_oversizing_quantification() {
 #[test]
 fn test_v7_f2b_binary_search_cache_locality_degradation() {
     // Small index: 4096 entries (a small page)
-    let mut tree_small = LsmTree::new_default().unwrap();
+    let mut tree_small = ChunkIndex::new_default().unwrap();
     for i in 0..4096u64 {
         tree_small.insert(make_entry(i)).unwrap();
     }
     let reader_small = tree_small.finalize().unwrap();
 
     // Large index: 16384 entries (1 page, should be 2 pages)
-    let mut tree_large = LsmTree::new_default().unwrap();
+    let mut tree_large = ChunkIndex::new_default().unwrap();
     for i in 0..16384u64 {
         tree_large.insert(make_entry(i)).unwrap();
     }
@@ -332,7 +333,7 @@ fn test_v7_f2b_binary_search_cache_locality_degradation() {
 #[test]
 fn test_v7_f2c_from_memory_always_one_page() {
     for n in [100, 8192, 20_000u64] {
-        let mut tree = LsmTree::new_default().unwrap();
+        let mut tree = ChunkIndex::new_default().unwrap();
         for i in 0..n {
             tree.insert(make_entry(i)).unwrap();
         }
@@ -590,7 +591,7 @@ fn test_v7_f5a_information_loss_two_volumes_same_block_id() {
     let vol_a = VolumeId::new();
     let vol_b = VolumeId::new();
 
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Entry from vol_a: hash=100, block_id=1
     tree.insert(IndexEntry::new(
@@ -700,7 +701,7 @@ fn test_v7_f6a_read_sorted_memory_scaling() {
 
 /// V7-F6b: read_sorted is called TWICE during finalize.
 ///
-/// LsmTree::finalize() calls builder.read_sorted() to get all entries,
+/// ChunkIndex::finalize() calls builder.read_sorted() to get all entries,
 /// then iterates them to build pages. There's no streaming alternative.
 /// If finalize also rebuilds the bloom (iterating entries again), that's
 /// 3× data traversal for a single finalize call.
@@ -799,10 +800,10 @@ fn test_v7_f7c_overlapping_page_ranges_accepted() {
 fn test_v7_f8a_bloom_rebuild_cost() {
     let n = 10_000u64;
 
-    // Time LsmTree::finalize() which internally calls drain + bloom rebuild
+    // Time ChunkIndex::finalize() which internally calls drain + bloom rebuild
     let start = Instant::now();
     let reader = {
-        let mut tree = LsmTree::new_default().unwrap();
+        let mut tree = ChunkIndex::new_default().unwrap();
         for i in 0..n {
             tree.insert(make_entry(i)).unwrap();
         }
@@ -976,7 +977,7 @@ fn test_v7_f11a_bloom_yes_store_no_during_buffer() {
 /// which is &self access — no lock contention.
 #[test]
 fn test_v7_f12a_embedded_mode_zero_contention() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..10_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -1107,7 +1108,7 @@ fn test_v7_bench_insert_throughput() {
 #[test]
 fn test_v7_bench_lookup_throughput() {
     let n = 50_000u64;
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..n {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -1150,7 +1151,7 @@ fn test_v7_bench_finalize_scaling() {
     let sizes = [10_000, 50_000];
 
     for &n in &sizes {
-        let mut tree = LsmTree::new_default().unwrap();
+        let mut tree = ChunkIndex::new_default().unwrap();
         for i in 0..n as u64 {
             tree.insert(make_entry(i)).unwrap();
         }
@@ -1175,7 +1176,7 @@ fn test_v7_bench_finalize_scaling() {
 /// V7-EDGE-1: Zero-entry builder finalize succeeds.
 #[test]
 fn test_v7_edge_zero_entry_finalize() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     let reader = tree.finalize().unwrap();
     assert!(reader.lookup(&test_hash(0)).unwrap().is_none());
 }
@@ -1183,7 +1184,7 @@ fn test_v7_edge_zero_entry_finalize() {
 /// V7-EDGE-2: Single-entry builder finalize succeeds.
 #[test]
 fn test_v7_edge_single_entry_finalize() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(make_entry(42)).unwrap();
     let reader = tree.finalize().unwrap();
     assert!(reader.lookup(&test_hash(42)).unwrap().is_some());
@@ -1269,7 +1270,7 @@ fn test_v7_edge_extreme_hash_values() {
     let zero_hash = ChunkHash::from_bytes([0u8; 32]);
     let max_hash = ChunkHash::from_bytes([0xFF; 32]);
 
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(IndexEntry::new(
         zero_hash,
         VolumeId::new(),

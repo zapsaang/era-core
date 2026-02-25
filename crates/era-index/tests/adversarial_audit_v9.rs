@@ -7,7 +7,7 @@
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexPage, IndexReader, LsmTree, MetaIndex, ENTRIES_PER_PAGE,
+    IndexBuilder, IndexEntry, IndexPage, IndexReader, ChunkIndex, MetaIndex, ENTRIES_PER_PAGE,
 };
 use tempfile::TempDir;
 
@@ -164,7 +164,7 @@ fn v9_f3c_set_bloom_accepts_valid() {
 fn v9_f4a_page_cache_bounded() {
     // Verify the LRU cache doesn't grow unbounded by looking at
     // lookup behavior under many pages
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Insert enough entries to create multiple pages (ENTRIES_PER_PAGE each)
     // We'll insert 300 * 100 = 30000 entries -> ~4 pages
@@ -452,12 +452,12 @@ fn v9_f11b_xor_double_application_reverts() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// V9-F12: NOVEL — LsmTree state machine edge cases
+// V9-F12: NOVEL — ChunkIndex state machine edge cases
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn v9_f12a_double_finalize_rejected() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(make_entry(1)).unwrap();
     let _reader = tree.finalize().unwrap();
 
@@ -470,7 +470,7 @@ fn v9_f12a_double_finalize_rejected() {
 
 #[test]
 fn v9_f12b_insert_after_finalize_rejected() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(make_entry(1)).unwrap();
     let _reader = tree.finalize().unwrap();
 
@@ -485,7 +485,7 @@ fn v9_f12b_insert_after_finalize_rejected() {
 fn v9_f12c_empty_finalize() {
     // The read_sorted_pages produces empty Vec for empty store -> no pages to add
     // from_pages with empty pages list should work
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     let result = tree.finalize();
     // An empty index should finalize successfully (0 pages, empty bloom)
     match &result {
@@ -562,7 +562,7 @@ fn v9_f13b_entry_count_mixed_buffer_and_redb() {
 
 #[test]
 fn v9_f14a_index_location_has_volume_id() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let vol = VolumeId::new();
     let entry = IndexEntry::new(test_hash(42), vol, BlockId::new(7), 1024, 4096);
@@ -582,7 +582,7 @@ fn v9_f14a_index_location_has_volume_id() {
 
 #[test]
 fn v9_f14b_multi_volume_lookup_preserves_volume_id() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let vol1 = VolumeId::new();
     let vol2 = VolumeId::new();
@@ -736,7 +736,7 @@ fn v9_f16b_from_memory_single_page() {
 #[test]
 fn v9_f17a_100k_roundtrip() {
     let start = std::time::Instant::now();
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Insert
     let insert_start = std::time::Instant::now();
@@ -784,7 +784,7 @@ fn v9_f17a_100k_roundtrip() {
 
 #[test]
 fn v9_f18a_bloom_no_false_negatives() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let mut hashes = Vec::new();
     for i in 0..5000u64 {
@@ -976,7 +976,7 @@ fn v9_f22b_readonly_batch_insert_rejected() {
 
 #[test]
 fn v9_f23a_concurrent_lookups() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
     for i in 0..10_000u64 {
         tree.insert(make_entry(i)).unwrap();
     }
@@ -1117,7 +1117,7 @@ fn v9_f26b_discard_idempotent() {
 
 #[test]
 fn v9_f27a_cross_page_lookup_correctness() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     // Insert exactly 2 full pages + 1 entry
     let total = ENTRIES_PER_PAGE * 2 + 1;
@@ -1173,12 +1173,12 @@ fn v9_f28a_binary_search_all_entries() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// V9-F29: NOVEL — LsmTree memtable_size_bytes accuracy
+// V9-F29: NOVEL — ChunkIndex memtable_size_bytes accuracy
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn v9_f29a_memtable_size_estimate() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let initial_size = tree.memtable_size_bytes();
     assert_eq!(initial_size, 0, "V9-F29a: Empty tree should have 0 size");
@@ -1259,7 +1259,7 @@ fn v9_f31a_builder_drop_cleans_staging() {
 
 #[test]
 fn v9_f32a_extreme_hash_values() {
-    let mut tree = LsmTree::new_default().unwrap();
+    let mut tree = ChunkIndex::new_default().unwrap();
 
     let zero_hash = ChunkHash::from_bytes([0u8; 32]);
     let max_hash = ChunkHash::from_bytes([0xFF; 32]);

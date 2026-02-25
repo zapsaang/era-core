@@ -1,7 +1,7 @@
 //! # IndexStore — Redb-backed ACID Chunk Index
 //!
 //! Wraps a Redb 2.1 database for ACID-compliant chunk indexing during
-//! archive creation. Replaces the custom LSM-Tree (Spiller + TieredMerger)
+//! archive creation. Uses a single embedded Redb B-tree database.
 //! with a single embedded B-tree database.
 //!
 //! ## Lifecycle
@@ -144,6 +144,12 @@ impl IndexStore {
                 "Cannot insert into a read-only IndexStore".into(),
             ));
         }
+        // SAFETY: Bloom filter is updated BEFORE the Redb commit.
+        // This creates a <1ms window where bloom.check() returns true but store.get() returns None.
+        // This is SAFE for dedup: false positive = redundant storage, not data loss.
+        // A false negative (bloom says no when entry exists) would cause data loss,
+        // but cannot happen here because bloom entries are only added, never removed.
+        // Reference: V7-F11 / V6-F9 — bloom-before-commit is intentional and correct.
         self.bloom.set(&entry.hash);
 
         let write_txn = self
@@ -197,6 +203,12 @@ impl IndexStore {
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
             let mut new_count = 0usize;
             for entry in entries {
+                // SAFETY: Bloom filter is updated BEFORE the Redb commit.
+                // This creates a <1ms window where bloom.check() returns true but store.get() returns None.
+                // This is SAFE for dedup: false positive = redundant storage, not data loss.
+                // A false negative (bloom says no when entry exists) would cause data loss,
+                // but cannot happen here because bloom entries are only added, never removed.
+                // Reference: V7-F11 / V6-F9 — bloom-before-commit is intentional and correct.
                 self.bloom.set(&entry.hash);
                 let is_new = table
                     .get(entry.hash.as_bytes())

@@ -35,6 +35,7 @@ use tempfile::TempDir;
 // Helpers
 // ============================================================================
 
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -949,13 +950,13 @@ fn test_footer_checksum_rejects_tampered_index_fields() {
 }
 
 // ============================================================================
-// ADVERSARIAL TESTS: LsmTree State Machine
+// ADVERSARIAL TESTS: ChunkIndex State Machine
 // ============================================================================
 
-/// Inserting into a finalized LsmTree must return error.
+/// Inserting into a finalized ChunkIndex must return error.
 #[test]
 fn test_insert_after_finalize_rejected() {
-    let mut tree = era_index::LsmTree::new_default().unwrap();
+    let mut tree = era_index::ChunkIndex::new_default().unwrap();
     tree.insert(IndexEntry::new(
         test_hash(0),
         VolumeId::new(),
@@ -971,10 +972,10 @@ fn test_insert_after_finalize_rejected() {
     // This is enforced at compile time by move semantics — test passes by compiling
 }
 
-/// LsmTree::finalize on empty tree should produce a valid empty reader.
+/// ChunkIndex::finalize on empty tree should produce a valid empty reader.
 #[test]
 fn test_finalize_empty_tree() {
-    let mut tree = era_index::LsmTree::new_default().unwrap();
+    let mut tree = era_index::ChunkIndex::new_default().unwrap();
     let reader = tree.finalize().unwrap();
 
     // Empty reader should not find anything
@@ -983,10 +984,10 @@ fn test_finalize_empty_tree() {
     assert!(result.is_none());
 }
 
-/// Bloom filter must have zero false negatives after LsmTree finalize.
+/// Bloom filter must have zero false negatives after ChunkIndex finalize.
 #[test]
 fn test_bloom_zero_false_negatives_after_finalize() {
-    let mut tree = era_index::LsmTree::new_default().unwrap();
+    let mut tree = era_index::ChunkIndex::new_default().unwrap();
     let count = 500u64;
 
     for i in 0..count {
@@ -1015,7 +1016,7 @@ fn test_bloom_zero_false_negatives_after_finalize() {
 /// Verify that all unique hashes inserted are retrievable after finalize.
 #[test]
 fn test_all_entries_retrievable_after_finalize() {
-    let mut tree = era_index::LsmTree::new_default().unwrap();
+    let mut tree = era_index::ChunkIndex::new_default().unwrap();
     let count = 300u64;
 
     for i in 0..count {
@@ -1044,7 +1045,7 @@ fn test_all_entries_retrievable_after_finalize() {
 /// Verify deduplication: same hash inserted twice should be findable.
 #[test]
 fn test_duplicate_hash_insertion() {
-    let mut tree = era_index::LsmTree::new_default().unwrap();
+    let mut tree = era_index::ChunkIndex::new_default().unwrap();
     let hash = test_hash(42);
 
     // Insert same hash with different locations

@@ -13,12 +13,12 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use era_index::{LsmTree, LsmTreeConfig, IndexEntry};
+//! use era_index::{ChunkIndex, ChunkIndexConfig, IndexEntry};
 //! use era_common::{ChunkHash, VolumeId, BlockId};
 //!
 //! # fn example() -> era_common::Result<()> {
 //! // Create a new index
-//! let mut tree = LsmTree::new_default()?;
+//! let mut tree = ChunkIndex::new_default()?;
 //!
 //! // Insert entries
 //! let entry = IndexEntry::new(
@@ -42,7 +42,7 @@
 mod bloom_serde;
 mod builder;
 mod error;
-mod lsm_tree;
+mod chunk_index;
 mod reader;
 mod schema;
 mod store;
@@ -50,7 +50,7 @@ mod store;
 pub use bloom_serde::{deserialize_bloom, serialize_bloom, BloomFilterData};
 pub use builder::IndexBuilder;
 pub use error::IndexError;
-pub use lsm_tree::{LsmTree, LsmTreeConfig, LsmTreeReader};
+pub use chunk_index::{ChunkIndex, ChunkIndexConfig, ChunkIndexReader};
 pub use reader::{IndexLocation, IndexReader};
 pub use store::IndexStore;
 

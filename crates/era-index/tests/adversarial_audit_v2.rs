@@ -4,15 +4,16 @@
 //! - FINDING-IDX-3: MetaIndex.find_page is O(n) linear scan, not binary search
 //! - FINDING-IDX-4: IndexPage::new panics on empty entries vec (expect on line 144)
 //! - FINDING-IDX-5: Duplicate hash entries are silently kept (no dedup in merge)
-//! - FINDING-IDX-7: Redb-backed LsmTree — verify entries survive insert cycle
+//! - FINDING-IDX-7: Redb-backed ChunkIndex — verify entries survive insert cycle
 
 use era_common::{BlockId, ChunkHash, VolumeId};
-use era_index::{IndexEntry, IndexPage, IndexStore, LsmTree, LsmTreeConfig, MetaIndex};
+use era_index::{IndexEntry, IndexPage, IndexStore, ChunkIndex, ChunkIndexConfig, MetaIndex};
 use tempfile::TempDir;
 
+/// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.
 fn test_hash(value: u64) -> ChunkHash {
     let mut bytes = [0u8; 32];
-    bytes[..8].copy_from_slice(&value.to_le_bytes());
+    bytes[24..32].copy_from_slice(&value.to_be_bytes());
     ChunkHash::from_bytes(bytes)
 }
 
@@ -45,7 +46,7 @@ fn test_index_page_try_new_empty_returns_err() {
 /// FINDING-IDX-5: Duplicate hashes are now deduplicated by Redb (last-write-wins).
 #[test]
 fn test_duplicate_hashes_deduplicated_after_fix() {
-    let mut tree = LsmTree::new(LsmTreeConfig {
+    let mut tree = ChunkIndex::new(ChunkIndexConfig {
         mem_limit: 1024 * 1024,
         temp_dir: std::env::temp_dir(),
     })
@@ -187,11 +188,11 @@ fn test_redb_store_tampered_file_rejected() {
     }
 }
 
-/// FINDING-IDX-7: LsmTree with Redb — verify all entries survive insert cycle.
+/// FINDING-IDX-7: ChunkIndex with Redb — verify all entries survive insert cycle.
 #[test]
-fn test_lsm_tree_redb_all_entries_survive() {
+fn test_chunk_index_redb_all_entries_survive() {
     let temp_dir = TempDir::new().unwrap();
-    let mut tree = LsmTree::new(LsmTreeConfig {
+    let mut tree = ChunkIndex::new(ChunkIndexConfig {
         mem_limit: 4096, // Small limit (affects bloom sizing only with Redb)
         temp_dir: temp_dir.path().to_path_buf(),
     })
@@ -215,5 +216,29 @@ fn test_lsm_tree_redb_all_entries_survive() {
         found, count,
         "All {} entries must survive Redb insert+finalize, found {}",
         count, found
+    );
+}
+
+/// Edge case: test_hash(0) < test_hash(1) in both numeric and Redb byte-comparison order.
+/// Verifies the BE canonical variant produces natural sort order.
+#[test]
+fn test_hash_be_sort_order_zero_vs_one() {
+    let h0 = test_hash(0);
+    let h1 = test_hash(1);
+    assert!(
+        h0 < h1,
+        "test_hash(0) must be less than test_hash(1) under BE canonical variant"
+    );
+}
+
+/// Edge case: test_hash(255) < test_hash(256) in both numeric and Redb byte-comparison order.
+/// Verifies BE byte layout handles byte-boundary rollover correctly.
+#[test]
+fn test_hash_be_sort_order_255_vs_256() {
+    let h255 = test_hash(255);
+    let h256 = test_hash(256);
+    assert!(
+        h255 < h256,
+        "test_hash(255) must be less than test_hash(256) under BE canonical variant"
     );
 }
