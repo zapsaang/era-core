@@ -24,6 +24,8 @@ Cargo.lock
 *.md
 *.bak
 !README.md
+!AGENTS.md
+!CLAUDE.md
 
 fuzz/
 bins/
