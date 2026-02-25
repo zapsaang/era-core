@@ -124,19 +124,6 @@ impl HybridPublicKey {
     }
 }
 
-impl HybridSecretKey {
-    /// Get the corresponding public key
-    pub fn public_key(&self) -> HybridPublicKey {
-        let _x25519_pk = X25519PublicKey::from(&self.x25519);
-
-        // Kyber secret key doesn't have a direct public key method
-        // We need to derive it during key generation
-        // For now, we'll require passing the public key separately
-        // This is a design choice to avoid storing redundant data
-        panic!("Use the public key stored during key generation");
-    }
-}
-
 /// Generate a new hybrid keypair
 ///
 /// This creates both X25519 and Kyber-768 keypairs.

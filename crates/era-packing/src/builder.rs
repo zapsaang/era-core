@@ -247,10 +247,10 @@ mod tests {
         let key = test_key();
 
         let compressor1 = Box::new(ZstdCompressor::default());
-        let builder1 = MacroBlockBuilder::new(key.clone(), [1u8; 16], compressor1);
+        let builder1 = MacroBlockBuilder::new(key.try_clone().unwrap(), [1u8; 16], compressor1);
 
         let compressor2 = Box::new(ZstdCompressor::default());
-        let builder2 = MacroBlockBuilder::new(key.clone(), [2u8; 16], compressor2);
+        let builder2 = MacroBlockBuilder::new(key.try_clone().unwrap(), [2u8; 16], compressor2);
 
         let chunk_data = vec![42u8; 256];
         let chunk1 = UniqueChunk::new(

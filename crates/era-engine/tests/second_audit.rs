@@ -357,7 +357,7 @@ fn nv2e_behavioral_truncated_salt_accepted() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -834,7 +834,7 @@ async fn behavioral_key_rotation_e2e() {
     assert_eq!(original_vk.as_bytes(), vk.as_bytes());
 
     // Re-wrap with new MK (simulating key rotation)
-    let new_ik = session_new.derive_intermediate_key();
+    let new_ik = session_new.derive_intermediate_key().unwrap();
     let wrapped_new = wrap_volume_key(&new_ik, &vk).unwrap();
 
     // Old MK must NOT unwrap new wrapping
@@ -891,9 +891,9 @@ fn cross_ik_domain_separation() {
 fn cross_debug_redaction() {
     let mk = [0xAB; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
-    let ik = session.derive_intermediate_key();
-    let bk = session.derive_block_key(&vk, 0, &[0; 16]);
+    let vk = VolumeKey::generate().unwrap();
+    let ik = session.derive_intermediate_key().unwrap();
+    let bk = session.derive_block_key(&vk, 0, &[0; 16]).unwrap();
 
     for (name, debug_str) in [
         ("KeySession", format!("{:?}", session)),
@@ -963,8 +963,8 @@ fn cross_shamir_rejects_t_gt_n() {
 #[test]
 fn cross_nonce_uniqueness() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
 
     let mut nonces = std::collections::HashSet::new();
     for i in 0..1000 {
@@ -982,12 +982,12 @@ fn cross_nonce_uniqueness() {
 fn cross_block_key_isolation() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
     let nonce_ctx = [0xAB; 16];
 
     let mut keys = std::collections::HashSet::new();
     for i in 0..100u64 {
-        let bk = session.derive_block_key(&vk, i, &nonce_ctx);
+        let bk = session.derive_block_key(&vk, i, &nonce_ctx).unwrap();
         assert!(
             keys.insert(*bk.as_bytes()),
             "Block key collision at index {}!",
@@ -1006,7 +1006,7 @@ fn cross_concurrent_vk_unique() {
 
     let handles: Vec<_> = (0..8)
         .map(|_| {
-            let s = session.clone();
+            let s = session.try_clone().unwrap();
             std::thread::spawn(move || {
                 let (vk, wrapped) = s.generate_and_wrap_volume_key().unwrap();
                 let unwrapped = s
@@ -1038,7 +1038,7 @@ fn header_threshold_0_handled() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -1068,7 +1068,7 @@ fn header_full_roundtrip() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -1124,8 +1124,8 @@ fn crypto_wrap_unwrap_roundtrip() {
 #[test]
 fn crypto_every_ciphertext_byte_authenticated() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     for i in 0..wrapped.ciphertext.len() {
@@ -1145,8 +1145,8 @@ fn crypto_every_ciphertext_byte_authenticated() {
 #[test]
 fn crypto_every_nonce_byte_validated() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     for i in 0..24 {
@@ -1169,8 +1169,8 @@ fn crypto_avalanche_effect() {
     let mut mk2 = [0u8; 32];
     mk2[0] = 1;
 
-    let ik1 = IntermediateKey::derive_from_master_key(&mk1);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk2);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk1).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk2).unwrap();
 
     let hamming: u32 = ik1
         .as_bytes()
@@ -1190,7 +1190,7 @@ fn crypto_avalanche_effect() {
 #[test]
 fn crypto_reject_degenerate_ciphertext() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
 
     // Empty
     assert!(

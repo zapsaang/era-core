@@ -137,8 +137,7 @@ impl BlockLocation {
 
     /// Create an erasure-coded block location with explicit shard locations.
     ///
-    /// # Panics
-    /// Panics in debug builds if `shard_offsets.len() != shard_volumes.len()`.
+    /// Returns an error if `shard_offsets.len() != shard_volumes.len()`.
     pub fn erasure(
         volume_id: VolumeId,
         slot_index: u32,
@@ -147,13 +146,15 @@ impl BlockLocation {
         info: ErasureBlockInfo,
         shard_offsets: Vec<u64>,
         shard_volumes: Vec<u16>,
-    ) -> Self {
-        debug_assert_eq!(
-            shard_offsets.len(),
-            shard_volumes.len(),
-            "shard_offsets and shard_volumes must have equal length"
-        );
-        Self {
+    ) -> crate::Result<Self> {
+        if shard_offsets.len() != shard_volumes.len() {
+            return Err(crate::EraError::InvalidConfig(format!(
+                "shard_offsets length ({}) must equal shard_volumes length ({})",
+                shard_offsets.len(),
+                shard_volumes.len()
+            )));
+        }
+        Ok(Self {
             volume_id,
             slot_index,
             physical_offset,
@@ -163,7 +164,7 @@ impl BlockLocation {
                 shard_offsets,
                 shard_volumes,
             },
-        }
+        })
     }
 
     /// Check if this block is erasure-coded.

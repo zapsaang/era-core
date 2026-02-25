@@ -39,7 +39,8 @@ fn bench_pack_single(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &chunk, |b, chunk| {
             let compressor = Box::new(ZstdCompressor::default());
-            let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+            let builder =
+                MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
             b.iter(|| builder.pack_single(black_box(chunk.clone())))
         });
     }
@@ -55,7 +56,8 @@ fn bench_unpack(c: &mut Criterion) {
     for size in [1024, 4096, 16384, 65536, 262144] {
         let chunk = generate_chunk(size);
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+        let builder =
+            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
         let encrypted = builder.pack_single(chunk).unwrap();
 
         group.throughput(Throughput::Bytes(size as u64));
@@ -64,7 +66,7 @@ fn bench_unpack(c: &mut Criterion) {
             &encrypted,
             |b, encrypted| {
                 let unpacker = MacroBlockUnpacker::new(
-                    key.clone(),
+                    key.try_clone().unwrap(),
                     TEST_NONCE_CONTEXT,
                     Box::new(ZstdCompressor::default()),
                 );
@@ -97,7 +99,11 @@ fn bench_pack_multiple_chunks(c: &mut Criterion) {
             &chunks,
             |b, chunks| {
                 let compressor = Box::new(ZstdCompressor::default());
-                let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+                let builder = MacroBlockBuilder::new(
+                    key.try_clone().unwrap(),
+                    TEST_NONCE_CONTEXT,
+                    compressor,
+                );
                 b.iter(|| builder.pack_chunks(black_box(chunks.clone())))
             },
         );
@@ -118,11 +124,15 @@ fn bench_roundtrip(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &chunk, |b, chunk| {
             b.iter(|| {
                 let compressor = Box::new(ZstdCompressor::default());
-                let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+                let builder = MacroBlockBuilder::new(
+                    key.try_clone().unwrap(),
+                    TEST_NONCE_CONTEXT,
+                    compressor,
+                );
                 let encrypted = builder.pack_single(chunk.clone()).unwrap();
 
                 let unpacker = MacroBlockUnpacker::new(
-                    key.clone(),
+                    key.try_clone().unwrap(),
                     TEST_NONCE_CONTEXT,
                     Box::new(ZstdCompressor::default()),
                 );

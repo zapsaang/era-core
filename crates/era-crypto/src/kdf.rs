@@ -73,7 +73,7 @@ pub fn derive_key(password: &[u8], salt: &Salt, params: &KdfParams) -> Result<De
         .hash_password_into(password, salt.as_bytes(), &mut key_bytes)
         .map_err(|e| EraError::InvalidKey(e.to_string()))?;
 
-    Ok(DerivedKey::from_bytes(key_bytes))
+    DerivedKey::from_bytes(key_bytes)
 }
 
 /// Generate a password verification tag from the derived key

@@ -40,7 +40,7 @@ fn derive_session_from_header(
     let slot = header
         .recipients
         .iter()
-        .find(|s| s.r_type == RecipientType::ScryptPassword)
+        .find(|s| s.r_type == RecipientType::Argon2idPassword)
         .ok_or(era_common::EraError::InvalidKey(
             "No password slot found".into(),
         ))?;

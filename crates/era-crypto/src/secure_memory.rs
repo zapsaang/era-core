@@ -153,11 +153,12 @@ impl<const N: usize> Drop for SecureBuffer<N> {
     }
 }
 
-impl<const N: usize> Clone for SecureBuffer<N> {
-    fn clone(&self) -> Self {
-        let mut new = Self::new().expect("Failed to allocate secure buffer for clone");
+impl<const N: usize> SecureBuffer<N> {
+    /// Clone the buffer, returning Result since secure memory allocation can fail.
+    pub fn try_clone(&self) -> Result<Self, SecureMemoryError> {
+        let mut new = Self::new()?;
         new.as_mut().copy_from_slice(self.as_ref());
-        new
+        Ok(new)
     }
 }
 
@@ -232,12 +233,13 @@ impl SecureBytes {
     }
 }
 
-impl Clone for SecureBytes {
-    fn clone(&self) -> Self {
-        let mut new =
-            Self::new(self.data.len()).expect("Failed to allocate secure bytes for clone");
+impl SecureBytes {
+    /// Clone the buffer, returning Result since secure memory allocation can fail.
+    #[allow(dead_code)]
+    pub fn try_clone(&self) -> Result<Self, SecureMemoryError> {
+        let mut new = Self::new(self.data.len())?;
         new.as_mut_slice().copy_from_slice(self.as_slice());
-        new
+        Ok(new)
     }
 }
 
@@ -424,7 +426,7 @@ mod tests {
         let mut original = SecureBuffer::<32>::new().unwrap();
         original.as_mut().copy_from_slice(&[42u8; 32]);
 
-        let cloned = original.clone();
+        let cloned = original.try_clone().unwrap();
         assert_eq!(original.as_ref(), cloned.as_ref());
     }
 

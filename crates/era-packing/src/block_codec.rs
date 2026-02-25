@@ -56,6 +56,14 @@ pub fn decrypt_and_decompress(
         decompressed[3],
     ]) as usize;
 
+    if index_len > decompressed.len() {
+        return Err(EraError::decompression(format!(
+            "index_len {} exceeds decompressed data length {}",
+            index_len,
+            decompressed.len()
+        )));
+    }
+
     if decompressed.len() < 4 + index_len {
         return Err(EraError::decompression("Index length exceeds block size"));
     }

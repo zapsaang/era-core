@@ -108,7 +108,8 @@ mod tests {
     fn test_pack_unpack_roundtrip() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+        let builder =
+            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -129,7 +130,8 @@ mod tests {
     fn test_extract_chunk_by_hash() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+        let builder =
+            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
 
         let data1 = vec![1u8; 256];
         let data2 = vec![2u8; 256];
@@ -162,7 +164,8 @@ mod tests {
     fn test_corrupted_block_detection() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+        let builder =
+            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -189,7 +192,8 @@ mod tests {
     fn test_wrong_key_detection() {
         let key1 = test_key();
         let compressor = crate::create_compressor();
-        let builder = MacroBlockBuilder::new(key1.clone(), TEST_NONCE_CONTEXT, compressor);
+        let builder =
+            MacroBlockBuilder::new(key1.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -217,7 +221,8 @@ mod tests {
     fn test_wrong_nonce_context_detection() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+        let builder =
+            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -240,7 +245,8 @@ mod tests {
     fn test_truncated_block_detection() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder = MacroBlockBuilder::new(key.clone(), TEST_NONCE_CONTEXT, compressor);
+        let builder =
+            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);

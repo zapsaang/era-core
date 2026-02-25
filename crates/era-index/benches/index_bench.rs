@@ -1,195 +1,107 @@
-//! Performance benchmarks for era-index.
+//! Performance benchmarks for era-index (V2.1 Redb-backed implementation).
 //!
 //! Run with: cargo bench -p era-index
-//!
-//! NOTE: These benchmarks are for the legacy RocksDB-based implementation.
-//! They are disabled as ERA-Index V2.1 has replaced the RocksDB backend.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use era_common::ChunkHash;
-use rand::Rng;
-// use era_index::LsmChunkIndex; // Disabled - V2.1 uses different API
+use era_common::{BlockId, ChunkHash, VolumeId};
+use era_index::{IndexEntry, LsmTree, LsmTreeConfig};
+use rand::RngCore;
 
-#[cfg(any())] // Disable legacy benchmarks - random_hash
 fn random_hash() -> ChunkHash {
-    // Legacy code - disabled
-    unimplemented!()
-}
-
-#[allow(dead_code)]
-fn random_hash() -> ChunkHash {
-    let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     ChunkHash::from_bytes(bytes)
 }
 
-#[cfg(any())] // Disable legacy benchmarks
-fn bench_put(c: &mut Criterion) {
-    let tmp = TempDir::new().unwrap();
-    let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-
-    let mut group = c.benchmark_group("put");
-    group.throughput(Throughput::Elements(1));
-
-    let mut slot = 0u32;
-    group.bench_function("single_put", |b| {
-        b.iter(|| {
-            let hash = random_hash();
-            let location = create_test_location(slot);
-            slot += 1;
-            index.put(hash, location).unwrap();
-        });
-    });
-
-    group.finish();
+fn make_entry(hash: ChunkHash, i: u64) -> IndexEntry {
+    IndexEntry::new(
+        hash,
+        VolumeId::new(),
+        BlockId::new(i / 100),
+        (i % 100) as u32 * 1024,
+        1024,
+    )
 }
 
-#[cfg(any())] // Disable legacy benchmarks
-fn bench_batch_put(c: &mut Criterion) {
-    let tmp = TempDir::new().unwrap();
-    let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-
-    let batch_sizes = [100, 1000, 10000];
-
-    let mut group = c.benchmark_group("batch_put");
-
-    for &size in &batch_sizes {
-        group.throughput(Throughput::Elements(size as u64));
-        group.bench_function(format!("batch_{}", size), |b| {
-            let mut slot = 0u32;
-            b.iter(|| {
-                index.start_batch();
-                for _ in 0..size {
-                    let hash = random_hash();
-                    let location = create_test_location(slot);
-                    slot += 1;
-                    index.put(hash, location).unwrap();
+fn insert_throughput(c: &mut Criterion) {
+    c.bench_function("insert_throughput", |b| {
+        b.iter_with_setup(
+            || {
+                let hashes: Vec<ChunkHash> = (0..10_000).map(|_| random_hash()).collect();
+                let tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+                (tree, hashes)
+            },
+            |(mut tree, hashes)| {
+                for (i, hash) in hashes.into_iter().enumerate() {
+                    tree.insert(make_entry(hash, i as u64)).unwrap();
                 }
-                index.commit_batch().unwrap();
-            });
-        });
-    }
-
-    group.finish();
+                black_box(&mut tree);
+            },
+        );
+    });
 }
 
-#[cfg(any())] // Disable legacy benchmarks
-fn bench_get(c: &mut Criterion) {
-    let tmp = TempDir::new().unwrap();
-    let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-
-    // Pre-populate with 100K entries
-    let mut hashes = Vec::with_capacity(100_000);
-    index.start_batch();
-    for i in 0..100_000u32 {
+fn lookup_hit(c: &mut Criterion) {
+    let mut tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+    let mut hashes = Vec::with_capacity(5_000);
+    for i in 0..5_000u64 {
         let hash = random_hash();
         hashes.push(hash);
-        index.put(hash, create_test_location(i)).unwrap();
+        tree.insert(make_entry(hash, i)).unwrap();
     }
-    index.commit_batch().unwrap();
-    index.flush().unwrap();
+    let reader = tree.finalize().unwrap();
 
-    let mut group = c.benchmark_group("get");
-    group.throughput(Throughput::Elements(1));
+    let lookup_hashes: Vec<ChunkHash> = (0..1_000).map(|i| hashes[i % hashes.len()]).collect();
 
-    let mut idx = 0usize;
-    group.bench_function("hit", |b| {
+    c.bench_function("lookup_hit", |b| {
         b.iter(|| {
-            let hash = &hashes[idx % hashes.len()];
-            idx += 1;
-            black_box(index.get(hash).unwrap())
-        });
-    });
-
-    group.bench_function("miss", |b| {
-        b.iter(|| {
-            let hash = random_hash();
-            black_box(index.get(&hash).unwrap())
-        });
-    });
-
-    group.finish();
-}
-
-#[cfg(any())] // Disable legacy benchmarks
-fn bench_contains(c: &mut Criterion) {
-    let tmp = TempDir::new().unwrap();
-    let index = LsmChunkIndex::open(tmp.path().join("index")).unwrap();
-
-    // Pre-populate with 100K entries
-    let mut hashes = Vec::with_capacity(100_000);
-    index.start_batch();
-    for i in 0..100_000u32 {
-        let hash = random_hash();
-        hashes.push(hash);
-        index.put(hash, create_test_location(i)).unwrap();
-    }
-    index.commit_batch().unwrap();
-    index.flush().unwrap();
-
-    let mut group = c.benchmark_group("contains");
-    group.throughput(Throughput::Elements(1));
-
-    let mut idx = 0usize;
-    group.bench_function("hit_bloom_filter", |b| {
-        b.iter(|| {
-            let hash = &hashes[idx % hashes.len()];
-            idx += 1;
-            black_box(index.contains(hash).unwrap())
-        });
-    });
-
-    group.bench_function("miss_bloom_filter", |b| {
-        b.iter(|| {
-            let hash = random_hash();
-            black_box(index.contains(&hash).unwrap())
-        });
-    });
-
-    group.finish();
-}
-
-#[cfg(any())] // Disable legacy benchmarks
-fn bench_persistence(c: &mut Criterion) {
-    let mut group = c.benchmark_group("persistence");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(20);
-
-    group.bench_function("reopen_100k", |b| {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("index");
-
-        // Create index with 100K entries
-        {
-            let index = LsmChunkIndex::open(&path).unwrap();
-            index.start_batch();
-            for i in 0..100_000u32 {
-                let hash = random_hash();
-                index.put(hash, create_test_location(i)).unwrap();
+            for hash in &lookup_hashes {
+                black_box(reader.lookup(hash).unwrap());
             }
-            index.commit_batch().unwrap();
-            index.flush().unwrap();
-        }
-
-        b.iter(|| {
-            let index = LsmChunkIndex::open(&path).unwrap();
-            black_box(index.len())
         });
     });
-
-    group.finish();
 }
 
-// Empty benchmark group for V2.1 - TODO: Create new benchmarks
-fn bench_v2_placeholder(c: &mut Criterion) {
-    c.bench_function("v2_placeholder", |b| {
+fn lookup_miss(c: &mut Criterion) {
+    let mut tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+    for i in 0..5_000u64 {
+        tree.insert(make_entry(random_hash(), i)).unwrap();
+    }
+    let reader = tree.finalize().unwrap();
+
+    let miss_hashes: Vec<ChunkHash> = (0..1_000).map(|_| random_hash()).collect();
+
+    c.bench_function("lookup_miss", |b| {
         b.iter(|| {
-            // Placeholder for future V2.1 benchmarks
-            black_box(1 + 1)
-        })
+            for hash in &miss_hashes {
+                black_box(reader.lookup(hash).unwrap());
+            }
+        });
     });
 }
 
-criterion_group!(benches, bench_v2_placeholder);
+fn finalize(c: &mut Criterion) {
+    c.bench_function("finalize", |b| {
+        b.iter_with_setup(
+            || {
+                let mut tree = LsmTree::new(LsmTreeConfig::default()).unwrap();
+                for i in 0..5_000u64 {
+                    tree.insert(make_entry(random_hash(), i)).unwrap();
+                }
+                tree
+            },
+            |mut tree| {
+                black_box(tree.finalize().unwrap());
+            },
+        );
+    });
+}
+
+criterion_group!(
+    benches,
+    insert_throughput,
+    lookup_hit,
+    lookup_miss,
+    finalize
+);
 criterion_main!(benches);

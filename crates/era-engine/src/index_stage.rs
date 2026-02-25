@@ -50,6 +50,7 @@ impl IndexStage {
     /// Create a new `IndexStage` without checkpoint support.
     ///
     /// Used in tests and scenarios where crash recovery is not needed.
+    #[allow(dead_code)]
     pub fn without_checkpoint(chunk_index: Arc<dyn ChunkIndex>) -> Self {
         Self {
             chunk_index,

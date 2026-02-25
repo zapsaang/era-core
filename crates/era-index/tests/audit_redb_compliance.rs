@@ -66,7 +66,7 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
     SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -154,16 +154,20 @@ fn test_a3_zero_copy_meta_index_access() {
 
     let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);
     let bloom_bytes = serialize_bloom(&bloom).unwrap();
-    meta.set_bloom_filter(bloom_bytes.clone());
+    meta.set_bloom_filter(bloom_bytes.clone()).unwrap();
 
     let bytes = rkyv::to_bytes::<_, 4096>(&meta).expect("MetaIndex serialization must succeed");
 
-    let archived = rkyv::check_archived_root::<MetaIndex>(&bytes)
+    // Verify zero-copy access works via check_archived_root
+    let _archived = rkyv::check_archived_root::<MetaIndex>(&bytes)
         .expect("check_archived_root must succeed for valid MetaIndex bytes");
 
-    assert_eq!(archived.pages.len(), 2, "Archived page count must match");
+    // Deserialize and verify via getters (fields are private)
+    let restored: MetaIndex =
+        rkyv::from_bytes(&bytes).expect("MetaIndex deserialization must succeed");
+    assert_eq!(restored.pages().len(), 2, "Archived page count must match");
     assert_eq!(
-        archived.bloom_filter.len(),
+        restored.bloom_filter().len(),
         bloom_bytes.len(),
         "Archived bloom filter length must match"
     );

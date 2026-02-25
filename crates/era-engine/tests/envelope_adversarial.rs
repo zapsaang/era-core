@@ -180,7 +180,7 @@ fn auth_04_any_of_n_correct_logic() {
         };
 
         slots.push(RecipientSlot {
-            r_type: RecipientType::ScryptPassword,
+            r_type: RecipientType::Argon2idPassword,
             key_id: None,
             params: rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
             encrypted_master_key: combined,
@@ -217,7 +217,7 @@ fn auth_04_any_of_n_correct_logic() {
     }
 }
 
-/// Verify wrong-type slot is ignored (ScryptPassword provider on X25519PubKey slot).
+/// Verify wrong-type slot is ignored (Argon2idPassword provider on X25519PubKey slot).
 #[test]
 fn auth_05_provider_ignores_wrong_type() {
     let slot = RecipientSlot {
@@ -252,7 +252,7 @@ fn auth_06_corrupt_emk_rejected_gracefully() {
     };
 
     let slot = RecipientSlot {
-        r_type: RecipientType::ScryptPassword,
+        r_type: RecipientType::Argon2idPassword,
         key_id: None,
         params: rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
         // Corrupt: random garbage instead of [nonce(24) | ciphertext]

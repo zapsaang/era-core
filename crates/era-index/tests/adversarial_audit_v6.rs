@@ -102,7 +102,7 @@ fn test_v6_1a_positional_contract_verification() {
     }
 
     // Verify positional contract: meta.pages[i].block_id == BlockId::new(i)
-    for (i, page) in meta.pages.iter().enumerate() {
+    for (i, page) in meta.pages().iter().enumerate() {
         assert_eq!(
             page.block_id,
             BlockId::new(i as u64),
@@ -180,7 +180,7 @@ fn test_v6_1c_completeness_check_catches_missing_pages() {
     meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
         .unwrap();
 
-    assert_eq!(meta.pages.len(), 3, "MetaIndex should have 3 pages");
+    assert_eq!(meta.pages().len(), 3, "MetaIndex should have 3 pages");
 
     // from_memory() replaces the passed meta with its own single-page meta.
     // The real completeness check is in recover_from_volume, which compares
@@ -487,54 +487,44 @@ fn test_v6_3b_multi_page_vs_single_page_comparison() {
     );
 }
 
-/// V6-3c: IndexPage::new() accepts 50K entries without error.
+/// V6-3c: IndexPage::try_new() now enforces ENTRIES_PER_PAGE size guard (V9 fix).
 ///
-/// Prove that there is no size guard — IndexPage happily accepts any number
-/// of entries, regardless of ENTRIES_PER_PAGE.
+/// Pages exceeding ENTRIES_PER_PAGE are rejected with an error.
 #[test]
 fn test_v6_3c_index_page_no_size_guard() {
     let count = 50_000u64;
     let entries: Vec<IndexEntry> = (0..count).map(make_entry).collect();
 
-    let page = IndexPage::try_new(entries).unwrap();
-
-    assert_eq!(
-        page.len(),
-        count as usize,
-        "V6-F3: IndexPage accepted {} entries without error. \
-         ENTRIES_PER_PAGE={} is not enforced.",
+    // V9 fix: try_new now rejects oversized pages
+    let result = IndexPage::try_new(entries);
+    assert!(
+        result.is_err(),
+        "V6-F3 FIXED: IndexPage now rejects {} entries (max {}).",
         count,
         ENTRIES_PER_PAGE
     );
-
-    // Verify the page is still functional
-    assert!(page.find(&test_hash(25_000)).is_some());
-    assert!(page.find(&test_hash(count + 1)).is_none());
 }
 
-/// V6-3d: ENTRIES_PER_PAGE constant has no runtime enforcement.
+/// V6-3d: ENTRIES_PER_PAGE is now enforced at runtime (V9 fix).
 ///
-/// The constant exists but is only used in builder::finalize() for chunking.
-/// from_memory() ignores it entirely.
+/// try_new() rejects pages exceeding ENTRIES_PER_PAGE. However,
+/// from_memory() still works because it chunks entries internally.
 #[test]
 fn test_v6_3d_entries_per_page_is_advisory_not_enforced() {
     // ENTRIES_PER_PAGE is 8192
     assert_eq!(ENTRIES_PER_PAGE, 8192, "ENTRIES_PER_PAGE should be 8192");
 
-    // Create a page with 2x ENTRIES_PER_PAGE — no error
+    // V9 fix: try_new now rejects 2x ENTRIES_PER_PAGE
     let count = ENTRIES_PER_PAGE * 2;
     let entries: Vec<IndexEntry> = (0..count as u64).map(make_entry).collect();
-    let page = IndexPage::try_new(entries).unwrap();
-
-    assert_eq!(
-        page.len(),
-        count,
-        "V6-F3: IndexPage accepted {}x ENTRIES_PER_PAGE entries. \
-         The constant is advisory only — no runtime enforcement exists.",
+    let result = IndexPage::try_new(entries);
+    assert!(
+        result.is_err(),
+        "V6-F3 FIXED: IndexPage now rejects {}x ENTRIES_PER_PAGE entries.",
         2
     );
 
-    // from_memory also doesn't enforce it
+    // from_memory still works — it chunks entries into ENTRIES_PER_PAGE pages internally
     let entries2: Vec<IndexEntry> = (0..count as u64).map(make_entry).collect();
     let mut bloom = bloomfilter::Bloom::new_for_fp_rate(count, 0.01);
     for e in &entries2 {
@@ -542,7 +532,7 @@ fn test_v6_3d_entries_per_page_is_advisory_not_enforced() {
     }
     let reader = IndexReader::from_memory(MetaIndex::new(), bloom, entries2).unwrap();
 
-    // All entries findable despite violating page size contract
+    // All entries findable via from_memory's internal chunking
     assert!(reader.lookup(&test_hash(0)).unwrap().is_some());
     assert!(reader
         .lookup(&test_hash(count as u64 - 1))

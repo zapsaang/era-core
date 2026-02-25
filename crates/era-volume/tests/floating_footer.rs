@@ -16,7 +16,7 @@ async fn test_floating_footer_recovery() {
     let header = SuperHeader::new(
         archive_id,
         vec![era_volume::RecipientSlot::new(
-            era_volume::RecipientType::ScryptPassword,
+            era_volume::RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],

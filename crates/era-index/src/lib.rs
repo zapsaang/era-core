@@ -118,12 +118,20 @@ pub struct IndexPage {
 }
 
 impl IndexPage {
-    /// Create a new index page from sorted entries, returning an error if entries is empty.
+    /// Create a new index page from sorted entries, returning an error if entries is empty
+    /// or exceeds ENTRIES_PER_PAGE.
     pub fn try_new(mut entries: Vec<IndexEntry>) -> era_common::Result<Self> {
         if entries.is_empty() {
             return Err(era_common::EraError::InvalidFormat(
                 "IndexPage cannot be empty".into(),
             ));
+        }
+        if entries.len() > ENTRIES_PER_PAGE {
+            return Err(era_common::EraError::InvalidFormat(format!(
+                "IndexPage too large: {} entries (max {})",
+                entries.len(),
+                ENTRIES_PER_PAGE
+            )));
         }
         entries.sort_unstable_by_key(|e| e.hash);
         // Remove duplicates by hash (keep first occurrence)
@@ -193,9 +201,9 @@ pub struct PagePointer {
 #[archive(check_bytes)]
 pub struct MetaIndex {
     /// Sparse index of L2 pages
-    pub pages: Vec<PagePointer>,
+    pages: Vec<PagePointer>,
     /// Serialized Bloom filter (for fast negative lookups)
-    pub bloom_filter: Vec<u8>,
+    bloom_filter: Vec<u8>,
 }
 
 impl MetaIndex {
@@ -257,9 +265,21 @@ impl MetaIndex {
         }
     }
 
-    /// Set the Bloom filter data
-    pub fn set_bloom_filter(&mut self, bloom_data: Vec<u8>) {
+    /// Get read-only access to the page pointers
+    pub fn pages(&self) -> &[PagePointer] {
+        &self.pages
+    }
+
+    /// Get read-only access to the serialized bloom filter data
+    pub fn bloom_filter(&self) -> &[u8] {
+        &self.bloom_filter
+    }
+
+    /// Set the Bloom filter data, validating it deserializes correctly
+    pub fn set_bloom_filter(&mut self, bloom_data: Vec<u8>) -> era_common::Result<()> {
+        crate::deserialize_bloom(&bloom_data)?;
         self.bloom_filter = bloom_data;
+        Ok(())
     }
 }
 

@@ -39,6 +39,10 @@ pub struct IndexBuilder {
     store: IndexStore,
     /// In-memory buffer for batch writes
     buffer: Vec<IndexEntry>,
+    /// Cached entry count (None = not yet computed)
+    cached_count: Option<usize>,
+    /// Whether the cache is dirty (insert happened since last count)
+    count_dirty: bool,
 }
 
 impl IndexBuilder {
@@ -57,6 +61,8 @@ impl IndexBuilder {
         Ok(Self {
             store,
             buffer: Vec::with_capacity(BATCH_SIZE),
+            cached_count: None,
+            count_dirty: false,
         })
     }
 
@@ -66,6 +72,8 @@ impl IndexBuilder {
         Ok(Self {
             store,
             buffer: Vec::with_capacity(BATCH_SIZE),
+            cached_count: None,
+            count_dirty: false,
         })
     }
 
@@ -84,6 +92,7 @@ impl IndexBuilder {
         let hash = entry.hash;
         self.buffer.push(entry);
         self.store.bloom_set(&hash);
+        self.count_dirty = true;
         if self.buffer.len() >= BATCH_SIZE {
             self.flush_buffer()?;
         }
@@ -104,13 +113,21 @@ impl IndexBuilder {
     /// Deduplicates buffer hashes with a HashSet, then checks Redb for each
     /// unique hash to count only genuinely new entries. Buffer is at most
     /// BATCH_SIZE-1 entries, so this is cheap.
-    pub fn entry_count(&self) -> usize {
+    pub fn entry_count(&mut self) -> usize {
+        if !self.count_dirty {
+            if let Some(cached) = self.cached_count {
+                return cached;
+            }
+        }
         let unique_buffer_hashes: HashSet<ChunkHash> = self.buffer.iter().map(|e| e.hash).collect();
         let new_in_buffer = unique_buffer_hashes
             .iter()
             .filter(|h| self.store.get(h).ok().flatten().is_none())
             .count();
-        self.store.entry_count() + new_in_buffer
+        let count = self.store.entry_count() + new_in_buffer;
+        self.cached_count = Some(count);
+        self.count_dirty = false;
+        count
     }
 
     /// Check if a hash exists in the Bloom filter
@@ -176,8 +193,8 @@ impl IndexBuilder {
             // Encrypt page with session keys
             let block_id = BlockId::new(block_id_counter);
             let block_key =
-                session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context);
-            let derived_key = block_key.to_derived_key();
+                session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context)?;
+            let derived_key = block_key.to_derived_key()?;
             let encrypted_data = era_crypto::encrypt_with_context(
                 &derived_key,
                 &index_nonce_context,
@@ -207,7 +224,7 @@ impl IndexBuilder {
 
         // Reuse the builder's existing bloom — it already contains all entries.
         let bloom_bytes = super::serialize_bloom(self.store.bloom())?;
-        meta.set_bloom_filter(bloom_bytes);
+        meta.set_bloom_filter(bloom_bytes)?;
 
         // Encrypt and write MetaIndex as IndexManifest block
         let meta_bytes =
@@ -218,8 +235,8 @@ impl IndexBuilder {
             volume_key,
             manifest_block_id.sequence(),
             &index_nonce_context,
-        );
-        let manifest_derived_key = manifest_key.to_derived_key();
+        )?;
+        let manifest_derived_key = manifest_key.to_derived_key()?;
         let encrypted_manifest = era_crypto::encrypt_with_context(
             &manifest_derived_key,
             &index_nonce_context,

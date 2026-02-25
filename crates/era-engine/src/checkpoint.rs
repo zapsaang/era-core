@@ -94,7 +94,7 @@ impl Checkpoint {
             version: CHECKPOINT_VERSION,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or(std::time::Duration::from_secs(0))
                 .as_secs(),
             current_volume,
             current_offset,
@@ -467,8 +467,8 @@ pub async fn write_checkpoint<W: StorageWriter>(
     let block_id = BlockId::new(volume_writer.block_count() as u64);
 
     // Encrypt checkpoint data
-    let block_key = session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
-    let derived_key = block_key.to_derived_key();
+    let block_key = session.derive_block_key(volume_key, block_id.sequence(), &nonce_context)?;
+    let derived_key = block_key.to_derived_key()?;
     let encrypted_data = era_crypto::encrypt_with_context(
         &derived_key,
         &nonce_context,
@@ -553,8 +553,9 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
     // If block_id is provided, try direct decryption first
     if let Some(id) = checkpoint_block_id {
         let block_id = BlockId::new(id as u64);
-        let block_key = session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
-        let derived_key = block_key.to_derived_key();
+        let block_key =
+            session.derive_block_key(volume_key, block_id.sequence(), &nonce_context)?;
+        let derived_key = block_key.to_derived_key()?;
 
         if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
             &derived_key,
@@ -577,8 +578,9 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
     // Fall back to brute-force for legacy volumes (block_id = 0 or decryption failed)
     for candidate_id in 0..100u64 {
         let block_id = BlockId::new(candidate_id);
-        let block_key = session.derive_block_key(volume_key, block_id.sequence(), &nonce_context);
-        let derived_key = block_key.to_derived_key();
+        let block_key =
+            session.derive_block_key(volume_key, block_id.sequence(), &nonce_context)?;
+        let derived_key = block_key.to_derived_key()?;
 
         if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
             &derived_key,

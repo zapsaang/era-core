@@ -667,7 +667,7 @@ fn rotation_01_preserves_vk() {
     assert_eq!(original_vk.as_bytes(), vk.as_bytes());
 
     // Re-wrap with new IK
-    let new_ik = new_session.derive_intermediate_key();
+    let new_ik = new_session.derive_intermediate_key().unwrap();
     let new_wrapped = wrap_volume_key(&new_ik, &vk).unwrap();
 
     // Unwrap with new session
@@ -698,12 +698,12 @@ fn rotation_02_double_rotation_preserves_vk() {
     let vk = s1.unwrap_volume_key(&w1.nonce, &w1.ciphertext).unwrap();
 
     // Rotation 1: mk1 -> mk2
-    let ik2 = s2.derive_intermediate_key();
+    let ik2 = s2.derive_intermediate_key().unwrap();
     let w2 = wrap_volume_key(&ik2, &vk).unwrap();
     let vk2 = s2.unwrap_volume_key(&w2.nonce, &w2.ciphertext).unwrap();
 
     // Rotation 2: mk2 -> mk3
-    let ik3 = s3.derive_intermediate_key();
+    let ik3 = s3.derive_intermediate_key().unwrap();
     let w3 = wrap_volume_key(&ik3, &vk2).unwrap();
     let vk3 = s3.unwrap_volume_key(&w3.nonce, &w3.ciphertext).unwrap();
 
@@ -726,8 +726,8 @@ fn ik_01_avalanche_effect() {
     let mut mk2 = mk1;
     mk2[0] ^= 0x01; // Flip one bit
 
-    let ik1 = IntermediateKey::derive_from_master_key(&mk1);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk2);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk1).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk2).unwrap();
 
     // Count differing bits
     let mut differing_bits = 0;
@@ -748,8 +748,8 @@ fn ik_01_avalanche_effect() {
 #[test]
 fn ik_02_deterministic() {
     let mk = [0x42u8; 32];
-    let ik1 = IntermediateKey::derive_from_master_key(&mk);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk).unwrap();
     assert_eq!(
         ik1.as_bytes(),
         ik2.as_bytes(),
@@ -764,7 +764,7 @@ fn ik_03_different_mk_different_ik() {
     for i in 0..100u8 {
         let mut mk = [0u8; 32];
         mk[0] = i;
-        let ik = IntermediateKey::derive_from_master_key(&mk);
+        let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
         iks.push(*ik.as_bytes());
     }
 
@@ -788,12 +788,12 @@ fn ik_03_different_mk_different_ik() {
 fn block_key_01_isolation() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
     let nonce_ctx = [0xAB; 16];
 
     let mut keys = Vec::new();
     for i in 0..100u64 {
-        let bk = session.derive_block_key(&vk, i, &nonce_ctx);
+        let bk = session.derive_block_key(&vk, i, &nonce_ctx).unwrap();
         keys.push(*bk.as_bytes());
     }
 
@@ -813,10 +813,10 @@ fn block_key_01_isolation() {
 fn block_key_02_nonce_context_isolation() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
 
-    let bk1 = session.derive_block_key(&vk, 0, &[0x01; 16]);
-    let bk2 = session.derive_block_key(&vk, 0, &[0x02; 16]);
+    let bk1 = session.derive_block_key(&vk, 0, &[0x01; 16]).unwrap();
+    let bk2 = session.derive_block_key(&vk, 0, &[0x02; 16]).unwrap();
     assert_ne!(
         bk1.as_bytes(),
         bk2.as_bytes(),
@@ -833,9 +833,9 @@ fn block_key_02_nonce_context_isolation() {
 fn redact_01_no_key_leaks_in_debug() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
-    let ik = session.derive_intermediate_key();
-    let bk = session.derive_block_key(&vk, 0, &[0u8; 16]);
+    let vk = VolumeKey::generate().unwrap();
+    let ik = session.derive_intermediate_key().unwrap();
+    let bk = session.derive_block_key(&vk, 0, &[0u8; 16]).unwrap();
 
     let session_debug = format!("{:?}", session);
     let vk_debug = format!("{:?}", vk);
@@ -1136,7 +1136,7 @@ async fn e2e_threshold_06_writer_rejects_t_gt_n() {
 /// Verify VolumeKey memory is locked.
 #[test]
 fn memory_01_volume_key_locked() {
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
     // On systems with mlock support, this should be locked
     // On CI/containers without CAP_IPC_LOCK, it may not be locked
     // but the SecureBuffer should still function correctly
@@ -1167,7 +1167,7 @@ fn concurrent_01_unique_vks() {
     let mut handles = Vec::new();
 
     for _ in 0..8 {
-        let session = session.clone();
+        let session = session.try_clone().unwrap();
         handles.push(thread::spawn(move || {
             let (vk, _) = session.generate_and_wrap_volume_key().unwrap();
             *vk.as_bytes()

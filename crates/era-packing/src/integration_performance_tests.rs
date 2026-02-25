@@ -169,7 +169,7 @@ mod tests {
         let simple_stats = simple.stats();
 
         // New strategy
-        let mut pool = StagingPool::new(8, target_size);
+        let mut pool = StagingPool::new(8, target_size).unwrap();
         let mut best_fit_blocks = Vec::new();
         for chunk in chunks.iter() {
             if let Some(packed) = pool.push(chunk.clone()) {
@@ -267,7 +267,7 @@ mod tests {
         let simple_stats = simple.stats();
 
         // New strategy
-        let mut pool = StagingPool::new(8, target_size);
+        let mut pool = StagingPool::new(8, target_size).unwrap();
         let mut best_fit_blocks = Vec::new();
         for chunk in chunks.iter() {
             if let Some(packed) = pool.push(chunk.clone()) {
@@ -370,7 +370,7 @@ mod tests {
 
         // New strategy
         let start = Instant::now();
-        let mut pool = StagingPool::new(8, target_size);
+        let mut pool = StagingPool::new(8, target_size).unwrap();
         let mut best_fit_blocks = Vec::new();
         for chunk in chunks.iter() {
             if let Some(packed) = pool.push(chunk.clone()) {
@@ -462,7 +462,7 @@ mod tests {
         );
 
         for k in [2, 4, 8, 16, 32] {
-            let mut pool = StagingPool::new(k, target_size);
+            let mut pool = StagingPool::new(k, target_size).unwrap();
             let mut blocks = Vec::new();
 
             for chunk in chunks.iter() {
@@ -515,7 +515,9 @@ mod tests {
         );
 
         for threshold in [70, 80, 90, 95, 99] {
-            let mut pool = StagingPool::new(8, target_size).with_flush_threshold(threshold);
+            let mut pool = StagingPool::new(8, target_size)
+                .unwrap()
+                .with_flush_threshold(threshold);
             let mut blocks = Vec::new();
 
             for chunk in chunks.iter() {
@@ -601,7 +603,7 @@ mod tests {
             let simple_stats = simple.stats();
 
             // New strategy
-            let mut pool = StagingPool::new(8, target_size);
+            let mut pool = StagingPool::new(8, target_size).unwrap();
             let mut best_fit_blocks = Vec::new();
             for chunk in chunks.iter() {
                 if let Some(packed) = pool.push(chunk.clone()) {

@@ -42,7 +42,7 @@ fn vuln_01_vk_must_be_random_not_derived_from_mk() {
 fn vuln_02_vk_statistical_randomness() {
     let mut seen = HashSet::new();
     for _ in 0..1000 {
-        let vk = VolumeKey::generate();
+        let vk = VolumeKey::generate().unwrap();
         let key = *vk.as_bytes();
         assert!(
             seen.insert(key),
@@ -55,7 +55,7 @@ fn vuln_02_vk_statistical_randomness() {
 #[test]
 fn vuln_03_vk_not_degenerate() {
     for _ in 0..100 {
-        let vk = VolumeKey::generate();
+        let vk = VolumeKey::generate().unwrap();
         assert_ne!(
             vk.as_bytes(),
             &[0u8; 32],
@@ -80,8 +80,8 @@ fn vuln_04_ik_derived_correctly_from_mk() {
     let mk1 = [0x01u8; 32];
     let mk2 = [0x02u8; 32];
 
-    let ik1 = IntermediateKey::derive_from_master_key(&mk1);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk2);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk1).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk2).unwrap();
 
     assert_ne!(
         ik1.as_bytes(),
@@ -101,8 +101,8 @@ fn vuln_04_ik_derived_correctly_from_mk() {
 #[test]
 fn vuln_05_ik_deterministic_for_same_mk() {
     let mk = [0x42u8; 32];
-    let ik1 = IntermediateKey::derive_from_master_key(&mk);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk).unwrap();
     assert_eq!(
         ik1.as_bytes(),
         ik2.as_bytes(),
@@ -115,12 +115,12 @@ fn vuln_05_ik_deterministic_for_same_mk() {
 fn vuln_06_block_key_isolation() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
     let nonce_ctx = [0xAB; 16];
 
     let mut block_keys = HashSet::new();
     for i in 0..100 {
-        let bk = session.derive_block_key(&vk, i, &nonce_ctx);
+        let bk = session.derive_block_key(&vk, i, &nonce_ctx).unwrap();
         assert!(
             block_keys.insert(*bk.as_bytes()),
             "CRITICAL: Block key collision at index {}. Per-block isolation broken.",
@@ -134,10 +134,10 @@ fn vuln_06_block_key_isolation() {
 fn vuln_07_block_key_nonce_context_isolation() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
 
-    let bk1 = session.derive_block_key(&vk, 0, &[0x01; 16]);
-    let bk2 = session.derive_block_key(&vk, 0, &[0x02; 16]);
+    let bk1 = session.derive_block_key(&vk, 0, &[0x01; 16]).unwrap();
+    let bk2 = session.derive_block_key(&vk, 0, &[0x02; 16]).unwrap();
 
     assert_ne!(
         bk1.as_bytes(),
@@ -155,8 +155,8 @@ fn vuln_07_block_key_nonce_context_isolation() {
 #[test]
 fn vuln_08_wrap_unwrap_roundtrip() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let original_bytes = *vk.as_bytes();
 
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
@@ -174,8 +174,8 @@ fn vuln_08_wrap_unwrap_roundtrip() {
 #[test]
 fn vuln_09_tamper_every_ciphertext_byte() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     for i in 0..wrapped.ciphertext.len() {
@@ -196,8 +196,8 @@ fn vuln_09_tamper_every_ciphertext_byte() {
 #[test]
 fn vuln_10_tamper_nonce() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     for i in 0..24 {
@@ -218,10 +218,10 @@ fn vuln_10_tamper_nonce() {
 fn vuln_11_wrong_ik_fails() {
     let mk1 = [0x01u8; 32];
     let mk2 = [0x02u8; 32];
-    let ik1 = IntermediateKey::derive_from_master_key(&mk1);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk2);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk1).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk2).unwrap();
 
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik1, &vk).unwrap();
 
     let result = unwrap_volume_key(&ik2, &wrapped.nonce, &wrapped.ciphertext);
@@ -235,7 +235,7 @@ fn vuln_11_wrong_ik_fails() {
 #[test]
 fn vuln_12_empty_ciphertext() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
 
     let result = unwrap_volume_key(&ik, &[0u8; 24], &[]);
     assert!(
@@ -248,8 +248,8 @@ fn vuln_12_empty_ciphertext() {
 #[test]
 fn vuln_13_truncated_ciphertext() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     // Ciphertext should be 32 (VK) + 16 (tag) = 48 bytes
@@ -266,8 +266,8 @@ fn vuln_13_truncated_ciphertext() {
 #[test]
 fn vuln_14_oversized_ciphertext() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     let mut oversized = wrapped.ciphertext.clone();
@@ -290,8 +290,8 @@ fn vuln_14_oversized_ciphertext() {
 #[test]
 fn vuln_15_tamper_error_message() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     let mut tampered = wrapped.ciphertext.clone();
@@ -314,8 +314,8 @@ fn vuln_15_tamper_error_message() {
 #[test]
 fn vuln_16_nonce_uniqueness_across_wraps() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
 
     let mut nonces = HashSet::new();
     for i in 0..500 {
@@ -332,8 +332,8 @@ fn vuln_16_nonce_uniqueness_across_wraps() {
 #[test]
 fn vuln_17_nonce_not_degenerate() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
 
     for _ in 0..100 {
         let wrapped = wrap_volume_key(&ik, &vk).unwrap();
@@ -350,9 +350,9 @@ fn vuln_17_nonce_not_degenerate() {
 fn vuln_18_debug_never_leaks_keys() {
     let mk = [0xAB; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let ik = session.derive_intermediate_key();
-    let vk = VolumeKey::generate();
-    let bk = session.derive_block_key(&vk, 0, &[0; 16]);
+    let ik = session.derive_intermediate_key().unwrap();
+    let vk = VolumeKey::generate().unwrap();
+    let bk = session.derive_block_key(&vk, 0, &[0; 16]).unwrap();
 
     let session_debug = format!("{:?}", session);
     let ik_debug = format!("{:?}", ik);
@@ -388,7 +388,7 @@ fn vuln_18_debug_never_leaks_keys() {
 /// Secure memory must be locked (mlock).
 #[test]
 fn vuln_19_secure_memory_locked() {
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
 
     // On Linux/macOS, memory should be locked.  May fail in CI containers
     // where mlock is restricted, so we just check the API exists.
@@ -420,7 +420,7 @@ fn vuln_20_key_rotation_preserves_vk() {
     assert_eq!(original_vk.as_bytes(), vk.as_bytes());
 
     // Re-wrap with new IK
-    let new_ik = new_session.derive_intermediate_key();
+    let new_ik = new_session.derive_intermediate_key().unwrap();
     let new_wrapped = wrap_volume_key(&new_ik, &vk).unwrap();
 
     // Old session must NOT unwrap new wrapping
@@ -457,12 +457,12 @@ fn vuln_21_double_rotation() {
 
     // Rotate MK1 → MK2
     let vk = s1.unwrap_volume_key(&w1.nonce, &w1.ciphertext).unwrap();
-    let ik2 = s2.derive_intermediate_key();
+    let ik2 = s2.derive_intermediate_key().unwrap();
     let w2 = wrap_volume_key(&ik2, &vk).unwrap();
 
     // Rotate MK2 → MK3
     let vk2 = s2.unwrap_volume_key(&w2.nonce, &w2.ciphertext).unwrap();
-    let ik3 = s3.derive_intermediate_key();
+    let ik3 = s3.derive_intermediate_key().unwrap();
     let w3 = wrap_volume_key(&ik3, &vk2).unwrap();
 
     // Final unwrap with MK3
@@ -490,8 +490,8 @@ fn vuln_22_mk_to_ik_avalanche() {
     let mut mk2 = [0u8; 32];
     mk2[0] = 1; // Flip 1 bit in MK
 
-    let ik1 = IntermediateKey::derive_from_master_key(&mk1);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk2);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk1).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk2).unwrap();
 
     let hamming: u32 = ik1
         .as_bytes()

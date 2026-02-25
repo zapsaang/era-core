@@ -373,7 +373,7 @@ impl ArchiveReader {
             ));
         }
 
-        let owned_session = session.clone();
+        let owned_session = session.try_clone()?;
         let volume_key = owned_session.unwrap_volume_key(
             &header.encrypted_volume_key.nonce,
             &header.encrypted_volume_key.ciphertext,
@@ -548,9 +548,9 @@ impl ArchiveReader {
         })?;
 
         let reader = &self.volume_readers[reader_idx];
-        let footer = reader
-            .footer()
-            .expect("Catalog volume must have valid footer");
+        let footer = reader.footer().ok_or_else(|| {
+            EraError::CorruptedFooter("Catalog volume has no valid footer".into())
+        })?;
 
         let catalog_location = BlockLocation::single(
             reader.header().volume_id,

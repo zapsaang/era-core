@@ -76,6 +76,16 @@ impl<R: StorageReader> VolumeReader<R> {
             ));
         }
 
+        // Validate that the file is not truncated: footer.data_end_offset must not exceed file size
+        if let Some(ref f) = footer {
+            if f.data_end_offset > size {
+                return Err(EraError::CorruptedFooter(format!(
+                    "Archive appears truncated: footer claims data_end_offset={} but file size is {}",
+                    f.data_end_offset, size
+                )));
+            }
+        }
+
         Ok(Self {
             reader,
             header,
@@ -448,7 +458,7 @@ mod tests {
         let header = SuperHeader::new(
             ArchiveId::new(),
             vec![RecipientSlot::new(
-                RecipientType::ScryptPassword,
+                RecipientType::Argon2idPassword,
                 Some([0x12; 8]),
                 vec![0xAB; 16],
                 vec![0xCD; 48],
@@ -483,7 +493,7 @@ mod tests {
         let header = SuperHeader::new(
             ArchiveId::new(),
             vec![RecipientSlot::new(
-                RecipientType::ScryptPassword,
+                RecipientType::Argon2idPassword,
                 Some([0x12; 8]),
                 vec![0xAB; 16],
                 vec![0xCD; 48],

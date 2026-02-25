@@ -87,9 +87,17 @@ impl StagingPool {
     /// - k=4: Low memory, good for small datasets
     /// - k=8: Balanced (recommended default)
     /// - k=16: Best space efficiency, higher memory usage
-    pub fn new(k: usize, target_size: usize) -> Self {
-        assert!(k > 0, "k must be at least 1");
-        assert!(target_size > 0, "target_size must be positive");
+    pub fn new(k: usize, target_size: usize) -> era_common::Result<Self> {
+        if k == 0 {
+            return Err(era_common::EraError::InvalidConfig(
+                "k must be at least 1".into(),
+            ));
+        }
+        if target_size == 0 {
+            return Err(era_common::EraError::InvalidConfig(
+                "target_size must be positive".into(),
+            ));
+        }
 
         let bins = (0..k)
             .map(|_| BinState {
@@ -98,12 +106,12 @@ impl StagingPool {
             })
             .collect();
 
-        Self {
+        Ok(Self {
             bins,
             target_size,
             k,
             flush_threshold_percent: 95, // Flush at 95% capacity
-        }
+        })
     }
 
     /// Set the flush threshold percentage (default: 95)
@@ -309,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_oversized_chunk_packed_alone() {
-        let mut pool = StagingPool::new(4, 1024);
+        let mut pool = StagingPool::new(4, 1024).unwrap();
         let chunk = make_chunk(2048, 1); // Larger than target
 
         let packed = pool.push(chunk).unwrap();
@@ -320,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_best_fit_strategy() {
-        let mut pool = StagingPool::new(4, 1000);
+        let mut pool = StagingPool::new(4, 1000).unwrap();
 
         // Add chunks that will test Best-Fit selection
         // Chunk 1: 600 bytes -> goes to bin0
@@ -349,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_flush_on_threshold() {
-        let mut pool = StagingPool::new(2, 1000).with_flush_threshold(90); // Flush at 900 bytes
+        let mut pool = StagingPool::new(2, 1000).unwrap().with_flush_threshold(90); // Flush at 900 bytes
 
         // Add chunks totaling 850 bytes - should not flush
         assert!(pool.push(make_chunk(500, 1)).is_none());
@@ -363,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_flush_all() {
-        let mut pool = StagingPool::new(3, 1000);
+        let mut pool = StagingPool::new(3, 1000).unwrap();
 
         pool.push(make_chunk(300, 1));
         pool.push(make_chunk(200, 2));
@@ -387,7 +395,7 @@ mod tests {
     fn test_strategy_evict_fullest_when_no_fit() {
         // Target: 100 bytes. k=2.
         // We use flush threshold 100% to control flushing behavior strictly via push logic
-        let mut pool = StagingPool::new(2, 100).with_flush_threshold(100);
+        let mut pool = StagingPool::new(2, 100).unwrap().with_flush_threshold(100);
 
         // Fill Bin 0 to 90
         pool.push(make_chunk(90, 1));
@@ -422,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let mut pool = StagingPool::new(4, 1000);
+        let mut pool = StagingPool::new(4, 1000).unwrap();
 
         pool.push(make_chunk(300, 1));
         pool.push(make_chunk(400, 2));
@@ -437,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_sequential_chunks_distribution() {
-        let mut pool = StagingPool::new(4, 4000);
+        let mut pool = StagingPool::new(4, 4000).unwrap();
 
         // Simulate a workload with varying chunk sizes
         let sizes = [512, 1024, 256, 2048, 128, 800, 1500, 300];

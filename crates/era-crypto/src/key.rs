@@ -3,6 +3,7 @@
 use rand::RngCore;
 
 use crate::secure_memory::{SecureBuffer, SecureMemoryConfig, SecureMemoryError};
+use era_common::EraError;
 
 /// A derived encryption key (32 bytes for XChaCha20)
 ///
@@ -25,9 +26,13 @@ impl DerivedKey {
     /// Create a new derived key from bytes.
     ///
     /// Uses default secure memory configuration (mlock enabled, non-strict).
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self::from_bytes_with_config(bytes, SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for DerivedKey")
+    pub fn from_bytes(bytes: [u8; 32]) -> era_common::Result<Self> {
+        Self::from_bytes_with_config(bytes, SecureMemoryConfig::default()).map_err(|e| {
+            EraError::Encryption(format!(
+                "Failed to allocate secure memory for DerivedKey: {}",
+                e
+            ))
+        })
     }
 
     /// Create a new derived key from bytes with custom memory configuration.
@@ -51,8 +56,9 @@ impl DerivedKey {
     }
 }
 
-impl Clone for DerivedKey {
-    fn clone(&self) -> Self {
+impl DerivedKey {
+    /// Clone the key, returning Result since secure memory allocation can fail.
+    pub fn try_clone(&self) -> era_common::Result<Self> {
         Self::from_bytes(*self.as_bytes())
     }
 }

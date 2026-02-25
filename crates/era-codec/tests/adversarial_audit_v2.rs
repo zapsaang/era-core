@@ -54,9 +54,8 @@ fn test_decode_inconsistent_shard_sizes() {
     // which will cause a mismatch. This should fail, not silently corrupt.
     let result = coder.decode(&shard_options, original.len());
     // Either succeeds with correct data or fails — must not silently corrupt
-    match result {
-        Ok(recovered) => assert_eq!(recovered, original, "Recovery must be exact"),
-        Err(_) => {} // Acceptable: inconsistent shards rejected
+    if let Ok(recovered) = result {
+        assert_eq!(recovered, original, "Recovery must be exact");
     }
 }
 

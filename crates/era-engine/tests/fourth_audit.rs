@@ -77,7 +77,7 @@ fn make_valid_header(policy: AccessPolicy) -> SuperHeader {
     SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -822,20 +822,20 @@ fn d1_deterministic_nonce_reuse_risk() {
             // Behavioral: same (key, nonce_context, block_id) → same ciphertext
             let mk = [0x42u8; 32];
             let session = KeySession::from_master_key(&mk).unwrap();
-            let vk = VolumeKey::generate();
+            let vk = VolumeKey::generate().unwrap();
             let salt = [0xAA; 16];
-            let bk = session.derive_block_key(&vk, 0, &salt);
+            let bk = session.derive_block_key(&vk, 0, &salt).unwrap();
 
             let plaintext = b"test data for nonce reuse check";
             let ct1 = era_crypto::encrypt_with_context(
-                &bk.to_derived_key(),
+                &bk.to_derived_key().unwrap(),
                 &salt,
                 era_common::BlockId::new(1),
                 plaintext,
             )
             .unwrap();
             let ct2 = era_crypto::encrypt_with_context(
-                &bk.to_derived_key(),
+                &bk.to_derived_key().unwrap(),
                 &salt,
                 era_common::BlockId::new(1),
                 plaintext,
@@ -1193,8 +1193,8 @@ fn behavioral_constant_time_password_verify() {
 fn behavioral_debug_redaction() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
-    let ik = session.derive_intermediate_key();
+    let vk = VolumeKey::generate().unwrap();
+    let ik = session.derive_intermediate_key().unwrap();
 
     let session_debug = format!("{:?}", session);
     let vk_debug = format!("{:?}", vk);

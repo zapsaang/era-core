@@ -42,17 +42,21 @@ impl PackingStage {
     /// * `k_factor` - Number of bins to maintain (higher = better packing, more memory)
     /// * `target_block_size` - Target size for each packed block
     /// * `flush_threshold_percent` - Percentage (1-100) at which to flush bins
-    pub fn new(k_factor: usize, target_block_size: usize, flush_threshold_percent: usize) -> Self {
-        Self {
-            staging_pool: StagingPool::new(k_factor, target_block_size)
+    pub fn new(
+        k_factor: usize,
+        target_block_size: usize,
+        flush_threshold_percent: usize,
+    ) -> era_common::Result<Self> {
+        Ok(Self {
+            staging_pool: StagingPool::new(k_factor, target_block_size)?
                 .with_flush_threshold(flush_threshold_percent),
             target_block_size,
-        }
+        })
     }
 
     /// Create a packing stage with default flush threshold (95%).
     #[allow(dead_code)]
-    pub fn with_defaults(k_factor: usize, target_block_size: usize) -> Self {
+    pub fn with_defaults(k_factor: usize, target_block_size: usize) -> era_common::Result<Self> {
         Self::new(k_factor, target_block_size, 95)
     }
 
@@ -117,14 +121,14 @@ mod tests {
 
     #[test]
     fn test_new_packing_stage() {
-        let stage = PackingStage::new(4, 4 * 1024 * 1024, 95);
+        let stage = PackingStage::new(4, 4 * 1024 * 1024, 95).unwrap();
         assert_eq!(stage.target_block_size(), 4 * 1024 * 1024);
         assert!(stage.is_empty());
     }
 
     #[test]
     fn test_push_small_chunk() {
-        let mut stage = PackingStage::new(4, 1024, 95);
+        let mut stage = PackingStage::new(4, 1024, 95).unwrap();
 
         // Small chunk should be buffered
         let result = stage.push(make_chunk(100));
@@ -134,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_flush_threshold() {
-        let mut stage = PackingStage::new(4, 1000, 50); // 50% threshold
+        let mut stage = PackingStage::new(4, 1000, 50).unwrap(); // 50% threshold
 
         // First chunk (50% of target) should trigger flush
         let result = stage.push(make_chunk(500));
@@ -146,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_flush_all() {
-        let mut stage = PackingStage::new(4, 1024, 95);
+        let mut stage = PackingStage::new(4, 1024, 95).unwrap();
 
         // Add some chunks
         stage.push(make_chunk(100));
@@ -160,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_oversized_chunk() {
-        let mut stage = PackingStage::new(4, 100, 95);
+        let mut stage = PackingStage::new(4, 100, 95).unwrap();
 
         // Oversized chunk should be returned immediately
         let result = stage.push(make_chunk(200));

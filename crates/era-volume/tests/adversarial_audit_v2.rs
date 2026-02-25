@@ -21,7 +21,7 @@ fn test_header() -> SuperHeader {
     SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],

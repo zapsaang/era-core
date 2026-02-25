@@ -20,7 +20,7 @@ use tempfile::TempDir;
 /// Create a dummy recipient slot for test headers (validation requires >= 1 recipient)
 fn dummy_recipients() -> Vec<RecipientSlot> {
     vec![RecipientSlot::new(
-        RecipientType::ScryptPassword,
+        RecipientType::Argon2idPassword,
         None,
         vec![0u8; 32], // dummy params
         vec![0u8; 48], // dummy encrypted master key
@@ -159,7 +159,8 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
         erasure_info,
         Vec::new(),
         Vec::new(),
-    );
+    )
+    .unwrap();
     let result = reader
         .read_erasure_shards(&fake_location, &erasure_info)
         .await;

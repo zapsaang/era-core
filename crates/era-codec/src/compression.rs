@@ -2,6 +2,10 @@
 
 use bytes::Bytes;
 use era_common::{CompressionAlgorithm, EraError, Result};
+use std::io::Read;
+
+/// Maximum decompressed output size (256 MB) to prevent decompression bombs.
+const MAX_DECOMPRESSED_SIZE: usize = 256 * 1024 * 1024;
 
 /// Trait for compression implementations
 pub trait Compressor: Send + Sync {
@@ -48,13 +52,26 @@ impl Compressor for ZstdCompressor {
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Bytes> {
-        // Optimization: use the low-level API to allow streaming decompression
-        // and preallocation, improving performance versus zstd::decode_all.
-        let decompressed =
-            zstd::decode_all(data).map_err(|e| EraError::decompression(e.to_string()))?;
-
-        // Optimization: convert Vec to Bytes to avoid an extra copy.
-        Ok(Bytes::from(decompressed))
+        let mut decoder =
+            zstd::Decoder::new(data).map_err(|e| EraError::decompression(e.to_string()))?;
+        let mut output = Vec::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = decoder
+                .read(&mut buf)
+                .map_err(|e| EraError::decompression(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            if output.len() + n > MAX_DECOMPRESSED_SIZE {
+                return Err(EraError::decompression(format!(
+                    "Decompressed output exceeds maximum allowed size of {} bytes",
+                    MAX_DECOMPRESSED_SIZE
+                )));
+            }
+            output.extend_from_slice(&buf[..n]);
+        }
+        Ok(Bytes::from(output))
     }
 
     fn algorithm(&self) -> CompressionAlgorithm {
@@ -114,7 +131,19 @@ impl Compressor for LZ4Compressor {
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Bytes> {
-        // LZ4 decompression - extremely fast, minimal CPU overhead
+        // Validate the 4-byte LE size prefix before decompression
+        if data.len() < 4 {
+            return Err(EraError::decompression(
+                "LZ4 data too short: missing size prefix".to_string(),
+            ));
+        }
+        let declared_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if declared_size > MAX_DECOMPRESSED_SIZE {
+            return Err(EraError::decompression(format!(
+                "LZ4 declared size {} exceeds maximum allowed size of {} bytes",
+                declared_size, MAX_DECOMPRESSED_SIZE
+            )));
+        }
         match lz4_flex::decompress_size_prepended(data) {
             Ok(decompressed) => Ok(Bytes::from(decompressed)),
             Err(e) => Err(EraError::decompression(format!(

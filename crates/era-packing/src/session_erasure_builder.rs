@@ -381,7 +381,7 @@ mod tests {
             parallelism: 1,
         };
         let key = derive_key(b"test_password", &salt, &params).unwrap();
-        (KeySession::from_derived_key(&key), salt)
+        (KeySession::from_derived_key(&key).unwrap(), salt)
     }
 
     #[test]

@@ -89,7 +89,7 @@ impl<'a> SessionBlockBuilder<'a> {
     }
 
     /// Derive a unique block key for the given block ID.
-    fn derive_block_key(&self, block_id: BlockId) -> BlockKey {
+    fn derive_block_key(&self, block_id: BlockId) -> Result<BlockKey> {
         self.session
             .derive_block_key(self.volume_key, block_id.sequence(), &self.nonce_context)
     }
@@ -108,7 +108,7 @@ impl<'a> SessionBlockBuilder<'a> {
         let block_id = BlockId::new(id);
 
         // 1. Derive a unique key for this block
-        let block_key = self.derive_block_key(block_id);
+        let block_key = self.derive_block_key(block_id)?;
 
         // 2. Build chunk index
         let mut index_entries = Vec::with_capacity(chunks.len());
@@ -144,7 +144,7 @@ impl<'a> SessionBlockBuilder<'a> {
         let compressed_size = compressed.len();
 
         // 5. Encrypt with the per-block key
-        let derived_key = block_key.to_derived_key();
+        let derived_key = block_key.to_derived_key()?;
         let encrypted = era_crypto::encrypt_with_context(
             &derived_key,
             &self.nonce_context,
@@ -202,15 +202,15 @@ impl<'a> SessionBlockUnpacker<'a> {
     }
 
     /// Derive a unique block key for the given block ID.
-    fn derive_block_key(&self, block_id: BlockId) -> BlockKey {
+    fn derive_block_key(&self, block_id: BlockId) -> Result<BlockKey> {
         self.session
             .derive_block_key(self.volume_key, block_id.sequence(), &self.nonce_context)
     }
 
     /// Decrypt and decompress a MacroBlock, returning raw data and index.
     pub fn unpack(&self, block: &EncryptedMacroBlock) -> Result<crate::unpacker::UnpackedBlock> {
-        let block_key = self.derive_block_key(block.block_id);
-        let derived_key = block_key.to_derived_key();
+        let block_key = self.derive_block_key(block.block_id)?;
+        let derived_key = block_key.to_derived_key()?;
 
         let (index, data) = crate::block_codec::decrypt_and_decompress(
             &derived_key,
@@ -347,8 +347,12 @@ mod tests {
         assert_ne!(vk0.as_bytes(), vk1.as_bytes());
 
         // Block keys derived from different volume keys should also differ
-        let bk0_0 = session.derive_block_key(&vk0, 0, &TEST_NONCE_CONTEXT);
-        let bk1_0 = session.derive_block_key(&vk1, 0, &TEST_NONCE_CONTEXT);
+        let bk0_0 = session
+            .derive_block_key(&vk0, 0, &TEST_NONCE_CONTEXT)
+            .unwrap();
+        let bk1_0 = session
+            .derive_block_key(&vk1, 0, &TEST_NONCE_CONTEXT)
+            .unwrap();
         assert_ne!(bk0_0.as_bytes(), bk1_0.as_bytes());
     }
 

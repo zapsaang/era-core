@@ -19,6 +19,7 @@ use parking_lot::{Mutex, RwLock};
 ///
 /// Provides a unified interface for looking up and recording chunk locations,
 /// whether backed by an in-memory HashMap or a persistent LSM-Tree.
+#[allow(dead_code)]
 pub(crate) trait ChunkIndex: Send + Sync {
     /// Check if a chunk hash exists in the index.
     fn contains(&self, hash: &ChunkHash) -> EraResult<bool>;
@@ -51,12 +52,14 @@ pub(crate) trait ChunkIndex: Send + Sync {
 /// Simple in-memory chunk index backed by a HashMap.
 ///
 /// Suitable for tests and small archives. Does not persist across restarts.
+#[allow(dead_code)]
 pub(crate) struct MemoryChunkIndex {
     map: RwLock<HashMap<ChunkHash, BlockLocation>>,
 }
 
 impl MemoryChunkIndex {
     /// Create a new empty in-memory chunk index.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             map: RwLock::new(HashMap::new()),

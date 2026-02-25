@@ -39,13 +39,21 @@ fn test_key_hierarchy_isolation() {
     assert_ne!(vk0.as_bytes(), vk2.as_bytes());
 
     // Block keys derived from same volume key should differ
-    let bk0 = session.derive_block_key(&vk0, 0, &TEST_NONCE_CONTEXT);
-    let bk1 = session.derive_block_key(&vk0, 1, &TEST_NONCE_CONTEXT);
+    let bk0 = session
+        .derive_block_key(&vk0, 0, &TEST_NONCE_CONTEXT)
+        .unwrap();
+    let bk1 = session
+        .derive_block_key(&vk0, 1, &TEST_NONCE_CONTEXT)
+        .unwrap();
     assert_ne!(bk0.as_bytes(), bk1.as_bytes());
 
     // Same block index but different volumes should produce different keys
-    let bk_v0_b0 = session.derive_block_key(&vk0, 0, &TEST_NONCE_CONTEXT);
-    let bk_v1_b0 = session.derive_block_key(&vk1, 0, &TEST_NONCE_CONTEXT);
+    let bk_v0_b0 = session
+        .derive_block_key(&vk0, 0, &TEST_NONCE_CONTEXT)
+        .unwrap();
+    let bk_v1_b0 = session
+        .derive_block_key(&vk1, 0, &TEST_NONCE_CONTEXT)
+        .unwrap();
     assert_ne!(bk_v0_b0.as_bytes(), bk_v1_b0.as_bytes());
 }
 
@@ -57,8 +65,12 @@ fn test_key_derivation_avalanche_effect() {
     let session = KeySession::new(b"test_password", &salt, &params).unwrap();
     let vk = session.generate_and_wrap_volume_key().unwrap().0;
 
-    let bk0 = session.derive_block_key(&vk, 0, &TEST_NONCE_CONTEXT);
-    let bk1 = session.derive_block_key(&vk, 1, &TEST_NONCE_CONTEXT);
+    let bk0 = session
+        .derive_block_key(&vk, 0, &TEST_NONCE_CONTEXT)
+        .unwrap();
+    let bk1 = session
+        .derive_block_key(&vk, 1, &TEST_NONCE_CONTEXT)
+        .unwrap();
 
     // Count bit differences (Hamming distance)
     let bit_diff: u32 = bk0
@@ -90,8 +102,12 @@ fn test_password_independence() {
     let vk2 = session2.generate_and_wrap_volume_key().unwrap().0;
     assert_ne!(vk1.as_bytes(), vk2.as_bytes());
 
-    let bk1 = session1.derive_block_key(&vk1, 0, &TEST_NONCE_CONTEXT);
-    let bk2 = session2.derive_block_key(&vk2, 0, &TEST_NONCE_CONTEXT);
+    let bk1 = session1
+        .derive_block_key(&vk1, 0, &TEST_NONCE_CONTEXT)
+        .unwrap();
+    let bk2 = session2
+        .derive_block_key(&vk2, 0, &TEST_NONCE_CONTEXT)
+        .unwrap();
     assert_ne!(bk1.as_bytes(), bk2.as_bytes());
 }
 
@@ -260,8 +276,12 @@ fn test_key_derivation_determinism() {
     // Use the same VK for both sessions to test block key determinism
     let (vk, _) = session1.generate_and_wrap_volume_key().unwrap();
 
-    let bk1 = session1.derive_block_key(&vk, 42, &TEST_NONCE_CONTEXT);
-    let bk2 = session2.derive_block_key(&vk, 42, &TEST_NONCE_CONTEXT);
+    let bk1 = session1
+        .derive_block_key(&vk, 42, &TEST_NONCE_CONTEXT)
+        .unwrap();
+    let bk2 = session2
+        .derive_block_key(&vk, 42, &TEST_NONCE_CONTEXT)
+        .unwrap();
     assert_eq!(bk1.as_bytes(), bk2.as_bytes());
 }
 
@@ -295,8 +315,10 @@ fn test_block_key_to_derived_key_roundtrip() {
     let params = fast_kdf_params();
     let session = KeySession::new(b"password", &salt, &params).unwrap();
     let vk = session.generate_and_wrap_volume_key().unwrap().0;
-    let bk = session.derive_block_key(&vk, 0, &TEST_NONCE_CONTEXT);
+    let bk = session
+        .derive_block_key(&vk, 0, &TEST_NONCE_CONTEXT)
+        .unwrap();
 
-    let derived = bk.to_derived_key();
+    let derived = bk.to_derived_key().unwrap();
     assert_eq!(bk.as_bytes(), derived.as_bytes());
 }

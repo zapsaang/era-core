@@ -25,7 +25,7 @@ fn mock_evk() -> EncryptedVolumeKey {
 
 fn mock_slot(encrypted_mk: Vec<u8>) -> RecipientSlot {
     RecipientSlot {
-        r_type: RecipientType::ScryptPassword,
+        r_type: RecipientType::Argon2idPassword,
         key_id: None,
         params: vec![0xAB; 24],
         encrypted_master_key: encrypted_mk,
@@ -206,7 +206,7 @@ fn header_08_only_xchacha20_allowed() {
 fn header_09_multi_recipient_roundtrip() {
     let recipients = vec![
         RecipientSlot {
-            r_type: RecipientType::ScryptPassword,
+            r_type: RecipientType::Argon2idPassword,
             key_id: Some([0x01; 8]),
             params: vec![1; 24],
             encrypted_master_key: vec![0xAA; 56],
@@ -218,7 +218,7 @@ fn header_09_multi_recipient_roundtrip() {
             encrypted_master_key: vec![0xBB; 64],
         },
         RecipientSlot {
-            r_type: RecipientType::ScryptPassword,
+            r_type: RecipientType::Argon2idPassword,
             key_id: None,
             params: vec![3; 24],
             encrypted_master_key: vec![0xCC; 56],
@@ -238,7 +238,10 @@ fn header_09_multi_recipient_roundtrip() {
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
 
     assert_eq!(restored.recipients.len(), 3);
-    assert_eq!(restored.recipients[0].r_type, RecipientType::ScryptPassword);
+    assert_eq!(
+        restored.recipients[0].r_type,
+        RecipientType::Argon2idPassword
+    );
     assert_eq!(restored.recipients[1].r_type, RecipientType::X25519PubKey);
     assert_eq!(restored.recipients[0].key_id, Some([0x01; 8]));
     assert_eq!(restored.recipients[1].key_id, Some([0x02; 8]));

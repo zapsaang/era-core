@@ -54,7 +54,7 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
     SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -118,13 +118,13 @@ async fn test_embedded_finalize_writes_typed_blocks() {
 
     // MetaIndex must have pages
     assert!(
-        !meta.pages.is_empty(),
+        !meta.pages().is_empty(),
         "MetaIndex must contain at least one page pointer"
     );
 
     // Bloom filter must be populated
     assert!(
-        !meta.bloom_filter.is_empty(),
+        !meta.bloom_filter().is_empty(),
         "MetaIndex bloom filter must be populated"
     );
 
@@ -170,27 +170,31 @@ fn test_meta_index_rkyv_roundtrip() {
         bloom.set(&test_hash(i));
     }
     let bloom_bytes = era_index::serialize_bloom(&bloom).unwrap();
-    meta.set_bloom_filter(bloom_bytes);
+    meta.set_bloom_filter(bloom_bytes).unwrap();
 
     // Serialize → deserialize
     let bytes = rkyv::to_bytes::<_, 4096>(&meta).expect("MetaIndex serialization must not fail");
     let restored: MetaIndex =
         rkyv::from_bytes(&bytes).expect("MetaIndex deserialization must not fail");
 
-    assert_eq!(restored.pages.len(), 3, "Page count must survive roundtrip");
     assert_eq!(
-        restored.pages[0].min_hash,
+        restored.pages().len(),
+        3,
+        "Page count must survive roundtrip"
+    );
+    assert_eq!(
+        restored.pages()[0].min_hash,
         test_hash(0),
         "Page hash range must survive roundtrip"
     );
     assert_eq!(
-        restored.pages[2].max_hash,
+        restored.pages()[2].max_hash,
         test_hash(299),
         "Page hash range must survive roundtrip"
     );
     assert_eq!(
-        restored.bloom_filter.len(),
-        meta.bloom_filter.len(),
+        restored.bloom_filter().len(),
+        meta.bloom_filter().len(),
         "Bloom filter bytes must survive roundtrip"
     );
 }
@@ -632,9 +636,9 @@ async fn test_large_index_embedded_finalize() {
 
     // With 10,000 entries and ENTRIES_PER_PAGE=8192, we expect at least 1 page
     assert!(
-        !_meta.pages.is_empty(),
+        !_meta.pages().is_empty(),
         "Must have at least 1 page for 10k entries, got {}",
-        _meta.pages.len()
+        _meta.pages().len()
     );
 
     let _ = writer
@@ -1163,9 +1167,9 @@ async fn test_multi_page_index_recovery() {
         .unwrap();
 
     assert!(
-        meta.pages.len() >= 2,
+        meta.pages().len() >= 2,
         "20,000 entries with 8192/page must produce >= 2 pages, got {}",
-        meta.pages.len()
+        meta.pages().len()
     );
 
     let _ = writer

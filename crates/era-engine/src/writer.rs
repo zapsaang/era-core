@@ -17,7 +17,7 @@
 use crate::auth::PasswordSlotParams;
 use bytes::Bytes;
 use era_common::{
-    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, ErasureCodeConfig,
+    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, EraError, ErasureCodeConfig,
     MatrixDistributionStrategy, Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
@@ -403,7 +403,7 @@ impl ArchiveWriterBuilder {
             for slot in &recipients {
                 if let (
                     AuthMode::Password(pwd) | AuthMode::Hybrid { password: pwd, .. },
-                    RecipientType::ScryptPassword,
+                    RecipientType::Argon2idPassword,
                 ) = (&self.auth_mode, slot.r_type)
                 {
                     if let Ok(archived) =
@@ -550,7 +550,7 @@ impl ArchiveWriterBuilder {
                             };
 
                             recipients.push(RecipientSlot {
-                                r_type: RecipientType::ScryptPassword,
+                                r_type: RecipientType::Argon2idPassword,
                                 key_id: None,
                                 params: rkyv::to_bytes::<_, 64>(&p_params)
                                     .map_err(|e| {
@@ -582,7 +582,7 @@ impl ArchiveWriterBuilder {
                         };
 
                         recipients.push(RecipientSlot {
-                            r_type: RecipientType::ScryptPassword,
+                            r_type: RecipientType::Argon2idPassword,
                             key_id: None,
                             params: rkyv::to_bytes::<_, 64>(&p_params)
                                 .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
@@ -782,7 +782,7 @@ impl ArchiveWriterBuilder {
         let checkpoint_manager = if self.enable_checkpoint {
             // Derive HMAC key from session for checkpoint integrity
             // Use HKDF to derive a separate key for checkpoints
-            let hmac_key = session.derive_checkpoint_key();
+            let hmac_key = session.derive_checkpoint_key()?;
 
             let manager = match self.recovery_options.strategy {
                 RecoveryStrategy::StartFresh => {
@@ -792,10 +792,10 @@ impl ArchiveWriterBuilder {
                         let old = CheckpointManager::load_or_create(&self.output_path)?;
                         old.delete()?;
                     }
-                    CheckpointManager::with_hmac_key(&self.output_path, hmac_key)
+                    CheckpointManager::with_hmac_key(&self.output_path, *hmac_key)
                 }
                 RecoveryStrategy::Resume => {
-                    CheckpointManager::load_or_create_with_key(&self.output_path, Some(hmac_key))?
+                    CheckpointManager::load_or_create_with_key(&self.output_path, Some(*hmac_key))?
                 }
                 RecoveryStrategy::Abort => {
                     if CheckpointManager::exists(&self.output_path) {
@@ -804,7 +804,7 @@ impl ArchiveWriterBuilder {
                                 .into(),
                         ));
                     }
-                    CheckpointManager::with_hmac_key(&self.output_path, hmac_key)
+                    CheckpointManager::with_hmac_key(&self.output_path, *hmac_key)
                 }
             };
             Some(manager)
@@ -912,7 +912,7 @@ impl ArchiveWriterBuilder {
                 config.packing.k_factor,
                 target_block_size,
                 config.packing.flush_threshold,
-            ),
+            )?,
             // Small file packing
             small_file_packer: if self.enable_small_file_packing {
                 SmallFilePacker::new(16 * 1024, 1024 * 1024, 1000)
@@ -1060,6 +1060,20 @@ impl ArchiveWriter {
 
     /// Add a file with a specific stored path
     pub async fn add_file_with_path(&mut self, disk_path: &Path, stored_path: &Path) -> Result<()> {
+        // Validate stored_path against path traversal attacks
+        if stored_path.is_absolute() {
+            return Err(EraError::InvalidConfig(
+                "stored_path must not be absolute".into(),
+            ));
+        }
+        for component in stored_path.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err(EraError::InvalidConfig(
+                    "stored_path must not contain '..' components".into(),
+                ));
+            }
+        }
+
         info!(
             "Adding file: {} as {}",
             disk_path.display(),
@@ -1584,8 +1598,8 @@ impl ArchiveWriter {
         let index_locations = if let Some(mut builder) = self.pipeline.index().take_index_builder()
         {
             // Copy crypto params before taking mutable borrow on pipeline
-            let session = self.pipeline.encryption().session().clone();
-            let volume_key = self.pipeline.encryption().volume_key().clone();
+            let session = self.pipeline.encryption().session().try_clone()?;
+            let volume_key = self.pipeline.encryption().volume_key().try_clone()?;
             let nonce_context = self.pipeline.encryption().nonce_context();
 
             if let Some(writer) = self.pipeline.volume_mut().get_writer_mut(0) {
@@ -2051,7 +2065,7 @@ pub mod generic {
             };
 
             let slot = RecipientSlot {
-                r_type: RecipientType::ScryptPassword,
+                r_type: RecipientType::Argon2idPassword,
                 key_id: None,
                 params: rkyv::to_bytes::<_, 64>(&p_params)
                     .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
@@ -2109,7 +2123,7 @@ pub mod generic {
                     self.config.packing.k_factor,
                     4 * 1024 * 1024,
                     self.config.packing.flush_threshold,
-                ),
+                )?,
             })
         }
     }

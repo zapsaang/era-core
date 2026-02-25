@@ -187,9 +187,9 @@ impl<B: StorageBackend> WritePipeline<B> {
             if i < stripe.data_blocks.len() {
                 shard_inputs.push(stripe.data_blocks[i].data.to_vec());
             } else {
-                let padding_block = padding_blocks[i]
-                    .as_ref()
-                    .expect("Padding block should be prepared");
+                let padding_block = padding_blocks[i].as_ref().ok_or_else(|| {
+                    era_common::EraError::Other("Padding block not prepared".into())
+                })?;
                 shard_inputs.push(padding_block.data.to_vec());
             }
         }
@@ -221,9 +221,9 @@ impl<B: StorageBackend> WritePipeline<B> {
                 data_info.push((entry.volume_sequence, entry.physical_offset));
             } else {
                 // Write padding block
-                let encrypted_block = padding_blocks[i]
-                    .take()
-                    .expect("Padding block should be prepared");
+                let encrypted_block = padding_blocks[i].take().ok_or_else(|| {
+                    era_common::EraError::Other("Padding block not prepared".into())
+                })?;
 
                 let (entry, _) = self
                     .volume
@@ -285,7 +285,7 @@ impl<B: StorageBackend> WritePipeline<B> {
                 },
                 shard_offsets,
                 shard_volumes,
-            );
+            )?;
 
             // Update index for all chunk hashes in this block
             for hash in &meta.chunk_hashes {

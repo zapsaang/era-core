@@ -149,7 +149,7 @@ mod tests {
             parity_shards: 2,
         };
         let builder = ErasureBlockBuilder::new(
-            key.clone(),
+            key.try_clone().unwrap(),
             nonce_context,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
@@ -195,7 +195,7 @@ mod tests {
             parity_shards: 2,
         };
         let builder = ErasureBlockBuilder::new(
-            key.clone(),
+            key.try_clone().unwrap(),
             nonce_context,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
@@ -249,7 +249,7 @@ mod tests {
             parity_shards: 2,
         };
         let builder = ErasureBlockBuilder::new(
-            key.clone(),
+            key.try_clone().unwrap(),
             nonce_context,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,

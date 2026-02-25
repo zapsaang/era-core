@@ -46,7 +46,7 @@ pub struct EncryptedVolumeKey {
 /// Recipient type for the multi-recipient envelope
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecipientType {
-    ScryptPassword,
+    Argon2idPassword,
     X25519PubKey,
     Fido2Hmac,
 }
@@ -132,7 +132,7 @@ impl SuperHeader {
             total_volumes: 0,
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("System clock is before Unix epoch")
+                .unwrap_or(std::time::Duration::from_secs(0))
                 .as_secs() as i64,
             feature_flags: 0,
             recipients,
@@ -155,7 +155,7 @@ impl SuperHeader {
             total_volumes: self.total_volumes,
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("System clock is before Unix epoch")
+                .unwrap_or(std::time::Duration::from_secs(0))
                 .as_secs() as i64,
             feature_flags: self.feature_flags,
             recipients: self.recipients.clone(),
@@ -214,7 +214,7 @@ impl From<RecipientSlot> for proto::RecipientSlot {
     fn from(slot: RecipientSlot) -> Self {
         Self {
             r#type: match slot.r_type {
-                RecipientType::ScryptPassword => {
+                RecipientType::Argon2idPassword => {
                     proto::recipient_slot::RecipientType::ScryptPassword.into()
                 }
                 RecipientType::X25519PubKey => {
@@ -252,7 +252,7 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
         Ok(Self {
             r_type: match r_type {
                 proto::recipient_slot::RecipientType::ScryptPassword => {
-                    RecipientType::ScryptPassword
+                    RecipientType::Argon2idPassword
                 }
                 proto::recipient_slot::RecipientType::X25519Pubkey => RecipientType::X25519PubKey,
                 proto::recipient_slot::RecipientType::Fido2Hmac => RecipientType::Fido2Hmac,
@@ -413,7 +413,7 @@ mod tests {
 
     fn mock_recipient() -> RecipientSlot {
         RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             TEST_PARAMS.to_vec(),
             vec![0xCD; 48],

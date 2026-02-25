@@ -349,7 +349,7 @@ impl EraKeyPair {
     pub fn save_encrypted<P: AsRef<Path>>(&self, path: P, password: &str) -> Result<()> {
         // Derive encryption key via Argon2 (lighter params since the private key is high entropy)
         let salt = Salt::generate();
-        let params = KdfParams::fast(); // 1MB memory, fast
+        let params = KdfParams::standard();
         let encryption_key = derive_key(password.as_bytes(), &salt, &params)?;
 
         // Encrypt private key
@@ -416,7 +416,7 @@ impl EraKeyPair {
         let encrypted_secret = &file_data[69..];
 
         // Derive decryption key via Argon2
-        let params = KdfParams::fast();
+        let params = KdfParams::standard();
         let encryption_key = derive_key(password.as_bytes(), &salt, &params)?;
 
         // Decrypt private key

@@ -71,7 +71,7 @@ fn make_valid_header(policy: AccessPolicy) -> SuperHeader {
     SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -630,7 +630,7 @@ fn rv8_empty_recipients_accepted() {
 fn rv9_empty_encrypted_master_key_accepted() {
     // Create a slot with empty encrypted_master_key
     let slot = RecipientSlot::new(
-        RecipientType::ScryptPassword,
+        RecipientType::Argon2idPassword,
         Some([0x12; 8]),
         vec![0xAB; 16], // params present
         vec![],         // EMPTY encrypted_master_key!
@@ -993,13 +993,13 @@ fn behavioral_shamir_2of3_reconstruction() {
 fn behavioral_block_key_volume_isolation() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
+    let vk = VolumeKey::generate().unwrap();
 
     let salt_a = [0xAA; 16];
     let salt_b = [0xBB; 16];
 
-    let bk_a = session.derive_block_key(&vk, 0, &salt_a);
-    let bk_b = session.derive_block_key(&vk, 0, &salt_b);
+    let bk_a = session.derive_block_key(&vk, 0, &salt_a).unwrap();
+    let bk_b = session.derive_block_key(&vk, 0, &salt_b).unwrap();
 
     assert_ne!(
         bk_a.as_bytes(),
@@ -1159,8 +1159,8 @@ fn integrity_evk_empty_ciphertext_rejected() {
 #[test]
 fn crypto_ik_deterministic() {
     let mk = [0x42u8; 32];
-    let ik1 = IntermediateKey::derive_from_master_key(&mk);
-    let ik2 = IntermediateKey::derive_from_master_key(&mk);
+    let ik1 = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let ik2 = IntermediateKey::derive_from_master_key(&mk).unwrap();
     assert_eq!(
         ik1.as_bytes(),
         ik2.as_bytes(),
@@ -1172,7 +1172,7 @@ fn crypto_ik_deterministic() {
 #[test]
 fn crypto_zero_mk_nonzero_ik() {
     let mk = [0u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
     assert_ne!(
         ik.as_bytes(),
         &[0u8; 32],
@@ -1184,8 +1184,8 @@ fn crypto_zero_mk_nonzero_ik() {
 #[test]
 fn crypto_wrapped_vk_length() {
     let mk = [0x42u8; 32];
-    let ik = IntermediateKey::derive_from_master_key(&mk);
-    let vk = VolumeKey::generate();
+    let ik = IntermediateKey::derive_from_master_key(&mk).unwrap();
+    let vk = VolumeKey::generate().unwrap();
     let wrapped = wrap_volume_key(&ik, &vk).unwrap();
 
     // XChaCha20-Poly1305: nonce=24 bytes, ciphertext = plaintext(32) + tag(16) = 48 bytes
@@ -1202,10 +1202,10 @@ fn crypto_wrapped_vk_length() {
 fn crypto_block_key_distinct_from_vk_ik() {
     let mk = [0x42u8; 32];
     let session = KeySession::from_master_key(&mk).unwrap();
-    let vk = VolumeKey::generate();
-    let ik = session.derive_intermediate_key();
+    let vk = VolumeKey::generate().unwrap();
+    let ik = session.derive_intermediate_key().unwrap();
     let salt = [0xAA; 16];
-    let bk = session.derive_block_key(&vk, 0, &salt);
+    let bk = session.derive_block_key(&vk, 0, &salt).unwrap();
 
     assert_ne!(bk.as_bytes(), vk.as_bytes(), "BK must differ from VK");
     assert_ne!(bk.as_bytes(), ik.as_bytes(), "BK must differ from IK");
@@ -1217,7 +1217,7 @@ fn crypto_block_key_distinct_from_vk_ik() {
 fn crypto_vk_uniqueness_stress() {
     let mut vks = HashSet::new();
     for _ in 0..10000 {
-        let vk = VolumeKey::generate();
+        let vk = VolumeKey::generate().unwrap();
         assert!(
             vks.insert(*vk.as_bytes()),
             "VK collision detected in 10000 generations! RNG is broken."
@@ -1588,7 +1588,7 @@ fn boundary_all_ff_salt() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             Some([0xFF; 8]),
             vec![0xFF; 16],
             vec![0xFF; 48],
@@ -1610,7 +1610,7 @@ fn boundary_all_zero_salt_is_valid() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::ScryptPassword,
+            RecipientType::Argon2idPassword,
             None,
             vec![0xAB; 16],
             vec![0xCD; 48],

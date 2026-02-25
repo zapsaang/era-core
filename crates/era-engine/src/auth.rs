@@ -40,7 +40,7 @@ impl PasswordProvider {
 
 impl AuthProvider for PasswordProvider {
     fn try_unlock(&self, slot: &RecipientSlot) -> Result<Option<Vec<u8>>> {
-        if slot.r_type != RecipientType::ScryptPassword {
+        if slot.r_type != RecipientType::Argon2idPassword {
             return Ok(None);
         }
 

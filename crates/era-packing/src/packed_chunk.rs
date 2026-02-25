@@ -199,6 +199,24 @@ impl PackedChunk {
         let entry_count = header.entry_count;
         let total_data_size = header.total_data_size;
 
+        // Validate bounds before allocation
+        if entry_count > 65536 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("entry_count {} exceeds maximum of 65536", entry_count),
+            ));
+        }
+        let remaining = data.len().saturating_sub(cursor.position() as usize);
+        if total_data_size as usize > remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "total_data_size {} exceeds remaining data length {}",
+                    total_data_size, remaining
+                ),
+            ));
+        }
+
         // Read entries
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {

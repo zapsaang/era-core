@@ -150,10 +150,10 @@ impl LsmTree {
     }
 
     /// Get current memory usage estimate (kept for API compat)
-    pub fn memtable_size_bytes(&self) -> usize {
+    pub fn memtable_size_bytes(&mut self) -> usize {
         // With Redb, entries are on disk. Return entry_count * entry_size as estimate.
         self.builder
-            .as_ref()
+            .as_mut()
             .map(|b| b.entry_count() * IndexEntry::memory_size())
             .unwrap_or(0)
     }
@@ -187,7 +187,7 @@ impl LsmTree {
         let meta = MetaIndex::new();
         let bloom_bytes = crate::serialize_bloom(&bloom_clone)?;
         let mut meta_with_bloom = meta;
-        meta_with_bloom.set_bloom_filter(bloom_bytes);
+        meta_with_bloom.set_bloom_filter(bloom_bytes)?;
 
         let reader = IndexReader::from_pages(meta_with_bloom, bloom_clone, pages)?;
 

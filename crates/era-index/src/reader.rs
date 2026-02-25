@@ -4,9 +4,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use bloomfilter::Bloom;
+use lru::LruCache;
 use parking_lot::RwLock;
 
 use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result, VolumeId};
@@ -35,23 +37,29 @@ pub struct IndexReader {
     meta: MetaIndex,
     /// Bloom filter (deserialized)
     bloom: Bloom<ChunkHash>,
-    /// Cache of loaded L2 pages
-    page_cache: RwLock<HashMap<BlockId, IndexPage>>,
+    /// Cache of loaded L2 pages (LRU-bounded)
+    page_cache: RwLock<LruCache<BlockId, IndexPage>>,
     /// In-memory page storage (for cold recovery mode)
     embedded_pages: HashMap<BlockId, IndexPage>,
 }
+
+/// Default LRU page cache capacity
+const PAGE_CACHE_CAP: NonZeroUsize = match NonZeroUsize::new(256) {
+    Some(v) => v,
+    None => unreachable!(),
+};
 
 impl IndexReader {
     /// Open an index from a directory
     pub fn open(index_dir: &Path, meta: MetaIndex) -> Result<Self> {
         // Deserialize Bloom filter using rkyv via bloom_serde
-        let bloom = super::deserialize_bloom(&meta.bloom_filter)?;
+        let bloom = super::deserialize_bloom(meta.bloom_filter())?;
 
         Ok(Self {
             index_dir: Some(index_dir.to_path_buf()),
             meta,
             bloom,
-            page_cache: RwLock::new(HashMap::new()),
+            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
             embedded_pages: HashMap::new(),
         })
     }
@@ -84,7 +92,7 @@ impl IndexReader {
             index_dir: None,
             meta,
             bloom,
-            page_cache: RwLock::new(HashMap::new()),
+            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
             embedded_pages,
         })
     }
@@ -109,7 +117,7 @@ impl IndexReader {
             index_dir: None,
             meta,
             bloom,
-            page_cache: RwLock::new(HashMap::new()),
+            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
             embedded_pages,
         })
     }
@@ -159,9 +167,12 @@ impl IndexReader {
 
                 // Decrypt MetaIndex
                 let block_id = BlockId::new(footer.index_block_id as u64);
-                let block_key =
-                    session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context);
-                let derived_key = block_key.to_derived_key();
+                let block_key = session.derive_block_key(
+                    volume_key,
+                    block_id.sequence(),
+                    &index_nonce_context,
+                )?;
+                let derived_key = block_key.to_derived_key()?;
                 let decrypted_data = era_crypto::decrypt_with_context(
                     &derived_key,
                     &index_nonce_context,
@@ -252,9 +263,12 @@ impl IndexReader {
             let mut manifest_data = None;
             for candidate_id in candidates {
                 let block_id = BlockId::new(candidate_id);
-                let block_key =
-                    session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context);
-                let derived_key = block_key.to_derived_key();
+                let block_key = session.derive_block_key(
+                    volume_key,
+                    block_id.sequence(),
+                    &index_nonce_context,
+                )?;
+                let derived_key = block_key.to_derived_key()?;
 
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
@@ -270,7 +284,7 @@ impl IndexReader {
                                 Err(never) => match never {},
                             };
                         // Verify this looks like a valid MetaIndex
-                        if !meta_candidate.pages.is_empty() {
+                        if !meta_candidate.pages().is_empty() {
                             tracing::info!(
                                 "MetaIndex decrypted successfully with block_id={}",
                                 candidate_id
@@ -307,7 +321,7 @@ impl IndexReader {
             let mut matched = false;
 
             // Try every unrecovered meta.pages entry until one decrypts + validates
-            for page_ptr in &meta.pages {
+            for page_ptr in meta.pages() {
                 if embedded_pages.contains_key(&page_ptr.block_id) {
                     continue; // Already recovered this page
                 }
@@ -316,8 +330,8 @@ impl IndexReader {
                     volume_key,
                     page_ptr.block_id.sequence(),
                     &index_nonce_context,
-                );
-                let derived_key = block_key.to_derived_key();
+                )?;
+                let derived_key = block_key.to_derived_key()?;
 
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
@@ -350,16 +364,16 @@ impl IndexReader {
         }
 
         // Completeness check: all expected pages must be recovered
-        if embedded_pages.len() < meta.pages.len() {
+        if embedded_pages.len() < meta.pages().len() {
             return Err(EraError::IndexError(format!(
                 "Incomplete recovery: expected {} pages, recovered {}",
-                meta.pages.len(),
+                meta.pages().len(),
                 embedded_pages.len()
             )));
         }
 
         // Step 5: Deserialize Bloom filter using rkyv via bloom_serde
-        let bloom = super::deserialize_bloom(&meta.bloom_filter)?;
+        let bloom = super::deserialize_bloom(meta.bloom_filter())?;
 
         tracing::info!(
             "Cold recovery complete: {} pages loaded, bloom filter restored",
@@ -370,7 +384,7 @@ impl IndexReader {
             index_dir: None, // No external directory in recovery mode
             meta,
             bloom,
-            page_cache: RwLock::new(HashMap::new()),
+            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
             embedded_pages,
         })
     }
@@ -417,7 +431,7 @@ impl IndexReader {
 
     /// Get the number of pages in the L1 meta-index
     pub fn meta_page_count(&self) -> usize {
-        self.meta.pages.len()
+        self.meta.pages().len()
     }
 
     /// Load an L2 page (with caching)
@@ -427,9 +441,9 @@ impl IndexReader {
             return Ok(page.clone());
         }
 
-        // Check cache with read lock (fast path — concurrent readers allowed)
+        // Check cache (LRU get requires &mut, so use write lock)
         {
-            let cache = self.page_cache.read();
+            let mut cache = self.page_cache.write();
             if let Some(page) = cache.get(&block_id) {
                 return Ok(page.clone());
             }
@@ -461,7 +475,7 @@ impl IndexReader {
         if let Some(existing) = cache.get(&block_id) {
             return Ok(existing.clone());
         }
-        cache.insert(block_id, page.clone());
+        cache.put(block_id, page.clone());
         Ok(page)
     }
 }
@@ -512,7 +526,7 @@ mod tests {
         }
         // Serialize bloom filter using rkyv via bloom_serde
         let bloom_bytes = crate::serialize_bloom(&bloom).unwrap();
-        meta.set_bloom_filter(bloom_bytes);
+        meta.set_bloom_filter(bloom_bytes).unwrap();
 
         // Create reader
         let reader = IndexReader::open(&index_dir, meta).unwrap();

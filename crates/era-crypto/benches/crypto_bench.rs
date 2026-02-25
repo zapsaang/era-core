@@ -51,7 +51,7 @@ fn bench_hkdf_key_derivation(c: &mut Criterion) {
         let mut i = 0u64;
         b.iter(|| {
             i += 1;
-            session.derive_block_key(&vk, black_box(i), &nonce)
+            session.derive_block_key(&vk, black_box(i), &nonce).unwrap()
         })
     });
 

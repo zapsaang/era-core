@@ -53,7 +53,7 @@ fn test_plaintext() -> Bytes {
 #[test]
 fn test_attack_cross_volume_block_injection() {
     // Setup: Two different volumes with the same master key
-    let session = KeySession::from_derived_key(&test_master_key());
+    let session = KeySession::from_derived_key(&test_master_key()).unwrap();
 
     // Derive keys for both volumes
     let volume_a_key = session.generate_and_wrap_volume_key().unwrap().0;
@@ -64,9 +64,11 @@ fn test_attack_cross_volume_block_injection() {
 
     // Encrypt data in Volume A
     let plaintext = test_plaintext();
-    let block_a_key = session.derive_block_key(&volume_a_key, block_id.sequence(), &nonce_context);
+    let block_a_key = session
+        .derive_block_key(&volume_a_key, block_id.sequence(), &nonce_context)
+        .unwrap();
     let ciphertext_from_a = encrypt_with_context(
-        &block_a_key.to_derived_key(),
+        &block_a_key.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &plaintext,
@@ -75,9 +77,11 @@ fn test_attack_cross_volume_block_injection() {
 
     // ATTACK: Try to decrypt the same ciphertext in Volume B context
     // This should FAIL because the encryption should be bound to Volume A's UUID
-    let block_b_key = session.derive_block_key(&volume_b_key, block_id.sequence(), &nonce_context);
+    let block_b_key = session
+        .derive_block_key(&volume_b_key, block_id.sequence(), &nonce_context)
+        .unwrap();
     let result = decrypt_with_context(
-        &block_b_key.to_derived_key(),
+        &block_b_key.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &ciphertext_from_a,
@@ -94,7 +98,7 @@ fn test_attack_cross_volume_block_injection() {
 
 #[test]
 fn test_attack_block_offset_manipulation() {
-    let session = KeySession::from_derived_key(&test_master_key());
+    let session = KeySession::from_derived_key(&test_master_key()).unwrap();
     let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id_100 = BlockId::new(100);
@@ -103,10 +107,11 @@ fn test_attack_block_offset_manipulation() {
 
     // Encrypt data at block offset 100
     let plaintext = test_plaintext();
-    let block_key_100 =
-        session.derive_block_key(&volume_key, block_id_100.sequence(), &nonce_context);
+    let block_key_100 = session
+        .derive_block_key(&volume_key, block_id_100.sequence(), &nonce_context)
+        .unwrap();
     let ciphertext_at_100 = encrypt_with_context(
-        &block_key_100.to_derived_key(),
+        &block_key_100.to_derived_key().unwrap(),
         &nonce_context,
         block_id_100,
         &plaintext,
@@ -115,10 +120,11 @@ fn test_attack_block_offset_manipulation() {
 
     // ATTACK: Try to decrypt the same block at offset 200
     // This should FAIL because the encryption is bound to block_id_100
-    let block_key_200 =
-        session.derive_block_key(&volume_key, block_id_200.sequence(), &nonce_context);
+    let block_key_200 = session
+        .derive_block_key(&volume_key, block_id_200.sequence(), &nonce_context)
+        .unwrap();
     let result = decrypt_with_context(
-        &block_key_200.to_derived_key(),
+        &block_key_200.to_derived_key().unwrap(),
         &nonce_context,
         block_id_200,
         &ciphertext_at_100,
@@ -135,7 +141,7 @@ fn test_attack_block_offset_manipulation() {
 
 #[test]
 fn test_attack_nonce_context_tampering() {
-    let session = KeySession::from_derived_key(&test_master_key());
+    let session = KeySession::from_derived_key(&test_master_key()).unwrap();
     let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(0);
@@ -144,9 +150,11 @@ fn test_attack_nonce_context_tampering() {
 
     // Encrypt with context A
     let plaintext = test_plaintext();
-    let block_key = session.derive_block_key(&volume_key, block_id.sequence(), &nonce_context_a);
+    let block_key = session
+        .derive_block_key(&volume_key, block_id.sequence(), &nonce_context_a)
+        .unwrap();
     let ciphertext = encrypt_with_context(
-        &block_key.to_derived_key(),
+        &block_key.to_derived_key().unwrap(),
         &nonce_context_a,
         block_id,
         &plaintext,
@@ -156,7 +164,7 @@ fn test_attack_nonce_context_tampering() {
     // ATTACK: Try to decrypt with different context B
     // This should FAIL
     let result = decrypt_with_context(
-        &block_key.to_derived_key(),
+        &block_key.to_derived_key().unwrap(),
         &nonce_context_b,
         block_id,
         &ciphertext,
@@ -177,7 +185,7 @@ fn test_attack_mixed_volume_and_block_context() {
     // Block 100 from Volume A and tries to inject it as Block 100 in Volume B
     // (matching block IDs but different volumes)
 
-    let session = KeySession::from_derived_key(&test_master_key());
+    let session = KeySession::from_derived_key(&test_master_key()).unwrap();
 
     let volume_a_key = session.generate_and_wrap_volume_key().unwrap().0;
     let volume_b_key = session.generate_and_wrap_volume_key().unwrap().0;
@@ -187,9 +195,11 @@ fn test_attack_mixed_volume_and_block_context() {
 
     // Encrypt in Volume A at block 100
     let plaintext = test_plaintext();
-    let block_key_a = session.derive_block_key(&volume_a_key, block_id.sequence(), &nonce_context);
+    let block_key_a = session
+        .derive_block_key(&volume_a_key, block_id.sequence(), &nonce_context)
+        .unwrap();
     let ciphertext_from_a = encrypt_with_context(
-        &block_key_a.to_derived_key(),
+        &block_key_a.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &plaintext,
@@ -198,9 +208,11 @@ fn test_attack_mixed_volume_and_block_context() {
 
     // ATTACK: Try to decrypt in Volume B at the same block 100
     // Even though the block ID matches, the volume context is different
-    let block_key_b = session.derive_block_key(&volume_b_key, block_id.sequence(), &nonce_context);
+    let block_key_b = session
+        .derive_block_key(&volume_b_key, block_id.sequence(), &nonce_context)
+        .unwrap();
     let result = decrypt_with_context(
-        &block_key_b.to_derived_key(),
+        &block_key_b.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &ciphertext_from_a,
@@ -223,7 +235,7 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
     // This test verifies that legitimate encryption/decryption still works
     // after we add context binding
 
-    let session = KeySession::from_derived_key(&test_master_key());
+    let session = KeySession::from_derived_key(&test_master_key()).unwrap();
     let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(42);
@@ -232,9 +244,11 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
     let plaintext = test_plaintext();
 
     // Encrypt
-    let block_key = session.derive_block_key(&volume_key, block_id.sequence(), &nonce_context);
+    let block_key = session
+        .derive_block_key(&volume_key, block_id.sequence(), &nonce_context)
+        .unwrap();
     let ciphertext = encrypt_with_context(
-        &block_key.to_derived_key(),
+        &block_key.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &plaintext,
@@ -243,7 +257,7 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
 
     // Decrypt with EXACT same context
     let decrypted = decrypt_with_context(
-        &block_key.to_derived_key(),
+        &block_key.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &ciphertext,
@@ -262,7 +276,7 @@ fn test_volume_uuid_affects_derived_keys() {
     // This test verifies that changing the volume UUID produces different keys
     // even if all other parameters are the same
 
-    let session = KeySession::from_derived_key(&test_master_key());
+    let session = KeySession::from_derived_key(&test_master_key()).unwrap();
 
     let volume_key_0 = session.generate_and_wrap_volume_key().unwrap().0;
     let volume_key_1 = session.generate_and_wrap_volume_key().unwrap().0;
@@ -270,8 +284,12 @@ fn test_volume_uuid_affects_derived_keys() {
     let block_id = BlockId::new(0);
     let nonce_context = [0x77; 16];
 
-    let block_key_0 = session.derive_block_key(&volume_key_0, block_id.sequence(), &nonce_context);
-    let block_key_1 = session.derive_block_key(&volume_key_1, block_id.sequence(), &nonce_context);
+    let block_key_0 = session
+        .derive_block_key(&volume_key_0, block_id.sequence(), &nonce_context)
+        .unwrap();
+    let block_key_1 = session
+        .derive_block_key(&volume_key_1, block_id.sequence(), &nonce_context)
+        .unwrap();
 
     // Keys MUST be different even though block_id and nonce_context are the same
     assert_ne!(
@@ -296,7 +314,7 @@ fn test_demonstrate_current_vulnerability() {
 
     println!("\n=== DEMONSTRATING VULNERABILITY ===\n");
 
-    let session = KeySession::from_derived_key(&test_master_key());
+    let session = KeySession::from_derived_key(&test_master_key()).unwrap();
 
     // Two different volumes
     let volume_a_key = session.generate_and_wrap_volume_key().unwrap().0;
@@ -307,12 +325,14 @@ fn test_demonstrate_current_vulnerability() {
 
     // Encrypt in Volume A
     let plaintext = Bytes::from(b"SECRET DATA FROM VOLUME A".to_vec());
-    let block_key_a = session.derive_block_key(&volume_a_key, block_id.sequence(), &nonce_context);
+    let block_key_a = session
+        .derive_block_key(&volume_a_key, block_id.sequence(), &nonce_context)
+        .unwrap();
 
     println!("Volume A Block Key: {:?}", block_key_a.as_bytes());
 
     let ciphertext = encrypt_with_context(
-        &block_key_a.to_derived_key(),
+        &block_key_a.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &plaintext,
@@ -322,7 +342,9 @@ fn test_demonstrate_current_vulnerability() {
     println!("Encrypted {} bytes", ciphertext.len());
 
     // Derive key for Volume B at same block
-    let block_key_b = session.derive_block_key(&volume_b_key, block_id.sequence(), &nonce_context);
+    let block_key_b = session
+        .derive_block_key(&volume_b_key, block_id.sequence(), &nonce_context)
+        .unwrap();
 
     println!("Volume B Block Key: {:?}", block_key_b.as_bytes());
 
@@ -336,7 +358,7 @@ fn test_demonstrate_current_vulnerability() {
 
     // Try to decrypt in Volume B
     match decrypt_with_context(
-        &block_key_b.to_derived_key(),
+        &block_key_b.to_derived_key().unwrap(),
         &nonce_context,
         block_id,
         &ciphertext,

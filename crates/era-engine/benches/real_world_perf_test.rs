@@ -19,7 +19,7 @@ fn derive_session_from_header(
     let slot = header
         .recipients
         .iter()
-        .find(|s| s.r_type == RecipientType::ScryptPassword)
+        .find(|s| s.r_type == RecipientType::Argon2idPassword)
         .ok_or(era_common::EraError::InvalidKey(
             "No password slot found".into(),
         ))?;
@@ -257,7 +257,7 @@ fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
         parallelism: 4,
     };
     let key = derive_key(b"test_password", &salt, &params).unwrap();
-    let session = KeySession::from_derived_key(&key);
+    let session = KeySession::from_derived_key(&key).unwrap();
 
     c.bench_function("hkdf_volume_key_derivation", |b| {
         let mut volume_id = 0u16;
@@ -273,7 +273,9 @@ fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
         let nonce_context = [0u8; 16];
         let mut block_id = 0u64;
         b.iter(|| {
-            let _bk = session.derive_block_key(&volume_key, block_id, &nonce_context);
+            let _bk = session
+                .derive_block_key(&volume_key, block_id, &nonce_context)
+                .unwrap();
             block_id = block_id.wrapping_add(1);
             black_box(_bk);
         });
@@ -284,7 +286,9 @@ fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
         let nonce_context = [0u8; 16];
         b.iter(|| {
             for i in 0..1000 {
-                let _bk = session.derive_block_key(&volume_key, i, &nonce_context);
+                let _bk = session
+                    .derive_block_key(&volume_key, i, &nonce_context)
+                    .unwrap();
                 black_box(&_bk);
             }
         });
@@ -351,7 +355,7 @@ fn bench_key_session_reader_speedup(c: &mut Criterion) {
     // Note: In this benchmark, each archive has a different Master Key, so KeySession
     // can only help with the FIRST archive.
     group.bench_function("open_1_archive_with_session", |b| {
-        let session = session.clone();
+        let session = session.try_clone().unwrap();
         b.iter(|| {
             rt.block_on(async {
                 let reader = ArchiveReader::open_with_session(&archive_paths[0], &session)

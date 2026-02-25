@@ -212,7 +212,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
 
     /// Check if a block of given size would fit in the current volume
     pub fn would_fit(&self, block_size: u32) -> bool {
-        let needed = block_size as u64 + 4; // 4 bytes for length prefix
+        let needed = block_size as u64 + era_common::BlockHeader::SIZE as u64;
         self.remaining_space() >= needed
     }
 
@@ -333,7 +333,7 @@ mod tests {
         SuperHeader::new(
             ArchiveId::new(),
             vec![RecipientSlot::new(
-                RecipientType::ScryptPassword,
+                RecipientType::Argon2idPassword,
                 Some([0x12; 8]),
                 vec![0xAB; 16],
                 vec![0xCD; 48],

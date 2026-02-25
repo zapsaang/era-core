@@ -38,11 +38,17 @@ impl IntermediateKey {
     /// Derive IK from a Master Key using HKDF-SHA256.
     ///
     /// `IK = HKDF-Expand(PRK=MK, Info="ERA_KeyWrap_v1", Salt=None)`
-    pub fn derive_from_master_key(mk: &[u8; 32]) -> Self {
-        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for IntermediateKey");
-        derive_key_hkdf(mk, None, IK_DOMAIN, buffer.as_mut()).expect("HKDF expand should not fail");
-        Self { buffer }
+    pub fn derive_from_master_key(mk: &[u8; 32]) -> Result<Self> {
+        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default()).map_err(|e| {
+            era_common::EraError::Encryption(format!(
+                "Failed to allocate secure memory for IntermediateKey: {}",
+                e
+            ))
+        })?;
+        derive_key_hkdf(mk, None, IK_DOMAIN, buffer.as_mut()).map_err(|e| {
+            era_common::EraError::KeyDerivation(format!("HKDF expand failed: {}", e))
+        })?;
+        Ok(Self { buffer })
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -68,19 +74,27 @@ pub struct VolumeKey {
 
 impl VolumeKey {
     /// Generate a new random Volume Key using OsRng (CSPRNG).
-    pub fn generate() -> Self {
-        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for VolumeKey");
+    pub fn generate() -> Result<Self> {
+        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default()).map_err(|e| {
+            era_common::EraError::Encryption(format!(
+                "Failed to allocate secure memory for VolumeKey: {}",
+                e
+            ))
+        })?;
         OsRng.fill_bytes(buffer.as_mut());
-        Self { buffer }
+        Ok(Self { buffer })
     }
 
     /// Create a volume key from raw bytes (used when unwrapping)
-    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
-        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for VolumeKey");
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Result<Self> {
+        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default()).map_err(|e| {
+            era_common::EraError::Encryption(format!(
+                "Failed to allocate secure memory for VolumeKey: {}",
+                e
+            ))
+        })?;
         buffer.as_mut().copy_from_slice(&bytes);
-        Self { buffer }
+        Ok(Self { buffer })
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -92,12 +106,17 @@ impl VolumeKey {
     }
 }
 
-impl Clone for VolumeKey {
-    fn clone(&self) -> Self {
-        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for VolumeKey clone");
+impl VolumeKey {
+    /// Clone the volume key, returning Result since secure memory allocation can fail.
+    pub fn try_clone(&self) -> Result<Self> {
+        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default()).map_err(|e| {
+            era_common::EraError::Encryption(format!(
+                "Failed to allocate secure memory for VolumeKey clone: {}",
+                e
+            ))
+        })?;
         buffer.as_mut().copy_from_slice(self.buffer.as_ref());
-        Self { buffer }
+        Ok(Self { buffer })
     }
 }
 
@@ -120,11 +139,15 @@ pub struct BlockKey {
 }
 
 impl BlockKey {
-    fn from_bytes(bytes: [u8; 32]) -> Self {
-        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for BlockKey");
+    fn from_bytes(bytes: [u8; 32]) -> Result<Self> {
+        let mut buffer = SecureBuffer::with_config(SecureMemoryConfig::default()).map_err(|e| {
+            era_common::EraError::Encryption(format!(
+                "Failed to allocate secure memory for BlockKey: {}",
+                e
+            ))
+        })?;
         buffer.as_mut().copy_from_slice(&bytes);
-        Self { buffer }
+        Ok(Self { buffer })
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -132,7 +155,7 @@ impl BlockKey {
     }
 
     /// Convert to DerivedKey for compatibility with existing encryption APIs
-    pub fn to_derived_key(&self) -> crate::DerivedKey {
+    pub fn to_derived_key(&self) -> Result<crate::DerivedKey> {
         crate::DerivedKey::from_bytes(*self.as_bytes())
     }
 
@@ -141,8 +164,9 @@ impl BlockKey {
     }
 }
 
-impl Clone for BlockKey {
-    fn clone(&self) -> Self {
+impl BlockKey {
+    /// Clone the block key, returning Result since secure memory allocation can fail.
+    pub fn try_clone(&self) -> Result<Self> {
         Self::from_bytes(*self.as_bytes())
     }
 }
@@ -206,7 +230,7 @@ pub fn unwrap_volume_key(
         ));
     }
     vk_bytes.copy_from_slice(&plaintext);
-    let vk = VolumeKey::from_bytes(vk_bytes);
+    let vk = VolumeKey::from_bytes(vk_bytes)?;
     vk_bytes.zeroize();
     Ok(vk)
 }
@@ -277,8 +301,9 @@ impl KeySession {
         mk.as_mut().copy_from_slice(mk_bytes);
 
         let mut verification_tag = [0u8; 16];
-        derive_key_hkdf(mk_bytes, None, VERIFICATION_DOMAIN, &mut verification_tag)
-            .expect("HKDF expand should not fail");
+        derive_key_hkdf(mk_bytes, None, VERIFICATION_DOMAIN, &mut verification_tag).map_err(
+            |e| era_common::EraError::KeyDerivation(format!("HKDF expand failed: {}", e)),
+        )?;
 
         Ok(Self {
             mk,
@@ -292,10 +317,8 @@ impl KeySession {
     }
 
     /// Create from existing derived key
-    pub fn from_derived_key(key: &crate::DerivedKey) -> Self {
-        KeySessionBuilder::new()
-            .build_from_derived(key)
-            .expect("Default build failed")
+    pub fn from_derived_key(key: &crate::DerivedKey) -> Result<Self> {
+        KeySessionBuilder::new().build_from_derived(key)
     }
 
     /// Create a key session from a raw master key (for certificate mode).
@@ -304,7 +327,7 @@ impl KeySession {
     }
 
     /// Derive the Intermediate Key from the stored Master Key.
-    pub fn derive_intermediate_key(&self) -> IntermediateKey {
+    pub fn derive_intermediate_key(&self) -> Result<IntermediateKey> {
         IntermediateKey::derive_from_master_key(self.mk.as_ref())
     }
 
@@ -313,15 +336,15 @@ impl KeySession {
     /// Returns both the plaintext VK (for encrypting data) and the
     /// wrapped form (for storing in the header).
     pub fn generate_and_wrap_volume_key(&self) -> Result<(VolumeKey, WrappedVolumeKey)> {
-        let vk = VolumeKey::generate();
-        let ik = self.derive_intermediate_key();
+        let vk = VolumeKey::generate()?;
+        let ik = self.derive_intermediate_key()?;
         let wrapped = wrap_volume_key(&ik, &vk)?;
         Ok((vk, wrapped))
     }
 
     /// Unwrap a Volume Key from the header's encrypted form.
     pub fn unwrap_volume_key(&self, nonce: &[u8; 24], ciphertext: &[u8]) -> Result<VolumeKey> {
-        let ik = self.derive_intermediate_key();
+        let ik = self.derive_intermediate_key()?;
         unwrap_volume_key(&ik, nonce, ciphertext)
     }
 
@@ -333,7 +356,7 @@ impl KeySession {
         volume_key: &VolumeKey,
         block_index: u64,
         nonce_context: &[u8; 16],
-    ) -> BlockKey {
+    ) -> Result<BlockKey> {
         let mut info = [0u8; 42]; // 18 (domain) + 8 (block_index) + 16 (nonce)
         let domain_len = BLOCK_KEY_DOMAIN.len();
         info[..domain_len].copy_from_slice(BLOCK_KEY_DOMAIN);
@@ -347,9 +370,11 @@ impl KeySession {
             &info[..domain_len + 8 + 16],
             &mut okm,
         )
-        .expect("HKDF expand should not fail with valid parameters");
+        .map_err(|e| era_common::EraError::KeyDerivation(format!("HKDF expand failed: {}", e)))?;
 
-        BlockKey::from_bytes(okm)
+        let key = BlockKey::from_bytes(okm);
+        okm.zeroize();
+        key
     }
 
     /// Verify password against a stored verification tag.
@@ -374,7 +399,7 @@ impl KeySession {
     /// This uses HKDF with a dedicated domain string, separate from volume keys.
     /// Volume keys MUST be randomly generated (§1.1), but checkpoint keys need
     /// to be reproducible from the same MK for integrity verification.
-    pub fn derive_checkpoint_key(&self) -> [u8; 32] {
+    pub fn derive_checkpoint_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
         let mut okm = [0u8; 32];
         derive_key_hkdf(
             self.mk.as_ref(),
@@ -382,8 +407,8 @@ impl KeySession {
             b"ERA_CHECKPOINT_HMAC_v8.1",
             &mut okm,
         )
-        .expect("HKDF expand should not fail");
-        okm
+        .map_err(|e| era_common::EraError::KeyDerivation(format!("HKDF expand failed: {}", e)))?;
+        Ok(zeroize::Zeroizing::new(okm))
     }
 }
 
@@ -395,15 +420,20 @@ impl std::fmt::Debug for KeySession {
     }
 }
 
-impl Clone for KeySession {
-    fn clone(&self) -> Self {
-        let mut mk = SecureBuffer::with_config(SecureMemoryConfig::default())
-            .expect("Failed to allocate secure memory for KeySession clone");
+impl KeySession {
+    /// Clone the session, returning Result since secure memory allocation can fail.
+    pub fn try_clone(&self) -> Result<Self> {
+        let mut mk = SecureBuffer::with_config(SecureMemoryConfig::default()).map_err(|e| {
+            era_common::EraError::Encryption(format!(
+                "Failed to allocate secure memory for KeySession clone: {}",
+                e
+            ))
+        })?;
         mk.as_mut().copy_from_slice(self.mk.as_ref());
-        Self {
+        Ok(Self {
             mk,
             verification_tag: self.verification_tag,
-        }
+        })
     }
 }
 
@@ -478,15 +508,15 @@ mod tests {
         let params = fast_kdf_params();
 
         let session = KeySession::new(password, &salt, &params).unwrap();
-        let ik1 = session.derive_intermediate_key();
-        let ik2 = session.derive_intermediate_key();
+        let ik1 = session.derive_intermediate_key().unwrap();
+        let ik2 = session.derive_intermediate_key().unwrap();
         assert_eq!(ik1.as_bytes(), ik2.as_bytes());
     }
 
     #[test]
     fn test_volume_key_is_random() {
-        let vk1 = VolumeKey::generate();
-        let vk2 = VolumeKey::generate();
+        let vk1 = VolumeKey::generate().unwrap();
+        let vk2 = VolumeKey::generate().unwrap();
         assert_ne!(vk1.as_bytes(), vk2.as_bytes());
     }
 
@@ -542,11 +572,11 @@ mod tests {
         let params = fast_kdf_params();
 
         let session = KeySession::new(password, &salt, &params).unwrap();
-        let vk = VolumeKey::generate();
+        let vk = VolumeKey::generate().unwrap();
         let nonce_context = [1u8; 16];
 
-        let bk1 = session.derive_block_key(&vk, 0, &nonce_context);
-        let bk2 = session.derive_block_key(&vk, 0, &nonce_context);
+        let bk1 = session.derive_block_key(&vk, 0, &nonce_context).unwrap();
+        let bk2 = session.derive_block_key(&vk, 0, &nonce_context).unwrap();
         assert_eq!(bk1.as_bytes(), bk2.as_bytes());
     }
 
@@ -557,11 +587,11 @@ mod tests {
         let params = fast_kdf_params();
 
         let session = KeySession::new(password, &salt, &params).unwrap();
-        let vk = VolumeKey::generate();
+        let vk = VolumeKey::generate().unwrap();
         let nonce_context = [1u8; 16];
 
-        let bk0 = session.derive_block_key(&vk, 0, &nonce_context);
-        let bk1 = session.derive_block_key(&vk, 1, &nonce_context);
+        let bk0 = session.derive_block_key(&vk, 0, &nonce_context).unwrap();
+        let bk1 = session.derive_block_key(&vk, 1, &nonce_context).unwrap();
         assert_ne!(bk0.as_bytes(), bk1.as_bytes());
     }
 
@@ -589,9 +619,9 @@ mod tests {
         let params = fast_kdf_params();
 
         let session = KeySession::new(password, &salt, &params).unwrap();
-        let vk = VolumeKey::generate();
-        let bk = session.derive_block_key(&vk, 0, &[0u8; 16]);
-        let ik = session.derive_intermediate_key();
+        let vk = VolumeKey::generate().unwrap();
+        let bk = session.derive_block_key(&vk, 0, &[0u8; 16]).unwrap();
+        let ik = session.derive_intermediate_key().unwrap();
 
         assert!(format!("{:?}", session).contains("REDACTED"));
         assert!(format!("{:?}", vk).contains("REDACTED"));
@@ -618,7 +648,7 @@ mod tests {
         assert_eq!(original_vk.as_bytes(), vk.as_bytes());
 
         // Re-wrap with new IK
-        let new_ik = new_session.derive_intermediate_key();
+        let new_ik = new_session.derive_intermediate_key().unwrap();
         let new_wrapped = wrap_volume_key(&new_ik, &vk).unwrap();
 
         // Unwrap with new session

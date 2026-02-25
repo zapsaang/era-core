@@ -50,7 +50,7 @@ async fn test_cold_recovery_from_orphaned_volume() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![era_volume::RecipientSlot::new(
-            era_volume::RecipientType::ScryptPassword,
+            era_volume::RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],
@@ -188,7 +188,7 @@ async fn test_index_embedded_in_volume() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![era_volume::RecipientSlot::new(
-            era_volume::RecipientType::ScryptPassword,
+            era_volume::RecipientType::Argon2idPassword,
             Some([0x12; 8]),
             vec![0xAB; 16],
             vec![0xCD; 48],

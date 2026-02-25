@@ -223,11 +223,11 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Rebuild the bloom filter at a larger capacity if entry count exceeds 2× the current capacity.
+    /// Rebuild the bloom filter at a larger capacity if entry count exceeds 1.5× the current capacity.
     ///
     /// New capacity is set to 4× the current entry count to avoid frequent rebuilds.
     fn rebuild_bloom_if_needed(&mut self) -> Result<()> {
-        if self.entry_count <= self.bloom_capacity * 2 {
+        if self.entry_count <= self.bloom_capacity * 3 / 2 {
             return Ok(());
         }
 
@@ -337,8 +337,8 @@ impl IndexStore {
 
     /// Drain entries in sorted order, chunked into IndexPages of ENTRIES_PER_PAGE.
     ///
-    /// Unlike `read_sorted()`, this never holds more than one page of entries
-    /// in memory at a time. Returns pages paired with their sequential BlockIds.
+    /// Returns all pages in sorted order, paired with their sequential BlockIds.
+    /// Note: all pages are collected into a Vec before returning.
     pub fn read_sorted_pages(&self) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
         use era_common::BlockId;
 
