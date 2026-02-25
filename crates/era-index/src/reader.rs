@@ -49,6 +49,12 @@ const PAGE_CACHE_CAP: NonZeroUsize = match NonZeroUsize::new(256) {
     None => unreachable!(),
 };
 
+/// Maximum entries allowed in from_memory() to prevent OOM (V6-F3)
+pub const MAX_MEMORY_ENTRIES: usize = crate::ENTRIES_PER_PAGE * 10_000;
+
+/// Maximum pages allowed in from_pages() to prevent OOM (V6-F3)
+pub const MAX_PAGES: usize = 10_000;
+
 impl IndexReader {
     /// Open an index from a directory
     pub fn open(index_dir: &Path, meta: MetaIndex) -> Result<Self> {
@@ -74,6 +80,13 @@ impl IndexReader {
         bloom: Bloom<ChunkHash>,
         entries: Vec<IndexEntry>,
     ) -> Result<Self> {
+        if entries.len() > MAX_MEMORY_ENTRIES {
+            return Err(EraError::IndexError(format!(
+                "from_memory: {} entries exceeds maximum {} (V6-F3)",
+                entries.len(),
+                MAX_MEMORY_ENTRIES
+            )));
+        }
         let mut meta = meta;
         let embedded_pages = if !entries.is_empty() {
             let mut pages = HashMap::new();
@@ -106,6 +119,13 @@ impl IndexReader {
         bloom: Bloom<ChunkHash>,
         pages: Vec<(IndexPage, BlockId)>,
     ) -> Result<Self> {
+        if pages.len() > MAX_PAGES {
+            return Err(EraError::IndexError(format!(
+                "from_pages: {} pages exceeds maximum {} (V6-F3)",
+                pages.len(),
+                MAX_PAGES
+            )));
+        }
         let mut meta = meta;
         let mut embedded_pages = HashMap::new();
         for (page, block_id) in pages {

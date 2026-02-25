@@ -26,6 +26,9 @@ use crate::IndexEntry;
 /// Bloom filter false positive rate (1%)
 const BLOOM_FP_RATE: f64 = 0.01;
 
+/// Maximum number of entries allowed in sorted operations to prevent OOM (V7-F6)
+pub const MAX_SORTED_ENTRIES: usize = 2_000_000;
+
 /// Deserialize an IndexEntry from potentially unaligned bytes.
 ///
 /// Redb value bytes are not guaranteed to be 8-byte aligned, but rkyv
@@ -334,6 +337,14 @@ impl IndexStore {
             .open_table(TABLE_CHUNKS)
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
+        // Guard against malicious/oversized indexes (V7-F6)
+        if self.entry_count > MAX_SORTED_ENTRIES {
+            return Err(EraError::IndexError(format!(
+                "read_sorted: entry count {} exceeds maximum {} (V7-F6)",
+                self.entry_count, MAX_SORTED_ENTRIES
+            )));
+        }
+
         let mut entries = Vec::with_capacity(self.entry_count);
         for result in table
             .iter()
@@ -363,6 +374,14 @@ impl IndexStore {
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
         let entries_per_page = crate::ENTRIES_PER_PAGE;
+        // Guard against malicious/oversized indexes (V7-F6)
+        if self.entry_count > MAX_SORTED_ENTRIES {
+            return Err(EraError::IndexError(format!(
+                "read_sorted_pages: entry count {} exceeds maximum {} (V7-F6)",
+                self.entry_count, MAX_SORTED_ENTRIES
+            )));
+        }
+
         let estimated_pages = (self.entry_count + entries_per_page - 1) / entries_per_page.max(1);
         let mut pages = Vec::with_capacity(estimated_pages);
         let mut chunk = Vec::with_capacity(entries_per_page);

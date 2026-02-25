@@ -112,14 +112,14 @@ impl ChunkIndex for MemoryChunkIndex {
 ///
 /// At finalization the `IndexBuilder` is extracted via `take_builder()` and
 /// finalized into typed index blocks written to the volume.
-pub(crate) struct LsmChunkIndex {
+pub(crate) struct RedbChunkIndex {
     /// IndexBuilder accumulates entries for volume-embedded finalization.
     builder: Mutex<Option<IndexBuilder>>,
     /// Fast point-lookup map for dedup during the write session.
     lookup: RwLock<HashMap<ChunkHash, BlockLocation>>,
 }
 
-impl LsmChunkIndex {
+impl RedbChunkIndex {
     /// Create a new Redb-backed chunk index.
     pub fn new() -> EraResult<Self> {
         Ok(Self {
@@ -136,7 +136,7 @@ impl LsmChunkIndex {
     }
 }
 
-impl ChunkIndex for LsmChunkIndex {
+impl ChunkIndex for RedbChunkIndex {
     fn contains(&self, hash: &ChunkHash) -> EraResult<bool> {
         Ok(self.lookup.read().contains_key(hash))
     }
@@ -200,7 +200,7 @@ impl ChunkIndex for LsmChunkIndex {
 
 /// Create a chunk index backed by Redb (default for production).
 pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
-    Ok(Arc::new(LsmChunkIndex::new()?))
+    Ok(Arc::new(RedbChunkIndex::new()?))
 }
 
 #[cfg(test)]
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_lsm_chunk_index() {
-        let index = LsmChunkIndex::new().unwrap();
+        let index = RedbChunkIndex::new().unwrap();
 
         let hash = ChunkHash::from_bytes([2u8; 32]);
         let location = create_test_location(1);

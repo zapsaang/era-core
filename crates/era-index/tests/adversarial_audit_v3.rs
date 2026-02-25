@@ -494,24 +494,17 @@ fn test_l1_lsm_naming_in_redb_codebase() {
 fn test_l2_api_fossils_from_lsm() {
     let source = include_str!("../src/chunk_index.rs");
 
-    // spill_count() always returns 0
+    // REMEDIATION L2: spill_count() and memtable_size_bytes() removed
     let has_spill_count = source.contains("pub fn spill_count");
-    assert!(
-        has_spill_count,
-        "FINDING L2a: spill_count() exists but always returns 0 — dead API fossil"
-    );
-
-    // Check it returns 0
-    let spill_fn_start = source.find("pub fn spill_count").unwrap();
-    let spill_body = &source[spill_fn_start..spill_fn_start + 100];
-    assert!(spill_body.contains("0"), "spill_count() hardcodes 0");
-
-    // memtable_size_bytes is a meaningless estimate
     let has_memtable_size = source.contains("pub fn memtable_size_bytes");
+
     assert!(
-        has_memtable_size,
-        "FINDING L2b: memtable_size_bytes() exists but is meaningless with Redb \
-         — returns entry_count * entry_size as an estimate, not actual memory usage"
+        !has_spill_count,
+        "REMEDIATION L2a VERIFIED: spill_count() must be removed — dead API fossil"
+    );
+    assert!(
+        !has_memtable_size,
+        "REMEDIATION L2b VERIFIED: memtable_size_bytes() must be removed — dead API fossil"
     );
 }
 

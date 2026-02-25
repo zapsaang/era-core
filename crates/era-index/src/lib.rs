@@ -49,8 +49,8 @@ mod store;
 
 pub use bloom_serde::{deserialize_bloom, serialize_bloom, BloomFilterData};
 pub use builder::IndexBuilder;
-pub use error::IndexError;
 pub use chunk_index::{ChunkIndex, ChunkIndexConfig, ChunkIndexReader};
+pub use error::IndexError;
 pub use reader::{IndexLocation, IndexReader};
 pub use store::IndexStore;
 

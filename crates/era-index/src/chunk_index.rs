@@ -144,19 +144,6 @@ impl ChunkIndex {
         }
     }
 
-    /// Get the number of spill files created (always 0 with Redb — kept for API compat)
-    pub fn spill_count(&self) -> usize {
-        0
-    }
-
-    /// Get current memory usage estimate (kept for API compat)
-    pub fn memtable_size_bytes(&mut self) -> usize {
-        // With Redb, entries are on disk. Return entry_count * entry_size as estimate.
-        self.builder
-            .as_mut()
-            .map(|b| b.entry_count() * IndexEntry::memory_size())
-            .unwrap_or(0)
-    }
 
     /// Finalize the index and transition to read mode
     ///
@@ -265,7 +252,6 @@ mod tests {
     fn test_chunk_index_creation() {
         let tree = ChunkIndex::new_default().unwrap();
         assert_eq!(tree.state, IndexState::Building);
-        assert_eq!(tree.spill_count(), 0);
     }
 
     #[test]

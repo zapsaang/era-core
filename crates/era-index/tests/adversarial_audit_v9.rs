@@ -1172,32 +1172,6 @@ fn v9_f28a_binary_search_all_entries() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// V9-F29: NOVEL — ChunkIndex memtable_size_bytes accuracy
-// ═══════════════════════════════════════════════════════════════════════
-
-#[test]
-fn v9_f29a_memtable_size_estimate() {
-    let mut tree = ChunkIndex::new_default().unwrap();
-
-    let initial_size = tree.memtable_size_bytes();
-    assert_eq!(initial_size, 0, "V9-F29a: Empty tree should have 0 size");
-
-    for i in 0..100u64 {
-        tree.insert(make_entry(i)).unwrap();
-    }
-
-    let size = tree.memtable_size_bytes();
-    let expected = 100 * IndexEntry::memory_size();
-    assert_eq!(
-        size,
-        expected,
-        "V9-F29a: Size should be {} (100 × {}), got {}",
-        expected,
-        IndexEntry::memory_size(),
-        size
-    );
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // V9-F30: NOVEL — Bloom filter serialization size sanity

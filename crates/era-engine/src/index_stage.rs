@@ -8,7 +8,7 @@
 //! - A `ChunkIndex` (either in-memory or LSM-backed) for dedup lookups
 //! - An optional `CheckpointManager` for crash recovery
 //!
-//! At finalization, the embedded `IndexBuilder` (if using `LsmChunkIndex`)
+//! At finalization, the embedded `IndexBuilder` (if using `RedbChunkIndex`)
 //! is extracted and serialized into typed index blocks written to the volume.
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use era_common::{BlockLocation, ChunkHash, Result};
 use era_index::IndexBuilder;
 
 use crate::checkpoint::CheckpointManager;
-use crate::chunk_index::{ChunkIndex, LsmChunkIndex};
+use crate::chunk_index::{ChunkIndex, RedbChunkIndex};
 
 /// Index stage: wraps chunk index and optional checkpoint manager.
 ///
@@ -71,7 +71,7 @@ impl IndexStage {
     /// Record a chunk hash → block location mapping in the index.
     ///
     /// This updates both the dedup lookup index and the `IndexBuilder`
-    /// (if backed by `LsmChunkIndex`).
+    /// (if backed by `RedbChunkIndex`).
     pub fn record_location(&self, hash: ChunkHash, location: BlockLocation) -> Result<()> {
         self.chunk_index.put(hash, location)
     }
@@ -88,13 +88,13 @@ impl IndexStage {
 
     /// Extract the `IndexBuilder` for V2.1 embedded index finalization.
     ///
-    /// This downcasts the inner chunk index to `LsmChunkIndex` and takes
+    /// This downcasts the inner chunk index to `RedbChunkIndex` and takes
     /// the builder. Returns `None` if the index is not LSM-backed or the
     /// builder was already taken.
     pub fn take_index_builder(&self) -> Option<IndexBuilder> {
         self.chunk_index
             .as_any()
-            .downcast_ref::<LsmChunkIndex>()
+            .downcast_ref::<RedbChunkIndex>()
             .and_then(|lsm| lsm.take_builder())
     }
 
