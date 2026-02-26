@@ -3,6 +3,7 @@
 //! Reads the finalized index structure efficiently.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bloomfilter::Bloom;
@@ -33,9 +34,9 @@ pub struct IndexReader {
     /// Bloom filter (deserialized)
     bloom: Bloom<ChunkHash>,
     /// Cache of loaded L2 pages (lock-free concurrent reads)
-    page_cache: Cache<BlockId, IndexPage>,
+    page_cache: Cache<BlockId, Arc<IndexPage>>,
     /// In-memory page storage (for cold recovery mode)
-    embedded_pages: HashMap<BlockId, IndexPage>,
+    embedded_pages: HashMap<BlockId, Arc<IndexPage>>,
 }
 
 /// Default page cache capacity
@@ -109,13 +110,14 @@ impl IndexReader {
             )));
         }
         let mut meta = meta;
+        meta.clear_pages();
         let embedded_pages = if !entries.is_empty() {
             let mut pages = HashMap::new();
             for (block_id, chunk) in entries.chunks(super::ENTRIES_PER_PAGE).enumerate() {
                 let page = IndexPage::try_new(chunk.to_vec())?;
                 let bid = BlockId::new(block_id as u64);
                 meta.add_page(*page.min_hash(), *page.max_hash(), bid)?;
-                pages.insert(bid, page);
+                pages.insert(bid, Arc::new(page));
             }
             pages
         } else {
@@ -147,10 +149,11 @@ impl IndexReader {
             )));
         }
         let mut meta = meta;
+        meta.clear_pages();
         let mut embedded_pages = HashMap::new();
         for (page, block_id) in pages {
             meta.add_page(*page.min_hash(), *page.max_hash(), block_id)?;
-            embedded_pages.insert(block_id, page);
+            embedded_pages.insert(block_id, Arc::new(page));
         }
 
         Ok(Self {
@@ -381,7 +384,11 @@ impl IndexReader {
         // Instead of assuming page_blocks[i] == meta.pages[i] (positional matching),
         // we try each scanned block against all unrecovered meta entries. This is
         // robust against volume scanners returning pages in any order.
+        //
+        // V13-F12 optimization: Use a shrinking Vec of unrecovered page indices
+        // with swap_remove to avoid re-checking already-recovered pages.
         let mut embedded_pages = HashMap::new();
+        let mut unrecovered: Vec<usize> = (0..meta.pages().len()).collect();
 
         for location in page_blocks.iter() {
             if let Some(dl) = deadline {
@@ -394,11 +401,11 @@ impl IndexReader {
             let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
             let mut matched = false;
 
-            // Try every unrecovered meta.pages entry until one decrypts + validates
-            for page_ptr in meta.pages() {
-                if embedded_pages.contains_key(&page_ptr.block_id) {
-                    continue; // Already recovered this page
-                }
+            // Try each unrecovered meta page — swap_remove on match for O(1) shrink
+            let mut i = 0;
+            while i < unrecovered.len() {
+                let page_idx = unrecovered[i];
+                let page_ptr = &meta.pages()[page_idx];
 
                 let block_key = session.derive_block_key(
                     volume_key,
@@ -422,6 +429,7 @@ impl IndexReader {
                     )
                     .is_err()
                     {
+                        i += 1;
                         continue;
                     }
                     if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
@@ -432,12 +440,14 @@ impl IndexReader {
                         if *page.min_hash() == page_ptr.min_hash
                             && *page.max_hash() == page_ptr.max_hash
                         {
-                            embedded_pages.insert(page_ptr.block_id, page);
+                            embedded_pages.insert(page_ptr.block_id, Arc::new(page));
+                            unrecovered.swap_remove(i);
                             matched = true;
                             break;
                         }
                     }
                 }
+                i += 1;
             }
 
             if !matched {
@@ -520,10 +530,10 @@ impl IndexReader {
     }
 
     /// Load an L2 page (with caching)
-    fn load_page(&self, block_id: BlockId) -> Result<IndexPage> {
+    fn load_page(&self, block_id: BlockId) -> Result<Arc<IndexPage>> {
         // Check embedded pages first (recovery mode)
         if let Some(page) = self.embedded_pages.get(&block_id) {
-            return Ok(page.clone());
+            return Ok(Arc::clone(page));
         }
 
         // Check cache (lock-free read via quick_cache)

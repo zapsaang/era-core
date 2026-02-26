@@ -109,8 +109,8 @@ impl IndexBuilder {
         // then return the store's O(1) counter.
         if let Err(e) = self.flush_buffer() {
             tracing::error!("entry_count: flush_buffer failed: {}", e);
-            // Fallback: upper-bound estimate (may overcount if buffer has dupes)
-            return self.store.entry_count() + self.buffer.len();
+            // V13-F1: return store count (safe minimum) on flush failure
+            return self.store.entry_count();
         }
         self.store.entry_count()
     }
@@ -332,7 +332,9 @@ impl IndexBuilder {
     /// Removes the staging file while the DB handle is still held,
     /// eliminating the TOCTOU window in Drop (V6-F10 fix).
     pub fn discard(mut self) -> Result<()> {
-        self.flush_buffer()?;
+        // V13-F9 fix: skip flush — buffer entries are about to be deleted anyway.
+        // Clear the buffer to prevent the Drop warning about unflushed entries.
+        self.buffer.clear();
         self.store.discard()?;
         Ok(())
         // Drop runs but store.read_only=true, so no double-remove

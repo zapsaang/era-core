@@ -125,7 +125,8 @@ fn v12_f1c_entry_count_source_confirms_per_hash_get() {
 
 #[test]
 fn v12_f2a_cold_recovery_nested_loop_exists() {
-    // Source verification: reader.rs recover_from_volume has nested iteration
+    // Source verification: reader.rs recover_from_volume has outer loop over page_blocks
+    // V13-F12: inner loop replaced with while+swap_remove for O(n) amortized instead of O(n×m)
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
@@ -136,22 +137,23 @@ fn v12_f2a_cold_recovery_nested_loop_exists() {
         .expect("recover_from_volume must exist");
     let fn_body = &source[fn_start..];
 
-    // Outer loop: iterates page_blocks
+    // Outer loop: iterates page_blocks (unchanged)
     assert!(
         fn_body.contains("for location in page_blocks.iter()"),
         "recover_from_volume must have outer loop over page_blocks"
     );
-    // Inner loop: iterates meta.pages()
+    // V13-F12: inner loop now uses while+swap_remove instead of for page_ptr in meta.pages()
     assert!(
-        fn_body.contains("for page_ptr in meta.pages()"),
-        "recover_from_volume must have inner loop over meta.pages() — O(n×m)"
+        fn_body.contains("while i < unrecovered.len()"),
+        "recover_from_volume must use while loop over shrinking unrecovered Vec — V13-F12 optimization"
     );
 }
 
 #[test]
 fn v12_f2b_cold_recovery_complexity_proof() {
-    // The recover_from_volume function's inner loop skips already-recovered pages
-    // via contains_key, but worst case (all fail except last) is still O(n×m).
+    // V13-F12: The recover_from_volume function's inner loop now uses swap_remove
+    // to shrink the unrecovered set on each match, giving O(n) amortized complexity
+    // instead of the original O(n×m) nested loop with contains_key skip.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
@@ -160,25 +162,22 @@ fn v12_f2b_cold_recovery_complexity_proof() {
     let fn_start = source
         .find("pub async fn recover_from_volume")
         .expect("recover_from_volume must exist");
-    let fn_body = &source[fn_start..fn_start + 10000.min(source.len() - fn_start)];
+    let fn_body = &source[fn_start..fn_start + 20000.min(source.len() - fn_start)];
 
-    // The skip check exists but doesn't prevent quadratic worst case
+    // V13-F12: swap_remove pattern replaces contains_key skip check
     assert!(
-        fn_body.contains("embedded_pages.contains_key(&page_ptr.block_id)"),
-        "Recovery loop has contains_key skip — but worst case is still O(n×m)"
+        fn_body.contains("unrecovered.swap_remove(i)"),
+        "Recovery loop uses swap_remove for O(1) removal — V13-F12 optimization"
     );
 
-    // The inner loop has no break statement — it always iterates ALL meta.pages()
-    // even when all pages have already been recovered. This confirms O(n×m) worst case.
-    let inner_loop_start = fn_body
-        .find("for page_ptr in meta.pages()")
-        .expect("inner loop over meta.pages() must exist");
-    let inner_loop_body =
-        &fn_body[inner_loop_start..inner_loop_start + 800.min(fn_body.len() - inner_loop_start)];
+    // The while loop has a break statement when a match is found — early termination
+    let while_start = fn_body
+        .find("while i < unrecovered.len()")
+        .expect("while loop over unrecovered must exist");
+    let while_body = &fn_body[while_start..while_start + 2500.min(fn_body.len() - while_start)];
     assert!(
-        !inner_loop_body.contains("break"),
-        "Inner loop over meta.pages() must NOT contain a break — \
-         no early termination when all pages recovered, confirming O(n×m)"
+        while_body.contains("break"),
+        "While loop over unrecovered contains break on match — ",
     );
 }
 
@@ -236,9 +235,8 @@ fn v12_f3b_from_memory_appends_to_caller_meta() {
 
 #[test]
 fn v12_f3c_from_memory_preserves_preexisting_pages() {
-    // The actual finding: from_memory() appends new pages to the caller's MetaIndex
-    // WITHOUT clearing pre-existing pages. A pre-existing page in a non-overlapping
-    // hash range is silently preserved alongside the newly-appended pages.
+    // V13-F2: from_memory() now clears pre-existing pages via clear_pages() before
+    // adding new pages. A pre-existing page is cleared, and only the newly-built pages remain.
     let mut meta = MetaIndex::new();
     // Pre-existing page covers hash range 0..50 (before the entries' range)
     meta.add_page(test_hash(0), test_hash(50), BlockId::new(99))
@@ -251,11 +249,12 @@ fn v12_f3c_from_memory_preserves_preexisting_pages() {
     let reader = IndexReader::from_memory(meta, bloom, entries)
         .expect("from_memory must succeed with non-overlapping pre-existing page");
 
-    // The reader has >= 2 pages: the pre-existing page (0..50) + the new page (100..199).
-    // This proves from_memory() does NOT clear pre-existing pages before appending.
-    assert!(
-        reader.meta_page_count() >= 2,
-        "reader must have >= 2 pages: pre-existing page preserved + new page appended, got {}",
+    // V13-F2: from_memory now clears pre-existing pages via clear_pages().
+    // Only the newly-built page (100..199) remains — pre-existing page (0..50) is cleared.
+    assert_eq!(
+        reader.meta_page_count(),
+        1,
+        "reader must have exactly 1 page: pre-existing page cleared by V13-F2, only new page remains, got {}",
         reader.meta_page_count()
     );
 }

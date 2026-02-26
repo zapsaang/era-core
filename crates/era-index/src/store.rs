@@ -29,6 +29,9 @@ const BLOOM_FP_RATE: f64 = 0.01;
 /// Maximum number of entries allowed in sorted operations to prevent OOM (V7-F6)
 pub const MAX_SORTED_ENTRIES: usize = 2_000_000;
 
+/// Maximum number of entries allowed in open_readonly to prevent DoS (V13-F10)
+const MAX_READONLY_ENTRIES: usize = 100_000_000;
+
 /// Deserialize an IndexEntry using a caller-provided aligned buffer.
 ///
 /// Reuses `buf` across calls to avoid per-entry heap allocation in loops.
@@ -61,10 +64,10 @@ pub struct IndexStore {
     db_path: PathBuf,
     /// In-memory Bloom filter (survives across transactions)
     bloom: Bloom<ChunkHash>,
-    /// Current bloom filter capacity (number of items it was sized for)
-    bloom_capacity: usize,
     /// Total entries inserted
     entry_count: usize,
+    /// Number of entries the bloom filter was sized for (for rebuild threshold)
+    bloom_sized_for: usize,
     /// Whether to keep the file on drop (prevents deletion for read-only stores or explicit keep)
     should_keep_on_drop: bool,
     /// Whether this store was opened in read-only mode
@@ -95,13 +98,12 @@ impl IndexStore {
             db,
             db_path: path.to_path_buf(),
             bloom: Bloom::new_for_fp_rate(items, BLOOM_FP_RATE),
-            bloom_capacity: items,
             entry_count: 0,
+            bloom_sized_for: items,
             should_keep_on_drop: false,
             read_only: false,
         })
     }
-
     /// Open an existing Redb file in read-only mode (for crash recovery tests).
     pub fn open_readonly(path: &Path) -> Result<Self> {
         let db = Database::open(path)
@@ -118,6 +120,14 @@ impl IndexStore {
             .len()
             .map_err(|e: redb::StorageError| EraError::IndexError(e.to_string()))?
             as usize;
+
+        // V13-F10 fix: hard limit to prevent DoS via crafted staging files
+        if len > MAX_READONLY_ENTRIES {
+            return Err(EraError::IndexError(format!(
+                "open_readonly: {} entries exceeds maximum {} (V13-F10)",
+                len, MAX_READONLY_ENTRIES
+            )));
+        }
 
         if len > 1_000_000 {
             tracing::warn!(
@@ -140,8 +150,8 @@ impl IndexStore {
             db,
             db_path: path.to_path_buf(),
             bloom,
-            bloom_capacity: len,
             entry_count: len,
+            bloom_sized_for: len.max(1024),
             should_keep_on_drop: true,
             read_only: true,
         })
@@ -157,13 +167,6 @@ impl IndexStore {
                 "Cannot insert into a read-only IndexStore".into(),
             ));
         }
-        // SAFETY: Bloom filter is updated BEFORE the Redb commit.
-        // This creates a <1ms window where bloom.check() returns true but store.get() returns None.
-        // This is SAFE for dedup: false positive = redundant storage, not data loss.
-        // A false negative (bloom says no when entry exists) would cause data loss,
-        // but cannot happen here because bloom entries are only added, never removed.
-        // Reference: V7-F11 / V6-F9 — bloom-before-commit is intentional and correct.
-        self.bloom.set(&entry.hash);
 
         let write_txn = self
             .db
@@ -190,8 +193,14 @@ impl IndexStore {
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
+        // V13-F4 fix: set bloom AFTER successful commit to avoid phantom entries
+        // on commit failure. False positive in bloom only causes redundant storage
+        // (not data loss), and bloom entries are only added, never removed.
+        self.bloom.set(&entry.hash);
+        // SAFETY (V11-F8 / V13-F4): bloom-before-commit is intentional and correct
+        // was the prior invariant; V13-F4 moved bloom.set AFTER commit to avoid phantom
+        // entries on commit failure. Bloom FP is harmless; false negatives remain impossible.
         self.rebuild_bloom_if_needed()?;
-
         Ok(())
     }
 
@@ -218,8 +227,6 @@ impl IndexStore {
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
             let mut new_count = 0usize;
             for entry in entries {
-                // SAFETY: See bloom-before-commit invariant in insert().
-                self.bloom.set(&entry.hash);
                 let is_new = table
                     .get(entry.hash.as_bytes())
                     .map_err(|e| EraError::IndexError(e.to_string()))?
@@ -239,42 +246,13 @@ impl IndexStore {
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
-        // Resize bloom if overcapacity
+        // V13-F4 fix: set bloom bits AFTER successful commit to avoid phantom entries.
+        // We set ALL entries (including duplicates that already exist in the DB) to ensure
+        // the bloom filter reflects all entries present in the store.
+        for entry in entries {
+            self.bloom.set(&entry.hash);
+        }
         self.rebuild_bloom_if_needed()?;
-
-        Ok(())
-    }
-
-    /// Rebuild the bloom filter at a larger capacity if entry count exceeds 1.5× the current capacity.
-    ///
-    /// New capacity is set to 4× the current entry count to avoid frequent rebuilds.
-    fn rebuild_bloom_if_needed(&mut self) -> Result<()> {
-        if self.entry_count <= self.bloom_capacity * 3 / 2 {
-            return Ok(());
-        }
-
-        let new_capacity = self.entry_count * 4;
-        let mut new_bloom = Bloom::new_for_fp_rate(new_capacity.max(1024), BLOOM_FP_RATE);
-
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| EraError::IndexError(e.to_string()))?;
-        let table = read_txn
-            .open_table(TABLE_CHUNKS)
-            .map_err(|e| EraError::IndexError(e.to_string()))?;
-
-        for result in table
-            .iter()
-            .map_err(|e| EraError::IndexError(e.to_string()))?
-        {
-            let (key, _) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
-            let hash = ChunkHash::from_bytes(*key.value());
-            new_bloom.set(&hash);
-        }
-
-        self.bloom = new_bloom;
-        self.bloom_capacity = new_capacity;
         Ok(())
     }
 
@@ -330,6 +308,37 @@ impl IndexStore {
         self.entry_count
     }
 
+    /// Rebuild the bloom filter when entry count exceeds 1.5× the size it was built for.
+    ///
+    /// V13-F6: This performs a full table scan and is O(n) in the number of stored entries.
+    /// Called from both `insert()` and `insert_batch()` to maintain bloom FPR guarantees.
+    fn rebuild_bloom_if_needed(&mut self) -> Result<()> {
+        if self.entry_count <= self.bloom_sized_for * 3 / 2 {
+            return Ok(());
+        }
+        let new_capacity = self.entry_count * 4;
+        let mut new_bloom = Bloom::new_for_fp_rate(new_capacity.max(1024), BLOOM_FP_RATE);
+
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let table = read_txn
+            .open_table(TABLE_CHUNKS)
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+        for result in table
+            .iter()
+            .map_err(|e| EraError::IndexError(e.to_string()))?
+        {
+            let (key, _) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
+            let hash = ChunkHash::from_bytes(*key.value());
+            new_bloom.set(&hash);
+        }
+
+        self.bloom = new_bloom;
+        self.bloom_sized_for = new_capacity;
+        Ok(())
+    }
     /// Drain all entries in sorted hash order for finalization.
     ///
     /// Redb's B-tree stores keys in sorted order, so iteration
@@ -344,15 +353,18 @@ impl IndexStore {
             .open_table(TABLE_CHUNKS)
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
-        // Guard against malicious/oversized indexes (V7-F6)
-        if self.entry_count > MAX_SORTED_ENTRIES {
+        // V13-F11: use table.len() as ground truth
+        let table_len = table
+            .len()
+            .map_err(|e| EraError::IndexError(e.to_string()))? as usize;
+        if table_len > MAX_SORTED_ENTRIES {
             return Err(EraError::IndexError(format!(
                 "read_sorted: entry count {} exceeds maximum {} (V7-F6)",
-                self.entry_count, MAX_SORTED_ENTRIES
+                table_len, MAX_SORTED_ENTRIES
             )));
         }
 
-        let mut entries = Vec::with_capacity(self.entry_count);
+        let mut entries = Vec::with_capacity(table_len);
         let mut align_buf = rkyv::AlignedVec::with_capacity(256);
         for result in table
             .iter()
@@ -404,11 +416,15 @@ impl IndexStore {
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
         let entries_per_page = crate::ENTRIES_PER_PAGE;
-        // Guard against malicious/oversized indexes (V7-F6)
-        if self.entry_count > MAX_SORTED_ENTRIES {
+        // V13-F11 fix: use Redb table.len() as ground truth for the guard check
+        let table_len = table
+            .len()
+            .map_err(|e: redb::StorageError| EraError::IndexError(e.to_string()))?
+            as usize;
+        if table_len > MAX_SORTED_ENTRIES {
             return Err(EraError::IndexError(format!(
                 "for_each_sorted_page: entry count {} exceeds maximum {} (V7-F6)",
-                self.entry_count, MAX_SORTED_ENTRIES
+                table_len, MAX_SORTED_ENTRIES
             )));
         }
 
@@ -425,10 +441,8 @@ impl IndexStore {
             chunk.push(entry);
 
             if chunk.len() >= entries_per_page {
-                let page = crate::IndexPage::try_new(std::mem::replace(
-                    &mut chunk,
-                    Vec::with_capacity(entries_per_page),
-                ))?;
+                // V13-F7 fix: take the chunk to pass to try_new, leaving an empty Vec in place
+                let page = crate::IndexPage::try_new(std::mem::take(&mut chunk))?;
                 callback(page, BlockId::new(block_id_counter))?;
                 block_id_counter += 1;
             }

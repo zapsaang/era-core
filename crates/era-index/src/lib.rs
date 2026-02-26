@@ -182,7 +182,11 @@ impl IndexPage {
         }
     }
 
-    /// Check if a hash could be in this page's range
+    ///
+    /// **Note:** This method is not used by the production lookup path, which uses
+    /// `MetaIndex::find_page()` for range selection and `IndexPage::find()` for exact match.
+    /// It is retained for test coverage and potential external consumers.
+    /// Check if a hash could be in this page's range (inclusive bounds).
     pub fn contains_range(&self, hash: &ChunkHash) -> bool {
         hash >= &self.min_hash && hash <= &self.max_hash
     }
@@ -223,6 +227,14 @@ impl MetaIndex {
     ///
     /// Pages must be added in ascending, non-overlapping order (by min_hash).
     /// Returns an error if this invariant is violated.
+    ///
+    /// # Design Decision (V13-F5)
+    ///
+    /// Uses `<=` (not `<`) to reject shared boundary hashes. This prevents
+    /// ambiguous ownership where the same hash could be looked up in two pages.
+    /// The trade-off is that legitimate adjacent pages sharing an exact boundary
+    /// hash are rejected; callers must ensure page boundaries are strictly
+    /// non-overlapping.
     pub fn add_page(
         &mut self,
         min_hash: ChunkHash,
@@ -284,6 +296,14 @@ impl MetaIndex {
         crate::deserialize_bloom(&bloom_data)?;
         self.bloom_filter = bloom_data;
         Ok(())
+    }
+
+    /// Clear all existing page pointers.
+    ///
+    /// Used by `IndexReader::from_memory()` and `from_pages()` to prevent stale
+    /// page pointers from a caller-provided MetaIndex (V13-F2 fix).
+    pub fn clear_pages(&mut self) {
+        self.pages.clear();
     }
 }
 
