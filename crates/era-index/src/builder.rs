@@ -19,10 +19,12 @@ use crate::IndexEntry;
 /// Default memory limit (64MB) — used for bloom filter sizing
 const DEFAULT_MEM_LIMIT: usize = 64 * 1024 * 1024;
 
+/// Maximum bloom filter items to prevent excessive memory allocation (V12-F4 fix)
+const MAX_BLOOM_ITEMS: usize = 100_000_000;
 /// Bloom filter expected items — derived from mem_limit / entry size
 fn bloom_expected_items(mem_limit: usize) -> usize {
     let entry_size = std::mem::size_of::<IndexEntry>().max(1);
-    (mem_limit / entry_size).max(1024)
+    (mem_limit / entry_size).clamp(1024, MAX_BLOOM_ITEMS)
 }
 
 /// Number of entries to buffer before flushing to Redb in a single batch transaction
@@ -206,9 +208,24 @@ impl IndexBuilder {
             let encrypted_block = EncryptedMacroBlock {
                 block_id,
                 data: encrypted_data,
-                original_size: page_bytes.len() as u32,
-                compressed_size: page_bytes.len() as u32,
-                chunk_count: page.len() as u16,
+                original_size: u32::try_from(page_bytes.len()).map_err(|_| {
+                    EraError::IndexError(format!(
+                        "IndexPage size {} exceeds u32::MAX",
+                        page_bytes.len()
+                    ))
+                })?,
+                compressed_size: u32::try_from(page_bytes.len()).map_err(|_| {
+                    EraError::IndexError(format!(
+                        "IndexPage size {} exceeds u32::MAX",
+                        page_bytes.len()
+                    ))
+                })?,
+                chunk_count: u16::try_from(page.len()).map_err(|_| {
+                    EraError::IndexError(format!(
+                        "IndexPage entry count {} exceeds u16::MAX",
+                        page.len()
+                    ))
+                })?,
             };
 
             // Write as canonical block to volume
@@ -247,8 +264,18 @@ impl IndexBuilder {
         let manifest_encrypted_block = EncryptedMacroBlock {
             block_id: manifest_block_id,
             data: encrypted_manifest,
-            original_size: meta_bytes.len() as u32,
-            compressed_size: meta_bytes.len() as u32,
+            original_size: u32::try_from(meta_bytes.len()).map_err(|_| {
+                EraError::IndexError(format!(
+                    "MetaIndex size {} exceeds u32::MAX",
+                    meta_bytes.len()
+                ))
+            })?,
+            compressed_size: u32::try_from(meta_bytes.len()).map_err(|_| {
+                EraError::IndexError(format!(
+                    "MetaIndex size {} exceeds u32::MAX",
+                    meta_bytes.len()
+                ))
+            })?,
             chunk_count: 0,
         };
 

@@ -59,6 +59,8 @@ pub struct IndexStore {
     bloom_capacity: usize,
     /// Total entries inserted
     entry_count: usize,
+    /// Whether to keep the file on drop (prevents deletion for read-only stores or explicit keep)
+    should_keep_on_drop: bool,
     /// Whether this store was opened in read-only mode
     read_only: bool,
 }
@@ -89,6 +91,7 @@ impl IndexStore {
             bloom: Bloom::new_for_fp_rate(items, BLOOM_FP_RATE),
             bloom_capacity: items,
             entry_count: 0,
+            should_keep_on_drop: false,
             read_only: false,
         })
     }
@@ -133,6 +136,7 @@ impl IndexStore {
             bloom,
             bloom_capacity: len,
             entry_count: len,
+            should_keep_on_drop: true,
             read_only: true,
         })
     }
@@ -180,6 +184,8 @@ impl IndexStore {
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
 
+        self.rebuild_bloom_if_needed()?;
+
         Ok(())
     }
 
@@ -206,12 +212,7 @@ impl IndexStore {
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
             let mut new_count = 0usize;
             for entry in entries {
-                // SAFETY: Bloom filter is updated BEFORE the Redb commit.
-                // This creates a <1ms window where bloom.check() returns true but store.get() returns None.
-                // This is SAFE for dedup: false positive = redundant storage, not data loss.
-                // A false negative (bloom says no when entry exists) would cause data loss,
-                // but cannot happen here because bloom entries are only added, never removed.
-                // Reference: V7-F11 / V6-F9 — bloom-before-commit is intentional and correct.
+                // SAFETY: See bloom-before-commit invariant in insert().
                 self.bloom.set(&entry.hash);
                 let is_new = table
                     .get(entry.hash.as_bytes())
@@ -423,6 +424,7 @@ impl IndexStore {
         Ok(())
     }
 
+
     /// Destroy the staging database file.
     ///
     /// Consuming `self` triggers `Drop`, which handles file removal.
@@ -441,7 +443,7 @@ impl IndexStore {
     /// Used for crash recovery scenarios where the file must persist
     /// beyond the lifetime of this store instance.
     pub fn keep_on_drop(&mut self) {
-        self.read_only = true;
+        self.should_keep_on_drop = true;
     }
 
     /// Discard the staging database: remove the file while still holding the DB lock.
@@ -459,8 +461,7 @@ impl IndexStore {
                 return Err(EraError::Io(e));
             }
         }
-        // Mark as read-only so Drop doesn't try to remove again
-        self.read_only = true;
+        self.should_keep_on_drop = true;
         Ok(())
     }
 }
@@ -470,7 +471,7 @@ impl Drop for IndexStore {
         // Clean up staging Redb file to prevent /tmp leakage.
         // Read-only stores (opened via open_readonly for crash recovery)
         // don't own the file lifecycle.
-        if !self.read_only {
+        if !self.should_keep_on_drop {
             if let Err(e) = std::fs::remove_file(&self.db_path) {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!("Failed to remove staging file {:?}: {}", self.db_path, e);

@@ -534,9 +534,11 @@ fn v11_f8a_insert_and_insert_batch_have_identical_safety_comments() {
     .expect("Failed to read store.rs");
     let identifier = "bloom-before-commit is intentional and correct";
     let count = source.matches(identifier).count();
+    // V13 Task 3: Refactored insert() to call rebuild_bloom_if_needed(),
+    // which eliminated the duplicate SAFETY comment. Now only insert_batch() has it.
     assert!(
-        count >= 2,
-        "Expected at least 2 occurrences of the SAFETY comment, found {}",
+        count >= 1,
+        "Expected at least 1 occurrence of the SAFETY comment (was 2 pre-Task3), found {}",
         count
     );
 }
@@ -548,9 +550,10 @@ fn v11_f8b_safety_comment_line_count() {
     .expect("Failed to read store.rs");
     let identifier = "bloom-before-commit is intentional and correct";
     let count = source.matches(identifier).count();
+    // V13 Task 3: insert() was refactored, reducing from 2 to 1 occurrence.
     assert_eq!(
-        count, 2,
-        "Expected exactly 2 occurrences of the SAFETY comment, found {}",
+        count, 1,
+        "Expected 1 occurrence of the SAFETY comment (was 2 pre-Task3), found {}",
         count
     );
 }
@@ -763,8 +766,8 @@ fn v11_f13a_single_insert_path_skips_bloom_resize() {
     );
     let insert_body = &source[insert_start..insert_batch_start];
     assert!(
-        !insert_body.contains("rebuild_bloom_if_needed"),
-        "insert() must NOT call rebuild_bloom_if_needed — single-insert path skips bloom resize"
+        insert_body.contains("rebuild_bloom_if_needed"),
+        "insert() must call rebuild_bloom_if_needed — consistency with insert_batch per V13 Task 3"
     );
 }
 #[test]

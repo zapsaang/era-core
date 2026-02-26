@@ -41,7 +41,7 @@
 
 mod bloom_serde;
 mod builder;
-mod error;
+
 mod chunk_index;
 mod reader;
 mod schema;
@@ -50,7 +50,7 @@ mod store;
 pub use bloom_serde::{deserialize_bloom, serialize_bloom, BloomFilterData};
 pub use builder::IndexBuilder;
 pub use chunk_index::{ChunkIndex, ChunkIndexConfig, ChunkIndexReader};
-pub use error::IndexError;
+
 pub use reader::{IndexLocation, IndexReader};
 pub use store::IndexStore;
 
@@ -120,6 +120,10 @@ pub struct IndexPage {
 impl IndexPage {
     /// Create a new index page from sorted entries, returning an error if entries is empty
     /// or exceeds ENTRIES_PER_PAGE.
+    ///
+    /// **Note:** Entries are sorted by hash and deduplicated (first-write-wins semantics).
+    /// Duplicate hashes are silently removed, keeping only the first occurrence.
+    /// The returned page may contain fewer entries than the input Vec.
     pub fn try_new(mut entries: Vec<IndexEntry>) -> era_common::Result<Self> {
         if entries.is_empty() {
             return Err(era_common::EraError::InvalidFormat(
