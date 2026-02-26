@@ -15,6 +15,8 @@ use std::hash::Hash;
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub struct BloomFilterData {
+    /// Schema version for future evolution (currently 1)
+    pub version: u8,
     /// The bit vector as raw bytes
     pub bitmap: Vec<u8>,
     /// Number of bits in the filter
@@ -35,6 +37,7 @@ impl BloomFilterData {
         let sip_keys = bloom.sip_keys();
 
         Self {
+            version: 1,
             bitmap,
             bitmap_bits,
             k_num,
@@ -58,10 +61,20 @@ impl BloomFilterData {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let archived = rkyv::check_archived_root::<Self>(bytes)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
-        Ok(match archived.deserialize(&mut rkyv::Infallible) {
+        let result: Self = match archived.deserialize(&mut rkyv::Infallible) {
             Ok(val) => val,
             Err(never) => match never {},
-        })
+        };
+
+        // Validate schema version
+        if result.version != 1 {
+            return Err(EraError::IndexError(format!(
+                "unsupported bloom filter version: {}",
+                result.version
+            )));
+        }
+
+        Ok(result)
     }
 }
 
@@ -81,7 +94,7 @@ mod tests {
 
     fn test_hash(value: u64) -> ChunkHash {
         let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
+        bytes[24..32].copy_from_slice(&value.to_be_bytes());
         ChunkHash::from_bytes(bytes)
     }
 
@@ -128,9 +141,40 @@ mod tests {
         let bytes = data.to_bytes().unwrap();
         let restored = BloomFilterData::from_bytes(&bytes).unwrap();
 
+        assert_eq!(data.version, restored.version);
         assert_eq!(data.bitmap_bits, restored.bitmap_bits);
         assert_eq!(data.k_num, restored.k_num);
         assert_eq!(data.sip_keys, restored.sip_keys);
         assert_eq!(data.bitmap, restored.bitmap);
+    }
+
+    #[test]
+    fn test_bloom_version_validation() {
+        // Create a valid BloomFilterData
+        let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(100, 0.01);
+        let mut data = BloomFilterData::from_bloom(&bloom);
+
+        // Serialize with version 1
+        let bytes = data.to_bytes().unwrap();
+
+        // Verify it deserializes successfully
+        let result = BloomFilterData::from_bytes(&bytes);
+        assert!(result.is_ok());
+
+        // Now create invalid data with version 2
+        data.version = 2;
+        let bytes = data.to_bytes().unwrap();
+
+        // Verify deserialization rejects version 2
+        let result = BloomFilterData::from_bytes(&bytes);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("unsupported bloom filter version"),
+                "Expected version error, got: {}",
+                err_msg
+            );
+        }
     }
 }
