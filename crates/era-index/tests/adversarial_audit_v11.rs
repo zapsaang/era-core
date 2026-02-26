@@ -562,14 +562,14 @@ fn v11_f8b_safety_comment_line_count() {
 // adversarial_audit_v10.rs uses BE bytes at the TAIL. Inconsistent test
 // helpers can mask hash-ordering bugs.
 #[test]
-fn v11_f9a_bloom_serde_test_hash_uses_le_front() {
+fn v11_f9a_bloom_serde_test_hash_uses_be_tail() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bloom_serde.rs"),
     )
     .expect("Failed to read bloom_serde.rs");
     assert!(
-        source.contains("bytes[..8].copy_from_slice(&value.to_le_bytes())"),
-        "bloom_serde.rs test_hash should use LE bytes at the front"
+        source.contains("bytes[24..32].copy_from_slice(&value.to_be_bytes())"),
+        "bloom_serde.rs test_hash should use BE bytes at the tail (canonical pattern)"
     );
 }
 #[test]
@@ -678,7 +678,7 @@ fn v11_f10c_try_new_no_error_on_duplicates() {
 // FINDING: BloomFilterData has no version or magic field. Format changes are
 // undetectable — corrupted bitmap_bits survives deserialization without error.
 #[test]
-fn v11_f11a_bloom_filter_data_has_no_version_field() {
+fn v11_f11a_bloom_filter_data_has_version_field() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bloom_serde.rs"),
     )
@@ -689,8 +689,8 @@ fn v11_f11a_bloom_filter_data_has_no_version_field() {
     let struct_end = source[struct_start..].find('}').expect("struct must close");
     let struct_body = &source[struct_start..struct_start + struct_end];
     assert!(
-        !struct_body.contains("version"),
-        "BloomFilterData must NOT have a version field"
+        struct_body.contains("version"),
+        "BloomFilterData MUST have a version field for schema evolution (Task 4)"
     );
     assert!(
         !struct_body.contains("magic"),

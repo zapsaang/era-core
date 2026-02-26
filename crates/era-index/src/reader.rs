@@ -3,9 +3,8 @@
 //! Reads the finalized index structure efficiently.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bloomfilter::Bloom;
 use lru::LruCache;
@@ -31,8 +30,7 @@ pub struct IndexLocation {
 
 /// IndexReader provides fast lookups via Bloom + L1 + L2
 pub struct IndexReader {
-    /// Root directory containing index files (legacy mode)
-    index_dir: Option<PathBuf>,
+
     /// L1 Meta-Index (sparse directory)
     meta: MetaIndex,
     /// Bloom filter (deserialized)
@@ -57,12 +55,11 @@ pub const MAX_PAGES: usize = 10_000;
 
 impl IndexReader {
     /// Open an index from a directory
-    pub fn open(index_dir: &Path, meta: MetaIndex) -> Result<Self> {
+    pub fn open(_index_dir: &Path, meta: MetaIndex) -> Result<Self> {
         // Deserialize Bloom filter using rkyv via bloom_serde
         let bloom = super::deserialize_bloom(meta.bloom_filter())?;
 
         Ok(Self {
-            index_dir: Some(index_dir.to_path_buf()),
             meta,
             bloom,
             page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
@@ -102,7 +99,6 @@ impl IndexReader {
         };
 
         Ok(Self {
-            index_dir: None,
             meta,
             bloom,
             page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
@@ -134,7 +130,6 @@ impl IndexReader {
         }
 
         Ok(Self {
-            index_dir: None,
             meta,
             bloom,
             page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
@@ -400,8 +395,7 @@ impl IndexReader {
             embedded_pages.len()
         );
 
-        Ok(Self {
-            index_dir: None, // No external directory in recovery mode
+        Ok(Self { // No external directory in recovery mode
             meta,
             bloom,
             page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
@@ -455,8 +449,9 @@ impl IndexReader {
     }
 
     /// Load an L2 page (with caching)
+    /// Load an L2 page (with caching)
     fn load_page(&self, block_id: BlockId) -> Result<IndexPage> {
-        // Check embedded pages first (cold recovery mode)
+        // Check embedded pages first (recovery mode)
         if let Some(page) = self.embedded_pages.get(&block_id) {
             return Ok(page.clone());
         }
@@ -469,34 +464,10 @@ impl IndexReader {
             }
         }
 
-        // Cache miss — load from filesystem (legacy mode)
-        let index_dir = self.index_dir.as_ref().ok_or_else(|| {
-            EraError::InvalidFormat(
-                "IndexReader in recovery mode - pages should be embedded".into(),
-            )
-        })?;
-
-        let page_path = index_dir.join(format!("page_{}.bin", block_id.sequence()));
-
-        let page_bytes = fs::read(&page_path).map_err(|e| {
-            EraError::InvalidFormat(format!("Failed to read page {:?}: {}", page_path, e))
-        })?;
-
-        // Deserialize IndexPage using rkyv (check_archived_root + deserialize)
-        let archived = rkyv::check_archived_root::<IndexPage>(&page_bytes)
-            .map_err(|e| EraError::Deserialization(e.to_string()))?;
-        let page: IndexPage = match archived.deserialize(&mut rkyv::Infallible) {
-            Ok(val) => val,
-            Err(never) => match never {},
-        };
-
-        // Insert into cache with write lock (double-check after acquiring)
-        let mut cache = self.page_cache.write();
-        if let Some(existing) = cache.get(&block_id) {
-            return Ok(existing.clone());
-        }
-        cache.put(block_id, page.clone());
-        Ok(page)
+        // Page not found
+        Err(EraError::InvalidFormat(
+            format!("Page {} not found in embedded index", block_id.sequence()),
+        ))
     }
 }
 
@@ -504,7 +475,7 @@ impl IndexReader {
 mod tests {
     use super::*;
     use era_common::VolumeId;
-    use tempfile::TempDir;
+
 
     fn test_hash(value: u64) -> ChunkHash {
         let mut bytes = [0u8; 32];
@@ -514,10 +485,6 @@ mod tests {
 
     #[test]
     fn test_reader_basic() {
-        let temp_dir = TempDir::new().unwrap();
-        let index_dir = temp_dir.path().join("index");
-        fs::create_dir_all(&index_dir).unwrap();
-
         // Create a simple L2 page
         let entries: Vec<IndexEntry> = (0..100)
             .map(|i| IndexEntry {
@@ -530,14 +497,10 @@ mod tests {
             .collect();
 
         let page = IndexPage::try_new(entries.clone()).unwrap();
-        // Serialize page using rkyv
-        let page_bytes = rkyv::to_bytes::<_, 4096>(&page).unwrap();
-        fs::write(index_dir.join("page_0.bin"), &page_bytes).unwrap();
 
         // Create meta-index
         let mut meta = MetaIndex::new();
-        meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
-            .unwrap();
+
 
         // Create a simple bloom filter
         let mut bloom = Bloom::new_for_fp_rate(1000, 0.01);
@@ -548,8 +511,13 @@ mod tests {
         let bloom_bytes = crate::serialize_bloom(&bloom).unwrap();
         meta.set_bloom_filter(bloom_bytes).unwrap();
 
-        // Create reader
-        let reader = IndexReader::open(&index_dir, meta).unwrap();
+        // Create reader using from_pages (in-memory, no filesystem)
+        let reader = IndexReader::from_pages(
+            meta,
+            bloom,
+            vec![(page, BlockId::new(0))],
+        )
+        .unwrap();
 
         // Test positive lookup
         let result = reader.lookup(&test_hash(50)).unwrap();
