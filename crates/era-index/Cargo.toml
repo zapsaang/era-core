@@ -22,8 +22,6 @@ rkyv = { workspace = true }
 # Bytes
 bytes = "1.5"
 
-# Error handling
-thiserror = "1.0"
 
 # Logging
 tracing = "0.1"

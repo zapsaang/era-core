@@ -416,13 +416,6 @@ impl IndexStore {
         Ok(pages)
     }
 
-    /// Compact the database (call before finalization for optimal read perf).
-    pub fn compact(&mut self) -> Result<()> {
-        self.db
-            .compact()
-            .map_err(|e| EraError::IndexError(format!("Redb compact failed: {}", e)))?;
-        Ok(())
-    }
 
 
     /// Destroy the staging database file.

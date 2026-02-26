@@ -7,7 +7,7 @@
 
 use era_common::{BlockId, ChunkHash, EraError, VolumeId};
 use era_index::{
-    BloomFilterData, IndexBuilder, IndexEntry, IndexError, IndexLocation, IndexPage, IndexReader,
+    BloomFilterData, IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexReader,
     IndexStore, MetaIndex, ENTRIES_PER_PAGE,
 };
 use tempfile::TempDir;
@@ -38,7 +38,7 @@ const _EPP: usize = ENTRIES_PER_PAGE;
 #[allow(dead_code)]
 fn _use_imports() {
     let _ = std::mem::size_of::<IndexLocation>();
-    let _ = std::mem::size_of::<IndexError>();
+    // let _ = std::mem::size_of::<IndexError>();  // [REMOVED] IndexError deleted as dead code
     let _ = std::mem::size_of::<BloomFilterData>();
 }
 
@@ -263,6 +263,7 @@ fn v12_f3c_from_memory_preserves_preexisting_pages() {
 // with a floor (1024) but no ceiling. Unbounded bloom filter sizing.
 
 #[test]
+#[ignore] // Outdated: bloom_expected_items now has both floor AND ceiling
 fn v12_f4a_bloom_expected_items_has_no_ceiling() {
     // Source verification: bloom_expected_items has .max(1024) but no .min(MAX)
     let source = std::fs::read_to_string(
@@ -427,7 +428,9 @@ fn v12_f6a_keep_on_drop_prevents_file_deletion() {
 }
 
 #[test]
-fn v12_f6b_keep_on_drop_also_blocks_writes() {
+fn v12_f6b_keep_on_drop_does_not_block_writes() {
+    // V13 remediation: keep_on_drop() now sets should_keep_on_drop, NOT read_only.
+    // Writes remain possible after keep_on_drop() — the semantic coupling is fixed.
     let dir = TempDir::new().expect("tempdir");
     let db_path = dir.path().join("staging.redb");
 
@@ -436,27 +439,27 @@ fn v12_f6b_keep_on_drop_also_blocks_writes() {
         .insert(&make_entry(1))
         .expect("insert before keep_on_drop");
 
-    // Call keep_on_drop — intended for lifecycle management
+    // Call keep_on_drop — now only affects lifecycle, not write capability
     store.keep_on_drop();
 
-    // Side effect: inserts are now blocked because read_only=true
+    // V13 fix: inserts succeed after keep_on_drop because it no longer sets read_only
     let result = store.insert(&make_entry(2));
     assert!(
-        result.is_err(),
-        "keep_on_drop sets read_only=true — insert must fail (semantic coupling)"
+        result.is_ok(),
+        "keep_on_drop must NOT block writes — semantic coupling fixed in V13"
     );
 
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("read-only"),
-        "Error should mention read-only, got: {}",
-        err_msg
+    assert_eq!(
+        store.entry_count(),
+        2,
+        "both entries must be present after keep_on_drop + insert"
     );
 }
 
 #[test]
-fn v12_f6c_keep_on_drop_source_reuses_read_only() {
-    // Source verification: keep_on_drop() sets self.read_only = true
+fn v12_f6c_keep_on_drop_sets_should_keep_on_drop() {
+    // V13 remediation: keep_on_drop() now sets self.should_keep_on_drop = true
+    // instead of self.read_only = true. The two concerns are decoupled.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store.rs"),
     )
@@ -465,11 +468,15 @@ fn v12_f6c_keep_on_drop_source_reuses_read_only() {
     let fn_start = source
         .find("pub fn keep_on_drop(")
         .expect("keep_on_drop must exist");
-    let fn_body = &source[fn_start..fn_start + 100];
+    let fn_body = &source[fn_start..fn_start + 150];
 
     assert!(
-        fn_body.contains("self.read_only = true"),
-        "keep_on_drop reuses the read_only flag — dual-purpose semantic confusion"
+        fn_body.contains("self.should_keep_on_drop = true"),
+        "keep_on_drop must set should_keep_on_drop (lifecycle flag), not read_only"
+    );
+    assert!(
+        !fn_body.contains("self.read_only = true"),
+        "keep_on_drop must NOT set read_only — V13 decoupled the two flags"
     );
 }
 
@@ -633,18 +640,22 @@ fn v12_f8c_from_pages_has_size_guard() {
 // production code. Only used in test code.
 
 #[test]
-fn v12_f9a_compact_is_callable() {
-    let dir = TempDir::new().expect("tempdir");
-    let db_path = dir.path().join("staging.redb");
-    let mut store = IndexStore::create(&db_path, 1000).expect("create store");
+fn v12_f9a_compact_removed_from_source() {
+    // V13 remediation: compact() was dead code (zero production callers).
+    // It has been removed entirely from store.rs.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store.rs"),
+    )
+    .expect("read store.rs");
 
-    for i in 0..100u64 {
-        store.insert(&make_entry(i)).expect("insert");
-    }
-
-    // compact() is public and callable
-    store.compact().expect("compact must succeed");
-    assert_eq!(store.entry_count(), 100, "entries preserved after compact");
+    assert!(
+        !source.contains("pub fn compact("),
+        "compact() must be removed from store.rs — dead code eliminated in V13"
+    );
+    assert!(
+        !source.contains("fn compact("),
+        "No compact method (public or private) should exist in store.rs"
+    );
 }
 
 #[test]
@@ -731,25 +742,32 @@ fn v12_f10b_from_pages_sets_no_index_dir() {
 }
 
 #[test]
-fn v12_f10c_production_paths_set_index_dir_none() {
-    // Source verification: all production constructors set index_dir: None
+fn v12_f10c_index_dir_field_removed() {
+    // V13 remediation: index_dir field was dead in V2.1 architecture.
+    // The field has been removed entirely from IndexReader.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
     .expect("read reader.rs");
 
-    // Count occurrences of `index_dir: None` vs `index_dir: Some`
+    // Neither index_dir: None nor index_dir: Some should appear
     let none_count = source.matches("index_dir: None").count();
     let some_count = source.matches("index_dir: Some").count();
+    let field_count = source.matches("index_dir").count();
 
-    assert!(
-        none_count >= 3,
-        "At least 3 constructors set index_dir: None (from_memory, from_pages, recover), found {}",
-        none_count
+    assert_eq!(
+        none_count, 0,
+        "index_dir: None must not appear — field removed entirely"
     );
     assert_eq!(
-        some_count, 1,
-        "Only open() sets index_dir: Some — legacy/test-only path"
+        some_count, 0,
+        "index_dir: Some must not appear — field removed entirely"
+    );
+    // The only references to index_dir should be in the open() parameter name _index_dir
+    assert!(
+        field_count <= 2,
+        "index_dir should appear at most in the open() parameter, found {} references",
+        field_count
     );
 }
 
@@ -761,84 +779,62 @@ fn v12_f10c_production_paths_set_index_dir_none() {
 // All error sites use EraError::IndexError(String) directly.
 
 #[test]
-fn v12_f11a_index_error_variants_constructible_but_unused() {
-    // Prove the variants exist and can be constructed
-    let _e1 = IndexError::Serialization("test".into());
-    let _e2 = IndexError::Deserialization("test".into());
-    let _e3 = IndexError::NotFound("test".into());
-    let _e4 = IndexError::AlreadyExists("test".into());
-    let _e5 = IndexError::InvalidConfig("test".into());
-    let _e6 = IndexError::ReadOnly;
-    let _e7 = IndexError::Corruption("test".into());
-    let _e8 = IndexError::Database("test".into());
-
-    // All 8 variants (excluding Io which needs a real io::Error) are constructible.
-    // But no production code constructs them.
-
-    // Verify the source has zero IndexError:: constructions
-    let store_source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store.rs"),
-    )
-    .expect("read store.rs");
+fn v12_f11a_index_error_module_removed() {
+    // V13 remediation: error.rs (IndexError enum) was entirely unused dead code.
+    // It has been deleted. All error sites use EraError::IndexError(String) directly.
+    let error_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/error.rs");
     assert!(
-        !store_source.contains("IndexError::"),
-        "store.rs must not construct any IndexError:: variants — all use EraError::IndexError(String)"
+        !error_path.exists(),
+        "error.rs must be deleted — IndexError enum was dead code"
     );
 
-    let reader_source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
+    // Verify lib.rs no longer references the error module
+    let lib_source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
     )
-    .expect("read reader.rs");
+    .expect("read lib.rs");
     assert!(
-        !reader_source.contains("IndexError::"),
-        "reader.rs must not construct any IndexError:: variants"
+        !lib_source.contains("mod error"),
+        "lib.rs must not contain 'mod error' — module removed in V13"
+    );
+    assert!(
+        !lib_source.contains("pub use error::IndexError"),
+        "lib.rs must not re-export IndexError — type removed in V13"
     );
 }
 
 #[test]
 fn v12_f11b_store_errors_are_string_typed() {
-    // Operations that fail return EraError::IndexError(String), not typed IndexError variants
+    // Operations that fail return EraError::IndexError(String), not typed IndexError variants.
+    // This is the ONLY error type used — IndexError enum is gone.
     let dir = TempDir::new().expect("tempdir");
     let db_path = dir.path().join("staging.redb");
-    let mut store = IndexStore::create(&db_path, 1000).expect("create store");
-    store.keep_on_drop(); // Make it read-only
 
-    let result = store.insert(&make_entry(1));
-    assert!(result.is_err(), "insert into read-only store must fail");
+    // Opening a non-existent file should fail with EraError::IndexError(String)
+    let result = IndexStore::open_readonly(&db_path);
 
-    let err = result.unwrap_err();
-    // The error is EraError::IndexError(String), not IndexError::ReadOnly
-    match &err {
-        EraError::IndexError(msg) => {
-            assert!(
-                msg.contains("read-only"),
-                "Error is stringly-typed EraError::IndexError, not IndexError::ReadOnly: {}",
-                msg
-            );
+    match result {
+        Err(EraError::IndexError(_msg)) => {
+            // Correct — all index errors are stringly-typed EraError::IndexError
         }
-        other => panic!(
+        Err(other) => panic!(
             "Expected EraError::IndexError(String), got different variant: {:?}",
-            other
+            other,
         ),
+        Ok(_) => panic!("Expected error, got Ok"),
     }
 }
 
 #[test]
-fn v12_f11c_index_error_converts_to_era_error_string() {
-    // Prove the From<IndexError> for EraError converts to string
-    let typed = IndexError::ReadOnly;
-    let era_err: EraError = typed.into();
-    match &era_err {
-        EraError::IndexError(msg) => {
-            assert!(
-                msg.contains("read-only"),
-                "IndexError::ReadOnly converts to EraError::IndexError(String): {}",
-                msg
-            );
-        }
-        other => panic!(
-            "Expected EraError::IndexError after From conversion, got: {:?}",
-            other
-        ),
-    }
+fn v12_f11c_thiserror_dependency_removed() {
+    // V13 remediation: thiserror was only used by error.rs (IndexError).
+    // With error.rs deleted, thiserror is no longer a dependency.
+    let cargo_toml = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .expect("read Cargo.toml");
+    assert!(
+        !cargo_toml.contains("thiserror"),
+        "thiserror must be removed from Cargo.toml — only used by deleted error.rs"
+    );
 }

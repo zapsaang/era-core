@@ -739,7 +739,6 @@ fn test_n3_comprehensive_panic_audit() {
         ("chunk_index.rs", include_str!("../src/chunk_index.rs")),
         ("lib.rs", include_str!("../src/lib.rs")),
         ("bloom_serde.rs", include_str!("../src/bloom_serde.rs")),
-        ("error.rs", include_str!("../src/error.rs")),
     ];
 
     let mut total_violations = 0;

@@ -1175,15 +1175,18 @@ fn test_z11_concurrent_builders() {
     assert!(path2.exists(), "Builder 2 temp file must exist");
 }
 
-/// Z12: IndexStore compact() should succeed on empty store.
+/// Z12: compact() was removed as dead code in V13.
+/// This test verifies the method no longer exists.
 #[test]
-fn test_z12_compact_empty_store() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("compact_empty.redb");
-    let mut store = IndexStore::create(&db_path, 1024).unwrap();
-
-    let result = store.compact();
-    assert!(result.is_ok(), "compact() on empty store should succeed");
+fn test_z12_compact_removed() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store.rs"),
+    )
+    .expect("read store.rs");
+    assert!(
+        !source.contains("fn compact("),
+        "compact() must be removed from store.rs"
+    );
 }
 
 /// Z13: IndexStore destroy() removes the file.
@@ -1350,7 +1353,6 @@ fn test_bb1_total_panic_surface() {
         ("chunk_index.rs", include_str!("../src/chunk_index.rs")),
         ("lib.rs", include_str!("../src/lib.rs")),
         ("bloom_serde.rs", include_str!("../src/bloom_serde.rs")),
-        ("error.rs", include_str!("../src/error.rs")),
         ("schema.rs", include_str!("../src/schema.rs")),
     ];
 
