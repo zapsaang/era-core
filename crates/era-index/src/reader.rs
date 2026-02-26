@@ -3,11 +3,10 @@
 //! Reads the finalized index structure efficiently.
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
+use std::time::{Duration, Instant};
 
 use bloomfilter::Bloom;
-use lru::LruCache;
-use parking_lot::RwLock;
+use quick_cache::sync::Cache;
 
 use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result, VolumeId};
 use era_crypto::{KeySession, VolumeKey};
@@ -34,17 +33,14 @@ pub struct IndexReader {
     meta: MetaIndex,
     /// Bloom filter (deserialized)
     bloom: Bloom<ChunkHash>,
-    /// Cache of loaded L2 pages (LRU-bounded)
-    page_cache: RwLock<LruCache<BlockId, IndexPage>>,
+    /// Cache of loaded L2 pages (lock-free concurrent reads)
+    page_cache: Cache<BlockId, IndexPage>,
     /// In-memory page storage (for cold recovery mode)
     embedded_pages: HashMap<BlockId, IndexPage>,
 }
 
-/// Default LRU page cache capacity
-const PAGE_CACHE_CAP: NonZeroUsize = match NonZeroUsize::new(256) {
-    Some(v) => v,
-    None => unreachable!(),
-};
+/// Default page cache capacity
+const PAGE_CACHE_CAP: usize = 256;
 
 /// Minimum valid serialized IndexPage size (~40 bytes: rkyv overhead + at least 1 entry header)
 const MIN_INDEX_PAGE_SIZE: usize = 40;
@@ -91,7 +87,7 @@ impl IndexReader {
         Ok(Self {
             meta,
             bloom,
-            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
+            page_cache: Cache::new(PAGE_CACHE_CAP),
             embedded_pages: HashMap::new(),
         })
     }
@@ -130,7 +126,7 @@ impl IndexReader {
         Ok(Self {
             meta,
             bloom,
-            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
+            page_cache: Cache::new(PAGE_CACHE_CAP),
             embedded_pages,
         })
     }
@@ -161,7 +157,7 @@ impl IndexReader {
         Ok(Self {
             meta,
             bloom,
-            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
+            page_cache: Cache::new(PAGE_CACHE_CAP),
             embedded_pages,
         })
     }
@@ -179,8 +175,10 @@ impl IndexReader {
         session: &KeySession,
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
+        timeout: Option<Duration>,
     ) -> Result<Self> {
         tracing::info!("Starting cold recovery from volume");
+        let deadline = timeout.map(|d| Instant::now() + d);
 
         // Domain-separated nonce context for index blocks (must match builder::finalize)
         let mut index_nonce_context = nonce_context;
@@ -309,6 +307,13 @@ impl IndexReader {
 
             let mut manifest_data = None;
             for candidate_id in candidates {
+                if let Some(dl) = deadline {
+                    if Instant::now() >= dl {
+                        return Err(EraError::IndexError(
+                            "Cold recovery timed out during candidate iteration".into(),
+                        ));
+                    }
+                }
                 let block_id = BlockId::new(candidate_id);
                 let block_key = session.derive_block_key(
                     volume_key,
@@ -368,6 +373,13 @@ impl IndexReader {
         let mut embedded_pages = HashMap::new();
 
         for location in page_blocks.iter() {
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    return Err(EraError::IndexError(
+                        "Cold recovery timed out during page recovery".into(),
+                    ));
+                }
+            }
             let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
             let mut matched = false;
 
@@ -438,7 +450,7 @@ impl IndexReader {
         Ok(Self { // No external directory in recovery mode
             meta,
             bloom,
-            page_cache: RwLock::new(LruCache::new(PAGE_CACHE_CAP)),
+            page_cache: Cache::new(PAGE_CACHE_CAP),
             embedded_pages,
         })
     }
@@ -489,19 +501,15 @@ impl IndexReader {
     }
 
     /// Load an L2 page (with caching)
-    /// Load an L2 page (with caching)
     fn load_page(&self, block_id: BlockId) -> Result<IndexPage> {
         // Check embedded pages first (recovery mode)
         if let Some(page) = self.embedded_pages.get(&block_id) {
             return Ok(page.clone());
         }
 
-        // Check cache (LRU get requires &mut, so use write lock)
-        {
-            let mut cache = self.page_cache.write();
-            if let Some(page) = cache.get(&block_id) {
-                return Ok(page.clone());
-            }
+        // Check cache (lock-free read via quick_cache)
+        if let Some(page) = self.page_cache.get(&block_id) {
+            return Ok(page);
         }
 
         // Page not found

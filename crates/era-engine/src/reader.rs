@@ -483,6 +483,7 @@ impl ArchiveReader {
                         &self.session,
                         &self.volume_key,
                         self.nonce_context,
+                        None,
                     )
                     .await
                     {

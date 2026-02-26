@@ -468,7 +468,7 @@ async fn test_index_page_encryption_roundtrip() {
     let footer = reader.footer().unwrap();
     assert!(footer.has_index(), "Footer must indicate index presence");
 
-    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context, None)
         .await
         .unwrap();
 
@@ -555,7 +555,7 @@ async fn test_wrong_key_cold_recovery_fails_cleanly() {
 
     // Recovery with wrong key must fail, not panic or return garbage
     let result =
-        IndexReader::recover_from_volume(&reader, &wrong_session, &wrong_vk, wrong_nonce).await;
+        IndexReader::recover_from_volume(&reader, &wrong_session, &wrong_vk, wrong_nonce, None).await;
     assert!(
         result.is_err(),
         "Cold recovery with wrong key must return Err, not Ok with garbage"
@@ -656,7 +656,7 @@ async fn test_large_index_embedded_finalize() {
 
     // Recover and verify all entries
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
-    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context, None)
         .await
         .unwrap();
 
@@ -1186,7 +1186,7 @@ async fn test_multi_page_index_recovery() {
         .unwrap();
 
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
-    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context, None)
         .await
         .unwrap();
 

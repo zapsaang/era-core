@@ -29,8 +29,8 @@ tracing = "0.1"
 # Concurrency
 parking_lot = "0.12"
 
-# LRU cache for page_cache
-lru = "0.12"
+# Concurrent cache (lock-free reads)
+quick_cache = "0.6"
 
 # Bloom filter
 bloomfilter = "1.0"

@@ -128,7 +128,7 @@ async fn test_cold_recovery_from_orphaned_volume() {
 
     // Perform cold recovery (ZERO external metadata)
     let recovered_index =
-        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context)
+        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context, None)
             .await
             .unwrap();
 

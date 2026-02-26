@@ -200,9 +200,10 @@ impl ChunkIndex {
         session: &KeySession,
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
+        timeout: Option<std::time::Duration>,
     ) -> Result<ChunkIndexReader> {
         let reader =
-            IndexReader::recover_from_volume(volume_reader, session, volume_key, nonce_context)
+            IndexReader::recover_from_volume(volume_reader, session, volume_key, nonce_context, timeout)
                 .await?;
 
         Ok(ChunkIndexReader {

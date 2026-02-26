@@ -183,42 +183,45 @@ fn v11_f1c_sip_keys_survive_serialization_roundtrip_unchanged() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// V11-F2: LRU cache write lock on every read
+// V11-F2: Page cache uses lock-free concurrent reads (quick_cache)
 // ═══════════════════════════════════════════════════════════════════════
 //
-// FINDING: load_page() acquires a write lock even for cache hits because
-// lru::LruCache::get() requires &mut self (updates LRU order).
-// This serializes all concurrent readers.
+// REMEDIATION: Replaced lru::LruCache (requires write lock on every read)
+// with quick_cache::sync::Cache which provides lock-free concurrent reads.
 
 #[test]
-fn v11_f2a_page_cache_requires_write_lock_for_reads() {
+fn v11_f2a_page_cache_uses_lock_free_reads() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
     .expect("read reader.rs");
     let fn_start = source.find("fn load_page(").expect("load_page must exist");
-    let fn_body = &source[fn_start..fn_start + 1500];
+    let fn_body = &source[fn_start..fn_start + 1500.min(source.len() - fn_start)];
     assert!(
-        fn_body.contains("page_cache.write()"),
-        "load_page must acquire write lock — lru::LruCache::get() requires &mut self"
+        fn_body.contains("page_cache.get("),
+        "load_page must use page_cache.get() for lock-free reads (quick_cache)"
+    );
+    assert!(
+        !fn_body.contains("page_cache.write()"),
+        "load_page must NOT use write lock — quick_cache provides lock-free reads"
     );
 }
 
 #[test]
-fn v11_f2b_lru_get_requires_write_lock_not_read_lock() {
+fn v11_f2b_no_write_lock_needed_for_cache_reads() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
     .expect("read reader.rs");
     let fn_start = source.find("fn load_page(").expect("load_page must exist");
-    let fn_body = &source[fn_start..fn_start + 1500];
+    let fn_body = &source[fn_start..fn_start + 1500.min(source.len() - fn_start)];
     assert!(
-        fn_body.contains("page_cache.write()"),
-        "write lock must be used"
+        !fn_body.contains("page_cache.write()"),
+        "write lock must NOT be used — quick_cache::sync::Cache::get() takes &self"
     );
     assert!(
         !fn_body.contains("page_cache.read()"),
-        "read lock must NOT be used — lru requires &mut, forcing write lock on every read"
+        "read lock must NOT be used — quick_cache::sync::Cache::get() takes &self, no lock needed"
     );
 }
 
@@ -361,7 +364,7 @@ fn v11_f5a_candidate_list_grows_linearly_with_volume_block_count() {
     );
 }
 #[test]
-fn v11_f5b_recover_from_volume_has_no_timeout_parameter() {
+fn v11_f5b_recover_from_volume_has_timeout_parameter() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let reader_path = std::path::Path::new(manifest_dir)
         .join("src")
@@ -376,30 +379,25 @@ fn v11_f5b_recover_from_volume_has_no_timeout_parameter() {
         .find('{')
         .expect("function must have an opening brace");
     let signature = &sig_region[..sig_end];
-    let timeout_indicators = [
-        "timeout",
-        "Timeout",
-        "deadline",
-        "Deadline",
-        "Duration",
-        "Instant",
-        "cancel",
-        "Cancel",
-        "CancellationToken",
-        "progress",
-        "Progress",
-        "callback",
-        "Callback",
-        "max_attempts",
-        "limit",
-    ];
-    for indicator in &timeout_indicators {
-        assert!(
-            !signature.contains(indicator),
-            "recover_from_volume signature contains '{}' — expected NO timeout/cancellation/progress parameter. Signature:\n{}",
-            indicator, signature
-        );
-    }
+
+    // Verify the timeout parameter exists with correct type
+    assert!(
+        signature.contains("timeout"),
+        "recover_from_volume signature must contain 'timeout' parameter. Signature:\n{}",
+        signature
+    );
+    assert!(
+        signature.contains("Duration"),
+        "recover_from_volume timeout parameter must use Duration type. Signature:\n{}",
+        signature
+    );
+    assert!(
+        signature.contains("Option<Duration>"),
+        "recover_from_volume timeout must be Option<Duration>. Signature:\n{}",
+        signature
+    );
+
+    // Verify existing required parameters are still present
     assert!(
         signature.contains("volume_reader"),
         "Expected volume_reader parameter"
