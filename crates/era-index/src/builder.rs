@@ -274,15 +274,31 @@ impl IndexBuilder {
 
 impl Drop for IndexBuilder {
     fn drop(&mut self) {
-        // Flush buffer to persist any remaining entries before store cleanup.
+        if self.is_dirty() {
+            tracing::warn!("IndexBuilder dropped with {} unflushed entries", self.buffer.len());
+        }
         if let Err(e) = self.flush_buffer() {
             tracing::error!("Failed to flush buffer in Drop: {}", e);
         }
-        // IndexStore::Drop handles staging file removal.
     }
 }
 
 impl IndexBuilder {
+    /// Returns `true` if there are unflushed entries in the in-memory buffer.
+    pub fn is_dirty(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
+    /// Consume the builder, flushing any remaining buffered entries.
+    ///
+    /// Unlike `Drop`, this method propagates flush errors to the caller.
+    /// After `close()` returns, Drop still runs but the buffer is empty,
+    /// so no data is at risk.
+    pub fn close(mut self) -> Result<()> {
+        self.flush_buffer()?;
+        Ok(())
+    }
+
     /// Explicitly discard the builder and remove the staging file.
     ///
     /// Removes the staging file while the DB handle is still held,
