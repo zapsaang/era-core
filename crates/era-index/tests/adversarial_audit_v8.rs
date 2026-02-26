@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexPage, IndexReader, ChunkIndex, MetaIndex, ENTRIES_PER_PAGE,
+    ChunkIndex, IndexBuilder, IndexEntry, IndexPage, IndexReader, MetaIndex, ENTRIES_PER_PAGE,
 };
 use rkyv::Deserialize;
 

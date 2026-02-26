@@ -28,7 +28,6 @@ pub struct IndexLocation {
 
 /// IndexReader provides fast lookups via Bloom + L1 + L2
 pub struct IndexReader {
-
     /// L1 Meta-Index (sparse directory)
     meta: MetaIndex,
     /// Bloom filter (deserialized)
@@ -223,7 +222,12 @@ impl IndexReader {
                 )?;
 
                 // Pre-validate size before rkyv deserialization to prevent allocation bombs
-                validate_rkyv_size(&decrypted_data, MIN_META_INDEX_SIZE, MAX_META_INDEX_SIZE, "MetaIndex")?;
+                validate_rkyv_size(
+                    &decrypted_data,
+                    MIN_META_INDEX_SIZE,
+                    MAX_META_INDEX_SIZE,
+                    "MetaIndex",
+                )?;
 
                 // Deserialize MetaIndex using rkyv (check_archived_root + deserialize)
                 let archived = rkyv::check_archived_root::<MetaIndex>(&decrypted_data)
@@ -329,7 +333,14 @@ impl IndexReader {
                     &encrypted_block.data,
                 ) {
                     // Pre-validate size before rkyv deserialization
-                    if validate_rkyv_size(&decrypted_data, MIN_META_INDEX_SIZE, MAX_META_INDEX_SIZE, "MetaIndex").is_err() {
+                    if validate_rkyv_size(
+                        &decrypted_data,
+                        MIN_META_INDEX_SIZE,
+                        MAX_META_INDEX_SIZE,
+                        "MetaIndex",
+                    )
+                    .is_err()
+                    {
                         continue;
                     }
                     // Try to deserialize as MetaIndex using rkyv
@@ -403,7 +414,14 @@ impl IndexReader {
                     &encrypted_block.data,
                 ) {
                     // Pre-validate size before rkyv deserialization
-                    if validate_rkyv_size(&decrypted_data, MIN_INDEX_PAGE_SIZE, MAX_INDEX_PAGE_SIZE, "IndexPage").is_err() {
+                    if validate_rkyv_size(
+                        &decrypted_data,
+                        MIN_INDEX_PAGE_SIZE,
+                        MAX_INDEX_PAGE_SIZE,
+                        "IndexPage",
+                    )
+                    .is_err()
+                    {
                         continue;
                     }
                     if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
@@ -447,7 +465,8 @@ impl IndexReader {
             embedded_pages.len()
         );
 
-        Ok(Self { // No external directory in recovery mode
+        Ok(Self {
+            // No external directory in recovery mode
             meta,
             bloom,
             page_cache: Cache::new(PAGE_CACHE_CAP),
@@ -513,9 +532,10 @@ impl IndexReader {
         }
 
         // Page not found
-        Err(EraError::InvalidFormat(
-            format!("Page {} not found in embedded index", block_id.sequence()),
-        ))
+        Err(EraError::InvalidFormat(format!(
+            "Page {} not found in embedded index",
+            block_id.sequence()
+        )))
     }
 }
 
@@ -523,7 +543,6 @@ impl IndexReader {
 mod tests {
     use super::*;
     use era_common::VolumeId;
-
 
     fn test_hash(value: u64) -> ChunkHash {
         let mut bytes = [0u8; 32];
@@ -549,7 +568,6 @@ mod tests {
         // Create meta-index
         let mut meta = MetaIndex::new();
 
-
         // Create a simple bloom filter
         let mut bloom = Bloom::new_for_fp_rate(1000, 0.01);
         for entry in &entries {
@@ -560,12 +578,7 @@ mod tests {
         meta.set_bloom_filter(bloom_bytes).unwrap();
 
         // Create reader using from_pages (in-memory, no filesystem)
-        let reader = IndexReader::from_pages(
-            meta,
-            bloom,
-            vec![(page, BlockId::new(0))],
-        )
-        .unwrap();
+        let reader = IndexReader::from_pages(meta, bloom, vec![(page, BlockId::new(0))]).unwrap();
 
         // Test positive lookup
         let result = reader.lookup(&test_hash(50)).unwrap();

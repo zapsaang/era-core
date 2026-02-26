@@ -5,7 +5,6 @@
 //! At finalization, entries are read in sorted order and written as encrypted
 //! IndexPage blocks to the volume.
 
-
 use bloomfilter::Bloom;
 
 use era_common::{BlockType, ChunkHash, EncryptedMacroBlock, EraError, Result};
@@ -197,11 +196,8 @@ impl IndexBuilder {
 
                 // Encrypt page with session keys
                 let block_id = BlockId::new(block_id_counter);
-                let block_key = session.derive_block_key(
-                    volume_key,
-                    block_id.sequence(),
-                    &idx_nonce,
-                )?;
+                let block_key =
+                    session.derive_block_key(volume_key, block_id.sequence(), &idx_nonce)?;
                 let derived_key = block_key.to_derived_key()?;
                 let encrypted_data = era_crypto::encrypt_with_context(
                     &derived_key,
@@ -304,7 +300,10 @@ impl IndexBuilder {
 impl Drop for IndexBuilder {
     fn drop(&mut self) {
         if self.is_dirty() {
-            tracing::warn!("IndexBuilder dropped with {} unflushed entries", self.buffer.len());
+            tracing::warn!(
+                "IndexBuilder dropped with {} unflushed entries",
+                self.buffer.len()
+            );
         }
         if let Err(e) = self.flush_buffer() {
             tracing::error!("Failed to flush buffer in Drop: {}", e);

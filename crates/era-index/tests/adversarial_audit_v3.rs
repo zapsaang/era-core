@@ -25,7 +25,7 @@
 //! - **N: Iron Law Violations** — unwrap() in production code
 
 use era_common::{BlockId, ChunkHash, VolumeId};
-use era_index::{IndexEntry, IndexPage, IndexStore, ChunkIndex, MetaIndex};
+use era_index::{ChunkIndex, IndexEntry, IndexPage, IndexStore, MetaIndex};
 use std::path::Path;
 use std::time::Instant;
 use tempfile::TempDir;

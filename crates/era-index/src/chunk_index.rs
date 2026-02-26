@@ -137,9 +137,9 @@ impl ChunkIndex {
     /// error messages and transition logic live in one place.
     fn require_building(&self, operation: &str) -> Result<()> {
         if self.state != IndexState::Building {
-            return Err(era_common::EraError::InvalidFormat(
-                format!("Cannot {operation}: index already finalized"),
-            ));
+            return Err(era_common::EraError::InvalidFormat(format!(
+                "Cannot {operation}: index already finalized"
+            )));
         }
         Ok(())
     }
@@ -241,9 +241,14 @@ impl ChunkIndex {
         nonce_context: [u8; 16],
         timeout: Option<std::time::Duration>,
     ) -> Result<ChunkIndexReader> {
-        let reader =
-            IndexReader::recover_from_volume(volume_reader, session, volume_key, nonce_context, timeout)
-                .await?;
+        let reader = IndexReader::recover_from_volume(
+            volume_reader,
+            session,
+            volume_key,
+            nonce_context,
+            timeout,
+        )
+        .await?;
 
         Ok(ChunkIndexReader {
             reader: Arc::new(RwLock::new(reader)),

@@ -7,8 +7,8 @@
 
 use era_common::{BlockId, ChunkHash, EraError, VolumeId};
 use era_index::{
-    BloomFilterData, IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexReader,
-    IndexStore, MetaIndex, ENTRIES_PER_PAGE,
+    BloomFilterData, IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexReader, IndexStore,
+    MetaIndex, ENTRIES_PER_PAGE,
 };
 use tempfile::TempDir;
 
@@ -600,7 +600,13 @@ fn v12_f8b_cold_recovery_missing_size_guard() {
 
     // For each check_archived_root call, verify no size-limit pattern appears
     // in the 300 chars immediately preceding it. This proves the call is unguarded.
-    let size_limit_patterns = [".len() >", ".len() <", "MAX_PAGES", "MAX_MEMORY", "MAX_ENTRIES"];
+    let size_limit_patterns = [
+        ".len() >",
+        ".len() <",
+        "MAX_PAGES",
+        "MAX_MEMORY",
+        "MAX_ENTRIES",
+    ];
     let mut search_pos = 0;
     let mut unguarded_count = 0;
     while let Some(rel_pos) = fn_body[search_pos..].find("check_archived_root") {

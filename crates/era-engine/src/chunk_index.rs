@@ -148,9 +148,7 @@ where
     // off this thread while we do I/O.
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => match handle.runtime_flavor() {
-            tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(f)
-            }
+            tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
             _ => f(),
         },
         Err(_) => f(), // Not inside a Tokio runtime — just run directly

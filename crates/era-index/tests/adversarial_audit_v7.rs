@@ -46,7 +46,7 @@ use tempfile::TempDir;
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexStore, ChunkIndex, MetaIndex,
+    ChunkIndex, IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexStore, MetaIndex,
     ENTRIES_PER_PAGE,
 };
 

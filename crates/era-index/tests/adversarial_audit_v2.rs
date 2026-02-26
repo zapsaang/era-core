@@ -7,7 +7,7 @@
 //! - FINDING-IDX-7: Redb-backed ChunkIndex — verify entries survive insert cycle
 
 use era_common::{BlockId, ChunkHash, VolumeId};
-use era_index::{IndexEntry, IndexPage, IndexStore, ChunkIndex, ChunkIndexConfig, MetaIndex};
+use era_index::{ChunkIndex, ChunkIndexConfig, IndexEntry, IndexPage, IndexStore, MetaIndex};
 use tempfile::TempDir;
 
 /// Canonical test hash: BE at high bytes ensures sort order matches Redb's lexicographic byte comparison.

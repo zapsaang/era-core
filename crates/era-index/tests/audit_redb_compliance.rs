@@ -344,9 +344,10 @@ async fn test_c1_zombie_recovery_garbage_appended_to_volume() {
         "Footer must still report has_index()=true"
     );
 
-    let recovered = IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context, None)
-        .await
-        .unwrap();
+    let recovered =
+        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context, None)
+            .await
+            .unwrap();
 
     for i in 0..500u64 {
         let result = recovered.lookup(&test_hash(i)).unwrap();
@@ -401,7 +402,8 @@ async fn test_c2_zombie_recovery_wrong_credentials_fails_cleanly() {
 
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
     let result =
-        IndexReader::recover_from_volume(&reader, &wrong_session, &wrong_vk, wrong_nonce, None).await;
+        IndexReader::recover_from_volume(&reader, &wrong_session, &wrong_vk, wrong_nonce, None)
+            .await;
 
     assert!(
         result.is_err(),

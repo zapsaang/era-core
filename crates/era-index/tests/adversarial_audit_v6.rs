@@ -36,8 +36,8 @@
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexReader, IndexStore, ChunkIndex,
-    ChunkIndexReader, MetaIndex, ENTRIES_PER_PAGE,
+    ChunkIndex, ChunkIndexReader, IndexBuilder, IndexEntry, IndexLocation, IndexPage, IndexReader,
+    IndexStore, MetaIndex, ENTRIES_PER_PAGE,
 };
 use std::collections::HashSet;
 use std::sync::Arc;

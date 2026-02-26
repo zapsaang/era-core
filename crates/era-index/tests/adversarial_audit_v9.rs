@@ -7,7 +7,7 @@
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexPage, IndexReader, ChunkIndex, MetaIndex, ENTRIES_PER_PAGE,
+    ChunkIndex, IndexBuilder, IndexEntry, IndexPage, IndexReader, MetaIndex, ENTRIES_PER_PAGE,
 };
 use tempfile::TempDir;
 
@@ -1171,7 +1171,6 @@ fn v9_f28a_binary_search_all_entries() {
         assert!(page.find(&test_hash(i)).is_none());
     }
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════
 // V9-F30: NOVEL — Bloom filter serialization size sanity

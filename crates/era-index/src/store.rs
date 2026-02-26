@@ -443,8 +443,6 @@ impl IndexStore {
         Ok(())
     }
 
-
-
     /// Destroy the staging database file.
     ///
     /// Consuming `self` triggers `Drop`, which handles file removal.

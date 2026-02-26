@@ -4,7 +4,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use era_common::{BlockId, ChunkHash, VolumeId};
-use era_index::{IndexEntry, ChunkIndex, ChunkIndexConfig};
+use era_index::{ChunkIndex, ChunkIndexConfig, IndexEntry};
 use rand::RngCore;
 
 fn random_hash() -> ChunkHash {

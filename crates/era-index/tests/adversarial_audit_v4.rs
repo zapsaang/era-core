@@ -29,7 +29,7 @@
 
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
-    IndexBuilder, IndexEntry, IndexPage, IndexStore, ChunkIndex, ChunkIndexConfig, MetaIndex,
+    ChunkIndex, ChunkIndexConfig, IndexBuilder, IndexEntry, IndexPage, IndexStore, MetaIndex,
 };
 use std::path::Path;
 use std::time::Instant;
