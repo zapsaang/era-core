@@ -4,7 +4,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::path::Path;
 
 use bloomfilter::Bloom;
 use lru::LruCache;
@@ -47,6 +46,36 @@ const PAGE_CACHE_CAP: NonZeroUsize = match NonZeroUsize::new(256) {
     None => unreachable!(),
 };
 
+/// Minimum valid serialized IndexPage size (~40 bytes: rkyv overhead + at least 1 entry header)
+const MIN_INDEX_PAGE_SIZE: usize = 40;
+
+/// Maximum valid serialized IndexPage size.
+/// ENTRIES_PER_PAGE (8192) × sizeof(archived IndexEntry) (~64 bytes) + rkyv overhead
+/// = ~524,288 + overhead = 1MB (revised from 512KB due to rkyv alignment/header)
+const MAX_INDEX_PAGE_SIZE: usize = 1024 * 1024;
+
+/// Minimum valid serialized MetaIndex size (~40 bytes: rkyv overhead + bloom filter header)
+const MIN_META_INDEX_SIZE: usize = 40;
+
+/// Maximum valid serialized MetaIndex size.
+/// 10,000 pages × PagePointer (~80 bytes each) + bloom filter data = ~1MB + margin
+const MAX_META_INDEX_SIZE: usize = 2 * 1024 * 1024;
+
+/// Validate that serialized rkyv data falls within expected size bounds.
+/// Returns `EraError::IndexError` if the data is outside the valid range.
+fn validate_rkyv_size(data: &[u8], min: usize, max: usize, type_name: &str) -> Result<()> {
+    if data.len() < min || data.len() > max {
+        return Err(EraError::IndexError(format!(
+            "{} data size {} is outside valid range [{}, {}]",
+            type_name,
+            data.len(),
+            min,
+            max,
+        )));
+    }
+    Ok(())
+}
+
 /// Maximum entries allowed in from_memory() to prevent OOM (V6-F3)
 pub const MAX_MEMORY_ENTRIES: usize = crate::ENTRIES_PER_PAGE * 10_000;
 
@@ -55,7 +84,7 @@ pub const MAX_PAGES: usize = 10_000;
 
 impl IndexReader {
     /// Open an index from a directory
-    pub fn open(_index_dir: &Path, meta: MetaIndex) -> Result<Self> {
+    pub fn open(meta: MetaIndex) -> Result<Self> {
         // Deserialize Bloom filter using rkyv via bloom_serde
         let bloom = super::deserialize_bloom(meta.bloom_filter())?;
 
@@ -195,6 +224,9 @@ impl IndexReader {
                     &encrypted_block.data,
                 )?;
 
+                // Pre-validate size before rkyv deserialization to prevent allocation bombs
+                validate_rkyv_size(&decrypted_data, MIN_META_INDEX_SIZE, MAX_META_INDEX_SIZE, "MetaIndex")?;
+
                 // Deserialize MetaIndex using rkyv (check_archived_root + deserialize)
                 let archived = rkyv::check_archived_root::<MetaIndex>(&decrypted_data)
                     .map_err(|e| EraError::Deserialization(e.to_string()))?;
@@ -291,6 +323,10 @@ impl IndexReader {
                     block_id,
                     &encrypted_block.data,
                 ) {
+                    // Pre-validate size before rkyv deserialization
+                    if validate_rkyv_size(&decrypted_data, MIN_META_INDEX_SIZE, MAX_META_INDEX_SIZE, "MetaIndex").is_err() {
+                        continue;
+                    }
                     // Try to deserialize as MetaIndex using rkyv
                     if let Ok(archived) = rkyv::check_archived_root::<MetaIndex>(&decrypted_data) {
                         let meta_candidate: MetaIndex =
@@ -354,6 +390,10 @@ impl IndexReader {
                     page_ptr.block_id,
                     &encrypted_block.data,
                 ) {
+                    // Pre-validate size before rkyv deserialization
+                    if validate_rkyv_size(&decrypted_data, MIN_INDEX_PAGE_SIZE, MAX_INDEX_PAGE_SIZE, "IndexPage").is_err() {
+                        continue;
+                    }
                     if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
                         let page: IndexPage = match archived.deserialize(&mut rkyv::Infallible) {
                             Ok(val) => val,

@@ -23,7 +23,17 @@ pub struct BloomFilterData {
     pub bitmap_bits: u64,
     /// Number of hash functions (k)
     pub k_num: u32,
-    /// SipHasher keys for reproducible hashing
+    /// SipHasher keys for reproducible hashing.
+    ///
+    /// **Security note:** These keys are stored in plaintext intentionally.
+    /// The Bloom filter is a probabilistic performance optimization, NOT a
+    /// security primitive. An adversary who knows the SipHash keys can craft
+    /// worst-case hash collisions that cause false positives, but false
+    /// positives only trigger redundant storage lookups (performance
+    /// degradation), never data loss or security breach. The deduplication
+    /// index performs a full hash comparison as the authoritative check.
+    ///
+    /// Reference: Naor & Yogev 2015 — adversarial Bloom filter analysis.
     pub sip_keys: [(u64, u64); 2],
 }
 
