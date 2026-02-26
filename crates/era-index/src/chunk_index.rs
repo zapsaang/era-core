@@ -165,9 +165,13 @@ impl ChunkIndex {
             era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
         })?;
 
-        // Flush buffer and drain entries as pre-built pages (streaming, low-memory)
+        // Flush buffer and drain entries as pre-built pages.
         let bloom_clone = builder.bloom().clone();
         let pages = builder.read_sorted_pages()?;
+        // NOTE: This path keeps using read_sorted_pages() (Vec materialization) because
+        // IndexReader::from_pages() requires all pages in memory to build the L2 lookup.
+        // The streaming for_each_sorted_page() is used in builder.rs finalize() which
+        // writes pages to volume one at a time and doesn't need them all in memory.
         let entries_count: usize = pages.iter().map(|(p, _)| p.len()).sum();
 
         // Build MetaIndex + IndexReader from pages

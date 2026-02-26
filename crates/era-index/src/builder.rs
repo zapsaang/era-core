@@ -143,6 +143,18 @@ impl IndexBuilder {
         self.store.read_sorted_pages()
     }
 
+    /// Flush any buffered entries and process sorted pages one at a time via callback.
+    ///
+    /// Memory usage is O(ENTRIES_PER_PAGE) per callback invocation, avoiding
+    /// the O(all_entries) allocation of `read_sorted_pages()`.
+    pub fn for_each_sorted_page<F>(&mut self, callback: F) -> Result<()>
+    where
+        F: FnMut(crate::IndexPage, era_common::BlockId) -> Result<()>,
+    {
+        self.flush_buffer()?;
+        self.store.for_each_sorted_page(callback)
+    }
+
     /// Finalize the index (EMBEDDED MODE — writes to volume)
     ///
     /// Reads all entries from the Redb staging database as pre-built pages
@@ -158,9 +170,12 @@ impl IndexBuilder {
     ) -> Result<(super::MetaIndex, era_common::BlockLocation)> {
         use era_common::BlockId;
 
-        // Flush any remaining buffered entries, then stream pages from Redb
+        // Flush any remaining buffered entries, then stream pages from Redb.
+        // Uses for_each_sorted_page to process one page at a time: each page is
+        // serialized + encrypted inside the callback, so raw IndexEntry memory
+        // is O(ENTRIES_PER_PAGE) rather than O(all_entries).
+        // The encrypted blocks (much smaller) are collected for async volume writes.
         self.flush_buffer()?;
-        let pages = self.store.read_sorted_pages()?;
 
         // Build L1 MetaIndex
         let mut meta = super::MetaIndex::new();
@@ -169,58 +184,72 @@ impl IndexBuilder {
         let mut index_nonce_context = nonce_context;
         index_nonce_context[0] ^= 0xFF;
 
-        // Write L2 pages as typed blocks to volume
+        // Stream pages: serialize + encrypt synchronously, collect for async volume write
+        let mut encrypted_blocks: Vec<(EncryptedMacroBlock, ChunkHash, ChunkHash, BlockId)> =
+            Vec::new();
         let mut block_id_counter = 0u64;
-        for (page, _page_block_id) in &pages {
-            // Serialize page to rkyv
-            let page_bytes = rkyv::to_bytes::<_, 4096>(page)
-                .map_err(|e| EraError::Serialization(e.to_string()))?;
+        {
+            let idx_nonce = index_nonce_context;
+            self.store.for_each_sorted_page(|page, _page_block_id| {
+                // Serialize page to rkyv
+                let page_bytes = rkyv::to_bytes::<_, 4096>(&page)
+                    .map_err(|e| EraError::Serialization(e.to_string()))?;
 
-            // Encrypt page with session keys
-            let block_id = BlockId::new(block_id_counter);
-            let block_key =
-                session.derive_block_key(volume_key, block_id.sequence(), &index_nonce_context)?;
-            let derived_key = block_key.to_derived_key()?;
-            let encrypted_data = era_crypto::encrypt_with_context(
-                &derived_key,
-                &index_nonce_context,
-                block_id,
-                &page_bytes,
-            )?;
+                // Encrypt page with session keys
+                let block_id = BlockId::new(block_id_counter);
+                let block_key = session.derive_block_key(
+                    volume_key,
+                    block_id.sequence(),
+                    &idx_nonce,
+                )?;
+                let derived_key = block_key.to_derived_key()?;
+                let encrypted_data = era_crypto::encrypt_with_context(
+                    &derived_key,
+                    &idx_nonce,
+                    block_id,
+                    &page_bytes,
+                )?;
 
-            // Create EncryptedMacroBlock
-            let encrypted_block = EncryptedMacroBlock {
-                block_id,
-                data: encrypted_data,
-                original_size: u32::try_from(page_bytes.len()).map_err(|_| {
-                    EraError::IndexError(format!(
-                        "IndexPage size {} exceeds u32::MAX",
-                        page_bytes.len()
-                    ))
-                })?,
-                compressed_size: u32::try_from(page_bytes.len()).map_err(|_| {
-                    EraError::IndexError(format!(
-                        "IndexPage size {} exceeds u32::MAX",
-                        page_bytes.len()
-                    ))
-                })?,
-                chunk_count: u16::try_from(page.len()).map_err(|_| {
-                    EraError::IndexError(format!(
-                        "IndexPage entry count {} exceeds u16::MAX",
-                        page.len()
-                    ))
-                })?,
-            };
+                // Create EncryptedMacroBlock
+                let encrypted_block = EncryptedMacroBlock {
+                    block_id,
+                    data: encrypted_data,
+                    original_size: u32::try_from(page_bytes.len()).map_err(|_| {
+                        EraError::IndexError(format!(
+                            "IndexPage size {} exceeds u32::MAX",
+                            page_bytes.len()
+                        ))
+                    })?,
+                    compressed_size: u32::try_from(page_bytes.len()).map_err(|_| {
+                        EraError::IndexError(format!(
+                            "IndexPage size {} exceeds u32::MAX",
+                            page_bytes.len()
+                        ))
+                    })?,
+                    chunk_count: u16::try_from(page.len()).map_err(|_| {
+                        EraError::IndexError(format!(
+                            "IndexPage entry count {} exceeds u16::MAX",
+                            page.len()
+                        ))
+                    })?,
+                };
 
-            // Write as canonical block to volume
+                let min_h = *page.min_hash();
+                let max_h = *page.max_hash();
+                encrypted_blocks.push((encrypted_block, min_h, max_h, block_id));
+                block_id_counter += 1;
+                Ok(())
+            })?;
+        }
+
+        // Write encrypted blocks to volume (async) and build MetaIndex
+        for (encrypted_block, min_hash, max_hash, block_id) in encrypted_blocks {
             let _location = volume_writer
                 .write_canonical_block(&encrypted_block, BlockType::IndexPage)
                 .await?;
 
             // Add PagePointer to L1
-            meta.add_page(*page.min_hash(), *page.max_hash(), block_id)?;
-
-            block_id_counter += 1;
+            meta.add_page(min_hash, max_hash, block_id)?;
         }
 
         // Reuse the builder's existing bloom — it already contains all entries.

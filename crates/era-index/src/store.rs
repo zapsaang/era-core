@@ -370,7 +370,29 @@ impl IndexStore {
     ///
     /// Returns all pages in sorted order, paired with their sequential BlockIds.
     /// Note: all pages are collected into a Vec before returning.
+    ///
+    /// For production callers that process pages one at a time, prefer
+    /// [`for_each_sorted_page`] which uses O(ENTRIES_PER_PAGE) memory per invocation.
     pub fn read_sorted_pages(&self) -> Result<Vec<(crate::IndexPage, era_common::BlockId)>> {
+        let entries_per_page = crate::ENTRIES_PER_PAGE;
+        let estimated_pages = (self.entry_count + entries_per_page - 1) / entries_per_page.max(1);
+        let mut pages = Vec::with_capacity(estimated_pages);
+        self.for_each_sorted_page(|page, block_id| {
+            pages.push((page, block_id));
+            Ok(())
+        })?;
+        Ok(pages)
+    }
+
+    /// Process sorted pages one at a time via callback. Memory usage O(ENTRIES_PER_PAGE).
+    ///
+    /// Same logic as `read_sorted_pages`, but instead of collecting all pages into a Vec,
+    /// each completed page is passed to `callback` and can be dropped before the next is built.
+    /// Sorted ordering is preserved (Redb B-tree iteration is already sorted).
+    pub fn for_each_sorted_page<F>(&self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(crate::IndexPage, era_common::BlockId) -> Result<()>,
+    {
         use era_common::BlockId;
 
         let read_txn = self
@@ -385,13 +407,11 @@ impl IndexStore {
         // Guard against malicious/oversized indexes (V7-F6)
         if self.entry_count > MAX_SORTED_ENTRIES {
             return Err(EraError::IndexError(format!(
-                "read_sorted_pages: entry count {} exceeds maximum {} (V7-F6)",
+                "for_each_sorted_page: entry count {} exceeds maximum {} (V7-F6)",
                 self.entry_count, MAX_SORTED_ENTRIES
             )));
         }
 
-        let estimated_pages = (self.entry_count + entries_per_page - 1) / entries_per_page.max(1);
-        let mut pages = Vec::with_capacity(estimated_pages);
         let mut chunk = Vec::with_capacity(entries_per_page);
         let mut block_id_counter = 0u64;
         let mut align_buf = rkyv::AlignedVec::with_capacity(256);
@@ -409,7 +429,7 @@ impl IndexStore {
                     &mut chunk,
                     Vec::with_capacity(entries_per_page),
                 ))?;
-                pages.push((page, BlockId::new(block_id_counter)));
+                callback(page, BlockId::new(block_id_counter))?;
                 block_id_counter += 1;
             }
         }
@@ -417,10 +437,10 @@ impl IndexStore {
         // Flush remaining entries
         if !chunk.is_empty() {
             let page = crate::IndexPage::try_new(chunk)?;
-            pages.push((page, BlockId::new(block_id_counter)));
+            callback(page, BlockId::new(block_id_counter))?;
         }
 
-        Ok(pages)
+        Ok(())
     }
 
 
