@@ -454,7 +454,7 @@ fn v11_f6c_index_builder_flush_triggers_redb_batch_write() {
     assert_eq!(builder.entry_count(), 1001);
 }
 #[test]
-fn v11_f6d_era_engine_wraps_in_mutex_not_spawn_blocking() {
+fn v11_f6d_era_engine_wraps_redb_io_in_block_in_place() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -467,9 +467,9 @@ fn v11_f6d_era_engine_wraps_in_mutex_not_spawn_blocking() {
         "RedbChunkIndex must wrap IndexBuilder in a Mutex"
     );
     assert!(
-        !source.contains("spawn_blocking"),
-        "RedbChunkIndex must NOT use spawn_blocking — this is the finding: \
-         Redb I/O blocks the Tokio runtime thread"
+        source.contains("block_in_place"),
+        "RedbChunkIndex must use block_in_place to avoid blocking the Tokio runtime \
+         during Redb I/O (V11-F6 P1 fix)"
     );
 }
 // ═══════════════════════════════════════════════════════════════════════

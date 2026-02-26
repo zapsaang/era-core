@@ -136,6 +136,27 @@ impl RedbChunkIndex {
     }
 }
 
+/// Execute a closure that may perform blocking I/O, using `block_in_place`
+/// when running on a multi-threaded Tokio runtime to avoid blocking async workers.
+/// On current-thread runtimes (common in tests) or outside a runtime, runs directly.
+fn run_blocking_io<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    // block_in_place panics on current-thread runtimes, so we check first.
+    // On multi-threaded runtimes, block_in_place tells Tokio to move other tasks
+    // off this thread while we do I/O.
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(f)
+            }
+            _ => f(),
+        },
+        Err(_) => f(), // Not inside a Tokio runtime — just run directly
+    }
+}
+
 impl ChunkIndex for RedbChunkIndex {
     fn contains(&self, hash: &ChunkHash) -> EraResult<bool> {
         Ok(self.lookup.read().contains_key(hash))
@@ -146,31 +167,35 @@ impl ChunkIndex for RedbChunkIndex {
     }
 
     fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
-        // Insert into lookup map for point queries
+        // Insert into lookup map for point queries (in-memory, non-blocking)
         self.lookup.write().insert(hash, location.clone());
 
         // Insert into IndexBuilder for volume finalization.
+        // The builder.insert() call triggers Redb write transactions (disk I/O),
+        // so we use run_blocking_io (which calls block_in_place on multi-threaded
+        // runtimes) to avoid blocking the Tokio async runtime.
         // If builder has been taken (finalization started), reject the insert
         // to prevent silent data loss in the volume index.
-        match *self.builder.lock() {
-            Some(ref mut builder) => {
-                let entry = IndexEntry::new(
-                    hash,
-                    location.volume_id,
-                    BlockId::new(location.slot_index as u64),
-                    0, // offset within block (not tracked at this level)
-                    location.encrypted_size,
-                );
-                builder.insert(entry)?;
+        run_blocking_io(|| {
+            match *self.builder.lock() {
+                Some(ref mut builder) => {
+                    let entry = IndexEntry::new(
+                        hash,
+                        location.volume_id,
+                        BlockId::new(location.slot_index as u64),
+                        0, // offset within block (not tracked at this level)
+                        location.encrypted_size,
+                    );
+                    builder.insert(entry)?;
+                }
+                None => {
+                    return Err(era_common::EraError::InvalidConfig(
+                        "Cannot insert after builder taken — finalization already started".into(),
+                    ));
+                }
             }
-            None => {
-                return Err(era_common::EraError::InvalidConfig(
-                    "Cannot insert after builder taken — finalization already started".into(),
-                ));
-            }
-        }
-
-        Ok(())
+            Ok(())
+        })
     }
 
     fn delete(&self, hash: &ChunkHash) -> EraResult<()> {
