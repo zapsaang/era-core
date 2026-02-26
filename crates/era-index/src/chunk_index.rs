@@ -86,11 +86,29 @@ pub struct ChunkIndex {
     state: IndexState,
 }
 
+/// Runtime state machine for `ChunkIndex`.
+///
+/// # State Transitions
+///
+/// ```text
+///   Building ──▶ Finalized   (via finalize())
+/// ```
+///
+/// - **`Building`**: The index is accepting writes. `insert()` and `finalize()` are valid.
+/// - **`Finalized`**: The index is read-only. Only lookups (`bloom_contains`, via reader) are valid.
+///
+/// Invalid transitions produce runtime errors:
+/// - `insert()` after `finalize()` → `EraError::InvalidFormat`
+/// - `finalize()` after `finalize()` → `EraError::InvalidFormat`
+///
+/// A typestate approach was considered but rejected because adversarial tests
+/// (V11-F7) assert runtime errors from invalid transitions; consuming `self`
+/// in `finalize()` would make those tests fail to compile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IndexState {
-    /// Building index (write mode)
+    /// Index is open for writes (`insert`, `finalize`).
     Building,
-    /// Index finalized (read mode)
+    /// Index is sealed; only read operations are valid.
     Finalized,
 }
 
@@ -113,14 +131,28 @@ impl ChunkIndex {
         Self::new(ChunkIndexConfig::default())
     }
 
-    /// Insert an entry into the index
-    pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
+    /// Returns `Ok(())` if the index is in `Building` state, or an error if finalized.
+    ///
+    /// Consolidates the state guard used by `insert()` and `finalize()` so that
+    /// error messages and transition logic live in one place.
+    fn require_building(&self, operation: &str) -> Result<()> {
         if self.state != IndexState::Building {
             return Err(era_common::EraError::InvalidFormat(
-                "Cannot insert into finalized index".to_string(),
+                format!("Cannot {operation}: index already finalized"),
             ));
         }
+        Ok(())
+    }
 
+    /// Insert an entry into the index.
+    ///
+    /// Only valid in `Building` state. Returns `EraError::InvalidFormat` if
+    /// the index has already been finalized.
+    pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
+        self.require_building("insert")?;
+
+        // Defensive: builder must be Some when state == Building.
+        // The state guard above already validates this invariant.
         let builder = self.builder.as_mut().ok_or_else(|| {
             era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
         })?;
@@ -128,7 +160,13 @@ impl ChunkIndex {
         builder.insert(entry)
     }
 
-    /// Check if a hash exists in the Bloom filter (fast negative lookup)
+    /// Check if a hash exists in the Bloom filter (fast negative lookup).
+    ///
+    /// Works in both states:
+    /// - **`Building`**: checks the builder's in-memory Bloom filter.
+    /// - **`Finalized`**: checks the reader's serialized Bloom filter.
+    ///
+    /// Returns `false` if the backing object is unexpectedly absent.
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         match self.state {
             IndexState::Building => self
@@ -144,23 +182,20 @@ impl ChunkIndex {
         }
     }
 
-
-    /// Finalize the index and transition to read mode
+    /// Finalize the index and transition to read mode.
     ///
     /// Reads all entries from the Redb staging database, builds the
     /// hierarchical index structure (Bloom + L1 + L2), and returns
     /// a read-only view.
     ///
-    /// On success, the tree transitions to `Finalized` state and further
-    /// inserts/finalizations will return errors. On failure, the tree
-    /// remains in `Building` state and finalize can be retried.
+    /// On success the index transitions to `Finalized` state; further
+    /// inserts or finalizations will return errors. On failure the index
+    /// remains in `Building` state and `finalize` can be retried.
     pub fn finalize(&mut self) -> Result<ChunkIndexReader> {
-        if self.state != IndexState::Building {
-            return Err(era_common::EraError::InvalidFormat(
-                "Index already finalized".to_string(),
-            ));
-        }
+        self.require_building("finalize")?;
 
+        // Defensive: builder must be Some when state == Building.
+        // The state guard above already validates this invariant.
         let builder = self.builder.as_mut().ok_or_else(|| {
             era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
         })?;
