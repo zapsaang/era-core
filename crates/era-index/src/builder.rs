@@ -5,7 +5,6 @@
 //! At finalization, entries are read in sorted order and written as encrypted
 //! IndexPage blocks to the volume.
 
-use std::collections::HashSet;
 
 use bloomfilter::Bloom;
 
@@ -41,10 +40,6 @@ pub struct IndexBuilder {
     store: IndexStore,
     /// In-memory buffer for batch writes
     buffer: Vec<IndexEntry>,
-    /// Cached entry count (None = not yet computed)
-    cached_count: Option<usize>,
-    /// Whether the cache is dirty (insert happened since last count)
-    count_dirty: bool,
 }
 
 impl IndexBuilder {
@@ -63,8 +58,6 @@ impl IndexBuilder {
         Ok(Self {
             store,
             buffer: Vec::with_capacity(BATCH_SIZE),
-            cached_count: None,
-            count_dirty: false,
         })
     }
 
@@ -74,8 +67,6 @@ impl IndexBuilder {
         Ok(Self {
             store,
             buffer: Vec::with_capacity(BATCH_SIZE),
-            cached_count: None,
-            count_dirty: false,
         })
     }
 
@@ -94,7 +85,6 @@ impl IndexBuilder {
         let hash = entry.hash;
         self.buffer.push(entry);
         self.store.bloom_set(&hash);
-        self.count_dirty = true;
         if self.buffer.len() >= BATCH_SIZE {
             self.flush_buffer()?;
         }
@@ -110,26 +100,20 @@ impl IndexBuilder {
         Ok(())
     }
 
-    /// Get total number of unique entries (including buffered entries not yet flushed)
+    /// Get total number of unique entries in the index.
     ///
-    /// Deduplicates buffer hashes with a HashSet, then checks Redb for each
-    /// unique hash to count only genuinely new entries. Buffer is at most
-    /// BATCH_SIZE-1 entries, so this is cheap.
+    /// Flushes any buffered entries to the Redb store first so that
+    /// first-write-wins deduplication produces an exact unique count.
+    /// After flush, `store.entry_count()` is O(1).
     pub fn entry_count(&mut self) -> usize {
-        if !self.count_dirty {
-            if let Some(cached) = self.cached_count {
-                return cached;
-            }
+        // Flush buffer so Redb deduplicates via first-write-wins,
+        // then return the store's O(1) counter.
+        if let Err(e) = self.flush_buffer() {
+            tracing::error!("entry_count: flush_buffer failed: {}", e);
+            // Fallback: upper-bound estimate (may overcount if buffer has dupes)
+            return self.store.entry_count() + self.buffer.len();
         }
-        let unique_buffer_hashes: HashSet<ChunkHash> = self.buffer.iter().map(|e| e.hash).collect();
-        let new_in_buffer = unique_buffer_hashes
-            .iter()
-            .filter(|h| self.store.get(h).ok().flatten().is_none())
-            .count();
-        let count = self.store.entry_count() + new_in_buffer;
-        self.cached_count = Some(count);
-        self.count_dirty = false;
-        count
+        self.store.entry_count()
     }
 
     /// Check if a hash exists in the Bloom filter

@@ -29,22 +29,28 @@ const BLOOM_FP_RATE: f64 = 0.01;
 /// Maximum number of entries allowed in sorted operations to prevent OOM (V7-F6)
 pub const MAX_SORTED_ENTRIES: usize = 2_000_000;
 
-/// Deserialize an IndexEntry from potentially unaligned bytes.
+/// Deserialize an IndexEntry using a caller-provided aligned buffer.
 ///
-/// Redb value bytes are not guaranteed to be 8-byte aligned, but rkyv
-/// requires alignment for `check_archived_root`.
-/// This helper copies to an aligned buffer, validates via `check_archived_root`,
-/// then deserializes.
-fn deserialize_entry_aligned(bytes: &[u8]) -> Result<IndexEntry> {
-    // rkyv::AlignedVec provides 16-byte alignment
-    let mut aligned = rkyv::AlignedVec::with_capacity(bytes.len());
-    aligned.extend_from_slice(bytes);
-    let archived = rkyv::check_archived_root::<IndexEntry>(&aligned)
+/// Reuses `buf` across calls to avoid per-entry heap allocation in loops.
+/// The buffer is cleared and refilled on each call, so alignment is maintained.
+fn deserialize_entry_with_buf(bytes: &[u8], buf: &mut rkyv::AlignedVec) -> Result<IndexEntry> {
+    buf.clear();
+    buf.extend_from_slice(bytes);
+    let archived = rkyv::check_archived_root::<IndexEntry>(buf)
         .map_err(|e| EraError::Deserialization(e.to_string()))?;
     Ok(match archived.deserialize(&mut rkyv::Infallible) {
         Ok(val) => val,
         Err(never) => match never {},
     })
+}
+
+/// Deserialize an IndexEntry from potentially unaligned bytes.
+///
+/// Convenience wrapper over [`deserialize_entry_with_buf`] for single-call
+/// sites (e.g. `get()`). For hot loops, prefer the buffered variant directly.
+fn deserialize_entry_aligned(bytes: &[u8]) -> Result<IndexEntry> {
+    let mut buf = rkyv::AlignedVec::with_capacity(bytes.len());
+    deserialize_entry_with_buf(bytes, &mut buf)
 }
 
 /// IndexStore wraps a Redb database for ACID-compliant chunk indexing.
@@ -347,13 +353,14 @@ impl IndexStore {
         }
 
         let mut entries = Vec::with_capacity(self.entry_count);
+        let mut align_buf = rkyv::AlignedVec::with_capacity(256);
         for result in table
             .iter()
             .map_err(|e| EraError::IndexError(e.to_string()))?
         {
             let (_, value) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
             let bytes = value.value();
-            let entry = deserialize_entry_aligned(bytes)?;
+            let entry = deserialize_entry_with_buf(bytes, &mut align_buf)?;
             entries.push(entry);
         }
         Ok(entries)
@@ -387,14 +394,14 @@ impl IndexStore {
         let mut pages = Vec::with_capacity(estimated_pages);
         let mut chunk = Vec::with_capacity(entries_per_page);
         let mut block_id_counter = 0u64;
-
+        let mut align_buf = rkyv::AlignedVec::with_capacity(256);
         for result in table
             .iter()
             .map_err(|e| EraError::IndexError(e.to_string()))?
         {
             let (_, value) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
             let bytes = value.value();
-            let entry = deserialize_entry_aligned(bytes)?;
+            let entry = deserialize_entry_with_buf(bytes, &mut align_buf)?;
             chunk.push(entry);
 
             if chunk.len() >= entries_per_page {

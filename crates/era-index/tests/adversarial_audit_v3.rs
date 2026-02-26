@@ -170,16 +170,21 @@ fn test_h1_store_get_is_not_zero_copy() {
         "store.rs has deserialize_entry_aligned helper"
     );
 
-    // REMEDIATION H1: The helper now uses check_archived_root, not from_bytes
-    let helper_start = source.find("fn deserialize_entry_aligned").unwrap();
+    // REMEDIATION H1: The core deserialization helper uses check_archived_root, not from_bytes.
+    // After V13 refactor, the validation lives in deserialize_entry_with_buf (the buffered variant)
+    // while deserialize_entry_aligned is a thin convenience wrapper.
+    let helper_start = source
+        .find("fn deserialize_entry_with_buf(")
+        .or_else(|| source.find("fn deserialize_entry_aligned("))
+        .unwrap();
     let helper_body = &source[helper_start..helper_start + 400];
     assert!(
         helper_body.contains("check_archived_root"),
-        "REMEDIATION H1 VERIFIED: deserialize_entry_aligned must use check_archived_root"
+        "REMEDIATION H1 VERIFIED: deserialization helper must use check_archived_root"
     );
     assert!(
         !helper_body.contains("rkyv::from_bytes"),
-        "REMEDIATION H1 VERIFIED: deserialize_entry_aligned must NOT use rkyv::from_bytes"
+        "REMEDIATION H1 VERIFIED: deserialization helper must NOT use rkyv::from_bytes"
     );
 }
 

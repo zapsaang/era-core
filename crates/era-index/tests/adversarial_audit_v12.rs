@@ -96,7 +96,8 @@ fn v12_f1b_entry_count_repeated_calls_scale() {
 
 #[test]
 fn v12_f1c_entry_count_source_confirms_per_hash_get() {
-    // Source verification: builder.rs entry_count() calls self.store.get(h) per unique hash
+    // Source verification: builder.rs entry_count() now flushes buffer then returns O(1) store count
+    // (V13 fix: replaced O(n) per-hash store.get() with flush_buffer + store.entry_count())
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builder.rs"),
     )
@@ -106,8 +107,12 @@ fn v12_f1c_entry_count_source_confirms_per_hash_get() {
         .expect("entry_count must exist");
     let fn_body = &source[fn_start..fn_start + 500];
     assert!(
-        fn_body.contains("self.store.get(h)"),
-        "entry_count must call store.get() per unique buffer hash — O(n) Redb reads"
+        fn_body.contains("self.flush_buffer()"),
+        "entry_count must flush buffer before returning store count — O(1) after flush"
+    );
+    assert!(
+        fn_body.contains("self.store.entry_count()"),
+        "entry_count must delegate to store.entry_count() which is O(1)"
     );
 }
 
@@ -516,30 +521,32 @@ fn v12_f7a_read_sorted_works_with_many_entries() {
 
 #[test]
 fn v12_f7b_deserialize_entry_aligned_called_per_entry() {
-    // Source verification: deserialize_entry_aligned allocates AlignedVec per call
+    // Source verification: read_sorted now uses deserialize_entry_with_buf to reuse AlignedVec
+    // (V13 fix: replaced per-entry AlignedVec allocation with shared buffer)
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store.rs"),
     )
     .expect("read store.rs");
 
+    // The buffered variant must exist
     let fn_start = source
-        .find("fn deserialize_entry_aligned(")
-        .expect("deserialize_entry_aligned must exist");
+        .find("fn deserialize_entry_with_buf(")
+        .expect("deserialize_entry_with_buf must exist");
     let fn_body = &source[fn_start..fn_start + 400];
 
     assert!(
-        fn_body.contains("rkyv::AlignedVec::with_capacity(bytes.len())"),
-        "Each call allocates a new AlignedVec — O(n) heap allocations in read_sorted"
+        fn_body.contains("buf.clear()"),
+        "Buffered variant clears and reuses caller-provided AlignedVec"
     );
 
-    // Verify it's called in read_sorted's loop
+    // read_sorted must use the buffered variant (not the allocating one)
     let read_sorted_start = source
         .find("pub fn read_sorted(&self)")
         .expect("read_sorted must exist");
     let read_sorted_body = &source[read_sorted_start..read_sorted_start + 1200];
     assert!(
-        read_sorted_body.contains("deserialize_entry_aligned(bytes)?"),
-        "read_sorted calls deserialize_entry_aligned per entry"
+        read_sorted_body.contains("deserialize_entry_with_buf(bytes, &mut align_buf)?"),
+        "read_sorted calls deserialize_entry_with_buf to reuse buffer per entry"
     );
 }
 

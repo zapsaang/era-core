@@ -111,10 +111,11 @@ fn extract_production_code(source: &str) -> String {
 fn test_q1_store_deserialize_uses_infallible_unwrap() {
     let source = include_str!("../src/store.rs");
 
-    // Find deserialize_entry_aligned in raw source (it's a free function, not in tests)
+    // Find the core deserialization helper (after V13 refactor, logic moved to deserialize_entry_with_buf)
     let helper_start = source
-        .find("fn deserialize_entry_aligned")
-        .expect("deserialize_entry_aligned must exist in store.rs");
+        .find("fn deserialize_entry_with_buf(")
+        .or_else(|| source.find("fn deserialize_entry_aligned("))
+        .expect("deserialization helper must exist in store.rs");
     let helper_end = source[helper_start..]
         .find("\n}")
         .map(|i| helper_start + i + 2)
@@ -125,7 +126,7 @@ fn test_q1_store_deserialize_uses_infallible_unwrap() {
     let has_unwrap = helper_body.contains(".unwrap()");
     assert!(
         has_infallible && !has_unwrap,
-        "FIX Q1 VERIFIED: deserialize_entry_aligned uses Infallible without .unwrap(). \
+        "FIX Q1 VERIFIED: deserialization helper uses Infallible without .unwrap(). \
          has_infallible={}, has_unwrap={}",
         has_infallible,
         has_unwrap
@@ -509,7 +510,7 @@ fn test_u2_cold_recovery_brute_force_decryption() {
     let fn_start = source
         .find("pub async fn recover_from_volume")
         .expect("recover_from_volume must exist");
-    let fn_body = &source[fn_start..fn_start.saturating_add(8000).min(source.len())];
+    let fn_body = &source[fn_start..fn_start.saturating_add(10000).min(source.len())];
 
     // Content-addressed matching: tries each page block against unrecovered meta entries
     let has_content_addressed = fn_body.contains("content-addressed");
@@ -952,10 +953,11 @@ fn test_y3_get_still_performs_two_copies() {
     let source = include_str!("../src/store.rs");
     let production_code = extract_production_code(source);
 
-    // Find deserialize_entry_aligned
+    // Find the core deserialization helper (after V13 refactor, logic moved to deserialize_entry_with_buf)
     let fn_start = production_code
-        .find("fn deserialize_entry_aligned")
-        .expect("helper must exist");
+        .find("fn deserialize_entry_with_buf(")
+        .or_else(|| production_code.find("fn deserialize_entry_aligned("))
+        .expect("deserialization helper must exist");
     let fn_end = production_code[fn_start..]
         .find("\n}")
         .map(|i| fn_start + i)
@@ -978,7 +980,7 @@ fn test_y3_get_still_performs_two_copies() {
     let returns_owned = fn_body.contains("-> Result<IndexEntry>");
     assert!(
         returns_owned,
-        "FINDING Y3 CONFIRMED: deserialize_entry_aligned returns owned IndexEntry. \
+        "FINDING Y3 CONFIRMED: deserialization helper returns owned IndexEntry. \
          True zero-copy would return &ArchivedIndexEntry — accessing fields directly \
          from the validated buffer with ZERO allocation. \
          The 'fix' replaced from_bytes with check_archived_root + deserialize — \
