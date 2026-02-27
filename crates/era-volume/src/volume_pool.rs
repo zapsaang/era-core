@@ -14,7 +14,13 @@ use std::path::{Path, PathBuf};
 
 use crate::distribution::{DistributionCalculator, DistributionConfigExt};
 use crate::footer::FOOTER_SIZE;
+use crate::header::HEADER_SIZE;
 use crate::{SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE};
+
+/// Space reserved for the backup copy of the SuperHeader at the end of each volume.
+/// This mirrors `HEADER_SIZE` (4096 bytes) — the volume format writes a backup header
+/// before the primary footer so that volumes can be recovered if the primary header is lost.
+const BACKUP_HEADER_RESERVATION: u64 = HEADER_SIZE as u64;
 
 /// Configuration for the volume pool.
 #[derive(Debug, Clone)]
@@ -136,7 +142,7 @@ impl<B: StorageBackend> VolumePool<B> {
 
             let seq = header.volume_sequence;
             let volume_path = config.volume_path(seq);
-            let volume_filename = volume_path.file_name().unwrap_or_default();
+            let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
 
             let writer = VolumeWriter::create(&backend, Path::new(volume_filename), header).await?;
             writers.push(writer);
@@ -184,7 +190,7 @@ impl<B: StorageBackend> VolumePool<B> {
                 era_common::EraError::InvalidConfig(format!("volume sequence {} exceeds u16", seq))
             })?;
             let volume_path = config.volume_path(seq_u16);
-            let volume_filename = volume_path.file_name().unwrap_or_default();
+            let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
 
             let reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
             let footer = reader
@@ -229,7 +235,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ) -> Result<Self> {
         config.initial_volume_count = 1;
         let volume_path = config.volume_path(0);
-        let volume_filename = volume_path.file_name().unwrap_or_default();
+        let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
 
         let writer =
             VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)
@@ -265,7 +271,8 @@ impl<B: StorageBackend> VolumePool<B> {
     async fn rotate_volumes(&mut self) -> Result<()> {
         let volume_count = self.writers.len();
 
-        let old_sequences = self.sequences.clone();
+        // Use drain to avoid cloning — moves data into old_sequences and clears self.sequences
+        let old_sequences: Vec<u16> = self.sequences.drain(..).collect();
 
         // 1. Finalize current volumes (pad to max size and update stats)
         for (i, writer) in self.writers.iter_mut().enumerate() {
@@ -274,13 +281,12 @@ impl<B: StorageBackend> VolumePool<B> {
 
             // Record size
             let size = writer.current_size();
-            let sequence = self.sequences[i];
+            let sequence = old_sequences[i];
             self.stats.volume_sizes.push((sequence, size));
         }
 
         // 2. Clear current writers (closes files)
         self.writers.clear();
-        self.sequences.clear();
 
         // 3. Create new set of volumes
         let vc_u16 = u16::try_from(volume_count).map_err(|_| {
@@ -299,7 +305,7 @@ impl<B: StorageBackend> VolumePool<B> {
             })?;
 
             let volume_path = self.config.volume_path(next_sequence);
-            let volume_filename = volume_path.file_name().unwrap_or_default();
+            let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
 
             let writer =
                 VolumeWriter::create(&self.backend, Path::new(volume_filename), header).await?;
@@ -359,7 +365,7 @@ impl<B: StorageBackend> VolumePool<B> {
             return false;
         }
         let current_size = self.writers[slot].current_size();
-        let reserved = FOOTER_SIZE as u64 + 4096; // Reserve for footer + padding
+        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + BlockHeader::SIZE as u64 + ShardHeader::SIZE as u64;
         current_size + additional_size + reserved <= self.config.max_volume_size
     }
 
@@ -369,7 +375,7 @@ impl<B: StorageBackend> VolumePool<B> {
             return 0;
         }
         let current_size = self.writers[slot].current_size();
-        let reserved = FOOTER_SIZE as u64 + 4096;
+        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION;
         if current_size + reserved >= self.config.max_volume_size {
             0
         } else {
@@ -381,7 +387,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// Returns an error if the shard is larger than max_volume_size allows.
     fn validate_shard_size(&self, shard_size: u64) -> Result<()> {
-        let reserved = FOOTER_SIZE as u64 + 4096 + ShardHeader::SIZE as u64 + 4; // footer + padding + header + original_len
+        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + ShardHeader::SIZE as u64 + 4; // footer + backup header + shard header + original_len
         let max_shard_size = self.config.max_volume_size.saturating_sub(reserved);
 
         if shard_size > max_shard_size {
@@ -568,8 +574,8 @@ impl<B: StorageBackend> VolumePool<B> {
 
         // Track which volumes we've written to for this block
         // We need to write the original_len header to the first shard on each volume
-        let mut volumes_with_header: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
+        let mut volumes_with_header: Vec<bool> =
+            vec![false; self.writers.len()];
 
         let mut location = MatrixBlockLocation::new(
             block_id,
@@ -581,7 +587,7 @@ impl<B: StorageBackend> VolumePool<B> {
 
         for (shard_idx, shard_data) in shards.iter().enumerate() {
             let slot = self.shard_volume_slot(shard_idx);
-            let need_header = !volumes_with_header.contains(&slot);
+            let need_header = !volumes_with_header[slot];
 
             let (entry, _) = self
                 .write_shard(shard_idx, shard_data, need_header, original_len, None)
@@ -589,7 +595,7 @@ impl<B: StorageBackend> VolumePool<B> {
             location.add_shard(entry);
 
             if need_header {
-                volumes_with_header.insert(slot);
+                volumes_with_header[slot] = true;
             }
         }
 
@@ -718,7 +724,7 @@ impl<B: StorageBackend> VolumePool<B> {
         })?;
 
         let volume_path = self.config.volume_path(new_sequence);
-        let volume_filename = volume_path.file_name().unwrap_or_default();
+        let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
 
         let writer = VolumeWriter::create(backend, Path::new(volume_filename), header).await?;
 
@@ -733,7 +739,7 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Check if the pool needs more volumes to write additional data.
     pub fn needs_expansion(&self, required_size: u64) -> bool {
         // First check if the data is inherently too large for any single volume
-        let reserved = FOOTER_SIZE as u64 + 4096;
+        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION;
         let max_per_volume = self.config.max_volume_size.saturating_sub(reserved);
         if required_size > max_per_volume {
             return false;

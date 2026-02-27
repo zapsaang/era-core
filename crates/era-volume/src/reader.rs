@@ -137,25 +137,44 @@ impl<R: StorageReader> VolumeReader<R> {
             Err(_) => return Ok(None),
         };
 
-        // Search backwards for footer magic pattern "ERAF"
+        // Search backwards for footer magic pattern "ERAF" using windowed scan.
+        // First pass: check 128-byte aligned offsets (footer is FOOTER_SIZE=128 bytes,
+        // typically written at aligned positions). Second pass: check remaining positions.
         let magic = FOOTER_MAGIC;
+        let search_limit = data.len().saturating_sub(FOOTER_SIZE);
 
-        // Iterate backwards to find the *last* valid footer
-        // Footer must be aligned and have at least FOOTER_SIZE bytes after it
-        for i in (0..=data.len().saturating_sub(FOOTER_SIZE)).rev() {
-            if data[i..i + 4] == magic {
-                // Possible match found - try to parse as footer
-                let footer_file_offset = start_offset + i as u64;
+        // Pass 1: Aligned positions (step by FOOTER_SIZE) — most likely to hit
+        let mut aligned_positions: Vec<usize> = (0..=search_limit)
+            .rev()
+            .step_by(FOOTER_SIZE)
+            .filter(|&i| data[i..i + magic.len()] == magic)
+            .collect();
 
-                // Try to read footer from this offset
-                if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE).await {
-                    if let Ok(f) = Footer::from_bytes(&bytes) {
-                        tracing::warn!(
-                            "Recovered floating footer at offset {}",
-                            footer_file_offset
-                        );
-                        return Ok(Some(f));
-                    }
+        // Pass 2: All remaining positions via windows() — catches unaligned footers
+        // windows() is vectorization-friendly and avoids manual byte-by-byte indexing
+        if aligned_positions.is_empty() {
+            if let Some(pos) = data[..=search_limit + magic.len() - 1]
+                .windows(magic.len())
+                .rposition(|w| w == magic)
+            {
+                if pos <= search_limit {
+                    aligned_positions.push(pos);
+                }
+            }
+        }
+
+        for i in aligned_positions {
+            // Possible match found - try to parse as footer
+            let footer_file_offset = start_offset + i as u64;
+
+            // Try to read footer from this offset
+            if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE).await {
+                if let Ok(f) = Footer::from_bytes(&bytes) {
+                    tracing::warn!(
+                        "Recovered floating footer at offset {}",
+                        footer_file_offset
+                    );
+                    return Ok(Some(f));
                 }
             }
         }
@@ -379,7 +398,7 @@ impl<R: StorageReader> VolumeReader<R> {
                                         // Valid typed block found
                                         if header.block_type == target_type {
                                             found_blocks.push(BlockLocation::single(
-                                                era_common::VolumeId::new(),
+                                                self.header.volume_id,
                                                 found_blocks.len() as u32,
                                                 current_offset,
                                                 BlockHeader::SIZE as u32 + header.length,

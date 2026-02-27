@@ -3,7 +3,7 @@
 //! This module provides automatic volume splitting when archives exceed a size limit.
 //! All I/O operations are async (non-blocking).
 
-use era_common::{BlockLocation, EncryptedMacroBlock, Result};
+use era_common::{BlockLocation, EncryptedMacroBlock, EraError, Result};
 use era_storage::{StorageBackend, StorageReader, StorageWriter};
 use std::path::PathBuf;
 
@@ -16,6 +16,10 @@ pub const DEFAULT_MAX_VOLUME_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Minimum volume size (must fit header + footer + at least one small block)
 pub const MIN_VOLUME_SIZE: u64 = HEADER_SIZE as u64 + FOOTER_SIZE as u64 + 16 * 1024; // ~20KB minimum
+
+/// Maximum number of volume sequences to scan when discovering multi-volume archives.
+/// Scanning terminates early on the first missing sequence number.
+const MAX_VOLUME_SCAN: u16 = 1000;
 
 /// Configuration for multi-volume archives
 #[derive(Debug, Clone)]
@@ -82,7 +86,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         header: SuperHeader,
     ) -> Result<Self> {
         let volume_path = config.volume_path(0);
-        let volume_filename = volume_path.file_name().unwrap_or_default();
+        let volume_filename = volume_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
 
         let mut volume_writer = VolumeWriter::create(
             backend,
@@ -162,7 +166,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         let next_header = self.template_header.next_volume()?;
 
         let volume_path = self.config.volume_path(self.stats.volume_count);
-        let volume_filename = volume_path.file_name().unwrap_or_default();
+        let volume_filename = volume_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
 
         let mut volume_writer = VolumeWriter::create(
             backend,
@@ -246,7 +250,7 @@ impl<R: StorageReader> MultiVolumeReader<R> {
         first_volume_path: &std::path::Path,
     ) -> Result<Self> {
         // Open the first volume
-        let volume_filename = first_volume_path.file_name().unwrap_or_default();
+        let volume_filename = first_volume_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
         let first_reader =
             crate::VolumeReader::open(backend, std::path::Path::new(volume_filename)).await?;
         let archive_id = first_reader.header().archive_id;
@@ -259,10 +263,10 @@ impl<R: StorageReader> MultiVolumeReader<R> {
 
         // Try to find additional volumes
         let base_path = first_volume_path.with_extension("");
-        for seq in 1..1000u16 {
+        for seq in 1..MAX_VOLUME_SCAN {
             let ext = format!("era.{:03}", seq);
             let next_path = base_path.with_extension(ext);
-            let next_filename = next_path.file_name().unwrap_or_default();
+            let next_filename = next_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
 
             match crate::VolumeReader::open(backend, std::path::Path::new(next_filename)).await {
                 Ok(reader) => {

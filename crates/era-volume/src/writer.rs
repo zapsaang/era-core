@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::footer::{BACKUP_FOOTER_GAP, FOOTER_SIZE};
 use crate::header::{DATA_REGION_START, HEADER_SIZE};
-use crate::{Footer, SuperHeader};
+use crate::{Footer, SuperHeader, MAX_SHARD_SIZE};
 use rand::rngs::OsRng;
 use rand::RngCore;
 
@@ -85,6 +85,17 @@ impl<W: StorageWriter> VolumeWriter<W> {
         footer: &Footer,
     ) -> Result<Self> {
         let mut writer = backend.open_append(path).await?;
+
+        // SECURITY: Validate footer.data_end_offset against actual file size
+        // to prevent seeking past end of file with a corrupted footer
+        let actual_size = writer.current_size();
+        if footer.data_end_offset > actual_size {
+            return Err(era_common::EraError::CorruptedFooter(format!(
+                "footer data_end_offset {} exceeds actual file size {}",
+                footer.data_end_offset, actual_size
+            )));
+        }
+
         writer.truncate(footer.data_end_offset).await?;
 
         Ok(Self {
@@ -239,8 +250,21 @@ impl<W: StorageWriter> VolumeWriter<W> {
         block_type: era_common::BlockType,
     ) -> Result<BlockLocation> {
         // Format: Write BlockHeader + Data
+
+        // SECURITY: Validate block size against MAX_SHARD_SIZE to prevent writing
+        // blocks that the reader would reject (symmetric validation with reader)
+        if block.data.len() > MAX_SHARD_SIZE {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "block data size {} exceeds MAX_SHARD_SIZE ({})",
+                block.data.len(),
+                MAX_SHARD_SIZE
+            )));
+        }
+
         let offset = self.position;
-        let block_len = block.data.len() as u32;
+        let block_len = u32::try_from(block.data.len()).map_err(|_| {
+            era_common::EraError::InvalidConfig("block data exceeds u32::MAX".into())
+        })?;
         let header_size = era_common::BlockHeader::SIZE as u64;
         let total_len = block_len as u64 + header_size;
 
