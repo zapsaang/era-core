@@ -137,12 +137,17 @@ impl<B: StorageBackend> VolumePool<B> {
                 era_common::EraError::InvalidConfig(format!("volume index {} exceeds u16", i))
             })?;
             header.total_volumes = u16::try_from(volume_count).map_err(|_| {
-                era_common::EraError::InvalidConfig(format!("volume count {} exceeds u16", volume_count))
+                era_common::EraError::InvalidConfig(format!(
+                    "volume count {} exceeds u16",
+                    volume_count
+                ))
             })?;
 
             let seq = header.volume_sequence;
             let volume_path = config.volume_path(seq);
-            let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
+            let volume_filename = volume_path.file_name().ok_or_else(|| {
+                era_common::EraError::InvalidConfig("path has no filename".into())
+            })?;
 
             let writer = VolumeWriter::create(&backend, Path::new(volume_filename), header).await?;
             writers.push(writer);
@@ -190,7 +195,9 @@ impl<B: StorageBackend> VolumePool<B> {
                 era_common::EraError::InvalidConfig(format!("volume sequence {} exceeds u16", seq))
             })?;
             let volume_path = config.volume_path(seq_u16);
-            let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
+            let volume_filename = volume_path.file_name().ok_or_else(|| {
+                era_common::EraError::InvalidConfig("path has no filename".into())
+            })?;
 
             let reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
             let footer = reader
@@ -235,7 +242,9 @@ impl<B: StorageBackend> VolumePool<B> {
     ) -> Result<Self> {
         config.initial_volume_count = 1;
         let volume_path = config.volume_path(0);
-        let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
+        let volume_filename = volume_path
+            .file_name()
+            .ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
 
         let writer =
             VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)
@@ -290,7 +299,10 @@ impl<B: StorageBackend> VolumePool<B> {
 
         // 3. Create new set of volumes
         let vc_u16 = u16::try_from(volume_count).map_err(|_| {
-            era_common::EraError::InvalidConfig(format!("volume count {} exceeds u16", volume_count))
+            era_common::EraError::InvalidConfig(format!(
+                "volume count {} exceeds u16",
+                volume_count
+            ))
         })?;
         for &sequence in old_sequences.iter().take(volume_count) {
             // Next sequence: previous + volume_count
@@ -305,7 +317,9 @@ impl<B: StorageBackend> VolumePool<B> {
             })?;
 
             let volume_path = self.config.volume_path(next_sequence);
-            let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
+            let volume_filename = volume_path.file_name().ok_or_else(|| {
+                era_common::EraError::InvalidConfig("path has no filename".into())
+            })?;
 
             let writer =
                 VolumeWriter::create(&self.backend, Path::new(volume_filename), header).await?;
@@ -370,7 +384,10 @@ impl<B: StorageBackend> VolumePool<B> {
             return false;
         }
         let current_size = self.writers[slot].current_size();
-        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + BlockHeader::SIZE as u64 + ShardHeader::SIZE as u64;
+        let reserved = FOOTER_SIZE as u64
+            + BACKUP_HEADER_RESERVATION
+            + BlockHeader::SIZE as u64
+            + ShardHeader::SIZE as u64;
         current_size + additional_size + reserved <= self.config.max_volume_size
     }
 
@@ -392,7 +409,8 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// Returns an error if the shard is larger than max_volume_size allows.
     fn validate_shard_size(&self, shard_size: u64) -> Result<()> {
-        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + ShardHeader::SIZE as u64 + 4; // footer + backup header + shard header + original_len
+        let reserved =
+            FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + ShardHeader::SIZE as u64 + 4; // footer + backup header + shard header + original_len
         let max_shard_size = self.config.max_volume_size.saturating_sub(reserved);
 
         if shard_size > max_shard_size {
@@ -579,8 +597,7 @@ impl<B: StorageBackend> VolumePool<B> {
 
         // Track which volumes we've written to for this block
         // We need to write the original_len header to the first shard on each volume
-        let mut volumes_with_header: Vec<bool> =
-            vec![false; self.writers.len()];
+        let mut volumes_with_header: Vec<bool> = vec![false; self.writers.len()];
 
         let mut location = MatrixBlockLocation::new(
             block_id,
@@ -728,12 +745,13 @@ impl<B: StorageBackend> VolumePool<B> {
 
         let mut header = self.template_header.clone();
         header.volume_sequence = new_sequence;
-        header.total_volumes = u16::try_from(self.writers.len() + 1).map_err(|_| {
-            era_common::EraError::InvalidConfig("total volumes exceeds u16".into())
-        })?;
+        header.total_volumes = u16::try_from(self.writers.len() + 1)
+            .map_err(|_| era_common::EraError::InvalidConfig("total volumes exceeds u16".into()))?;
 
         let volume_path = self.config.volume_path(new_sequence);
-        let volume_filename = volume_path.file_name().ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
+        let volume_filename = volume_path
+            .file_name()
+            .ok_or_else(|| era_common::EraError::InvalidConfig("path has no filename".into()))?;
 
         let writer = VolumeWriter::create(backend, Path::new(volume_filename), header).await?;
 

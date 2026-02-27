@@ -4,10 +4,10 @@
 //! The type definitions are in `era-common`, but the calculation logic lives here
 //! in the volume layer (L1).
 
+use crate::{FOOTER_SIZE, HEADER_SIZE};
 use era_common::{
     ErasureCodeConfig, MatrixDistributionConfig, MatrixDistributionStrategy, VolumePoolStatus,
 };
-use crate::{FOOTER_SIZE, HEADER_SIZE};
 
 /// Extension trait for `MatrixDistributionStrategy` providing calculation logic.
 pub trait DistributionCalculator {
@@ -31,7 +31,10 @@ impl DistributionCalculator for MatrixDistributionStrategy {
         block_sequence: u64,
         volume_count: usize,
     ) -> usize {
-        debug_assert!(volume_count > 0, "calculate_volume called with zero volumes");
+        debug_assert!(
+            volume_count > 0,
+            "calculate_volume called with zero volumes"
+        );
         if volume_count == 0 {
             return 0;
         }

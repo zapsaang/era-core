@@ -17,17 +17,17 @@
 
 use bytes::Bytes;
 use era_common::{
-    ArchiveConfig, ArchiveId, BlockId, BlockType, EncryptedMacroBlock,
-    MatrixDistributionStrategy, VolumePoolStatus,
+    ArchiveConfig, ArchiveId, BlockId, BlockType, EncryptedMacroBlock, MatrixDistributionStrategy,
+    VolumePoolStatus,
 };
 use era_storage::LocalStorageBackend;
-use era_volume::{
-    AccessPolicy, DistributionCalculator, EncryptedVolumeKey, Footer,
-    KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader, VolumePoolConfig,
-    VolumePoolStatusExt, VolumeReader, VolumeWriter, FOOTER_SIZE, HEADER_SIZE,
-};
-use era_volume::header::{DATA_REGION_START, HEADER_VERSION, MAGIC, MAX_RECIPIENTS};
 use era_volume::footer::{BACKUP_FOOTER_GAP, FOOTER_MAGIC, FOOTER_VERSION};
+use era_volume::header::{DATA_REGION_START, HEADER_VERSION, MAGIC, MAX_RECIPIENTS};
+use era_volume::{
+    AccessPolicy, DistributionCalculator, EncryptedVolumeKey, Footer, KeyWrapAlgorithm,
+    RecipientSlot, RecipientType, SuperHeader, VolumePoolConfig, VolumePoolStatusExt, VolumeReader,
+    VolumeWriter, FOOTER_SIZE, HEADER_SIZE,
+};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -73,18 +73,18 @@ fn test_block(id: u64, size: usize) -> EncryptedMacroBlock {
 #[test]
 fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
     let footer = Footer::with_catalog(
-        8192,       // data_end_offset (above min structural size)
-        42,         // block_count
-        7,          // sequence_number
-        5000,       // catalog_offset
-        1024,       // catalog_size
-        3,          // catalog_block_id
-        6000,       // last_checkpoint_offset
-        5,          // last_checkpoint_block_id
-        7000,       // index_offset
-        2048,       // index_size
-        10,         // index_block_id
-        4224,       // backup_header_offset
+        8192, // data_end_offset (above min structural size)
+        42,   // block_count
+        7,    // sequence_number
+        5000, // catalog_offset
+        1024, // catalog_size
+        3,    // catalog_block_id
+        6000, // last_checkpoint_offset
+        5,    // last_checkpoint_block_id
+        7000, // index_offset
+        2048, // index_size
+        10,   // index_block_id
+        4224, // backup_header_offset
     );
 
     let bytes = footer.to_bytes().unwrap();
@@ -112,11 +112,11 @@ fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
 #[test]
 fn test_v26_f1_footer_data_end_below_min_structural_size() {
     let min_data_end = (HEADER_SIZE + FOOTER_SIZE) as u64; // 4224
-    // Create a valid footer, then patch data_end_offset in the raw bytes
-    // Recompute checksum so only the range check catches it
-    // We can't call update_checksum directly (private), so we serialize manually
-    // Instead, build from scratch with the bad offset but valid checksum:
-    // Use the raw bytes approach — create valid footer, patch data_end_offset, recompute checksum
+                                                           // Create a valid footer, then patch data_end_offset in the raw bytes
+                                                           // Recompute checksum so only the range check catches it
+                                                           // We can't call update_checksum directly (private), so we serialize manually
+                                                           // Instead, build from scratch with the bad offset but valid checksum:
+                                                           // Use the raw bytes approach — create valid footer, patch data_end_offset, recompute checksum
     let valid_footer = Footer::new(min_data_end, 1, 1);
     let mut bytes = valid_footer.to_bytes().unwrap();
     // Patch data_end_offset at offset 8..16 to min_data_end - 1
@@ -130,7 +130,10 @@ fn test_v26_f1_footer_data_end_below_min_structural_size() {
     bytes[96..128].copy_from_slice(checksum.as_bytes());
 
     let result = Footer::from_bytes(&bytes);
-    assert!(result.is_err(), "data_end_offset below min structural size must be rejected");
+    assert!(
+        result.is_err(),
+        "data_end_offset below min structural size must be rejected"
+    );
 }
 
 /// V26 P0-1: catalog_offset non-zero but below HEADER_SIZE → Err.
@@ -138,9 +141,18 @@ fn test_v26_f1_footer_data_end_below_min_structural_size() {
 fn test_v26_f1_footer_catalog_offset_below_header() {
     // Create valid footer with catalog_offset in the valid range
     let valid = Footer::with_catalog(
-        8192, 1, 1,
-        HEADER_SIZE as u64, 512, 1, // catalog at HEADER_SIZE (valid)
-        0, 0, 0, 0, 0, 0,
+        8192,
+        1,
+        1,
+        HEADER_SIZE as u64,
+        512,
+        1, // catalog at HEADER_SIZE (valid)
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     );
     let mut bytes = valid.to_bytes().unwrap();
     // Patch catalog_offset (offset 32..40) to 100 (below HEADER_SIZE=4096)
@@ -154,16 +166,27 @@ fn test_v26_f1_footer_catalog_offset_below_header() {
     bytes[96..128].copy_from_slice(checksum.as_bytes());
 
     let result = Footer::from_bytes(&bytes);
-    assert!(result.is_err(), "catalog_offset below HEADER_SIZE must be rejected");
+    assert!(
+        result.is_err(),
+        "catalog_offset below HEADER_SIZE must be rejected"
+    );
 }
 
 /// V26 P0-1: index_offset non-zero but below HEADER_SIZE → Err.
 #[test]
 fn test_v26_f1_footer_index_offset_below_header() {
     let valid = Footer::with_catalog(
-        8192, 1, 1,
-        0, 0, 0, 0, 0,
-        HEADER_SIZE as u64, 512, 2, // index at HEADER_SIZE (valid)
+        8192,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        HEADER_SIZE as u64,
+        512,
+        2, // index at HEADER_SIZE (valid)
         0,
     );
     let mut bytes = valid.to_bytes().unwrap();
@@ -178,7 +201,10 @@ fn test_v26_f1_footer_index_offset_below_header() {
     bytes[96..128].copy_from_slice(checksum.as_bytes());
 
     let result = Footer::from_bytes(&bytes);
-    assert!(result.is_err(), "index_offset below HEADER_SIZE must be rejected");
+    assert!(
+        result.is_err(),
+        "index_offset below HEADER_SIZE must be rejected"
+    );
 }
 
 /// V26 P0-1: FooterBuilder roundtrip produces a valid footer.
@@ -216,7 +242,10 @@ fn test_v26_f2_next_volume_at_u16_max_returns_err() {
     header.volume_sequence = u16::MAX;
 
     let result = header.next_volume();
-    assert!(result.is_err(), "next_volume at u16::MAX must return Err, not overflow");
+    assert!(
+        result.is_err(),
+        "next_volume at u16::MAX must return Err, not overflow"
+    );
 }
 
 /// V26 P0-2: next_volume increments volume_sequence correctly and preserves archive_id.
@@ -327,7 +356,10 @@ fn test_v26_f2_threshold_below_2_rejected() {
     header.access_policy = AccessPolicy::Threshold(1);
     let bad_bytes = header.to_bytes().unwrap();
     let result = SuperHeader::from_bytes(&bad_bytes);
-    assert!(result.is_err(), "Threshold(1) must be rejected — minimum is 2");
+    assert!(
+        result.is_err(),
+        "Threshold(1) must be rejected — minimum is 2"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -351,7 +383,10 @@ fn test_v26_f5_header_version_future_rejected() {
     header.version = 999;
     let bytes = header.to_bytes().unwrap();
     let result = SuperHeader::from_bytes(&bytes);
-    assert!(result.is_err(), "Header with future version 999 must be rejected");
+    assert!(
+        result.is_err(),
+        "Header with future version 999 must be rejected"
+    );
 }
 
 /// V26 P0-5: Header with version=HEADER_VERSION roundtrips successfully.
@@ -381,7 +416,10 @@ async fn test_v26_f4_write_block_exceeding_max_shard_size() {
     let oversized = era_volume::MAX_SHARD_SIZE + 1;
     let block = test_block(0, oversized);
     let result = writer.write_canonical_block(&block, BlockType::Data).await;
-    assert!(result.is_err(), "Block exceeding MAX_SHARD_SIZE must be rejected");
+    assert!(
+        result.is_err(),
+        "Block exceeding MAX_SHARD_SIZE must be rejected"
+    );
 
     writer.finalize().await.unwrap();
 }
@@ -398,7 +436,10 @@ async fn test_v26_f4_write_block_exactly_at_max_shard_size() {
 
     let block = test_block(0, era_volume::MAX_SHARD_SIZE);
     let result = writer.write_canonical_block(&block, BlockType::Data).await;
-    assert!(result.is_ok(), "Block exactly at MAX_SHARD_SIZE must succeed");
+    assert!(
+        result.is_ok(),
+        "Block exactly at MAX_SHARD_SIZE must succeed"
+    );
 
     writer.finalize().await.unwrap();
 }
@@ -415,7 +456,10 @@ async fn test_v26_f4_write_block_one_below_max_shard_size() {
 
     let block = test_block(0, era_volume::MAX_SHARD_SIZE - 1);
     let result = writer.write_canonical_block(&block, BlockType::Data).await;
-    assert!(result.is_ok(), "Block one below MAX_SHARD_SIZE must succeed");
+    assert!(
+        result.is_ok(),
+        "Block one below MAX_SHARD_SIZE must succeed"
+    );
 
     writer.finalize().await.unwrap();
 }
@@ -478,11 +522,22 @@ async fn test_v26_f7_open_append_data_end_beyond_file_size() {
         real_footer.data_end_offset + 999_999, // far beyond actual file
         real_footer.block_count,
         real_footer.sequence_number,
-        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     );
 
     let result = VolumeWriter::open_append(&backend, path, header, &forged).await;
-    assert!(result.is_err(), "data_end_offset beyond actual file size must be rejected");
+    assert!(
+        result.is_err(),
+        "data_end_offset beyond actual file size must be rejected"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -553,8 +608,14 @@ fn test_v26_f8_can_fit_invalid_index() {
         max_volume_size: 10_000,
     };
 
-    assert!(!status.can_fit(2, 100), "Out-of-bounds index must return false");
-    assert!(!status.can_fit(999, 100), "Way out-of-bounds must return false");
+    assert!(
+        !status.can_fit(2, 100),
+        "Out-of-bounds index must return false"
+    );
+    assert!(
+        !status.can_fit(999, 100),
+        "Way out-of-bounds must return false"
+    );
 }
 
 /// V26 P3-4: can_fit correctly accounts for FOOTER_SIZE + HEADER_SIZE reservation.
@@ -632,7 +693,10 @@ fn test_v26_f1_footer_version_zero_accepted() {
     bytes[96..128].copy_from_slice(checksum.as_bytes());
 
     let result = Footer::from_bytes(&bytes);
-    assert!(result.is_ok(), "Footer version 0 should be accepted (version <= FOOTER_VERSION)");
+    assert!(
+        result.is_ok(),
+        "Footer version 0 should be accepted (version <= FOOTER_VERSION)"
+    );
 }
 
 /// V26: Footer with data_end_offset=0 is accepted (0 means unset).
@@ -641,7 +705,10 @@ fn test_v26_f1_footer_data_end_zero_accepted() {
     let footer = Footer::new(0, 0, 0);
     let bytes = footer.to_bytes().unwrap();
     let result = Footer::from_bytes(&bytes);
-    assert!(result.is_ok(), "Footer with data_end_offset=0 must be accepted (means unset)");
+    assert!(
+        result.is_ok(),
+        "Footer with data_end_offset=0 must be accepted (means unset)"
+    );
 }
 
 /// V26: Footer with catalog_offset=0 is accepted (0 means no catalog).
@@ -689,7 +756,10 @@ async fn test_v26_finalize_rejects_invalid_catalog_offset() {
 
     // catalog_offset=999999 is beyond current position
     let result = writer.finalize_with_catalog(999999, 512, 1, 0, 0, 0).await;
-    assert!(result.is_err(), "catalog_offset beyond current position must be rejected");
+    assert!(
+        result.is_err(),
+        "catalog_offset beyond current position must be rejected"
+    );
 }
 
 /// V26: finalize_with_catalog rejects index_offset > current position.
@@ -704,7 +774,10 @@ async fn test_v26_finalize_rejects_invalid_index_offset() {
 
     // index_offset=999999 is beyond current position
     let result = writer.finalize_with_catalog(0, 0, 0, 999999, 512, 1).await;
-    assert!(result.is_err(), "index_offset beyond current position must be rejected");
+    assert!(
+        result.is_err(),
+        "index_offset beyond current position must be rejected"
+    );
 }
 
 /// V26: Writer block_count and raw_bytes_written tracking.

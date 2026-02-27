@@ -86,7 +86,9 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         header: SuperHeader,
     ) -> Result<Self> {
         let volume_path = config.volume_path(0);
-        let volume_filename = volume_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+        let volume_filename = volume_path
+            .file_name()
+            .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
 
         let mut volume_writer = VolumeWriter::create(
             backend,
@@ -166,7 +168,9 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         let next_header = self.template_header.next_volume()?;
 
         let volume_path = self.config.volume_path(self.stats.volume_count);
-        let volume_filename = volume_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+        let volume_filename = volume_path
+            .file_name()
+            .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
 
         let mut volume_writer = VolumeWriter::create(
             backend,
@@ -250,7 +254,9 @@ impl<R: StorageReader> MultiVolumeReader<R> {
         first_volume_path: &std::path::Path,
     ) -> Result<Self> {
         // Open the first volume
-        let volume_filename = first_volume_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+        let volume_filename = first_volume_path
+            .file_name()
+            .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
         let first_reader =
             crate::VolumeReader::open(backend, std::path::Path::new(volume_filename)).await?;
         let archive_id = first_reader.header().archive_id;
@@ -266,7 +272,9 @@ impl<R: StorageReader> MultiVolumeReader<R> {
         for seq in 1..MAX_VOLUME_SCAN {
             let ext = format!("era.{:03}", seq);
             let next_path = base_path.with_extension(ext);
-            let next_filename = next_path.file_name().ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+            let next_filename = next_path
+                .file_name()
+                .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
 
             match crate::VolumeReader::open(backend, std::path::Path::new(next_filename)).await {
                 Ok(reader) => {

@@ -109,7 +109,7 @@ impl Footer {
     }
 
     /// Create a new footer with catalog location
-    /// 
+    ///
     /// Note: This method takes many arguments due to the fixed footer format. For simpler usage,
     /// consider using [`FooterBuilder`] which provides a more ergonomic API.
     #[allow(clippy::too_many_arguments)]
@@ -253,21 +253,51 @@ impl Footer {
     /// Read fields from a buffer (excluding checksum)
     fn read_fields_from(buf: &[u8; FOOTER_SIZE - 32]) -> Result<Self> {
         Ok(Self {
-            magic: buf[0..4].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer magic slice".into()))?,
+            magic: buf[0..4]
+                .try_into()
+                .map_err(|_| EraError::CorruptedFooter("invalid footer magic slice".into()))?,
             version: buf[4],
-            flags: u16::from_le_bytes(buf[6..8].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer flags slice".into()))?),
-            data_end_offset: u64::from_le_bytes(buf[8..16].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer data_end_offset slice".into()))?),
-            block_count: u32::from_le_bytes(buf[16..20].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer block_count slice".into()))?),
-            sequence_number: u64::from_le_bytes(buf[24..32].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer sequence_number slice".into()))?),
-            catalog_offset: u64::from_le_bytes(buf[32..40].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer catalog_offset slice".into()))?),
-            catalog_size: u32::from_le_bytes(buf[40..44].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer catalog_size slice".into()))?),
-            catalog_block_id: u32::from_le_bytes(buf[44..48].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer catalog_block_id slice".into()))?),
-            last_checkpoint_offset: u64::from_le_bytes(buf[48..56].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer last_checkpoint_offset slice".into()))?),
-            last_checkpoint_block_id: u32::from_le_bytes(buf[56..60].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer last_checkpoint_block_id slice".into()))?),
-            index_offset: u64::from_le_bytes(buf[64..72].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer index_offset slice".into()))?),
-            index_size: u32::from_le_bytes(buf[72..76].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer index_size slice".into()))?),
-            index_block_id: u32::from_le_bytes(buf[76..80].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer index_block_id slice".into()))?),
-            backup_header_offset: u64::from_le_bytes(buf[80..88].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer backup_header_offset slice".into()))?),
+            flags: u16::from_le_bytes(
+                buf[6..8]
+                    .try_into()
+                    .map_err(|_| EraError::CorruptedFooter("invalid footer flags slice".into()))?,
+            ),
+            data_end_offset: u64::from_le_bytes(buf[8..16].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer data_end_offset slice".into())
+            })?),
+            block_count: u32::from_le_bytes(buf[16..20].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer block_count slice".into())
+            })?),
+            sequence_number: u64::from_le_bytes(buf[24..32].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer sequence_number slice".into())
+            })?),
+            catalog_offset: u64::from_le_bytes(buf[32..40].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer catalog_offset slice".into())
+            })?),
+            catalog_size: u32::from_le_bytes(buf[40..44].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer catalog_size slice".into())
+            })?),
+            catalog_block_id: u32::from_le_bytes(buf[44..48].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer catalog_block_id slice".into())
+            })?),
+            last_checkpoint_offset: u64::from_le_bytes(buf[48..56].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer last_checkpoint_offset slice".into())
+            })?),
+            last_checkpoint_block_id: u32::from_le_bytes(buf[56..60].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer last_checkpoint_block_id slice".into())
+            })?),
+            index_offset: u64::from_le_bytes(buf[64..72].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer index_offset slice".into())
+            })?),
+            index_size: u32::from_le_bytes(buf[72..76].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer index_size slice".into())
+            })?),
+            index_block_id: u32::from_le_bytes(buf[76..80].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer index_block_id slice".into())
+            })?),
+            backup_header_offset: u64::from_le_bytes(buf[80..88].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer backup_header_offset slice".into())
+            })?),
             checksum: [0u8; 32], // Will be filled separately
         })
     }
@@ -294,11 +324,15 @@ impl Footer {
         }
 
         // Read fields
-        let fields_buf: [u8; FOOTER_SIZE - 32] = data[0..96].try_into().map_err(|_| EraError::CorruptedFooter("invalid footer data length".into()))?;
+        let fields_buf: [u8; FOOTER_SIZE - 32] = data[0..96]
+            .try_into()
+            .map_err(|_| EraError::CorruptedFooter("invalid footer data length".into()))?;
         let mut footer = Self::read_fields_from(&fields_buf)?;
 
         // Read checksum
-        footer.checksum = data[96..128].try_into().map_err(|_| EraError::CorruptedFooter("invalid checksum length".into()))?;
+        footer.checksum = data[96..128]
+            .try_into()
+            .map_err(|_| EraError::CorruptedFooter("invalid checksum length".into()))?;
 
         // Validate magic
         if footer.magic != FOOTER_MAGIC {

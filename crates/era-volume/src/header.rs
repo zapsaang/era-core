@@ -155,9 +155,7 @@ impl SuperHeader {
             volume_id: VolumeId::new(),
             archive_id: self.archive_id,
             volume_sequence: self.volume_sequence.checked_add(1).ok_or_else(|| {
-                era_common::EraError::InvalidConfig(
-                    "volume sequence overflow at u16::MAX".into(),
-                )
+                era_common::EraError::InvalidConfig("volume sequence overflow at u16::MAX".into())
             })?,
             total_volumes: self.total_volumes,
             creation_time: std::time::SystemTime::now()

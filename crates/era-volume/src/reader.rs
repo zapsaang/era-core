@@ -170,10 +170,7 @@ impl<R: StorageReader> VolumeReader<R> {
             // Try to read footer from this offset
             if let Ok(bytes) = reader.read_at(footer_file_offset, FOOTER_SIZE).await {
                 if let Ok(f) = Footer::from_bytes(&bytes) {
-                    tracing::warn!(
-                        "Recovered floating footer at offset {}",
-                        footer_file_offset
-                    );
+                    tracing::warn!("Recovered floating footer at offset {}", footer_file_offset);
                     return Ok(Some(f));
                 }
             }
