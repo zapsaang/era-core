@@ -413,7 +413,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Get the header for creating the next volume
-    pub fn next_volume_header(&self) -> SuperHeader {
+    pub fn next_volume_header(&self) -> era_common::Result<SuperHeader> {
         self.header.next_volume()
     }
 }

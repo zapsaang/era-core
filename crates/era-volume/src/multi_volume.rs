@@ -159,7 +159,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         }
 
         // Create next volume
-        let next_header = self.template_header.next_volume();
+        let next_header = self.template_header.next_volume()?;
 
         let volume_path = self.config.volume_path(self.stats.volume_count);
         let volume_filename = volume_path.file_name().unwrap_or_default();

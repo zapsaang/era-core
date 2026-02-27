@@ -171,7 +171,7 @@ fn header_07_next_volume_inherits_crypto() {
     header.epoch_id = 7;
     header.access_policy = AccessPolicy::Threshold(3);
 
-    let next = header.next_volume();
+    let next = header.next_volume().unwrap();
     assert_eq!(next.archive_id.0, header.archive_id.0);
     assert_ne!(next.volume_id.0, header.volume_id.0); // New UUID
     assert_eq!(next.volume_sequence, 1);

@@ -12,6 +12,9 @@ pub const HEADER_VERSION: u16 = 3;
 /// Size of the header region (4KB aligned)
 pub const HEADER_SIZE: usize = 4096;
 
+/// Maximum number of recipients allowed in a single archive
+pub const MAX_RECIPIENTS: usize = 256;
+
 /// Data region start offset (after header + backup footer gap)
 /// V8.1 layout: [Header 4096] [Backup Footer Gap 128] [Data Region...]
 pub const DATA_REGION_START: u64 = (HEADER_SIZE + crate::footer::BACKUP_FOOTER_GAP) as u64; // 4224
@@ -145,13 +148,17 @@ impl SuperHeader {
     }
 
     /// Create a header for a subsequent volume in the same archive
-    pub fn next_volume(&self) -> Self {
-        Self {
+    pub fn next_volume(&self) -> era_common::Result<Self> {
+        Ok(Self {
             magic: self.magic,
             version: self.version,
             volume_id: VolumeId::new(),
             archive_id: self.archive_id,
-            volume_sequence: self.volume_sequence + 1,
+            volume_sequence: self.volume_sequence.checked_add(1).ok_or_else(|| {
+                era_common::EraError::InvalidConfig(
+                    "volume sequence overflow at u16::MAX".into(),
+                )
+            })?,
             total_volumes: self.total_volumes,
             creation_time: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -164,7 +171,7 @@ impl SuperHeader {
             epoch_id: self.epoch_id,
             encrypted_volume_key: self.encrypted_volume_key.clone(),
             access_policy: self.access_policy,
-        }
+        })
     }
 
     /// Serialize the header to bytes (padded to HEADER_SIZE)
@@ -338,7 +345,10 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
         if magic != MAGIC {
             return Err(era_common::EraError::InvalidMagic);
         }
-        if proto.version as u16 != HEADER_VERSION {
+        let version = u16::try_from(proto.version).map_err(|_| {
+            era_common::EraError::CorruptedHeader("version field out of u16 range".into())
+        })?;
+        if version != HEADER_VERSION {
             return Err(era_common::EraError::UnsupportedVersion {
                 version: proto.version,
             });
@@ -369,9 +379,16 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
                 "Archive must have at least one recipient".into(),
             ));
         }
+        if recipients.len() > MAX_RECIPIENTS {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "too many recipients: {} exceeds maximum {}",
+                recipients.len(),
+                MAX_RECIPIENTS
+            )));
+        }
         Ok(Self {
             magic,
-            version: proto.version as u16,
+            version,
             volume_id: VolumeId(
                 uuid::Uuid::from_slice(&proto.volume_id)
                     .map_err(|_| era_common::EraError::CorruptedHeader("Invalid UUID".into()))?,
@@ -467,7 +484,7 @@ mod tests {
             AccessPolicy::AnyOfN,
         );
 
-        let header2 = header.next_volume();
+        let header2 = header.next_volume().unwrap();
 
         assert_eq!(header2.archive_id.0, header.archive_id.0);
         assert_ne!(header2.volume_id.0, header.volume_id.0);

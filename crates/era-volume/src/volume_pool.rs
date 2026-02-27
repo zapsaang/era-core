@@ -127,15 +127,20 @@ impl<B: StorageBackend> VolumePool<B> {
         // Create initial volumes
         for i in 0..volume_count {
             let mut header = template_header.clone();
-            header.volume_sequence = i as u16;
-            header.total_volumes = volume_count as u16;
+            header.volume_sequence = u16::try_from(i).map_err(|_| {
+                era_common::EraError::InvalidConfig(format!("volume index {} exceeds u16", i))
+            })?;
+            header.total_volumes = u16::try_from(volume_count).map_err(|_| {
+                era_common::EraError::InvalidConfig(format!("volume count {} exceeds u16", volume_count))
+            })?;
 
-            let volume_path = config.volume_path(i as u16);
+            let seq = header.volume_sequence;
+            let volume_path = config.volume_path(seq);
             let volume_filename = volume_path.file_name().unwrap_or_default();
 
             let writer = VolumeWriter::create(&backend, Path::new(volume_filename), header).await?;
             writers.push(writer);
-            sequences.push(i as u16);
+            sequences.push(seq);
         }
 
         let stats = VolumePoolStats {
@@ -175,7 +180,10 @@ impl<B: StorageBackend> VolumePool<B> {
         let mut max_block_count = 0u32;
 
         for seq in 0..config.initial_volume_count {
-            let volume_path = config.volume_path(seq as u16);
+            let seq_u16 = u16::try_from(seq).map_err(|_| {
+                era_common::EraError::InvalidConfig(format!("volume sequence {} exceeds u16", seq))
+            })?;
+            let volume_path = config.volume_path(seq_u16);
             let volume_filename = volume_path.file_name().unwrap_or_default();
 
             let reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
@@ -275,13 +283,20 @@ impl<B: StorageBackend> VolumePool<B> {
         self.sequences.clear();
 
         // 3. Create new set of volumes
+        let vc_u16 = u16::try_from(volume_count).map_err(|_| {
+            era_common::EraError::InvalidConfig(format!("volume count {} exceeds u16", volume_count))
+        })?;
         for &sequence in old_sequences.iter().take(volume_count) {
             // Next sequence: previous + volume_count
-            let next_sequence = sequence + volume_count as u16;
+            let next_sequence = sequence.checked_add(vc_u16).ok_or_else(|| {
+                era_common::EraError::InvalidConfig("volume sequence overflow".into())
+            })?;
 
             let mut header = self.template_header.clone();
             header.volume_sequence = next_sequence;
-            header.total_volumes = next_sequence + 1;
+            header.total_volumes = next_sequence.checked_add(1).ok_or_else(|| {
+                era_common::EraError::InvalidConfig("total_volumes overflow".into())
+            })?;
 
             let volume_path = self.config.volume_path(next_sequence);
             let volume_filename = volume_path.file_name().unwrap_or_default();
@@ -692,11 +707,15 @@ impl<B: StorageBackend> VolumePool<B> {
     /// This is called when all existing volumes are full and more space is needed.
     /// The new volume will use the next available sequence number.
     pub async fn add_volume(&mut self, backend: &B) -> Result<usize> {
-        let new_sequence = self.writers.len() as u16;
+        let new_sequence = u16::try_from(self.writers.len()).map_err(|_| {
+            era_common::EraError::InvalidConfig("too many volumes for u16 sequence".into())
+        })?;
 
         let mut header = self.template_header.clone();
         header.volume_sequence = new_sequence;
-        header.total_volumes = (self.writers.len() + 1) as u16;
+        header.total_volumes = u16::try_from(self.writers.len() + 1).map_err(|_| {
+            era_common::EraError::InvalidConfig("total volumes exceeds u16".into())
+        })?;
 
         let volume_path = self.config.volume_path(new_sequence);
         let volume_filename = volume_path.file_name().unwrap_or_default();
