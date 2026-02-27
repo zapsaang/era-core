@@ -31,3 +31,4 @@ fuzz/
 bins/
 **/bench_data/
 **/test_shell/
+.sisyphus/
