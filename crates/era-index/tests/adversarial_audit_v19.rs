@@ -390,11 +390,11 @@ fn v19_f8a_rebuild_bloom_has_cap() {
 
 #[test]
 fn v19_f8b_max_bloom_items_value() {
-    let source = read_source_file("src/store.rs");
+    let source = read_source_file("src/lib.rs");
 
     assert!(
         source.contains("MAX_BLOOM_ITEMS: usize = 100_000_000"),
-        "V19-F8: MAX_BLOOM_ITEMS must be 100_000_000"
+        "V25-F3: MAX_BLOOM_ITEMS must be 100_000_000 and defined in lib.rs"
     );
 }
 

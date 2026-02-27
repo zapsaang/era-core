@@ -26,6 +26,33 @@ pub struct IndexLocation {
     pub length: u32,
 }
 
+// V25-F1 fix: add accessor methods to IndexLocation for encapsulation parity with IndexEntry/PagePointer.
+impl IndexLocation {
+    /// Get the volume ID.
+    #[must_use]
+    pub fn volume_id(&self) -> VolumeId {
+        self.volume_id
+    }
+
+    /// Get the block ID.
+    #[must_use]
+    pub fn block_id(&self) -> BlockId {
+        self.block_id
+    }
+
+    /// Get the offset within the block.
+    #[must_use]
+    pub fn offset(&self) -> u32 {
+        self.offset
+    }
+
+    /// Get the length of the chunk.
+    #[must_use]
+    pub fn length(&self) -> u32 {
+        self.length
+    }
+}
+
 /// IndexReader provides fast lookups via Bloom + L1 + L2
 pub struct IndexReader {
     /// L1 Meta-Index (sparse directory)

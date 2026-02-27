@@ -21,6 +21,7 @@ use era_common::{ChunkHash, EraError, Result};
 
 use crate::schema::TABLE_CHUNKS;
 use crate::IndexEntry;
+use crate::MAX_BLOOM_ITEMS;
 
 /// Bloom filter false positive rate (1%)
 const BLOOM_FP_RATE: f64 = 0.01;
@@ -424,10 +425,6 @@ impl IndexStore {
         // V21-F5 fix: Log when bloom rebuild triggers for observability.
         // This can be a silent performance cliff for callers.
         let old_capacity = self.bloom_sized_for;
-        // V19-F8 fix: Cap new_capacity at MAX_BLOOM_ITEMS to prevent unbounded
-        // memory allocation. Without this cap, a store with 50M entries would
-        // try to allocate a bloom filter sized for 100M entries (~120MB).
-        const MAX_BLOOM_ITEMS: usize = 100_000_000;
         let new_capacity = (self.entry_count * 2).min(MAX_BLOOM_ITEMS);
         tracing::info!(
             "rebuild_bloom_if_needed: rebuilding bloom filter (old_capacity={}, new_capacity={}, entry_count={})",

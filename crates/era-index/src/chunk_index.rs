@@ -13,7 +13,7 @@
 // so Arc<IndexReader> suffices. Eliminates unnecessary synchronization overhead.
 use std::sync::Arc;
 
-use era_common::{ChunkHash, Result};
+use era_common::{ChunkHash, EraError, Result};
 use era_crypto::{KeySession, VolumeKey};
 use era_storage::StorageReader;
 use era_volume::VolumeReader;
@@ -111,6 +111,21 @@ enum IndexState {
 impl ChunkIndex {
     /// Create a new ChunkIndex for index construction
     pub fn new(config: ChunkIndexConfig) -> Result<Self> {
+        // V25-F4 fix: validate mem_limit — reject zero and absurdly large values.
+        // Zero mem_limit would cause division-by-zero or degenerate bloom filter sizing.
+        // Values above 64 GiB are likely configuration errors.
+        const MAX_MEM_LIMIT: usize = 64 * 1024 * 1024 * 1024; // 64 GiB
+        if config.mem_limit == 0 {
+            return Err(EraError::InvalidConfig(
+                "ChunkIndexConfig mem_limit must be > 0".into(),
+            ));
+        }
+        if config.mem_limit > MAX_MEM_LIMIT {
+            return Err(EraError::InvalidConfig(format!(
+                "ChunkIndexConfig mem_limit {} exceeds maximum ({} bytes / 64 GiB)",
+                config.mem_limit, MAX_MEM_LIMIT
+            )));
+        }
         // Use IndexBuilder::new() which creates a unique temp Redb file
         // via tempfile::Builder (avoids filename collisions in parallel tests)
         let builder = IndexBuilder::new(config.mem_limit)?;

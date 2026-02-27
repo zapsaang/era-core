@@ -65,6 +65,10 @@ pub const ENTRIES_PER_PAGE: usize = 8192;
 /// V24-F7 fix: Maximum number of L1 meta-index pages.
 /// Consolidated from duplicate definitions in add_page() and validate_meta_index().
 pub(crate) const MAX_META_PAGES: usize = 10_000;
+/// V25-F3 fix: consolidate MAX_BLOOM_ITEMS to single pub(crate) const.
+/// Maximum bloom filter items to prevent excessive memory allocation.
+/// Previously duplicated in builder.rs and store.rs.
+pub(crate) const MAX_BLOOM_ITEMS: usize = 100_000_000;
 
 /// A single entry mapping a chunk hash to its physical location
 ///

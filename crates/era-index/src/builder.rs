@@ -13,12 +13,11 @@ use era_storage::StorageWriter;
 
 use crate::store::IndexStore;
 use crate::IndexEntry;
+use crate::MAX_BLOOM_ITEMS;
 
 /// Default memory limit (64MB) — used for bloom filter sizing
 const DEFAULT_MEM_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Maximum bloom filter items to prevent excessive memory allocation (V12-F4 fix)
-const MAX_BLOOM_ITEMS: usize = 100_000_000;
 /// Compute bloom filter expected items from memory limit.
 ///
 /// Returns the estimated number of unique index entries that will fit within

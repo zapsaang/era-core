@@ -8,6 +8,11 @@ use era_common::{ChunkHash, EraError, Result};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use std::hash::Hash;
 
+/// V25-F2 fix: consolidate MAX_BLOOM_BITMAP_SIZE to single module-level definition.
+/// Maximum allowed bloom bitmap size in bytes (128 MiB). Used by both
+/// `from_bytes()` and `validate_archived()` to reject oversized bitmaps.
+const MAX_BLOOM_BITMAP_SIZE: usize = 128 * 1024 * 1024;
+
 /// Serializable representation of a Bloom filter
 ///
 /// This struct captures the essential state of a `Bloom<T>` filter
@@ -203,7 +208,6 @@ impl BloomFilterData {
         // V19-F4 fix: Reject oversized bloom bitmaps that could exhaust memory.
         // 128 MiB is generous for any realistic bloom filter.
         // (defense-in-depth: pre-deserialize check above is the primary guard)
-        const MAX_BLOOM_BITMAP_SIZE: usize = 128 * 1024 * 1024;
         if result.bitmap.len() > MAX_BLOOM_BITMAP_SIZE {
             return Err(EraError::IndexError(format!(
                 "bloom filter bitmap too large: {} bytes (max {})",
@@ -217,7 +221,6 @@ impl BloomFilterData {
     /// V24-F8: Pre-deserialize size validation on archived (zero-copy) view.
     /// Checks bitmap size, bitmap length consistency, and bitmap_bits bounds.
     fn validate_archived(archived: &ArchivedBloomFilterData) -> Result<()> {
-        const MAX_BLOOM_BITMAP_SIZE: usize = 128 * 1024 * 1024;
         if archived.bitmap.len() > MAX_BLOOM_BITMAP_SIZE {
             return Err(EraError::IndexError(format!(
                 "bloom bitmap too large (pre-deser): {} B (max {})",
