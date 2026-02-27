@@ -184,7 +184,7 @@ impl ChunkIndex for RedbChunkIndex {
                         0, // offset within block (not tracked at this level)
                         location.encrypted_size,
                     );
-                    builder.insert(entry)?;
+                    builder.insert(entry?)?;
                 }
                 None => {
                     return Err(era_common::EraError::InvalidConfig(

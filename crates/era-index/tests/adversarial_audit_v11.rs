@@ -38,6 +38,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 #[allow(dead_code)]
@@ -67,7 +68,13 @@ const _EPP: usize = ENTRIES_PER_PAGE;
 fn v11_f1a_sip_keys_accessible_after_deserialization() {
     // SETUP: Create a bloom filter, serialize via BloomFilterData, deserialize
     let bloom = make_bloom(500);
-    let data = BloomFilterData::from_bloom(&bloom);
+    let data = BloomFilterData::new(
+        bloom.bitmap(),
+        bloom.number_of_bits(),
+        bloom.number_of_hash_functions(),
+        bloom.sip_keys(),
+    )
+    .expect("bloom data");
 
     // Serialize to bytes (simulates on-disk or in-volume storage)
     let serialized = data
@@ -80,13 +87,14 @@ fn v11_f1a_sip_keys_accessible_after_deserialization() {
 
     // ASSERT: sip_keys are directly accessible and non-zero
     // This proves an adversary can extract the hash function secrets
-    let keys = recovered.sip_keys;
+    let keys = recovered.sip_keys();
     assert_ne!(keys[0], (0, 0), "First SipHash key pair must be non-zero");
     assert_ne!(keys[1], (0, 0), "Second SipHash key pair must be non-zero");
 
     // The keys are the EXACT internal state of the bloom filter's hash functions
     assert_eq!(
-        keys, data.sip_keys,
+        keys,
+        data.sip_keys(),
         "Extracted sip_keys must match original — adversary has full key material"
     );
 }
@@ -95,7 +103,13 @@ fn v11_f1a_sip_keys_accessible_after_deserialization() {
 fn v11_f1b_extracted_keys_enable_false_positive_prediction() {
     // SETUP: Build a bloom, extract keys, reconstruct, and probe
     let bloom = make_bloom(200);
-    let data = BloomFilterData::from_bloom(&bloom);
+    let data = BloomFilterData::new(
+        bloom.bitmap(),
+        bloom.number_of_bits(),
+        bloom.number_of_hash_functions(),
+        bloom.sip_keys(),
+    )
+    .expect("bloom data");
 
     // Adversary extracts sip_keys from serialized data
     let serialized = data.to_bytes().expect("serialization must succeed");
@@ -103,7 +117,8 @@ fn v11_f1b_extracted_keys_enable_false_positive_prediction() {
         BloomFilterData::from_bytes(&serialized).expect("deserialization must succeed");
 
     // Adversary reconstructs the bloom filter using extracted keys
-    let adversary_bloom: Bloom<ChunkHash> = adversary_data.to_bloom();
+    let adversary_bloom: Bloom<ChunkHash> =
+        adversary_data.to_bloom().expect("to_bloom must succeed");
 
     // Verify reconstruction is faithful: all originally-inserted hashes still match
     for i in 0..200u64 {
@@ -123,7 +138,7 @@ fn v11_f1b_extracted_keys_enable_false_positive_prediction() {
     }
 
     // The adversary's false positive set is identical to the real bloom's
-    let original_bloom: Bloom<ChunkHash> = data.to_bloom();
+    let original_bloom: Bloom<ChunkHash> = data.to_bloom().expect("to_bloom must succeed");
     for &fp in &false_positives {
         assert!(
             original_bloom.check(&test_hash(fp)),
@@ -144,14 +159,21 @@ fn v11_f1b_extracted_keys_enable_false_positive_prediction() {
 fn v11_f1c_sip_keys_survive_serialization_roundtrip_unchanged() {
     // Multiple roundtrips must preserve keys identically — no re-randomization
     let bloom = make_bloom(1000);
-    let original_data = BloomFilterData::from_bloom(&bloom);
-    let original_keys = original_data.sip_keys;
+    let original_data = BloomFilterData::new(
+        bloom.bitmap(),
+        bloom.number_of_bits(),
+        bloom.number_of_hash_functions(),
+        bloom.sip_keys(),
+    )
+    .expect("bloom data");
+    let original_keys = original_data.sip_keys();
 
     // Roundtrip 1
     let bytes1 = original_data.to_bytes().expect("roundtrip 1 serialize");
     let data1 = BloomFilterData::from_bytes(&bytes1).expect("roundtrip 1 deserialize");
     assert_eq!(
-        data1.sip_keys, original_keys,
+        data1.sip_keys(),
+        original_keys,
         "Keys must survive roundtrip 1 unchanged"
     );
 
@@ -159,7 +181,8 @@ fn v11_f1c_sip_keys_survive_serialization_roundtrip_unchanged() {
     let bytes2 = data1.to_bytes().expect("roundtrip 2 serialize");
     let data2 = BloomFilterData::from_bytes(&bytes2).expect("roundtrip 2 deserialize");
     assert_eq!(
-        data2.sip_keys, original_keys,
+        data2.sip_keys(),
+        original_keys,
         "Keys must survive roundtrip 2 unchanged"
     );
 
@@ -167,7 +190,8 @@ fn v11_f1c_sip_keys_survive_serialization_roundtrip_unchanged() {
     let bytes3 = data2.to_bytes().expect("roundtrip 3 serialize");
     let data3 = BloomFilterData::from_bytes(&bytes3).expect("roundtrip 3 deserialize");
     assert_eq!(
-        data3.sip_keys, original_keys,
+        data3.sip_keys(),
+        original_keys,
         "Keys must survive roundtrip 3 unchanged — \
          sip_keys are never re-randomized on deserialization"
     );
@@ -191,24 +215,29 @@ fn v11_f1c_sip_keys_survive_serialization_roundtrip_unchanged() {
 
 #[test]
 fn v11_f2a_page_cache_uses_lock_free_reads() {
+    // V14-F12: page_cache was removed as dead allocation (never populated).
+    // load_page now uses only embedded_pages (HashMap). Verify the old
+    // page_cache field no longer exists.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
     .expect("read reader.rs");
+    assert!(
+        !source.contains("page_cache"),
+        "page_cache was removed in V14-F12 — dead allocation that was never populated"
+    );
     let fn_start = source.find("fn load_page(").expect("load_page must exist");
     let fn_body = &source[fn_start..fn_start + 1500.min(source.len() - fn_start)];
     assert!(
-        fn_body.contains("page_cache.get("),
-        "load_page must use page_cache.get() for lock-free reads (quick_cache)"
-    );
-    assert!(
-        !fn_body.contains("page_cache.write()"),
-        "load_page must NOT use write lock — quick_cache provides lock-free reads"
+        fn_body.contains("embedded_pages"),
+        "load_page must use embedded_pages for page lookups"
     );
 }
 
 #[test]
 fn v11_f2b_no_write_lock_needed_for_cache_reads() {
+    // V14-F12: page_cache was removed entirely. This test now verifies
+    // that load_page uses no locking primitives at all (direct HashMap lookup).
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
@@ -216,12 +245,12 @@ fn v11_f2b_no_write_lock_needed_for_cache_reads() {
     let fn_start = source.find("fn load_page(").expect("load_page must exist");
     let fn_body = &source[fn_start..fn_start + 1500.min(source.len() - fn_start)];
     assert!(
-        !fn_body.contains("page_cache.write()"),
-        "write lock must NOT be used — quick_cache::sync::Cache::get() takes &self"
+        !fn_body.contains(".write()"),
+        "load_page must NOT use any write lock"
     );
     assert!(
-        !fn_body.contains("page_cache.read()"),
-        "read lock must NOT be used — quick_cache::sync::Cache::get() takes &self, no lock needed"
+        !fn_body.contains(".read()"),
+        "load_page must NOT use any read lock (HashMap::get takes &self)"
     );
 }
 
@@ -611,8 +640,10 @@ fn v11_f9c_inconsistent_hash_distributions_produce_different_bytes() {
 // hash, keeping the first occurrence. Callers may not realize data was dropped.
 #[test]
 fn v11_f10a_try_new_dedup_keeps_first_occurrence() {
-    let entry1 = IndexEntry::new(test_hash(42), VolumeId::new(), BlockId::new(0), 0, 1024);
-    let entry2 = IndexEntry::new(test_hash(42), VolumeId::new(), BlockId::new(0), 4096, 2048);
+    let entry1 = IndexEntry::new(test_hash(42), VolumeId::new(), BlockId::new(0), 0, 1024)
+        .expect("valid entry");
+    let entry2 = IndexEntry::new(test_hash(42), VolumeId::new(), BlockId::new(0), 4096, 2048)
+        .expect("valid entry");
     let page = IndexPage::try_new(vec![entry1, entry2]).expect("try_new must return Ok");
     assert_eq!(
         page.len(),
@@ -622,7 +653,7 @@ fn v11_f10a_try_new_dedup_keeps_first_occurrence() {
     assert_eq!(
         page.find(&test_hash(42))
             .expect("entry must be found")
-            .offset,
+            .offset(),
         0,
         "first occurrence (offset=0) must be preserved"
     );
@@ -630,27 +661,18 @@ fn v11_f10a_try_new_dedup_keeps_first_occurrence() {
 #[test]
 fn v11_f10b_try_new_dedup_reduces_count() {
     let mut entries: Vec<IndexEntry> = (0u64..7).map(make_entry).collect();
-    entries.push(IndexEntry::new(
-        test_hash(0),
-        VolumeId::new(),
-        BlockId::new(99),
-        9999,
-        512,
-    ));
-    entries.push(IndexEntry::new(
-        test_hash(1),
-        VolumeId::new(),
-        BlockId::new(99),
-        9999,
-        512,
-    ));
-    entries.push(IndexEntry::new(
-        test_hash(2),
-        VolumeId::new(),
-        BlockId::new(99),
-        9999,
-        512,
-    ));
+    entries.push(
+        IndexEntry::new(test_hash(0), VolumeId::new(), BlockId::new(99), 9999, 512)
+            .expect("valid entry"),
+    );
+    entries.push(
+        IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(99), 9999, 512)
+            .expect("valid entry"),
+    );
+    entries.push(
+        IndexEntry::new(test_hash(2), VolumeId::new(), BlockId::new(99), 9999, 512)
+            .expect("valid entry"),
+    );
     assert_eq!(entries.len(), 10, "pre-condition: 10 entries before dedup");
     let page = IndexPage::try_new(entries).expect("try_new must succeed");
     assert_eq!(
@@ -662,7 +684,10 @@ fn v11_f10b_try_new_dedup_reduces_count() {
 #[test]
 fn v11_f10c_try_new_no_error_on_duplicates() {
     let entries: Vec<IndexEntry> = (0..5)
-        .map(|_| IndexEntry::new(test_hash(99), VolumeId::new(), BlockId::new(0), 0, 1024))
+        .map(|_| {
+            IndexEntry::new(test_hash(99), VolumeId::new(), BlockId::new(0), 0, 1024)
+                .expect("valid entry")
+        })
         .collect();
     assert_eq!(entries.len(), 5, "pre-condition: 5 identical entries");
     let page = IndexPage::try_new(entries).expect("try_new must return Ok, NOT Err, on duplicates");
@@ -701,20 +726,29 @@ fn v11_f11a_bloom_filter_data_has_version_field() {
     assert!(struct_body.contains("sip_keys"), "must have sip_keys field");
 }
 #[test]
-fn v11_f11b_bloom_format_corruption_undetectable() {
+fn v11_f11b_bloom_format_corruption_coverage() {
     let bloom = make_bloom(100);
-    let mut data = BloomFilterData::from_bloom(&bloom);
-    let original_bits = data.bitmap_bits;
-    data.bitmap_bits = original_bits.wrapping_add(999_999);
-    let bytes = data
-        .to_bytes()
-        .expect("serialize must succeed even with corrupted bitmap_bits");
-    let recovered =
-        BloomFilterData::from_bytes(&bytes).expect("deserialize must succeed — no version check");
-    assert_eq!(
-        recovered.bitmap_bits,
-        original_bits.wrapping_add(999_999),
-        "corrupted value survives roundtrip — no integrity check"
+    let bitmap = bloom.bitmap();
+    let bitmap_bits = bloom.number_of_bits();
+    let k_num = bloom.number_of_hash_functions();
+    let sip_keys = bloom.sip_keys();
+    let data = BloomFilterData::new(bitmap, bitmap_bits, k_num, sip_keys).expect("bloom data");
+    let bytes = data.to_bytes().expect("serialize must succeed");
+    // V11-F11: rkyv's check_archived_root + validate() covers structural corruption
+    // (version, bitmap_bits=0, k_num=0, sip_keys=zeros, bitmap length mismatch).
+    // However, single-byte corruption within the bitmap or other fields may produce
+    // valid-looking data that passes validation. This is expected behavior:
+    // the Bloom filter is a probabilistic structure, not a security-critical one.
+    // Verify that truncation IS caught:
+    let truncated = &bytes[..bytes.len().saturating_sub(8).max(1)];
+    assert!(
+        BloomFilterData::from_bytes(truncated).is_err(),
+        "Truncated bloom data must be rejected"
+    );
+    // Verify that empty bytes ARE caught:
+    assert!(
+        BloomFilterData::from_bytes(&[]).is_err(),
+        "Empty bloom data must be rejected"
     );
 }
 // ═══════════════════════════════════════════════════════════════════════

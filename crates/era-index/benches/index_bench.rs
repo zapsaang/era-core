@@ -21,6 +21,7 @@ fn make_entry(hash: ChunkHash, i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 fn insert_throughput(c: &mut Criterion) {

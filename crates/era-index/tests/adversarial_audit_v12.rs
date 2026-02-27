@@ -30,6 +30,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 // Suppress unused import warnings for items required by spec
@@ -120,13 +121,15 @@ fn v12_f1c_entry_count_source_confirms_per_hash_get() {
 // V12-F2: Cold recovery O(n×m) nested loop
 // ═══════════════════════════════════════════════════════════════════════
 //
-// FINDING: recover_from_volume has a nested loop: for each scanned block,
-// it tries every unrecovered meta.pages entry. Worst case is O(n×m).
+// FINDING: recover_from_volume had a nested loop: for each scanned block,
+// it tried every unrecovered meta.pages entry. Worst case was O(n×m).
+// V13-F12: inner loop replaced with while+swap_remove for O(n) amortized.
+// V18-F1: Further optimized to HashMap-indexed O(1) lookup per block.
 
 #[test]
 fn v12_f2a_cold_recovery_nested_loop_exists() {
-    // Source verification: reader.rs recover_from_volume has outer loop over page_blocks
-    // V13-F12: inner loop replaced with while+swap_remove for O(n) amortized instead of O(n×m)
+    // Source verification: reader.rs recover_from_volume now uses
+    // block_id_to_page_idx HashMap for O(1) lookup (V18-F1 optimization).
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
@@ -137,23 +140,18 @@ fn v12_f2a_cold_recovery_nested_loop_exists() {
         .expect("recover_from_volume must exist");
     let fn_body = &source[fn_start..];
 
-    // Outer loop: iterates page_blocks (unchanged)
+    // V18-F1: recovery now uses HashMap for O(1) block_id lookup
     assert!(
-        fn_body.contains("for location in page_blocks.iter()"),
-        "recover_from_volume must have outer loop over page_blocks"
-    );
-    // V13-F12: inner loop now uses while+swap_remove instead of for page_ptr in meta.pages()
-    assert!(
-        fn_body.contains("while i < unrecovered.len()"),
-        "recover_from_volume must use while loop over shrinking unrecovered Vec — V13-F12 optimization"
+        fn_body.contains("block_id_to_page_idx"),
+        "recover_from_volume must use block_id_to_page_idx HashMap — V18-F1 optimization"
     );
 }
 
 #[test]
 fn v12_f2b_cold_recovery_complexity_proof() {
-    // V13-F12: The recover_from_volume function's inner loop now uses swap_remove
-    // to shrink the unrecovered set on each match, giving O(n) amortized complexity
-    // instead of the original O(n×m) nested loop with contains_key skip.
+    // V18-F1: The recover_from_volume function now uses a HashMap<BlockId, usize>
+    // to index unrecovered pages by block_id. Each scanned block does a HashMap lookup
+    // for O(1) matching instead of the previous O(n) while+swap_remove pattern.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
@@ -164,20 +162,16 @@ fn v12_f2b_cold_recovery_complexity_proof() {
         .expect("recover_from_volume must exist");
     let fn_body = &source[fn_start..fn_start + 20000.min(source.len() - fn_start)];
 
-    // V13-F12: swap_remove pattern replaces contains_key skip check
+    // V18-F1: HashMap-indexed approach replaces swap_remove pattern
     assert!(
-        fn_body.contains("unrecovered.swap_remove(i)"),
-        "Recovery loop uses swap_remove for O(1) removal — V13-F12 optimization"
+        fn_body.contains("block_id_to_page_idx.remove"),
+        "Recovery loop removes matched entries from HashMap — V18-F1 optimization"
     );
 
-    // The while loop has a break statement when a match is found — early termination
-    let while_start = fn_body
-        .find("while i < unrecovered.len()")
-        .expect("while loop over unrecovered must exist");
-    let while_body = &fn_body[while_start..while_start + 2500.min(fn_body.len() - while_start)];
+    // The matched flag + break pattern still exists for each scanned block
     assert!(
-        while_body.contains("break"),
-        "While loop over unrecovered contains break on match — ",
+        fn_body.contains("matched = true"),
+        "Recovery loop sets matched flag when page is recovered"
     );
 }
 
@@ -192,21 +186,17 @@ fn v12_f2b_cold_recovery_complexity_proof() {
 fn v12_f3a_from_memory_with_empty_meta_works() {
     // Baseline: from_memory with empty MetaIndex works correctly
     let meta = MetaIndex::new();
-    let bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
 
-    let reader =
-        IndexReader::from_memory(meta, bloom, entries).expect("from_memory with empty meta");
+    let reader = IndexReader::from_memory(meta, entries).expect("from_memory with empty meta");
     assert_eq!(reader.meta_page_count(), 1, "100 entries → 1 page");
 }
 
 #[test]
 fn v12_f3b_from_memory_appends_to_caller_meta() {
-    // The API takes `meta: MetaIndex` (not `&mut MetaIndex`) so the caller's
-    // original is consumed. But the issue is that from_memory() does
-    // `let mut meta = meta;` and then calls `meta.add_page()` for each chunk.
-    // If the caller passes a MetaIndex with pre-existing pages whose range
-    // overlaps the entries, add_page() will fail.
+    // V16-F2 update: from_memory() now takes `mut meta: MetaIndex` directly
+    // instead of shadow-rebinding. The behavior is the same: meta is mutated
+    // by clearing pages and adding new ones from the entries.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
@@ -215,21 +205,21 @@ fn v12_f3b_from_memory_appends_to_caller_meta() {
     let fn_start = source
         .find("pub fn from_memory(")
         .expect("from_memory must exist");
-    let fn_body = &source[fn_start..fn_start + 1000];
+    let fn_body = &source[fn_start..(fn_start + 2000).min(source.len())];
 
-    // Proves the API shadows the parameter as mutable and appends pages
+    // V16-F2: parameter is now `mut meta: MetaIndex` (not shadow rebinding)
     assert!(
-        fn_body.contains("let mut meta = meta;"),
-        "from_memory shadows meta as mutable — overwrites caller state"
+        fn_body.contains("mut meta: MetaIndex"),
+        "from_memory takes mut meta parameter directly (V16-F2)"
     );
     assert!(
         fn_body.contains("meta.add_page("),
         "from_memory appends pages to caller's MetaIndex"
     );
-    // No clearing of existing pages
+    // V13-F2: from_memory now clears pages before appending
     assert!(
-        !fn_body.contains("meta.pages.clear()"),
-        "from_memory does NOT clear pre-existing pages before appending"
+        fn_body.contains("meta.clear_pages()"),
+        "from_memory clears pre-existing pages before appending (V13-F2 fix)"
     );
 }
 
@@ -242,11 +232,10 @@ fn v12_f3c_from_memory_preserves_preexisting_pages() {
     meta.add_page(test_hash(0), test_hash(50), BlockId::new(99))
         .expect("add pre-existing page");
 
-    let bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
     // Entries cover hash range 100..199 — non-overlapping with pre-existing page
     let entries: Vec<IndexEntry> = (100..200u64).map(make_entry).collect();
 
-    let reader = IndexReader::from_memory(meta, bloom, entries)
+    let reader = IndexReader::from_memory(meta, entries)
         .expect("from_memory must succeed with non-overlapping pre-existing page");
 
     // V13-F2: from_memory now clears pre-existing pages via clear_pages().
@@ -374,7 +363,7 @@ fn v12_f5b_drop_swallows_errors_source_proof() {
     let drop_start = source
         .find("impl Drop for IndexBuilder")
         .expect("Drop impl must exist");
-    let drop_body = &source[drop_start..drop_start + 300];
+    let drop_body = &source[drop_start..drop_start + 400];
 
     assert!(
         drop_body.contains("if let Err(e) = self.flush_buffer()"),
@@ -512,7 +501,7 @@ fn v12_f7a_read_sorted_works_with_many_entries() {
     // Verify sorted order
     for i in 1..sorted.len() {
         assert!(
-            sorted[i - 1].hash <= sorted[i].hash,
+            sorted[i - 1].hash() <= sorted[i].hash(),
             "entries must be in sorted hash order"
         );
     }
@@ -531,21 +520,32 @@ fn v12_f7b_deserialize_entry_aligned_called_per_entry() {
     let fn_start = source
         .find("fn deserialize_entry_with_buf(")
         .expect("deserialize_entry_with_buf must exist");
-    let fn_body = &source[fn_start..fn_start + 400];
+    let fn_body = &source[fn_start..fn_start + 600];
 
     assert!(
         fn_body.contains("buf.clear()"),
         "Buffered variant clears and reuses caller-provided AlignedVec"
     );
 
-    // read_sorted must use the buffered variant (not the allocating one)
+    // V20-F4: read_sorted now delegates to for_each_sorted_page, which
+    // uses the buffered variant internally. Verify the delegation pattern.
     let read_sorted_start = source
         .find("pub fn read_sorted(&self)")
         .expect("read_sorted must exist");
-    let read_sorted_body = &source[read_sorted_start..read_sorted_start + 1200];
+    let read_sorted_body = &source[read_sorted_start..read_sorted_start + 300];
     assert!(
-        read_sorted_body.contains("deserialize_entry_with_buf(bytes, &mut align_buf)?"),
-        "read_sorted calls deserialize_entry_with_buf to reuse buffer per entry"
+        read_sorted_body.contains("for_each_sorted_page"),
+        "read_sorted delegates to for_each_sorted_page (V20-F4 dedup)"
+    );
+
+    // Verify for_each_sorted_page still uses the buffered variant
+    let for_each_start = source
+        .find("pub fn for_each_sorted_page")
+        .expect("for_each_sorted_page must exist");
+    let for_each_body = &source[for_each_start..for_each_start + 2000];
+    assert!(
+        for_each_body.contains("deserialize_entry_with_buf"),
+        "for_each_sorted_page uses deserialize_entry_with_buf to reuse buffer per entry"
     );
 }
 
@@ -714,12 +714,8 @@ fn v12_f10a_from_memory_sets_no_index_dir() {
     let meta = MetaIndex::new();
     let entries: Vec<IndexEntry> = (0..50).map(make_entry).collect();
     // Bloom must contain the hashes for lookup to proceed past the bloom check
-    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-    for entry in &entries {
-        bloom.set(&entry.hash);
-    }
 
-    let reader = IndexReader::from_memory(meta, bloom, entries).expect("from_memory works");
+    let reader = IndexReader::from_memory(meta, entries).expect("from_memory works");
 
     // Verify the reader works for lookups without any index_dir
     let result = reader.lookup(&test_hash(25)).expect("lookup succeeds");
@@ -735,15 +731,11 @@ fn v12_f10b_from_pages_sets_no_index_dir() {
     let meta = MetaIndex::new();
     let entries: Vec<IndexEntry> = (0..50).map(make_entry).collect();
     // Bloom must contain the hashes for lookup to proceed past the bloom check
-    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-    for entry in &entries {
-        bloom.set(&entry.hash);
-    }
 
     let page = IndexPage::try_new(entries).expect("try_new");
     let pages = vec![(page, BlockId::new(0))];
 
-    let reader = IndexReader::from_pages(meta, bloom, pages).expect("from_pages works");
+    let reader = IndexReader::from_pages(meta, pages).expect("from_pages works");
 
     // Verify the reader works for lookups without any index_dir
     let result = reader.lookup(&test_hash(25)).expect("lookup succeeds");

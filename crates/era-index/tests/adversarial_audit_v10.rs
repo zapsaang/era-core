@@ -33,15 +33,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
-}
-
-/// Build a valid Bloom<ChunkHash> with n items inserted
-fn make_bloom(n: usize) -> Bloom<ChunkHash> {
-    let mut bloom = Bloom::new_for_fp_rate(n.max(100), 0.01);
-    for i in 0..n as u64 {
-        bloom.set(&test_hash(i));
-    }
-    bloom
+    .expect("valid entry")
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -120,9 +112,8 @@ fn v10_b2_read_sorted_pages_accepts_normal_count() {
 fn v10_b3_from_memory_accepts_normal_entries() {
     // IndexReader::from_memory with 100 entries must succeed
     let meta = MetaIndex::new();
-    let bloom = make_bloom(100);
     let entries: Vec<IndexEntry> = (0..100u64).map(make_entry).collect();
-    let result = IndexReader::from_memory(meta, bloom, entries);
+    let result = IndexReader::from_memory(meta, entries);
     assert!(
         result.is_ok(),
         "from_memory must accept 100 entries (well under MAX_MEMORY_ENTRIES)"
@@ -133,7 +124,6 @@ fn v10_b3_from_memory_accepts_normal_entries() {
 fn v10_b4_from_pages_accepts_normal_pages() {
     // IndexReader::from_pages with 5 pages must succeed
     let meta = MetaIndex::new();
-    let bloom = make_bloom(5);
     // Build 5 non-overlapping pages with distinct hash ranges
     let pages: Vec<(IndexPage, BlockId)> = (0..5u64)
         .map(|i| {
@@ -143,7 +133,7 @@ fn v10_b4_from_pages_accepts_normal_pages() {
             (page, BlockId::new(i))
         })
         .collect();
-    let result = IndexReader::from_pages(meta, bloom, pages);
+    let result = IndexReader::from_pages(meta, pages);
     assert!(
         result.is_ok(),
         "from_pages must accept 5 pages (well under MAX_PAGES)"
@@ -155,7 +145,6 @@ fn v10_b5_from_pages_rejects_oversized() {
     // IndexReader::from_pages with MAX_PAGES + 1 pages must return Err
     // MAX_PAGES = 10_000; we build 10_001 single-entry pages with distinct hashes
     let meta = MetaIndex::new();
-    let bloom = make_bloom(10_001);
     let pages: Vec<(IndexPage, BlockId)> = (0..10_001u64)
         .map(|i| {
             let entry = make_entry(i);
@@ -163,7 +152,7 @@ fn v10_b5_from_pages_rejects_oversized() {
             (page, BlockId::new(i))
         })
         .collect();
-    let result = IndexReader::from_pages(meta, bloom, pages);
+    let result = IndexReader::from_pages(meta, pages);
     assert!(
         result.is_err(),
         "from_pages must reject 10_001 pages (exceeds MAX_PAGES=10_000)"
@@ -247,14 +236,18 @@ fn v10_d2_read_sorted_returns_ascending_order() {
     // Verify ascending order
     for window in entries.windows(2) {
         assert!(
-            window[0].hash <= window[1].hash,
+            window[0].hash() <= window[1].hash(),
             "read_sorted must return entries in ascending hash order"
         );
     }
     // Verify first and last are correct
-    assert_eq!(entries[0].hash, test_hash(0), "First entry must be hash(0)");
     assert_eq!(
-        entries[49].hash,
+        *entries[0].hash(),
+        test_hash(0),
+        "First entry must be hash(0)"
+    );
+    assert_eq!(
+        *entries[49].hash(),
         test_hash(49),
         "Last entry must be hash(49)"
     );
@@ -301,8 +294,7 @@ fn v10_e2_bloom_empty_bytes_rejected() {
 fn v10_f1_from_memory_empty_entries_ok() {
     // IndexReader::from_memory with empty entries must succeed (cold recovery with no chunks)
     let meta = MetaIndex::new();
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(100, 0.01);
-    let result = IndexReader::from_memory(meta, bloom, vec![]);
+    let result = IndexReader::from_memory(meta, vec![]);
     assert!(
         result.is_ok(),
         "from_memory must accept empty entries for cold recovery fast path"
@@ -322,8 +314,7 @@ fn v10_f1_from_memory_empty_entries_ok() {
 fn v10_f2_from_pages_empty_ok() {
     // IndexReader::from_pages with empty pages must succeed
     let meta = MetaIndex::new();
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(100, 0.01);
-    let result = IndexReader::from_pages(meta, bloom, vec![]);
+    let result = IndexReader::from_pages(meta, vec![]);
     assert!(
         result.is_ok(),
         "from_pages must accept empty pages for cold recovery fast path"
@@ -358,7 +349,7 @@ fn v10_bonus_index_store_create_and_insert() {
     // Verify ascending order
     for window in entries.windows(2) {
         assert!(
-            window[0].hash <= window[1].hash,
+            window[0].hash() <= window[1].hash(),
             "Entries must be in ascending hash order"
         );
     }

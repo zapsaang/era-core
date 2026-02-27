@@ -19,14 +19,24 @@ const DEFAULT_MEM_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Maximum bloom filter items to prevent excessive memory allocation (V12-F4 fix)
 const MAX_BLOOM_ITEMS: usize = 100_000_000;
-/// Bloom filter expected items — derived from mem_limit / entry size
+/// Compute bloom filter expected items from memory limit.
+///
+/// Returns the estimated number of unique index entries that will fit within
+/// `mem_limit` bytes, clamped to `[1024, MAX_BLOOM_ITEMS]`. This value is
+/// used to size the Bloom filter for the target false-positive rate.
+///
+/// V17-F12 fix: When `mem_limit` is very small (< entry_size), the division
+/// yields 0 which clamps to 128. This is technically correct but the Bloom
+/// filter will be undersized for any real workload. We use `max(1024, ...)`
+/// as the lower bound to ensure a minimally useful Bloom filter even for
+/// tiny memory limits.
 fn bloom_expected_items(mem_limit: usize) -> usize {
     let entry_size = std::mem::size_of::<IndexEntry>().max(1);
     (mem_limit / entry_size).clamp(1024, MAX_BLOOM_ITEMS)
 }
 
-/// Number of entries to buffer before flushing to Redb in a single batch transaction
-const BATCH_SIZE: usize = 1000;
+/// Default number of entries to buffer before flushing to Redb in a single batch transaction
+const DEFAULT_BATCH_SIZE: usize = 1000;
 
 /// IndexBuilder manages index construction with Redb-backed ACID storage.
 ///
@@ -39,6 +49,10 @@ pub struct IndexBuilder {
     store: IndexStore,
     /// In-memory buffer for batch writes
     buffer: Vec<IndexEntry>,
+    /// V21-F8 fix: Configurable batch size for Redb flush threshold.
+    /// Defaults to DEFAULT_BATCH_SIZE (1000). Callers can override via
+    /// `with_batch_size()` for workloads that benefit from larger/smaller batches.
+    batch_size: usize,
 }
 
 impl IndexBuilder {
@@ -56,7 +70,8 @@ impl IndexBuilder {
         let store = IndexStore::create(&temp_path, bloom_expected_items(mem_limit))?;
         Ok(Self {
             store,
-            buffer: Vec::with_capacity(BATCH_SIZE),
+            buffer: Vec::with_capacity(DEFAULT_BATCH_SIZE),
+            batch_size: DEFAULT_BATCH_SIZE,
         })
     }
 
@@ -65,7 +80,8 @@ impl IndexBuilder {
         let store = IndexStore::create(path, bloom_expected_items(mem_limit))?;
         Ok(Self {
             store,
-            buffer: Vec::with_capacity(BATCH_SIZE),
+            buffer: Vec::with_capacity(DEFAULT_BATCH_SIZE),
+            batch_size: DEFAULT_BATCH_SIZE,
         })
     }
 
@@ -74,17 +90,40 @@ impl IndexBuilder {
         Self::new(DEFAULT_MEM_LIMIT)
     }
 
+    /// V21-F8 fix: Set a custom batch size for Redb flush threshold.
+    ///
+    /// The batch size controls how many entries are buffered in memory before
+    /// flushing to the Redb staging database. Larger batches reduce transaction
+    /// overhead but increase memory usage. Must be >= 1.
+    ///
+    /// V22-F12 fix: Log a warning when batch_size=0 is silently clamped to 1.
+    /// Previously, `batch_size.max(1)` silently transformed 0 into 1, which could
+    /// confuse callers expecting exact control over batch behavior.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        if batch_size == 0 {
+            tracing::warn!("with_batch_size(0) is invalid — clamping to 1. Use batch_size >= 1.");
+        }
+        let size = batch_size.max(1);
+        self.batch_size = size;
+        self.buffer = Vec::with_capacity(size);
+        self
+    }
+
     /// Insert an entry into the index.
     ///
     /// Entries are buffered in memory and flushed to the Redb staging database
     /// in batches of 1000 for optimal write performance.
     pub fn insert(&mut self, entry: IndexEntry) -> Result<()> {
+        // NOTE (V6-F9 / V15-F4): bloom_set is called BEFORE flush_buffer, unlike
+        // store.insert() which sets bloom AFTER commit (V13-F4). This is intentional —
+        // the builder's bloom must reflect buffered entries for early dedup detection.
+        // Phantom entries on flush failure are harmless: they only cause redundant lookups.
         // Push to buffer first, then update bloom — ensures bloom never
         // contains entries that aren't at least in the buffer (V6-F9 fix)
         let hash = entry.hash;
         self.buffer.push(entry);
-        self.store.bloom_set(&hash);
-        if self.buffer.len() >= BATCH_SIZE {
+        self.store.bloom_set_unchecked(&hash);
+        if self.buffer.len() >= self.batch_size {
             self.flush_buffer()?;
         }
         Ok(())
@@ -104,6 +143,9 @@ impl IndexBuilder {
     /// Flushes any buffered entries to the Redb store first so that
     /// first-write-wins deduplication produces an exact unique count.
     /// After flush, `store.entry_count()` is O(1).
+    ///
+    /// **Takes `&mut self`** because it calls `flush_buffer()` to ensure
+    /// the count reflects all buffered entries after deduplication.
     pub fn entry_count(&mut self) -> usize {
         // Flush buffer so Redb deduplicates via first-write-wins,
         // then return the store's O(1) counter.
@@ -116,11 +158,13 @@ impl IndexBuilder {
     }
 
     /// Check if a hash exists in the Bloom filter
+    #[must_use]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         self.store.bloom_contains(hash)
     }
 
     /// Get reference to the bloom filter
+    #[must_use]
     pub fn bloom(&self) -> &Bloom<ChunkHash> {
         self.store.bloom()
     }
@@ -169,6 +213,17 @@ impl IndexBuilder {
     ) -> Result<(super::MetaIndex, era_common::BlockLocation)> {
         use era_common::BlockId;
 
+        // V19-F7: Note on spawn_blocking for finalize().
+        // The CPU-heavy work (rkyv serialization + AEAD encryption per page) runs
+        // synchronously inside `for_each_sorted_page`. Ideally this would use
+        // `spawn_blocking` to avoid stalling the async runtime. However:
+        //   1. The Redb `ReadTransaction` is !Send (tied to the thread that created it),
+        //      so it cannot be moved into a spawn_blocking closure.
+        //   2. The volume_writer requires &mut and is also !Send in some backends.
+        // Deferring to a future refactor that separates the Redb read phase (sync,
+        // collect pages into memory) from the encrypt+write phase (can be async).
+        // Risk is low: finalize() runs once per archive, not per-block.
+
         // Flush any remaining buffered entries, then stream pages from Redb.
         // Uses for_each_sorted_page to process one page at a time: each page is
         // serialized + encrypted inside the callback, so raw IndexEntry memory
@@ -179,13 +234,18 @@ impl IndexBuilder {
         // Build L1 MetaIndex
         let mut meta = super::MetaIndex::new();
 
-        // Domain-separated nonce context for index blocks (prevents nonce reuse with data blocks)
+        // V14-F1 fix: Multi-byte domain separation for index blocks.
+        // Overwriting a single byte with XOR was weak domain separation.
+        // Now we use a 4-byte domain tag that clearly distinguishes index nonces.
         let mut index_nonce_context = nonce_context;
-        index_nonce_context[0] ^= 0xFF;
+        index_nonce_context[0..4].copy_from_slice(b"IDX\x01");
 
-        // Stream pages: serialize + encrypt synchronously, collect for async volume write
+        // V22-F2 fix: Pre-allocate encrypted_blocks Vec based on estimated page count.
+        // Previously Vec::new() caused repeated reallocations as pages were pushed.
+        // The store's entry_count / ENTRIES_PER_PAGE gives a reasonable estimate.
+        let estimated_pages = (self.store.entry_count() / crate::ENTRIES_PER_PAGE).max(1);
         let mut encrypted_blocks: Vec<(EncryptedMacroBlock, ChunkHash, ChunkHash, BlockId)> =
-            Vec::new();
+            Vec::with_capacity(estimated_pages);
         let mut block_id_counter = 0u64;
         {
             let idx_nonce = index_nonce_context;
@@ -222,6 +282,9 @@ impl IndexBuilder {
                             page_bytes.len()
                         ))
                     })?,
+                    // V14-F8: chunk_count here represents IndexPage entry count,
+                    // not the number of data chunks. This reuses EncryptedMacroBlock's
+                    // field with different semantics for index blocks vs data blocks.
                     chunk_count: u16::try_from(page.len()).map_err(|_| {
                         EraError::IndexError(format!(
                             "IndexPage entry count {} exceeds u16::MAX",
@@ -307,6 +370,10 @@ impl Drop for IndexBuilder {
         }
         if let Err(e) = self.flush_buffer() {
             tracing::error!("Failed to flush buffer in Drop: {}", e);
+            // V20-F7 fix: Preserve staging file for forensic analysis when flush fails.
+            // Without this, Drop would delete the staging file, losing evidence of what
+            // caused the flush failure.
+            self.store.keep_on_drop();
         }
     }
 }
@@ -348,7 +415,7 @@ mod tests {
 
     fn test_hash(value: u64) -> ChunkHash {
         let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
+        bytes[24..32].copy_from_slice(&value.to_be_bytes());
         ChunkHash::from_bytes(bytes)
     }
 
@@ -363,7 +430,8 @@ mod tests {
                 BlockId::new(i / 100),
                 (i % 100) as u32 * 1024,
                 1024,
-            );
+            )
+            .expect("valid entry");
             builder.insert(entry).unwrap();
         }
 
@@ -381,7 +449,8 @@ mod tests {
                 BlockId::new(i / 100),
                 (i % 100) as u32 * 1024,
                 1024,
-            );
+            )
+            .expect("valid entry");
             builder.insert(entry).unwrap();
         }
 

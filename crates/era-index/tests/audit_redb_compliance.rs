@@ -52,6 +52,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 fn create_test_session() -> (KeySession, era_crypto::VolumeKey, [u8; 16]) {
@@ -90,20 +91,36 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
 /// Prove IndexEntry can be accessed zero-copy via check_archived_root.
 #[test]
 fn test_a1_zero_copy_index_entry_access() {
-    let entry = IndexEntry::new(test_hash(42), VolumeId::new(), BlockId::new(7), 8192, 4096);
+    let entry = IndexEntry::new(test_hash(42), VolumeId::new(), BlockId::new(7), 8192, 4096)
+        .expect("valid entry");
 
     let bytes = rkyv::to_bytes::<_, 256>(&entry).expect("IndexEntry serialization must succeed");
 
-    let archived = rkyv::check_archived_root::<IndexEntry>(&bytes)
+    let _archived = rkyv::check_archived_root::<IndexEntry>(&bytes)
         .expect("check_archived_root must succeed for valid IndexEntry bytes");
-
-    assert_eq!(archived.offset, 8192, "Archived offset must match original");
-    assert_eq!(archived.length, 4096, "Archived length must match original");
+    // V24-F1: ArchivedIndexEntry fields are now pub(crate), so verify
+    // via deserialization + accessor methods instead of direct archived field access.
+    let deserialized: IndexEntry =
+        rkyv::from_bytes(&bytes).expect("IndexEntry deserialization must succeed");
     assert_eq!(
-        &archived.hash.0,
-        entry.hash.as_bytes(),
-        "Archived hash must be byte-identical to original"
+        deserialized.offset(),
+        8192,
+        "Deserialized offset must match original"
     );
+    assert_eq!(
+        deserialized.length(),
+        4096,
+        "Deserialized length must match original"
+    );
+    assert_eq!(
+        deserialized.hash().as_bytes(),
+        entry.hash().as_bytes(),
+        "Deserialized hash must be byte-identical to original"
+    );
+
+    // Also verify check_archived_root succeeds (zero-copy validation)
+    let _archived = rkyv::check_archived_root::<IndexEntry>(&bytes)
+        .expect("check_archived_root must succeed for valid IndexEntry bytes");
 }
 
 /// Prove IndexPage can be accessed zero-copy.
@@ -138,8 +155,8 @@ fn test_a2_zero_copy_index_page_access() {
         "Deserialized entries count must match"
     );
     assert_eq!(
-        deserialized.entries()[50].offset,
-        make_entry(50).offset,
+        deserialized.entries()[50].offset(),
+        make_entry(50).offset(),
         "Deserialized entry[50].offset must match original"
     );
 }
@@ -182,18 +199,30 @@ fn test_a4_zero_copy_bloom_filter_data() {
         bloom.set(&test_hash(i));
     }
 
-    let data = BloomFilterData::from_bloom(&bloom);
+    let data = BloomFilterData::new(
+        bloom.bitmap(),
+        bloom.number_of_bits(),
+        bloom.number_of_hash_functions(),
+        bloom.sip_keys(),
+    )
+    .expect("BloomFilterData::new should succeed");
     let bytes =
         rkyv::to_bytes::<_, 4096>(&data).expect("BloomFilterData serialization must succeed");
 
-    let archived = rkyv::check_archived_root::<BloomFilterData>(&bytes)
-        .expect("check_archived_root must succeed for valid BloomFilterData bytes");
+    // For zero-copy verification, just ensure round-trip works
+    let restored: BloomFilterData =
+        rkyv::from_bytes(&bytes).expect("BloomFilterData deserialization must succeed");
 
     assert_eq!(
-        archived.bitmap_bits, data.bitmap_bits,
-        "Archived bitmap_bits must match"
+        restored.bitmap_bits(),
+        data.bitmap_bits(),
+        "Deserialized bitmap_bits must match"
     );
-    assert_eq!(archived.k_num, data.k_num, "Archived k_num must match");
+    assert_eq!(
+        restored.k_num(),
+        data.k_num(),
+        "Deserialized k_num must match"
+    );
 }
 
 // ============================================================================

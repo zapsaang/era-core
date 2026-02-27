@@ -78,7 +78,8 @@ async fn test_cold_recovery_from_orphaned_volume() {
             BlockId::new(i / 100),
             (i % 100) as u32 * 1024,
             1024,
-        );
+        )
+        .expect("valid entry");
         builder.insert(entry).unwrap();
     }
 
@@ -210,13 +211,16 @@ async fn test_index_embedded_in_volume() {
     let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..100u64 {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                i as u32 * 1024,
-                1024,
-            ))
+            .insert(
+                IndexEntry::new(
+                    test_hash(i),
+                    VolumeId::new(),
+                    BlockId::new(0),
+                    i as u32 * 1024,
+                    1024,
+                )
+                .expect("valid entry"),
+            )
             .unwrap();
     }
 

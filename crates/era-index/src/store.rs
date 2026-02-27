@@ -2,7 +2,6 @@
 //!
 //! Wraps a Redb 2.1 database for ACID-compliant chunk indexing during
 //! archive creation. Uses a single embedded Redb B-tree database.
-//! with a single embedded B-tree database.
 //!
 //! ## Lifecycle
 //!
@@ -37,6 +36,10 @@ const MAX_READONLY_ENTRIES: usize = 100_000_000;
 /// Reuses `buf` across calls to avoid per-entry heap allocation in loops.
 /// The buffer is cleared and refilled on each call, so alignment is maintained.
 fn deserialize_entry_with_buf(bytes: &[u8], buf: &mut rkyv::AlignedVec) -> Result<IndexEntry> {
+    // V24-F10: size limit (4x ~80B)
+    if bytes.len() > std::mem::size_of::<IndexEntry>() * 4 {
+        return Err(EraError::Deserialization("oversized".to_string()));
+    }
     buf.clear();
     buf.extend_from_slice(bytes);
     let archived = rkyv::check_archived_root::<IndexEntry>(buf)
@@ -135,15 +138,37 @@ impl IndexStore {
                 len
             );
         }
-
-        let mut bloom = Bloom::new_for_fp_rate(len.max(1024), BLOOM_FP_RATE);
-        for result in table
+        // Iterate keys only — we only need the hash bytes for the bloom filter.
+        // Value deserialization is intentionally skipped because we only need
+        // ChunkHash keys for bloom membership; full IndexEntry values are not used.
+        // V18-F8 fix: Cap bloom sizing to prevent excessive memory allocation.
+        // Even within MAX_READONLY_ENTRIES, sizing a bloom filter for 100M entries
+        // at 1% FPR would allocate ~114MB. Cap at 10M entries (~11.4MB).
+        const MAX_READONLY_BLOOM_ENTRIES: usize = 10_000_000;
+        let bloom_size = len.clamp(1024, MAX_READONLY_BLOOM_ENTRIES);
+        if len > MAX_READONLY_BLOOM_ENTRIES {
+            tracing::warn!(
+                "open_readonly: capping bloom filter size from {} to {} entries (V18-F8)",
+                len,
+                MAX_READONLY_BLOOM_ENTRIES
+            );
+        }
+        let mut bloom = Bloom::new_for_fp_rate(bloom_size, BLOOM_FP_RATE);
+        for (idx, result) in table
             .iter()
             .map_err(|e| EraError::IndexError(e.to_string()))?
+            .enumerate()
         {
             let (key, _) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
             let hash = ChunkHash::from_bytes(*key.value());
             bloom.set(&hash);
+            // V20-F11 fix: Periodic progress logging for large bloom rebuilds.
+            if idx % 100_000 == 0 && idx > 0 {
+                tracing::debug!(
+                    "open_readonly: bloom rebuild progress — {} entries processed",
+                    idx
+                );
+            }
         }
 
         Ok(Self {
@@ -159,6 +184,8 @@ impl IndexStore {
 
     /// Insert a single chunk entry (one write transaction per call).
     ///
+    /// **Performance note (V14-F10):** Opens a new write transaction per call.
+    /// For bulk inserts, prefer `insert_batch()` which amortizes transaction overhead.
     /// Uses first-write-wins semantics: if the hash already exists, the
     /// existing entry is preserved and the new one is silently dropped.
     pub fn insert(&mut self, entry: &IndexEntry) -> Result<()> {
@@ -168,15 +195,37 @@ impl IndexStore {
             ));
         }
 
+        // V21-F1 fix: Inline the read_txn logic directly instead of calling get(),
+        // which would redundantly check the bloom filter a second time (bloom.check
+        // is already performed above). This avoids the double bloom check overhead.
+        // V20-F3 fix: Early-return duplicate check before opening write transaction.
+        if self.bloom.check(&entry.hash) {
+            let read_txn = self
+                .db
+                .begin_read()
+                .map_err(|e| EraError::IndexError(e.to_string()))?;
+            let table = read_txn
+                .open_table(TABLE_CHUNKS)
+                .map_err(|e| EraError::IndexError(e.to_string()))?;
+            if table
+                .get(entry.hash.as_bytes())
+                .map_err(|e| EraError::IndexError(e.to_string()))?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+
         let write_txn = self
             .db
             .begin_write()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let is_new;
         {
             let mut table = write_txn
                 .open_table(TABLE_CHUNKS)
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
-            let is_new = table
+            is_new = table
                 .get(entry.hash.as_bytes())
                 .map_err(|e| EraError::IndexError(e.to_string()))?
                 .is_none();
@@ -186,12 +235,16 @@ impl IndexStore {
                 table
                     .insert(entry.hash.as_bytes(), value_bytes.as_slice())
                     .map_err(|e| EraError::IndexError(e.to_string()))?;
-                self.entry_count += 1;
             }
         }
         write_txn
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
+
+        // V14-F7 fix: increment entry_count AFTER successful commit to prevent drift
+        if is_new {
+            self.entry_count += 1;
+        }
 
         // V13-F4 fix: set bloom AFTER successful commit to avoid phantom entries
         // on commit failure. False positive in bloom only causes redundant storage
@@ -217,22 +270,66 @@ impl IndexStore {
             return Ok(());
         }
 
+        // V21-F9 fix: Filter out bloom-confirmed duplicates before opening the
+        // write transaction. For batches with many duplicates, this avoids
+        // wasting write transaction overhead on entries already in the store.
+        // V22-F1 fix: Use a single read transaction for all bloom-confirmed candidates
+        // instead of opening a separate read_txn per candidate. This reduces Redb
+        // transaction overhead from O(bloom_hits) to O(1) for duplicate checking.
+        let candidates: Vec<&IndexEntry> = if self.entry_count > 0 {
+            let mut filtered = Vec::with_capacity(entries.len());
+            let bloom_hits: Vec<&IndexEntry> = entries
+                .iter()
+                .filter(|e| self.bloom.check(&e.hash))
+                .collect();
+            if !bloom_hits.is_empty() {
+                let read_txn = self
+                    .db
+                    .begin_read()
+                    .map_err(|e| EraError::IndexError(e.to_string()))?;
+                let table = read_txn
+                    .open_table(TABLE_CHUNKS)
+                    .map_err(|e| EraError::IndexError(e.to_string()))?;
+                for entry in bloom_hits {
+                    if table
+                        .get(entry.hash.as_bytes())
+                        .map_err(|e| EraError::IndexError(e.to_string()))?
+                        .is_none()
+                    {
+                        filtered.push(entry);
+                    }
+                }
+            }
+            // Entries not in bloom are definitely new — add them directly
+            for entry in entries {
+                if !self.bloom.check(&entry.hash) {
+                    filtered.push(entry);
+                }
+            }
+            filtered
+        } else {
+            entries.iter().collect()
+        };
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
         let write_txn = self
             .db
             .begin_write()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let mut new_count = 0usize;
         {
             let mut table = write_txn
                 .open_table(TABLE_CHUNKS)
                 .map_err(|e| EraError::IndexError(e.to_string()))?;
-            let mut new_count = 0usize;
-            for entry in entries {
+            for entry in &candidates {
                 let is_new = table
                     .get(entry.hash.as_bytes())
                     .map_err(|e| EraError::IndexError(e.to_string()))?
                     .is_none();
                 if is_new {
-                    let value_bytes = rkyv::to_bytes::<_, 256>(entry)
+                    let value_bytes = rkyv::to_bytes::<_, 256>(*entry)
                         .map_err(|e| EraError::Serialization(e.to_string()))?;
                     table
                         .insert(entry.hash.as_bytes(), value_bytes.as_slice())
@@ -240,11 +337,13 @@ impl IndexStore {
                     new_count += 1;
                 }
             }
-            self.entry_count += new_count;
         }
         write_txn
             .commit()
             .map_err(|e| EraError::IndexError(e.to_string()))?;
+
+        // V14-F7 fix: increment entry_count AFTER successful commit to prevent drift
+        self.entry_count += new_count;
 
         // V13-F4 fix: set bloom bits AFTER successful commit to avoid phantom entries.
         // We set ALL entries (including duplicates that already exist in the DB) to ensure
@@ -288,35 +387,54 @@ impl IndexStore {
 
     /// Check bloom filter only (O(1) negative lookup).
     #[inline]
+    #[must_use]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         self.bloom.check(hash)
     }
 
     /// Eagerly set a hash in the bloom filter (for buffered insert paths).
     #[inline]
-    pub fn bloom_set(&mut self, hash: &ChunkHash) {
+    /// V19-F11: Renamed from `bloom_set` to make the unchecked nature explicit.
+    /// This method sets a bit in the bloom filter without verifying that the
+    /// corresponding entry has been committed to the Redb store.
+    pub(crate) fn bloom_set_unchecked(&mut self, hash: &ChunkHash) {
         self.bloom.set(hash);
     }
 
     /// Get reference to bloom filter.
+    #[must_use]
     pub fn bloom(&self) -> &Bloom<ChunkHash> {
         &self.bloom
     }
 
     /// Get entry count.
+    #[must_use]
     pub fn entry_count(&self) -> usize {
         self.entry_count
     }
 
-    /// Rebuild the bloom filter when entry count exceeds 1.5× the size it was built for.
+    /// Rebuild the bloom filter when entry count exceeds 2× the size it was built for.
     ///
     /// V13-F6: This performs a full table scan and is O(n) in the number of stored entries.
     /// Called from both `insert()` and `insert_batch()` to maintain bloom FPR guarantees.
     fn rebuild_bloom_if_needed(&mut self) -> Result<()> {
-        if self.entry_count <= self.bloom_sized_for * 3 / 2 {
+        if self.entry_count <= self.bloom_sized_for * 2 {
             return Ok(());
         }
-        let new_capacity = self.entry_count * 4;
+        // V21-F5 fix: Log when bloom rebuild triggers for observability.
+        // This can be a silent performance cliff for callers.
+        let old_capacity = self.bloom_sized_for;
+        // V19-F8 fix: Cap new_capacity at MAX_BLOOM_ITEMS to prevent unbounded
+        // memory allocation. Without this cap, a store with 50M entries would
+        // try to allocate a bloom filter sized for 100M entries (~120MB).
+        const MAX_BLOOM_ITEMS: usize = 100_000_000;
+        let new_capacity = (self.entry_count * 2).min(MAX_BLOOM_ITEMS);
+        tracing::info!(
+            "rebuild_bloom_if_needed: rebuilding bloom filter (old_capacity={}, new_capacity={}, entry_count={})",
+            old_capacity,
+            new_capacity,
+            self.entry_count
+        );
         let mut new_bloom = Bloom::new_for_fp_rate(new_capacity.max(1024), BLOOM_FP_RATE);
 
         let read_txn = self
@@ -345,36 +463,13 @@ impl IndexStore {
     /// yields entries sorted by ChunkHash bytes — exactly what
     /// the finalization pipeline needs.
     pub fn read_sorted(&self) -> Result<Vec<IndexEntry>> {
-        let read_txn = self
-            .db
-            .begin_read()
-            .map_err(|e| EraError::IndexError(e.to_string()))?;
-        let table = read_txn
-            .open_table(TABLE_CHUNKS)
-            .map_err(|e| EraError::IndexError(e.to_string()))?;
-
-        // V13-F11: use table.len() as ground truth
-        let table_len = table
-            .len()
-            .map_err(|e| EraError::IndexError(e.to_string()))? as usize;
-        if table_len > MAX_SORTED_ENTRIES {
-            return Err(EraError::IndexError(format!(
-                "read_sorted: entry count {} exceeds maximum {} (V7-F6)",
-                table_len, MAX_SORTED_ENTRIES
-            )));
-        }
-
-        let mut entries = Vec::with_capacity(table_len);
-        let mut align_buf = rkyv::AlignedVec::with_capacity(256);
-        for result in table
-            .iter()
-            .map_err(|e| EraError::IndexError(e.to_string()))?
-        {
-            let (_, value) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
-            let bytes = value.value();
-            let entry = deserialize_entry_with_buf(bytes, &mut align_buf)?;
-            entries.push(entry);
-        }
+        // V20-F4 fix: Delegate to for_each_sorted_page() to avoid duplicating
+        // the iteration logic. Collects entries via extend_from_slice(page.entries()).
+        let mut entries = Vec::new();
+        self.for_each_sorted_page(|page, _block_id| {
+            entries.extend_from_slice(page.entries());
+            Ok(())
+        })?;
         Ok(entries)
     }
 
@@ -401,6 +496,9 @@ impl IndexStore {
     /// Same logic as `read_sorted_pages`, but instead of collecting all pages into a Vec,
     /// each completed page is passed to `callback` and can be dropped before the next is built.
     /// Sorted ordering is preserved (Redb B-tree iteration is already sorted).
+    ///
+    /// V22-F6 fix: Added periodic progress logging for large iterations.
+    /// Without this, callers had no visibility into long-running page scans.
     pub fn for_each_sorted_page<F>(&self, mut callback: F) -> Result<()>
     where
         F: FnMut(crate::IndexPage, era_common::BlockId) -> Result<()>,
@@ -430,7 +528,9 @@ impl IndexStore {
 
         let mut chunk = Vec::with_capacity(entries_per_page);
         let mut block_id_counter = 0u64;
-        let mut align_buf = rkyv::AlignedVec::with_capacity(256);
+        // V21-F12 fix: Initialize align_buf with a capacity based on actual IndexEntry
+        // memory size to reduce reallocations. 256 bytes was often too small.
+        let mut align_buf = rkyv::AlignedVec::with_capacity(IndexEntry::memory_size() * 2);
         for result in table
             .iter()
             .map_err(|e| EraError::IndexError(e.to_string()))?
@@ -441,16 +541,26 @@ impl IndexStore {
             chunk.push(entry);
 
             if chunk.len() >= entries_per_page {
-                // V13-F7 fix: take the chunk to pass to try_new, leaving an empty Vec in place
-                let page = crate::IndexPage::try_new(std::mem::take(&mut chunk))?;
+                // V17-F2 fix: use try_new_presorted since Redb B-tree yields sorted keys
+                let page = crate::IndexPage::try_new_presorted(std::mem::take(&mut chunk))?;
+                chunk = Vec::with_capacity(entries_per_page);
                 callback(page, BlockId::new(block_id_counter))?;
                 block_id_counter += 1;
+                // V23-F8 fix: Progress logging moved AFTER page callback emission.
+                // Previously, this check was inside the inner entry loop and fired on
+                // every entry after a page boundary, not once per 100 pages.
+                if block_id_counter > 0 && block_id_counter.is_multiple_of(100) {
+                    tracing::debug!(
+                        "for_each_sorted_page: processed {} pages so far",
+                        block_id_counter
+                    );
+                }
             }
         }
 
         // Flush remaining entries
         if !chunk.is_empty() {
-            let page = crate::IndexPage::try_new(chunk)?;
+            let page = crate::IndexPage::try_new_presorted(chunk)?;
             callback(page, BlockId::new(block_id_counter))?;
         }
 
@@ -466,6 +576,7 @@ impl IndexStore {
     }
 
     /// Get the database path.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.db_path
     }
@@ -478,6 +589,14 @@ impl IndexStore {
         self.should_keep_on_drop = true;
     }
 
+    /// V22-F10 fix: Get the on-disk size of the Redb database file in bytes.
+    ///
+    /// Returns `None` if the file does not exist or metadata cannot be read.
+    /// Useful for monitoring staging database growth and diagnosing disk usage.
+    #[must_use]
+    pub fn db_file_size(&self) -> Option<u64> {
+        std::fs::metadata(&self.db_path).ok().map(|m| m.len())
+    }
     /// Discard the staging database: remove the file while still holding the DB lock.
     ///
     /// This eliminates the TOCTOU window in Drop where another process could
@@ -533,6 +652,7 @@ mod tests {
             (i % 100) as u32 * 1024,
             1024,
         )
+        .expect("valid entry")
     }
 
     #[test]
@@ -644,8 +764,10 @@ mod tests {
         let mut store = IndexStore::create(&db_path, 1024).unwrap();
 
         // Insert same hash twice with different offsets
-        let entry1 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 1024);
-        let entry2 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 4096, 2048);
+        let entry1 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 1024)
+            .expect("valid entry");
+        let entry2 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 4096, 2048)
+            .expect("valid entry");
 
         store.insert(&entry1).unwrap();
         store.insert(&entry2).unwrap();

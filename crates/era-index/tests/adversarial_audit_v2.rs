@@ -25,6 +25,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 /// FINDING-IDX-4: IndexPage::try_new with empty vec returns Err (panicking new() removed).
@@ -48,7 +49,6 @@ fn test_index_page_try_new_empty_returns_err() {
 fn test_duplicate_hashes_deduplicated_after_fix() {
     let mut tree = ChunkIndex::new(ChunkIndexConfig {
         mem_limit: 1024 * 1024,
-        temp_dir: std::env::temp_dir(),
     })
     .unwrap();
 
@@ -57,9 +57,9 @@ fn test_duplicate_hashes_deduplicated_after_fix() {
     let vol2 = VolumeId::new();
 
     // Insert same hash pointing to two different locations
-    tree.insert(IndexEntry::new(hash, vol1, BlockId::new(0), 0, 1024))
+    tree.insert(IndexEntry::new(hash, vol1, BlockId::new(0), 0, 1024).expect("valid entry"))
         .unwrap();
-    tree.insert(IndexEntry::new(hash, vol2, BlockId::new(1), 4096, 2048))
+    tree.insert(IndexEntry::new(hash, vol2, BlockId::new(1), 4096, 2048).expect("valid entry"))
         .unwrap();
 
     let reader = tree.finalize().unwrap();
@@ -89,20 +89,20 @@ fn test_meta_index_binary_search_correctness() {
     }
 
     assert_eq!(
-        meta.find_page(&be_hash(50)).unwrap().block_id,
+        meta.find_page(&be_hash(50)).unwrap().block_id(),
         BlockId::new(0)
     );
     assert_eq!(
-        meta.find_page(&be_hash(950)).unwrap().block_id,
+        meta.find_page(&be_hash(950)).unwrap().block_id(),
         BlockId::new(9)
     );
     assert_eq!(
-        meta.find_page(&be_hash(550)).unwrap().block_id,
+        meta.find_page(&be_hash(550)).unwrap().block_id(),
         BlockId::new(5)
     );
     assert!(meta.find_page(&be_hash(1000)).is_none());
     assert_eq!(
-        meta.find_page(&be_hash(0)).unwrap().block_id,
+        meta.find_page(&be_hash(0)).unwrap().block_id(),
         BlockId::new(0)
     );
 }
@@ -123,7 +123,7 @@ fn test_meta_index_le_hashes_no_wrong_page() {
 
     if let Some(page_ptr) = result {
         assert!(
-            target >= page_ptr.min_hash && target <= page_ptr.max_hash,
+            target >= *page_ptr.min_hash() && target <= *page_ptr.max_hash(),
             "find_page must never return a page that doesn't contain the target hash"
         );
     }
@@ -150,7 +150,7 @@ fn test_redb_store_different_instances_isolated() {
     // Both stores should have identical data but be independent
     assert_eq!(sorted1.len(), sorted2.len());
     for (a, b) in sorted1.iter().zip(sorted2.iter()) {
-        assert_eq!(a.hash, b.hash);
+        assert_eq!(a.hash(), b.hash());
     }
 }
 
@@ -191,10 +191,8 @@ fn test_redb_store_tampered_file_rejected() {
 /// FINDING-IDX-7: ChunkIndex with Redb — verify all entries survive insert cycle.
 #[test]
 fn test_chunk_index_redb_all_entries_survive() {
-    let temp_dir = TempDir::new().unwrap();
     let mut tree = ChunkIndex::new(ChunkIndexConfig {
         mem_limit: 4096, // Small limit (affects bloom sizing only with Redb)
-        temp_dir: temp_dir.path().to_path_buf(),
     })
     .unwrap();
 

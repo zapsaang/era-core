@@ -42,6 +42,7 @@ fn test_redb_store_insert_and_retrieve() {
                 (i % 100) as u32 * 1024,
                 1024,
             )
+            .expect("valid entry")
         })
         .collect();
 
@@ -53,7 +54,7 @@ fn test_redb_store_insert_and_retrieve() {
         let result = store.get(&test_hash(i)).unwrap();
         assert!(result.is_some(), "Entry {} must be retrievable", i);
         let entry = result.unwrap();
-        assert_eq!(entry.hash, test_hash(i));
+        assert_eq!(*entry.hash(), test_hash(i));
     }
 
     // Verify bloom filter
@@ -71,13 +72,16 @@ fn test_redb_store_sorted_iteration() {
     // Insert in reverse order
     for i in (0..1000u64).rev() {
         store
-            .insert(&IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(i / 100),
-                (i % 100) as u32 * 1024,
-                1024,
-            ))
+            .insert(
+                &IndexEntry::new(
+                    test_hash(i),
+                    VolumeId::new(),
+                    BlockId::new(i / 100),
+                    (i % 100) as u32 * 1024,
+                    1024,
+                )
+                .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -86,7 +90,7 @@ fn test_redb_store_sorted_iteration() {
     assert_eq!(sorted.len(), 1000);
     for i in 1..sorted.len() {
         assert!(
-            sorted[i - 1].hash <= sorted[i].hash,
+            sorted[i - 1].hash() <= sorted[i].hash(),
             "Entries must be sorted at index {}",
             i
         );
@@ -109,7 +113,8 @@ fn test_bloom_filter_via_builder() {
             BlockId::new(i / 1000),
             (i % 1000) as u32 * 1024,
             1024,
-        );
+        )
+        .expect("valid entry");
         builder.insert(entry).unwrap();
     }
 
@@ -158,6 +163,7 @@ fn test_redb_batch_insert() {
                     (hash_value % 100) as u32 * 1024,
                     1024,
                 )
+                .expect("valid entry")
             })
             .collect();
         store.insert_batch(&entries).unwrap();
@@ -170,7 +176,7 @@ fn test_redb_batch_insert() {
     // Verify sorted order
     for i in 1..sorted.len() {
         assert!(
-            sorted[i - 1].hash <= sorted[i].hash,
+            sorted[i - 1].hash() <= sorted[i].hash(),
             "Batch insert produced unsorted output at index {}",
             i
         );
@@ -192,6 +198,7 @@ fn test_index_page_layout() {
                 (i % 100) as u32 * 1024,
                 1024,
             )
+            .expect("valid entry")
         })
         .collect();
 
@@ -202,7 +209,7 @@ fn test_index_page_layout() {
     assert_eq!(page.len(), ENTRIES_PER_PAGE);
 
     for (i, entry) in page.entries().iter().enumerate() {
-        assert_eq!(entry.hash, test_hash(i as u64));
+        assert_eq!(*entry.hash(), test_hash(i as u64));
     }
 
     let serialized = rkyv::to_bytes::<_, 4096>(&page).unwrap();
@@ -231,15 +238,15 @@ fn test_meta_index_lookup() {
     }
 
     assert_eq!(
-        meta.find_page(&test_hash(500)).unwrap().block_id,
+        meta.find_page(&test_hash(500)).unwrap().block_id(),
         BlockId::new(100)
     );
     assert_eq!(
-        meta.find_page(&test_hash(5500)).unwrap().block_id,
+        meta.find_page(&test_hash(5500)).unwrap().block_id(),
         BlockId::new(105)
     );
     assert_eq!(
-        meta.find_page(&test_hash(9999)).unwrap().block_id,
+        meta.find_page(&test_hash(9999)).unwrap().block_id(),
         BlockId::new(109)
     );
     assert!(meta.find_page(&test_hash(10_000)).is_none());
@@ -261,7 +268,8 @@ fn test_full_index_lifecycle() {
             BlockId::new(i / 1000),
             (i % 1000) as u32 * 1024,
             1024,
-        );
+        )
+        .expect("valid entry");
         builder.insert(entry).unwrap();
     }
 
@@ -290,6 +298,7 @@ fn test_index_builder_bloom_lookup() {
                 (i % 100) as u32 * 1024,
                 1024,
             )
+            .expect("valid entry")
         })
         .collect();
 
@@ -300,7 +309,7 @@ fn test_index_builder_bloom_lookup() {
     // Test positive lookups via bloom
     for entry in known_entries.iter().step_by(100) {
         assert!(
-            builder.bloom_contains(&entry.hash),
+            builder.bloom_contains(entry.hash()),
             "Bloom must contain inserted hash"
         );
     }
@@ -338,7 +347,8 @@ fn test_redb_entry_count_tracking() {
             BlockId::new(i / 100),
             (i % 100) as u32 * 1024,
             1024,
-        );
+        )
+        .expect("valid entry");
         builder.insert(entry).unwrap();
     }
 
@@ -360,6 +370,7 @@ fn test_index_page_compression_and_encryption() {
                 (i % 100) as u32 * 1024,
                 1024,
             )
+            .expect("valid entry")
         })
         .collect();
 
@@ -389,13 +400,16 @@ fn test_redb_crash_recovery() {
         let mut store = IndexStore::create(&db_path, 10_000).unwrap();
         for i in 0..5000u64 {
             store
-                .insert(&IndexEntry::new(
-                    test_hash(i),
-                    VolumeId::new(),
-                    BlockId::new(i / 100),
-                    (i % 100) as u32 * 1024,
-                    1024,
-                ))
+                .insert(
+                    &IndexEntry::new(
+                        test_hash(i),
+                        VolumeId::new(),
+                        BlockId::new(i / 100),
+                        (i % 100) as u32 * 1024,
+                        1024,
+                    )
+                    .expect("valid entry"),
+                )
                 .unwrap();
         }
         // Simulate crash: preserve file on drop so recovery can reopen it

@@ -9,10 +9,9 @@
 //! - **IndexReader**: Bloom + L1 + L2 hierarchical lookup
 //! - **No Spiller/Merger**: Redb handles durability and sorted iteration
 
-use std::path::PathBuf;
+// V20-F2 fix: RwLock removed — IndexReader is read-only after construction,
+// so Arc<IndexReader> suffices. Eliminates unnecessary synchronization overhead.
 use std::sync::Arc;
-
-use parking_lot::RwLock;
 
 use era_common::{ChunkHash, Result};
 use era_crypto::{KeySession, VolumeKey};
@@ -26,15 +25,12 @@ use crate::{IndexBuilder, IndexEntry, IndexLocation, IndexReader, MetaIndex};
 pub struct ChunkIndexConfig {
     /// Memory limit for bloom filter sizing (bytes)
     pub mem_limit: usize,
-    /// Directory for Redb staging file
-    pub temp_dir: PathBuf,
 }
 
 impl Default for ChunkIndexConfig {
     fn default() -> Self {
         Self {
             mem_limit: 64 * 1024 * 1024, // 64MB
-            temp_dir: std::env::temp_dir(),
         }
     }
 }
@@ -63,7 +59,7 @@ impl Default for ChunkIndexConfig {
 ///     BlockId::new(0),
 ///     0,
 ///     4096,
-/// );
+/// )?;
 /// tree.insert(entry)?;
 ///
 /// // Finalize and get reader
@@ -81,7 +77,7 @@ pub struct ChunkIndex {
     /// Index builder (write path) — backed by Redb
     builder: Option<IndexBuilder>,
     /// Index reader (read path)
-    reader: Option<Arc<RwLock<IndexReader>>>,
+    reader: Option<Arc<IndexReader>>,
     /// State tracking
     state: IndexState,
 }
@@ -167,6 +163,7 @@ impl ChunkIndex {
     /// - **`Finalized`**: checks the reader's serialized Bloom filter.
     ///
     /// Returns `false` if the backing object is unexpectedly absent.
+    #[must_use]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
         match self.state {
             IndexState::Building => self
@@ -177,7 +174,7 @@ impl ChunkIndex {
             IndexState::Finalized => self
                 .reader
                 .as_ref()
-                .map(|r| r.read().bloom_contains(hash))
+                .map(|r| r.bloom_contains(hash))
                 .unwrap_or(false),
         }
     }
@@ -200,28 +197,38 @@ impl ChunkIndex {
             era_common::EraError::InvalidFormat("Builder must exist in Building state".to_string())
         })?;
 
-        // Flush buffer and drain entries as pre-built pages.
-        let bloom_clone = builder.bloom().clone();
+        // Read pages first so we can log entry count for observability.
         let pages = builder.read_sorted_pages()?;
-        // NOTE: This path keeps using read_sorted_pages() (Vec materialization) because
-        // IndexReader::from_pages() requires all pages in memory to build the L2 lookup.
-        // The streaming for_each_sorted_page() is used in builder.rs finalize() which
-        // writes pages to volume one at a time and doesn't need them all in memory.
+        // NOTE (V14-F9): This path materializes ALL pages in memory because
+        // IndexReader::from_pages() requires all pages to build the L2 lookup HashMap.
+        // For the volume-write path, builder.rs finalize() uses the streaming
+        // for_each_sorted_page() which is O(ENTRIES_PER_PAGE) memory per page.
+        // The memory bound here is MAX_SORTED_ENTRIES × sizeof(IndexEntry) ≈ 112MB.
         let entries_count: usize = pages.iter().map(|(p, _)| p.len()).sum();
+
+        // V21-F6 fix: Log entry count BEFORE bloom serialization so that
+        // if serialization fails, we still have observability into the page count.
+        tracing::info!("Index finalized: {} total entries", entries_count);
+
+        // V22-F8 fix: Serialize bloom directly from builder instead of cloning.
+        // Previously, `builder.bloom().clone()` duplicated the entire bloom bitmap
+        // (potentially megabytes) just to serialize it. Serializing directly from
+        // the builder's bloom reference avoids the intermediate allocation.
+        let bloom_bytes = crate::serialize_bloom(builder.bloom())?;
 
         // Build MetaIndex + IndexReader from pages
         let meta = MetaIndex::new();
-        let bloom_bytes = crate::serialize_bloom(&bloom_clone)?;
         let mut meta_with_bloom = meta;
         meta_with_bloom.set_bloom_filter(bloom_bytes)?;
 
-        let reader = IndexReader::from_pages(meta_with_bloom, bloom_clone, pages)?;
+        let reader = IndexReader::from_pages(meta_with_bloom, pages)?;
 
-        tracing::info!("Index finalized: {} total entries", entries_count);
-
-        self.reader = Some(Arc::new(RwLock::new(reader)));
+        self.reader = Some(Arc::new(reader));
         self.state = IndexState::Finalized;
-
+        // V19-F6 fix: Drop the builder to release the Redb database handle and
+        // free its file descriptor + mmap resources. After finalization, the builder
+        // is no longer needed — all data has been transferred to the reader.
+        self.builder.take();
         let reader_arc = self
             .reader
             .as_ref()
@@ -251,7 +258,7 @@ impl ChunkIndex {
         .await?;
 
         Ok(ChunkIndexReader {
-            reader: Arc::new(RwLock::new(reader)),
+            reader: Arc::new(reader),
         })
     }
 }
@@ -261,23 +268,23 @@ impl ChunkIndex {
 /// Provides fast lookups via Bloom filters and hierarchical indexing.
 #[derive(Clone)]
 pub struct ChunkIndexReader {
-    reader: Arc<RwLock<IndexReader>>,
+    reader: Arc<IndexReader>,
 }
 
 impl ChunkIndexReader {
     /// Lookup a chunk hash in the index
     pub fn lookup(&self, hash: &ChunkHash) -> Result<Option<IndexLocation>> {
-        self.reader.read().lookup(hash)
+        self.reader.lookup(hash)
     }
 
     /// Check if a hash exists in the Bloom filter (fast O(1) negative lookup)
     #[inline]
     pub fn bloom_contains(&self, hash: &ChunkHash) -> bool {
-        self.reader.read().bloom_contains(hash)
+        self.reader.bloom_contains(hash)
     }
 
     /// Get the underlying reader (for advanced use cases)
-    pub fn reader(&self) -> Arc<RwLock<IndexReader>> {
+    pub fn reader(&self) -> Arc<IndexReader> {
         Arc::clone(&self.reader)
     }
 }
@@ -303,7 +310,8 @@ mod tests {
     fn test_chunk_index_insert() {
         let mut tree = ChunkIndex::new_default().unwrap();
 
-        let entry = IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(0), 0, 4096);
+        let entry = IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(0), 0, 4096)
+            .expect("valid entry");
 
         tree.insert(entry).unwrap();
         assert!(tree.bloom_contains(&test_hash(100)));
@@ -315,7 +323,8 @@ mod tests {
         let mut tree = ChunkIndex::new_default().unwrap();
 
         for i in 0..100u64 {
-            let entry = IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i), 0, 4096);
+            let entry = IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i), 0, 4096)
+                .expect("valid entry");
             tree.insert(entry).unwrap();
         }
 
@@ -335,9 +344,8 @@ mod tests {
         use crate::reader::IndexReader;
 
         let meta = crate::MetaIndex::new();
-        let bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-        let reader = IndexReader::from_memory(meta, bloom, vec![])
-            .expect("IndexReader creation should succeed");
+        let reader =
+            IndexReader::from_memory(meta, vec![]).expect("IndexReader creation should succeed");
 
         let _result = reader.bloom_contains(&test_hash(25));
     }

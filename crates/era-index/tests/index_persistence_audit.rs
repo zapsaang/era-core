@@ -92,13 +92,10 @@ async fn test_embedded_finalize_writes_typed_blocks() {
     let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..50u64 {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(i / 10),
-                0,
-                1024,
-            ))
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i / 10), 0, 1024)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -184,12 +181,12 @@ fn test_meta_index_rkyv_roundtrip() {
         "Page count must survive roundtrip"
     );
     assert_eq!(
-        restored.pages()[0].min_hash,
+        *restored.pages()[0].min_hash(),
         test_hash(0),
         "Page hash range must survive roundtrip"
     );
     assert_eq!(
-        restored.pages()[2].max_hash,
+        *restored.pages()[2].max_hash(),
         test_hash(299),
         "Page hash range must survive roundtrip"
     );
@@ -251,7 +248,8 @@ fn test_index_page_binary_search_edge_cases() {
         BlockId::new(0),
         0,
         1024,
-    )])
+    )
+    .expect("valid entry")])
     .unwrap();
     assert!(page.find(&test_hash(42)).is_some());
     assert!(page.find(&test_hash(41)).is_none());
@@ -259,7 +257,10 @@ fn test_index_page_binary_search_edge_cases() {
 
     // Duplicate-adjacent hashes (all same hash)
     let entries: Vec<IndexEntry> = (0..5)
-        .map(|i| IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(i), 0, 1024))
+        .map(|i| {
+            IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(i), 0, 1024)
+                .expect("valid entry")
+        })
         .collect();
     let page = era_index::IndexPage::try_new(entries).unwrap();
     // binary_search_by_key will find one of them
@@ -273,14 +274,16 @@ fn test_index_page_binary_search_edge_cases() {
             BlockId::new(0),
             0,
             1024,
-        ),
+        )
+        .expect("valid entry"),
         IndexEntry::new(
             ChunkHash::from_bytes([0xFF; 32]),
             VolumeId::new(),
             BlockId::new(1),
             0,
             1024,
-        ),
+        )
+        .expect("valid entry"),
     ];
     let page = era_index::IndexPage::try_new(entries).unwrap();
     assert!(page.find(&ChunkHash::from_bytes([0u8; 32])).is_some());
@@ -297,13 +300,10 @@ fn test_builder_memory_bound_enforcement() {
 
     for i in 0..50u64 {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                0,
-                1024,
-            ))
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -339,13 +339,10 @@ async fn test_no_external_files_after_embedded_finalize() {
     let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..100u64 {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                0,
-                1024,
-            ))
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -388,13 +385,10 @@ fn test_redb_staging_file_lifecycle() {
     let mut store = era_index::IndexStore::create(&redb_path, 1024).unwrap();
     for i in 0..50u64 {
         store
-            .insert(&IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                0,
-                1024,
-            ))
+            .insert(
+                &IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -440,7 +434,8 @@ async fn test_index_page_encryption_roundtrip() {
             BlockId::new(i / 50),
             (i % 50) as u32 * 1024,
             1024,
-        );
+        )
+        .expect("valid entry");
         expected_entries.push(entry);
         builder.insert(entry).unwrap();
     }
@@ -517,13 +512,10 @@ async fn test_wrong_key_cold_recovery_fails_cleanly() {
     let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..10u64 {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                0,
-                1024,
-            ))
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -622,13 +614,16 @@ async fn test_large_index_embedded_finalize() {
     let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..entry_count {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(i / 1000),
-                (i % 1000) as u32 * 64,
-                64,
-            ))
+            .insert(
+                IndexEntry::new(
+                    test_hash(i),
+                    VolumeId::new(),
+                    BlockId::new(i / 1000),
+                    (i % 1000) as u32 * 64,
+                    64,
+                )
+                .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -719,13 +714,10 @@ async fn test_multiple_index_writes_uses_last() {
     let mut builder1 = IndexBuilder::new_default().unwrap();
     for i in 0..5u64 {
         builder1
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                0,
-                1024,
-            ))
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
     let (_, loc1) = builder1
@@ -737,13 +729,10 @@ async fn test_multiple_index_writes_uses_last() {
     let mut builder2 = IndexBuilder::new_default().unwrap();
     for i in 100..120u64 {
         builder2
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(1),
-                0,
-                2048,
-            ))
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(1), 0, 2048)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
     let (_, loc2) = builder2
@@ -778,8 +767,7 @@ async fn test_multiple_index_writes_uses_last() {
 #[test]
 fn test_index_reader_from_memory_empty() {
     let meta = MetaIndex::new();
-    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);
-    let reader = IndexReader::from_memory(meta, bloom, vec![]).unwrap();
+    let reader = IndexReader::from_memory(meta, vec![]).unwrap();
 
     // Lookup on empty index must return None
     let result = reader.lookup(&test_hash(42)).unwrap();
@@ -806,13 +794,14 @@ fn test_index_reader_from_memory_with_entries() {
                 BlockId::new(i / 10),
                 (i % 10) as u32 * 1024,
                 1024,
-            );
-            bloom.set(&entry.hash);
+            )
+            .expect("valid entry");
+            bloom.set(entry.hash());
             entry
         })
         .collect();
 
-    let reader = IndexReader::from_memory(meta, bloom, entries).unwrap();
+    let reader = IndexReader::from_memory(meta, entries).unwrap();
 
     for i in 0..50u64 {
         let result = reader.lookup(&test_hash(i)).unwrap();
@@ -960,13 +949,10 @@ fn test_footer_checksum_rejects_tampered_index_fields() {
 #[test]
 fn test_insert_after_finalize_rejected() {
     let mut tree = era_index::ChunkIndex::new_default().unwrap();
-    tree.insert(IndexEntry::new(
-        test_hash(0),
-        VolumeId::new(),
-        BlockId::new(0),
-        0,
-        1024,
-    ))
+    tree.insert(
+        IndexEntry::new(test_hash(0), VolumeId::new(), BlockId::new(0), 0, 1024)
+            .expect("valid entry"),
+    )
     .unwrap();
 
     let _reader = tree.finalize().unwrap();
@@ -994,13 +980,10 @@ fn test_bloom_zero_false_negatives_after_finalize() {
     let count = 500u64;
 
     for i in 0..count {
-        tree.insert(IndexEntry::new(
-            test_hash(i),
-            VolumeId::new(),
-            BlockId::new(0),
-            0,
-            1024,
-        ))
+        tree.insert(
+            IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024)
+                .expect("valid entry"),
+        )
         .unwrap();
     }
 
@@ -1023,13 +1006,16 @@ fn test_all_entries_retrievable_after_finalize() {
     let count = 300u64;
 
     for i in 0..count {
-        tree.insert(IndexEntry::new(
-            test_hash(i),
-            VolumeId::new(),
-            BlockId::new(i / 100),
-            (i % 100) as u32 * 512,
-            512,
-        ))
+        tree.insert(
+            IndexEntry::new(
+                test_hash(i),
+                VolumeId::new(),
+                BlockId::new(i / 100),
+                (i % 100) as u32 * 512,
+                512,
+            )
+            .expect("valid entry"),
+        )
         .unwrap();
     }
 
@@ -1052,21 +1038,13 @@ fn test_duplicate_hash_insertion() {
     let hash = test_hash(42);
 
     // Insert same hash with different locations
-    tree.insert(IndexEntry::new(
-        hash,
-        VolumeId::new(),
-        BlockId::new(0),
-        0,
-        1024,
-    ))
+    tree.insert(
+        IndexEntry::new(hash, VolumeId::new(), BlockId::new(0), 0, 1024).expect("valid entry"),
+    )
     .unwrap();
-    tree.insert(IndexEntry::new(
-        hash,
-        VolumeId::new(),
-        BlockId::new(1),
-        4096,
-        2048,
-    ))
+    tree.insert(
+        IndexEntry::new(hash, VolumeId::new(), BlockId::new(1), 4096, 2048).expect("valid entry"),
+    )
     .unwrap();
 
     let reader = tree.finalize().unwrap();
@@ -1097,13 +1075,10 @@ async fn test_footer_index_fields_populated_after_full_flow() {
     let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..25u64 {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(0),
-                0,
-                1024,
-            ))
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(0), 0, 1024)
+                    .expect("valid entry"),
+            )
             .unwrap();
     }
 
@@ -1155,13 +1130,16 @@ async fn test_multi_page_index_recovery() {
     let mut builder = IndexBuilder::new_default().unwrap();
     for i in 0..entry_count {
         builder
-            .insert(IndexEntry::new(
-                test_hash(i),
-                VolumeId::new(),
-                BlockId::new(i / 5000),
-                (i % 5000) as u32 * 32,
-                32,
-            ))
+            .insert(
+                IndexEntry::new(
+                    test_hash(i),
+                    VolumeId::new(),
+                    BlockId::new(i / 5000),
+                    (i % 5000) as u32 * 32,
+                    32,
+                )
+                .expect("valid entry"),
+            )
             .unwrap();
     }
 

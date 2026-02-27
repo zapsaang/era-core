@@ -78,6 +78,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 fn make_entry_at(hash_val: u64, block: u64, offset: u32, length: u32) -> IndexEntry {
@@ -88,6 +89,7 @@ fn make_entry_at(hash_val: u64, block: u64, offset: u32, length: u32) -> IndexEn
         offset,
         length,
     )
+    .expect("valid entry")
 }
 
 // Suppress unused import warnings for items required by audit spec
@@ -118,8 +120,14 @@ fn v13_regression_v11f9_be_tail_hash_ordering() {
 #[test]
 fn v13_regression_v11f11_bloom_version_field() {
     let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let data = BloomFilterData::from_bloom(&bloom);
-    assert_eq!(data.version, 1, "BloomFilterData must have version=1");
+    let data = BloomFilterData::new(
+        bloom.bitmap(),
+        bloom.number_of_bits(),
+        bloom.number_of_hash_functions(),
+        bloom.sip_keys(),
+    )
+    .expect("bloom data");
+    assert_eq!(data.version(), 1, "BloomFilterData must have version=1");
 }
 
 /// V11-F7 regression: require_building prevents insert after finalize
@@ -237,15 +245,8 @@ fn v13_f1b_entry_count_with_duplicates_in_buffer() {
 fn v13_f2a_from_memory_empty_meta_works() {
     // Happy path: empty MetaIndex + entries = correct reader
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
-    let bloom = {
-        let mut b = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-        for e in &entries {
-            b.set(&e.hash);
-        }
-        b
-    };
     let meta = MetaIndex::new();
-    let reader = IndexReader::from_memory(meta, bloom, entries).expect("from_memory");
+    let reader = IndexReader::from_memory(meta, entries).expect("from_memory");
     let result = reader.lookup(&test_hash(50)).expect("lookup");
     assert!(result.is_some(), "entry 50 must be found");
 }
@@ -260,17 +261,10 @@ fn v13_f2b_from_memory_with_preexisting_pages_appends() {
         .expect("add stale page");
 
     let entries: Vec<IndexEntry> = (100..200).map(make_entry).collect();
-    let bloom = {
-        let mut b = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-        for e in &entries {
-            b.set(&e.hash);
-        }
-        b
-    };
 
     // from_memory will try to add_page with min_hash >= test_hash(100)
     // which is > test_hash(49), so it should succeed (non-overlapping)
-    let reader = IndexReader::from_memory(meta, bloom, entries).expect("from_memory");
+    let reader = IndexReader::from_memory(meta, entries).expect("from_memory");
 
     // Lookup for hash 150 should find data in embedded pages
     let result = reader.lookup(&test_hash(150)).expect("lookup");
@@ -317,7 +311,7 @@ fn v13_f3a_try_new_dedup_preserves_first() {
     // Both e1 and e2 have the same hash, sort is stable-ish on dedup_by_key
     // dedup_by_key keeps the first of consecutive equal keys
     assert!(
-        found.length == 1024 || found.length == 2048,
+        found.length() == 1024 || found.length() == 2048,
         "dedup keeps one of the two entries"
     );
 }
@@ -567,7 +561,10 @@ fn v13_f7b_for_each_sorted_page_pages_are_sorted() {
             // Within page, entries are sorted
             let entries = page.entries();
             for w in entries.windows(2) {
-                assert!(w[0].hash <= w[1].hash, "entries within page must be sorted");
+                assert!(
+                    w[0].hash() <= w[1].hash(),
+                    "entries within page must be sorted"
+                );
             }
             // Across pages, ranges are non-overlapping and ascending
             if let Some(prev_max) = prev_max_hash {
@@ -598,15 +595,8 @@ fn v13_f7b_for_each_sorted_page_pages_are_sorted() {
 fn v13_f8a_lookup_returns_correct_data_through_clone() {
     // Verify that the clone path returns correct data
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
-    let bloom = {
-        let mut b = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-        for e in &entries {
-            b.set(&e.hash);
-        }
-        b
-    };
     let meta = MetaIndex::new();
-    let reader = IndexReader::from_memory(meta, bloom, entries).expect("from_memory");
+    let reader = IndexReader::from_memory(meta, entries).expect("from_memory");
 
     // Multiple lookups on the same page trigger multiple clones
     for _ in 0..10 {
@@ -629,15 +619,14 @@ fn v13_f8b_from_pages_lookup_also_clones() {
     let bloom = {
         let mut b = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
         for e in &entries {
-            b.set(&e.hash);
+            b.set(e.hash());
         }
         b
     };
     let bloom_bytes = era_index::serialize_bloom(&bloom).expect("serialize bloom");
     let mut meta = MetaIndex::new();
     meta.set_bloom_filter(bloom_bytes).expect("set bloom");
-    let reader =
-        IndexReader::from_pages(meta, bloom, vec![(page, BlockId::new(0))]).expect("from_pages");
+    let reader = IndexReader::from_pages(meta, vec![(page, BlockId::new(0))]).expect("from_pages");
 
     let r1 = reader.lookup(&test_hash(25)).expect("lookup 1");
     let r2 = reader.lookup(&test_hash(25)).expect("lookup 2");
@@ -806,7 +795,7 @@ fn v13_f12a_meta_index_find_page_binary_search_works() {
     // find_page for hash in page 50
     let result = meta.find_page(&test_hash(5050));
     assert!(result.is_some(), "must find page containing hash 5050");
-    assert_eq!(result.unwrap().block_id, BlockId::new(50));
+    assert_eq!(result.unwrap().block_id(), BlockId::new(50));
 
     // find_page for hash before all pages
     assert!(meta.find_page(&test_hash(u64::MAX)).is_none());
@@ -838,7 +827,7 @@ fn v13_f12b_meta_index_find_page_boundary_hashes() {
     );
     // Exact min of second page
     assert_eq!(
-        meta.find_page(&test_hash(200)).unwrap().block_id,
+        meta.find_page(&test_hash(200)).unwrap().block_id(),
         BlockId::new(1)
     );
 }
@@ -886,15 +875,8 @@ fn v13_f13a_contains_range_inclusive_semantics() {
 fn v13_f13b_lookup_does_not_use_contains_range() {
     // Verify the actual lookup path works without contains_range
     let entries: Vec<IndexEntry> = (100..200).map(make_entry).collect();
-    let bloom = {
-        let mut b = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-        for e in &entries {
-            b.set(&e.hash);
-        }
-        b
-    };
     let meta = MetaIndex::new();
-    let reader = IndexReader::from_memory(meta, bloom, entries).expect("from_memory");
+    let reader = IndexReader::from_memory(meta, entries).expect("from_memory");
 
     // Lookup uses find_page (binary search on MetaIndex) + find (binary search on page)
     let result = reader.lookup(&test_hash(150)).expect("lookup");

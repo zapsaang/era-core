@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bloomfilter::Bloom;
-use quick_cache::sync::Cache;
 
 use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result, VolumeId};
 use era_crypto::{KeySession, VolumeKey};
@@ -33,25 +32,24 @@ pub struct IndexReader {
     meta: MetaIndex,
     /// Bloom filter (deserialized)
     bloom: Bloom<ChunkHash>,
-    /// Cache of loaded L2 pages (lock-free concurrent reads)
-    page_cache: Cache<BlockId, Arc<IndexPage>>,
+
     /// In-memory page storage (for cold recovery mode)
     embedded_pages: HashMap<BlockId, Arc<IndexPage>>,
 }
 
-/// Default page cache capacity
-const PAGE_CACHE_CAP: usize = 256;
+/// V21-F7 fix: Minimum valid serialized IndexPage size.
+/// Derivation: rkyv ArchivedVec header (8 bytes) + ArchivedChunkHash (32 bytes) × 2
+/// + at least 1 archived IndexEntry (~48 bytes) + rkyv alignment padding ≈ 64 bytes minimum.
+const MIN_INDEX_PAGE_SIZE: usize = 64;
 
-/// Minimum valid serialized IndexPage size (~40 bytes: rkyv overhead + at least 1 entry header)
-const MIN_INDEX_PAGE_SIZE: usize = 40;
-
-/// Maximum valid serialized IndexPage size.
-/// ENTRIES_PER_PAGE (8192) × sizeof(archived IndexEntry) (~64 bytes) + rkyv overhead
-/// = ~524,288 + overhead = 1MB (revised from 512KB due to rkyv alignment/header)
+/// V21-F7 fix: Maximum valid serialized IndexPage size.
+/// Derivation: ENTRIES_PER_PAGE (8192) × sizeof(archived IndexEntry) (~64 bytes)
+/// + 2 × ArchivedChunkHash (32 bytes each) + rkyv Vec header + alignment
+///   = ~524,288 + overhead ≈ 1MB. Rounded up to account for rkyv alignment requirements.
 const MAX_INDEX_PAGE_SIZE: usize = 1024 * 1024;
 
 /// Minimum valid serialized MetaIndex size (~40 bytes: rkyv overhead + bloom filter header)
-const MIN_META_INDEX_SIZE: usize = 40;
+const MIN_META_INDEX_SIZE: usize = 48;
 
 /// Maximum valid serialized MetaIndex size.
 /// 10,000 pages × PagePointer (~80 bytes each) + bloom filter data = ~1MB + margin
@@ -72,6 +70,45 @@ fn validate_rkyv_size(data: &[u8], min: usize, max: usize, type_name: &str) -> R
     Ok(())
 }
 
+/// V18-F2: Validate MetaIndex structural invariants after deserialization.
+/// Checks: page count within bounds, min_hash <= max_hash per page,
+/// pages in ascending non-overlapping order, unique block_ids.
+fn validate_meta_index(meta: &MetaIndex) -> Result<()> {
+    if meta.pages().len() > super::MAX_META_PAGES {
+        return Err(EraError::IndexError(format!(
+            "MetaIndex has {} pages, exceeds maximum {}",
+            meta.pages().len(),
+            super::MAX_META_PAGES
+        )));
+    }
+    let mut seen_block_ids = HashSet::new();
+    for (i, page) in meta.pages().iter().enumerate() {
+        if page.min_hash > page.max_hash {
+            return Err(EraError::IndexError(format!(
+                "MetaIndex page {} has inverted hash range",
+                i
+            )));
+        }
+        if i > 0 {
+            let prev = &meta.pages()[i - 1];
+            if page.min_hash <= prev.max_hash {
+                return Err(EraError::IndexError(format!(
+                    "MetaIndex pages {} and {} overlap",
+                    i - 1,
+                    i
+                )));
+            }
+        }
+        if !seen_block_ids.insert(page.block_id) {
+            return Err(EraError::IndexError(format!(
+                "MetaIndex has duplicate block_id {}",
+                page.block_id.sequence()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Maximum entries allowed in from_memory() to prevent OOM (V6-F3)
 pub const MAX_MEMORY_ENTRIES: usize = crate::ENTRIES_PER_PAGE * 10_000;
 
@@ -81,13 +118,15 @@ pub const MAX_PAGES: usize = 10_000;
 impl IndexReader {
     /// Open an index from a directory
     pub fn open(meta: MetaIndex) -> Result<Self> {
+        // V19-F1 fix: Validate MetaIndex structural invariants before trusting it
+        validate_meta_index(&meta)?;
         // Deserialize Bloom filter using rkyv via bloom_serde
         let bloom = super::deserialize_bloom(meta.bloom_filter())?;
 
         Ok(Self {
             meta,
             bloom,
-            page_cache: Cache::new(PAGE_CACHE_CAP),
+
             embedded_pages: HashMap::new(),
         })
     }
@@ -97,11 +136,7 @@ impl IndexReader {
     /// This is used by ChunkIndex::finalize() to create a reader from Redb entries
     /// from merged entries without disk I/O. Entries are chunked into pages of
     /// ENTRIES_PER_PAGE to respect the L2 cache optimization.
-    pub fn from_memory(
-        meta: MetaIndex,
-        bloom: Bloom<ChunkHash>,
-        entries: Vec<IndexEntry>,
-    ) -> Result<Self> {
+    pub fn from_memory(mut meta: MetaIndex, entries: Vec<IndexEntry>) -> Result<Self> {
         if entries.len() > MAX_MEMORY_ENTRIES {
             return Err(EraError::IndexError(format!(
                 "from_memory: {} entries exceeds maximum {} (V6-F3)",
@@ -109,12 +144,27 @@ impl IndexReader {
                 MAX_MEMORY_ENTRIES
             )));
         }
-        let mut meta = meta;
+
+        // V19-F5 fix: Rebuild bloom from actual entries instead of trusting the
+        // caller-provided bloom. A caller could pass a bloom that omits entries
+        // (causing false negatives) or contains phantom entries. Rebuilding from
+        // the ground truth (entries) guarantees bloom ↔ entries consistency.
+        let mut verified_bloom: Bloom<ChunkHash> =
+            Bloom::new_for_fp_rate(entries.len().max(1024), 0.01);
+        for entry in &entries {
+            verified_bloom.set(&entry.hash);
+        }
+        let bloom = verified_bloom;
         meta.clear_pages();
+        // V22-F3 fix: Use try_new_presorted() instead of try_new() since entries
+        // are already sorted (they come from a sorted Vec). try_new() would
+        // re-sort the already-sorted chunks, adding unnecessary O(n log n) overhead.
         let embedded_pages = if !entries.is_empty() {
-            let mut pages = HashMap::new();
+            let mut pages = HashMap::with_capacity(
+                (entries.len() + super::ENTRIES_PER_PAGE - 1) / super::ENTRIES_PER_PAGE.max(1),
+            );
             for (block_id, chunk) in entries.chunks(super::ENTRIES_PER_PAGE).enumerate() {
-                let page = IndexPage::try_new(chunk.to_vec())?;
+                let page = IndexPage::try_new_presorted(chunk.to_vec())?;
                 let bid = BlockId::new(block_id as u64);
                 meta.add_page(*page.min_hash(), *page.max_hash(), bid)?;
                 pages.insert(bid, Arc::new(page));
@@ -127,7 +177,7 @@ impl IndexReader {
         Ok(Self {
             meta,
             bloom,
-            page_cache: Cache::new(PAGE_CACHE_CAP),
+
             embedded_pages,
         })
     }
@@ -136,11 +186,7 @@ impl IndexReader {
     ///
     /// This avoids materializing all entries into a single Vec — each page
     /// is already chunked at ENTRIES_PER_PAGE boundaries by the caller.
-    pub fn from_pages(
-        meta: MetaIndex,
-        bloom: Bloom<ChunkHash>,
-        pages: Vec<(IndexPage, BlockId)>,
-    ) -> Result<Self> {
+    pub fn from_pages(mut meta: MetaIndex, pages: Vec<(IndexPage, BlockId)>) -> Result<Self> {
         if pages.len() > MAX_PAGES {
             return Err(EraError::IndexError(format!(
                 "from_pages: {} pages exceeds maximum {} (V6-F3)",
@@ -148,7 +194,22 @@ impl IndexReader {
                 MAX_PAGES
             )));
         }
-        let mut meta = meta;
+
+        // V20-F1 fix: Rebuild bloom from actual page entries instead of trusting
+        // the caller-provided bloom. Same rationale as from_memory() (V19-F5):
+        // a caller could pass a bloom that omits entries (false negatives) or
+        // contains phantom entries. Rebuilding from ground truth guarantees
+        // bloom ↔ entries consistency.
+        let total_entries: usize = pages.iter().map(|(p, _)| p.len()).sum();
+        let mut verified_bloom: Bloom<ChunkHash> =
+            Bloom::new_for_fp_rate(total_entries.max(1024), 0.01);
+        for (page, _) in &pages {
+            for entry in page.entries() {
+                verified_bloom.set(&entry.hash);
+            }
+        }
+        let bloom = verified_bloom;
+
         meta.clear_pages();
         let mut embedded_pages = HashMap::new();
         for (page, block_id) in pages {
@@ -159,7 +220,7 @@ impl IndexReader {
         Ok(Self {
             meta,
             bloom,
-            page_cache: Cache::new(PAGE_CACHE_CAP),
+
             embedded_pages,
         })
     }
@@ -182,14 +243,18 @@ impl IndexReader {
         tracing::info!("Starting cold recovery from volume");
         let deadline = timeout.map(|d| Instant::now() + d);
 
-        // Domain-separated nonce context for index blocks (must match builder::finalize)
+        // V14-F1 fix: Multi-byte domain separation for index blocks.
+        // Overwriting a single byte with XOR was weak domain separation.
+        // Now we use a 4-byte domain tag that clearly distinguishes index nonces.
         let mut index_nonce_context = nonce_context;
-        index_nonce_context[0] ^= 0xFF;
+        index_nonce_context[0..4].copy_from_slice(b"IDX\x01");
 
         // Step 1: Try to read MetaIndex from footer (fast path)
         let meta = if let Some(footer) = volume_reader.footer() {
             if footer.has_index() {
                 // Footer has index location
+                // VolumeId::new() creates a placeholder — VolumeReader has no volume_id()
+                // accessor. read_typed_block on a single-volume reader ignores the volume_id.
                 let location = BlockLocation::single(
                     era_common::VolumeId::new(),
                     footer.index_block_id,
@@ -206,6 +271,15 @@ impl IndexReader {
                     return Err(EraError::InvalidFormat(format!(
                         "Expected IndexManifest, found {:?}",
                         block_type
+                    )));
+                }
+
+                // V18-F4 fix: Pre-decrypt size check — reject oversized blocks before
+                // spending CPU on decryption. AEAD adds ~40 bytes overhead.
+                if encrypted_block.data.len() > MAX_META_INDEX_SIZE + 64 {
+                    return Err(EraError::IndexError(format!(
+                        "Encrypted MetaIndex block too large: {} bytes",
+                        encrypted_block.data.len()
                     )));
                 }
 
@@ -240,6 +314,9 @@ impl IndexReader {
                     Err(never) => match never {},
                 };
 
+                // V18-F2: Validate structural invariants before trusting the MetaIndex
+                validate_meta_index(&meta)?;
+
                 Some(meta)
             } else {
                 None
@@ -248,12 +325,24 @@ impl IndexReader {
             None
         };
 
+        // V20-F9 fix: Track pre-scanned page blocks from slow path to avoid
+        // redundant scan in Step 3. Initialized to None; populated if slow
+        // path scans for IndexPage blocks during manifest discovery.
+        let mut cached_page_blocks: Option<Vec<era_common::BlockLocation>> = None;
+
         // Step 2: If footer doesn't have index, scan for IndexManifest (slow path)
         let meta = if let Some(m) = meta {
             tracing::info!("MetaIndex loaded from footer (fast path)");
             m
         } else {
             tracing::warn!("Footer missing or no index_root - scanning for IndexManifest blocks");
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    return Err(EraError::IndexError(
+                        "Cold recovery timed out before manifest scan".into(),
+                    ));
+                }
+            }
             let manifest_blocks = volume_reader
                 .scan_for_typed_blocks(BlockType::IndexManifest)
                 .await?;
@@ -264,22 +353,47 @@ impl IndexReader {
                 ));
             }
 
-            // Use the first (should be only) manifest
-            let location = &manifest_blocks[0];
-            let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
+            // V18-F3 fix: Try all manifest blocks, prefer the last valid one.
+            // Partial writes may leave stale manifests; the last valid one is most current.
+            let mut best_encrypted_block = None;
+            for manifest_loc in manifest_blocks.iter().rev() {
+                match volume_reader.read_typed_block(manifest_loc).await {
+                    Ok((_, eb)) => {
+                        best_encrypted_block = Some(eb);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read manifest block: {}", e);
+                        continue;
+                    }
+                }
+            }
+            let encrypted_block = best_encrypted_block.ok_or_else(|| {
+                EraError::InvalidFormat("All IndexManifest blocks unreadable".into())
+            })?;
 
             // Scan for IndexPage blocks first to estimate the manifest block ID.
             // The manifest is written after all pages, so its block_id = page_count.
-            let page_blocks_for_hint = volume_reader
+            let page_blocks_for_hint = match volume_reader
                 .scan_for_typed_blocks(BlockType::IndexPage)
                 .await
-                .unwrap_or_default();
+            {
+                Ok(blocks) => blocks,
+                Err(e) => {
+                    tracing::warn!("Failed to scan for IndexPage hint blocks: {}", e);
+                    Vec::new()
+                }
+            };
             let page_count_hint = page_blocks_for_hint.len() as u64;
+            // V20-F9 fix: Cache the scan result to avoid redundant scan in Step 3
+            cached_page_blocks = Some(page_blocks_for_hint);
 
-            // Build candidate block IDs: start with the most likely (page_count),
-            // then try nearby values, then expand outward. Uses HashSet for O(1) dedup.
+            // V21-F2 fix: Pre-compute capacity from upper_bound to avoid Vec reallocations.
+            // The candidates Vec is bounded by MAX_RECOVERY_CANDIDATES, so we can size it
+            // precisely. The HashSet provides O(1) dedup across all insertion phases.
             let mut seen: HashSet<u64> = HashSet::new();
-            let mut candidates: Vec<u64> = Vec::with_capacity(512);
+            // Capacity finalized after upper_bound calculation; start with a default.
+            let mut candidates: Vec<u64> = Vec::new();
             // Most likely: manifest block_id == number of index pages
             if seen.insert(page_count_hint) {
                 candidates.push(page_count_hint);
@@ -301,11 +415,20 @@ impl IndexReader {
             // otherwise use a generous estimate. This ensures manifests at any
             // block_id are recoverable (fixes V6-F2: hint=0 missed block_id>=256).
             let volume_block_count = volume_reader.block_count() as u64;
+            // V15-F2 fix: Cap upper bound to prevent OOM from malicious block_count
+            const MAX_RECOVERY_CANDIDATES: u64 = 100_000;
+            // V24-F5 fix: Use saturating_add to prevent integer overflow on u64::MAX
             let upper_bound = if volume_block_count > 0 {
-                volume_block_count + 1
+                volume_block_count.saturating_add(1)
             } else {
-                (page_count_hint + 1).saturating_mul(4).max(1024)
+                page_count_hint
+                    .saturating_add(1)
+                    .saturating_mul(4)
+                    .max(1024)
             };
+            let upper_bound = upper_bound.min(MAX_RECOVERY_CANDIDATES);
+            // V21-F2 fix: Reserve capacity now that upper_bound is known.
+            candidates.reserve(upper_bound as usize);
             for id in 0..upper_bound {
                 if seen.insert(id) {
                     candidates.push(id);
@@ -335,6 +458,17 @@ impl IndexReader {
                     block_id,
                     &encrypted_block.data,
                 ) {
+                    // V19-F12 fix: Check deadline AFTER successful decrypt, before
+                    // expensive rkyv deserialization. Without this, a crafted volume
+                    // with many decryptable-but-invalid blocks could stall recovery
+                    // indefinitely in the deserialization loop below.
+                    if let Some(dl) = deadline {
+                        if Instant::now() >= dl {
+                            return Err(EraError::IndexError(
+                                "Cold recovery timed out after successful decrypt".into(),
+                            ));
+                        }
+                    }
                     // Pre-validate size before rkyv deserialization
                     if validate_rkyv_size(
                         &decrypted_data,
@@ -354,7 +488,10 @@ impl IndexReader {
                                 Err(never) => match never {},
                             };
                         // Verify this looks like a valid MetaIndex
-                        if !meta_candidate.pages().is_empty() {
+                        // V18-F2: Validate structural invariants
+                        if !meta_candidate.pages().is_empty()
+                            && validate_meta_index(&meta_candidate).is_ok()
+                        {
                             tracing::info!(
                                 "MetaIndex decrypted successfully with block_id={}",
                                 candidate_id
@@ -374,23 +511,52 @@ impl IndexReader {
         };
 
         // Step 3: Scan for all IndexPage blocks
-        tracing::info!("Scanning for IndexPage blocks");
-        let page_blocks = volume_reader
-            .scan_for_typed_blocks(BlockType::IndexPage)
-            .await?;
-        tracing::info!("Found {} IndexPage blocks", page_blocks.len());
+        // V20-F9 fix: Reuse cached page blocks from slow path if available,
+        // avoiding a redundant scan_for_typed_blocks call.
+        let page_blocks = if let Some(cached) = cached_page_blocks.take() {
+            tracing::info!(
+                "Reusing {} cached IndexPage blocks from manifest discovery",
+                cached.len()
+            );
+            cached
+        } else {
+            tracing::info!("Scanning for IndexPage blocks");
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    return Err(EraError::IndexError(
+                        "Cold recovery timed out before page scan".into(),
+                    ));
+                }
+            }
+            let blocks = volume_reader
+                .scan_for_typed_blocks(BlockType::IndexPage)
+                .await?;
+            tracing::info!("Found {} IndexPage blocks", blocks.len());
+            blocks
+        };
 
-        // Step 4: Load all pages — content-addressed matching (order-independent)
-        // Instead of assuming page_blocks[i] == meta.pages[i] (positional matching),
-        // we try each scanned block against all unrecovered meta entries. This is
-        // robust against volume scanners returning pages in any order.
-        //
-        // V13-F12 optimization: Use a shrinking Vec of unrecovered page indices
-        // with swap_remove to avoid re-checking already-recovered pages.
-        let mut embedded_pages = HashMap::new();
-        let mut unrecovered: Vec<usize> = (0..meta.pages().len()).collect();
+        // V22-F11 fix: Pre-allocate embedded_pages HashMap based on the number of
+        // pages in the MetaIndex. Without this, the HashMap uses default capacity
+        // and may need multiple resizes during page recovery.
+        let mut embedded_pages = HashMap::with_capacity(meta.pages().len());
 
-        for location in page_blocks.iter() {
+        // V18-F1 fix: content-addressed matching with O(1) block_id→page_idx index.
+        // For each scanned block, try matching block_ids from the index instead
+        // of iterating all unrecovered pages. Falls back to linear scan only if
+        // the indexed approach fails (handles reordered/unexpected blocks).
+        let mut block_id_to_page_idx: HashMap<BlockId, usize> = meta
+            .pages()
+            .iter()
+            .enumerate()
+            .map(|(idx, p)| (p.block_id, idx))
+            .collect();
+        // V22-F7 fix: Reuse candidate_block_ids Vec across loop iterations
+        // instead of allocating a new Vec per scan_idx. Clear and re-fill
+        // reduces allocation pressure from O(page_blocks × unrecovered) to O(1).
+        let mut candidate_block_ids: Vec<BlockId> =
+            Vec::with_capacity(block_id_to_page_idx.len().min(16) + 1);
+
+        for (scan_idx, location) in page_blocks.iter().enumerate() {
             if let Some(dl) = deadline {
                 if Instant::now() >= dl {
                     return Err(EraError::IndexError(
@@ -399,12 +565,43 @@ impl IndexReader {
                 }
             }
             let (_, encrypted_block) = volume_reader.read_typed_block(location).await?;
+            // V18-F4 fix: Skip oversized encrypted page blocks before decryption attempts
+            if encrypted_block.data.len() > MAX_INDEX_PAGE_SIZE + 64 {
+                tracing::warn!(
+                    "Skipping oversized encrypted IndexPage block: {} bytes",
+                    encrypted_block.data.len()
+                );
+                continue;
+            }
             let mut matched = false;
 
-            // Try each unrecovered meta page — swap_remove on match for O(1) shrink
-            let mut i = 0;
-            while i < unrecovered.len() {
-                let page_idx = unrecovered[i];
+            // V18-F1: Build ordered candidate list — try positional hint first,
+            // then remaining unrecovered block_ids. This makes the happy path O(1).
+            let positional_hint = BlockId::new(scan_idx as u64);
+            candidate_block_ids.clear();
+            if block_id_to_page_idx.contains_key(&positional_hint) {
+                candidate_block_ids.push(positional_hint);
+            }
+            for &bid in block_id_to_page_idx.keys() {
+                if bid != positional_hint {
+                    candidate_block_ids.push(bid);
+                }
+            }
+            for candidate_bid in &candidate_block_ids {
+                // V24-F6 fix: Check deadline inside page-recovery decrypt loop.
+                // Without this, a volume with many candidate block_ids could stall
+                // indefinitely during page recovery if each decrypt attempt is slow.
+                if let Some(dl) = deadline {
+                    if Instant::now() >= dl {
+                        return Err(EraError::IndexError(
+                            "Cold recovery timed out during candidate scan".into(),
+                        ));
+                    }
+                }
+                let page_idx = match block_id_to_page_idx.get(candidate_bid) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
                 let page_ptr = &meta.pages()[page_idx];
 
                 let block_key = session.derive_block_key(
@@ -429,7 +626,6 @@ impl IndexReader {
                     )
                     .is_err()
                     {
-                        i += 1;
                         continue;
                     }
                     if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
@@ -440,14 +636,20 @@ impl IndexReader {
                         if *page.min_hash() == page_ptr.min_hash
                             && *page.max_hash() == page_ptr.max_hash
                         {
+                            // V17-F1 fix: Check for block_id collision BEFORE insert
+                            if embedded_pages.contains_key(&page_ptr.block_id) {
+                                tracing::warn!(
+                                    "block_id {} collision during recovery — overwriting previous page",
+                                    page_ptr.block_id.sequence()
+                                );
+                            }
                             embedded_pages.insert(page_ptr.block_id, Arc::new(page));
-                            unrecovered.swap_remove(i);
+                            block_id_to_page_idx.remove(candidate_bid);
                             matched = true;
                             break;
                         }
                     }
                 }
-                i += 1;
             }
 
             if !matched {
@@ -460,10 +662,17 @@ impl IndexReader {
 
         // Completeness check: all expected pages must be recovered
         if embedded_pages.len() < meta.pages().len() {
+            // V18-F12 fix: Include missing block_ids in error for debuggability
+            let missing: Vec<u64> = block_id_to_page_idx
+                .keys()
+                .take(10)
+                .map(|bid| bid.sequence())
+                .collect();
             return Err(EraError::IndexError(format!(
-                "Incomplete recovery: expected {} pages, recovered {}",
+                "Incomplete recovery: expected {} pages, recovered {}. Missing block_ids (first 10): {:?}",
                 meta.pages().len(),
-                embedded_pages.len()
+                embedded_pages.len(),
+                missing
             )));
         }
 
@@ -479,7 +688,7 @@ impl IndexReader {
             // No external directory in recovery mode
             meta,
             bloom,
-            page_cache: Cache::new(PAGE_CACHE_CAP),
+
             embedded_pages,
         })
     }
@@ -497,7 +706,7 @@ impl IndexReader {
             None => return Ok(None), // Hash not in index range
         };
 
-        // Step 3: Load L2 page (with caching)
+        // Step 3: Load L2 page from embedded pages
         let page = self.load_page(page_ptr.block_id)?;
 
         // Step 4: Binary search within L2 page
@@ -529,20 +738,25 @@ impl IndexReader {
         self.meta.pages().len()
     }
 
-    /// Load an L2 page (with caching)
+    /// V21-F11 fix: Get total entry count across all embedded pages.
+    ///
+    /// Sums entries from all embedded pages. Returns 0 if no pages are loaded.
+    /// This avoids forcing callers to iterate all pages manually to get the total count.
+    pub fn total_entry_count(&self) -> usize {
+        self.embedded_pages.values().map(|p| p.len()).sum()
+    }
+
+    /// Load an L2 page from embedded pages
     fn load_page(&self, block_id: BlockId) -> Result<Arc<IndexPage>> {
         // Check embedded pages first (recovery mode)
         if let Some(page) = self.embedded_pages.get(&block_id) {
             return Ok(Arc::clone(page));
         }
 
-        // Check cache (lock-free read via quick_cache)
-        if let Some(page) = self.page_cache.get(&block_id) {
-            return Ok(page);
-        }
-
         // Page not found
-        Err(EraError::InvalidFormat(format!(
+        // V20-F6 fix: Use IndexError (not InvalidFormat) for missing embedded pages.
+        // This is an index-internal lookup failure, not a format validation issue.
+        Err(EraError::IndexError(format!(
             "Page {} not found in embedded index",
             block_id.sequence()
         )))
@@ -556,7 +770,7 @@ mod tests {
 
     fn test_hash(value: u64) -> ChunkHash {
         let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
+        bytes[24..32].copy_from_slice(&value.to_be_bytes());
         ChunkHash::from_bytes(bytes)
     }
 
@@ -588,7 +802,7 @@ mod tests {
         meta.set_bloom_filter(bloom_bytes).unwrap();
 
         // Create reader using from_pages (in-memory, no filesystem)
-        let reader = IndexReader::from_pages(meta, bloom, vec![(page, BlockId::new(0))]).unwrap();
+        let reader = IndexReader::from_pages(meta, vec![(page, BlockId::new(0))]).unwrap();
 
         // Test positive lookup
         let result = reader.lookup(&test_hash(50)).unwrap();

@@ -63,6 +63,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 fn make_entry_fixed_vol(i: u64, vol: VolumeId) -> IndexEntry {
@@ -73,6 +74,7 @@ fn make_entry_fixed_vol(i: u64, vol: VolumeId) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 // ============================================================================
@@ -105,13 +107,13 @@ fn test_v6_1a_positional_contract_verification() {
     // Verify positional contract: meta.pages[i].block_id == BlockId::new(i)
     for (i, page) in meta.pages().iter().enumerate() {
         assert_eq!(
-            page.block_id,
+            page.block_id(),
             BlockId::new(i as u64),
             "V6-F1: Positional contract violated at index {}. \
              meta.pages[{}].block_id = {:?}, expected BlockId::new({})",
             i,
             i,
-            page.block_id,
+            page.block_id(),
             i
         );
     }
@@ -135,29 +137,29 @@ fn test_v6_1b_meta_index_order_independence() {
 
     // Verify lookups work for each page's range
     assert_eq!(
-        meta.find_page(&test_hash(50)).unwrap().block_id,
+        meta.find_page(&test_hash(50)).unwrap().block_id(),
         BlockId::new(0)
     );
     assert_eq!(
-        meta.find_page(&test_hash(150)).unwrap().block_id,
+        meta.find_page(&test_hash(150)).unwrap().block_id(),
         BlockId::new(1)
     );
     assert_eq!(
-        meta.find_page(&test_hash(250)).unwrap().block_id,
+        meta.find_page(&test_hash(250)).unwrap().block_id(),
         BlockId::new(2)
     );
 
     // Boundary: exact min_hash of each page
     assert_eq!(
-        meta.find_page(&test_hash(0)).unwrap().block_id,
+        meta.find_page(&test_hash(0)).unwrap().block_id(),
         BlockId::new(0)
     );
     assert_eq!(
-        meta.find_page(&test_hash(100)).unwrap().block_id,
+        meta.find_page(&test_hash(100)).unwrap().block_id(),
         BlockId::new(1)
     );
     assert_eq!(
-        meta.find_page(&test_hash(200)).unwrap().block_id,
+        meta.find_page(&test_hash(200)).unwrap().block_id(),
         BlockId::new(2)
     );
 
@@ -188,12 +190,8 @@ fn test_v6_1c_completeness_check_catches_missing_pages() {
     // embedded_pages.len() vs meta.pages.len() after the loading loop.
     // Here we verify from_memory creates a consistent reader.
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
-    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
-    for i in 0..100u64 {
-        bloom.set(&test_hash(i));
-    }
 
-    let reader = IndexReader::from_memory(MetaIndex::new(), bloom, entries).unwrap();
+    let reader = IndexReader::from_memory(MetaIndex::new(), entries).unwrap();
     // The reader creates its own MetaIndex with 1 page — consistent
     let result = reader.lookup(&test_hash(50)).unwrap();
     assert!(result.is_some(), "Lookup should work in single-page mode");
@@ -527,11 +525,7 @@ fn test_v6_3d_entries_per_page_is_advisory_not_enforced() {
 
     // from_memory still works — it chunks entries into ENTRIES_PER_PAGE pages internally
     let entries2: Vec<IndexEntry> = (0..count as u64).map(make_entry).collect();
-    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(count, 0.01);
-    for e in &entries2 {
-        bloom.set(&e.hash);
-    }
-    let reader = IndexReader::from_memory(MetaIndex::new(), bloom, entries2).unwrap();
+    let reader = IndexReader::from_memory(MetaIndex::new(), entries2).unwrap();
 
     // All entries findable via from_memory's internal chunking
     assert!(reader.lookup(&test_hash(0)).unwrap().is_some());
@@ -622,8 +616,8 @@ fn test_v6_4c_double_finalize_data_duplication_risk() {
     assert_eq!(d2.len(), d3.len());
 
     for i in 0..d1.len() {
-        assert_eq!(d1[i].hash, d2[i].hash);
-        assert_eq!(d2[i].hash, d3[i].hash);
+        assert_eq!(d1[i].hash(), d2[i].hash());
+        assert_eq!(d2[i].hash(), d3[i].hash());
     }
 
     eprintln!(
@@ -701,7 +695,7 @@ fn test_v6_5c_entry_to_location_information_loss() {
     let entry = make_entry_fixed_vol(42, vol);
 
     // Entry has volume_id
-    assert_eq!(entry.volume_id, vol);
+    assert_eq!(entry.volume_id(), vol);
 
     let mut tree = ChunkIndex::new_default().unwrap();
     tree.insert(entry).unwrap();
@@ -710,8 +704,8 @@ fn test_v6_5c_entry_to_location_information_loss() {
     let location = reader.lookup(&test_hash(42)).unwrap().unwrap();
 
     // Location now has block_id, offset, length, AND volume_id
-    assert_eq!(location.offset, entry.offset);
-    assert_eq!(location.length, entry.length);
+    assert_eq!(location.offset, entry.offset());
+    assert_eq!(location.length, entry.length());
     assert_eq!(
         location.volume_id, vol,
         "volume_id is now preserved in IndexLocation"
@@ -1408,15 +1402,15 @@ fn test_v6_13b_single_entry_pages() {
 
     // Exact matches
     assert_eq!(
-        meta.find_page(&test_hash(100)).unwrap().block_id,
+        meta.find_page(&test_hash(100)).unwrap().block_id(),
         BlockId::new(0)
     );
     assert_eq!(
-        meta.find_page(&test_hash(200)).unwrap().block_id,
+        meta.find_page(&test_hash(200)).unwrap().block_id(),
         BlockId::new(1)
     );
     assert_eq!(
-        meta.find_page(&test_hash(300)).unwrap().block_id,
+        meta.find_page(&test_hash(300)).unwrap().block_id(),
         BlockId::new(2)
     );
 
@@ -1439,22 +1433,22 @@ fn test_v6_13c_adjacent_pages_no_overlap() {
 
     // Boundary: hash 99 → page 0 (max_hash of page 0)
     assert_eq!(
-        meta.find_page(&test_hash(99)).unwrap().block_id,
+        meta.find_page(&test_hash(99)).unwrap().block_id(),
         BlockId::new(0)
     );
     // Boundary: hash 100 → page 1 (min_hash of page 1)
     assert_eq!(
-        meta.find_page(&test_hash(100)).unwrap().block_id,
+        meta.find_page(&test_hash(100)).unwrap().block_id(),
         BlockId::new(1)
     );
     // Boundary: hash 199 → page 1 (max_hash of page 1)
     assert_eq!(
-        meta.find_page(&test_hash(199)).unwrap().block_id,
+        meta.find_page(&test_hash(199)).unwrap().block_id(),
         BlockId::new(1)
     );
     // Boundary: hash 200 → page 2 (min_hash of page 2)
     assert_eq!(
-        meta.find_page(&test_hash(200)).unwrap().block_id,
+        meta.find_page(&test_hash(200)).unwrap().block_id(),
         BlockId::new(2)
     );
 }
@@ -1471,17 +1465,17 @@ fn test_v6_13d_max_hash_boundary() {
     // Exact max_hash of page 0
     let result = meta.find_page(&test_hash(999));
     assert!(result.is_some(), "max_hash 999 must be found");
-    assert_eq!(result.unwrap().block_id, BlockId::new(0));
+    assert_eq!(result.unwrap().block_id(), BlockId::new(0));
 
     // One past max_hash of page 0 → page 1
     let result = meta.find_page(&test_hash(1000));
     assert!(result.is_some(), "min_hash 1000 must be found");
-    assert_eq!(result.unwrap().block_id, BlockId::new(1));
+    assert_eq!(result.unwrap().block_id(), BlockId::new(1));
 
     // Exact max_hash of page 1
     let result = meta.find_page(&test_hash(1999));
     assert!(result.is_some(), "max_hash 1999 must be found");
-    assert_eq!(result.unwrap().block_id, BlockId::new(1));
+    assert_eq!(result.unwrap().block_id(), BlockId::new(1));
 
     // One past max_hash of page 1 → None
     assert!(meta.find_page(&test_hash(2000)).is_none());
@@ -1724,7 +1718,7 @@ fn test_v6_15c_sequential_batch_boundary_stress() {
     // Verify sorted order
     for i in 1..drained.len() {
         assert!(
-            drained[i - 1].hash <= drained[i].hash,
+            drained[i - 1].hash() <= drained[i].hash(),
             "Sort invariant violated at index {}",
             i
         );

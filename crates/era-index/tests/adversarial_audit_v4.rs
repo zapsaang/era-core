@@ -54,6 +54,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 /// Extract production (non-test) code from a source file.
@@ -317,16 +318,19 @@ fn test_s1_read_sorted_unbounded_allocation() {
 
     assert!(
         !has_limit,
-        "FINDING S1 CONFIRMED: read_sorted has NO memory limit or streaming API. \
-         It allocates Vec::with_capacity(self.entry_count) and loads ALL entries. \
-         For a 10M entry index (~800MB), this causes OOM on constrained systems. \
-         A production system needs an Iterator-based API for bounded memory."
+        "FINDING S1 PARTIALLY MITIGATED (V20-F4): read_sorted no longer pre-allocates \
+         with_capacity(entry_count). It delegates to for_each_sorted_page and grows \
+         incrementally. Still loads all entries to RAM but avoids untrusted pre-allocation. \
+         A production system still needs an Iterator-based API for bounded memory."
     );
 
-    // Verify it uses with_capacity (pre-allocates based on entry_count)
+    // V20-F4: read_sorted now delegates to for_each_sorted_page and uses
+    // Vec::new() + extend_from_slice — no longer pre-allocates with_capacity.
+    // This is an improvement: no single allocation based on untrusted entry_count.
+    // It still loads all entries to RAM, but grows incrementally.
     assert!(
-        fn_body.contains("with_capacity"),
-        "read_sorted pre-allocates the full Vec"
+        fn_body.contains("for_each_sorted_page") || fn_body.contains("extend_from_slice"),
+        "V20-F4: read_sorted should delegate to for_each_sorted_page"
     );
 }
 
@@ -478,7 +482,7 @@ fn test_u1_cold_recovery_on2_candidate_building() {
         .find("pub async fn recover_from_volume")
         .expect("recover_from_volume must exist");
 
-    let fn_body = &source[fn_start..fn_start.saturating_add(5000).min(source.len())];
+    let fn_body = &source[fn_start..fn_start.saturating_add(10000).min(source.len())];
 
     // Check that Vec::contains is no longer used in candidate loop
     let has_contains_in_loop =
@@ -510,13 +514,14 @@ fn test_u2_cold_recovery_brute_force_decryption() {
     let fn_start = source
         .find("pub async fn recover_from_volume")
         .expect("recover_from_volume must exist");
-    let fn_body = &source[fn_start..fn_start.saturating_add(10000).min(source.len())];
+    let fn_body = &source[fn_start..];
 
-    // Content-addressed matching: tries each page block against unrecovered meta entries
-    let has_content_addressed = fn_body.contains("content-addressed");
+    // V18-F1: Recovery now uses HashMap-indexed block_id lookup for O(1) matching.
+    // This replaces the previous content-addressed brute-force and positional matching.
+    let has_indexed_lookup = fn_body.contains("block_id_to_page_idx");
     assert!(
-        has_content_addressed,
-        "FIX U2 VERIFIED: Cold recovery uses content-addressed page matching (V6-F1 fix)."
+        has_indexed_lookup,
+        "FIX U2 VERIFIED: Cold recovery uses block_id-indexed page matching (V18-F1 optimization)."
     );
 
     // No positional matching: page_blocks[i] == meta.pages[i] pattern removed
@@ -734,31 +739,28 @@ fn test_w3_index_metrics_is_dead_code() {
     );
 }
 
-/// W4: ChunkIndexConfig.temp_dir is ignored — builder uses tempfile::Builder instead.
+/// W4: ChunkIndexConfig.temp_dir was removed (V15-F9) — field no longer exists.
+/// Verify that ChunkIndexConfig no longer contains a temp_dir field.
 #[test]
-fn test_w4_chunk_index_config_temp_dir_ignored() {
+fn test_w4_chunk_index_config_temp_dir_removed() {
     let source = include_str!("../src/chunk_index.rs");
     let production_code = extract_production_code(source);
 
-    // Find ChunkIndex::new
-    let fn_start = production_code
-        .find("pub fn new(config: ChunkIndexConfig)")
-        .expect("ChunkIndex::new must exist");
-    let fn_end = production_code[fn_start..]
-        .find("\n    pub fn ")
-        .map(|i| fn_start + i)
+    // V15-F9: temp_dir field was removed from ChunkIndexConfig.
+    // Verify the struct no longer contains it.
+    let struct_start = production_code
+        .find("pub struct ChunkIndexConfig")
+        .expect("ChunkIndexConfig must exist");
+    let struct_end = production_code[struct_start..]
+        .find('}')
+        .map(|i| struct_start + i + 1)
         .unwrap_or(production_code.len());
-    let fn_body = &production_code[fn_start..fn_end];
-
-    // Check if temp_dir from config is used
-    let uses_temp_dir = fn_body.contains("config.temp_dir") || fn_body.contains("temp_dir");
+    let struct_body = &production_code[struct_start..struct_end];
 
     assert!(
-        !uses_temp_dir,
-        "FINDING W4 CONFIRMED: ChunkIndex::new() ignores config.temp_dir. \
-         It delegates to IndexBuilder::new(config.mem_limit) which uses \
-         tempfile::Builder (always goes to system /tmp). The ChunkIndexConfig.temp_dir \
-         field is dead configuration."
+        !struct_body.contains("temp_dir"),
+        "V15-F9 FIX VERIFIED: ChunkIndexConfig no longer contains temp_dir field. \
+         The dead configuration was removed since backward compatibility is not required."
     );
 }
 
@@ -801,14 +803,17 @@ fn test_x1_open_readonly_accepts_writes() {
 #[test]
 fn test_x2_index_page_does_not_dedup() {
     let hash = test_hash(42);
-    let entry1 = IndexEntry::new(hash, VolumeId::new(), BlockId::new(0), 0, 1024);
-    let entry2 = IndexEntry::new(hash, VolumeId::new(), BlockId::new(1), 4096, 2048);
-    let entry3 = IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(2), 0, 512);
+    let entry1 =
+        IndexEntry::new(hash, VolumeId::new(), BlockId::new(0), 0, 1024).expect("valid entry");
+    let entry2 =
+        IndexEntry::new(hash, VolumeId::new(), BlockId::new(1), 4096, 2048).expect("valid entry");
+    let entry3 = IndexEntry::new(test_hash(100), VolumeId::new(), BlockId::new(2), 0, 512)
+        .expect("valid entry");
 
     let page = IndexPage::try_new(vec![entry1, entry2, entry3]).unwrap();
 
     // Count entries with hash 42 — should be 1 after dedup
-    let dup_count = page.entries().iter().filter(|e| e.hash == hash).count();
+    let dup_count = page.entries().iter().filter(|e| e.hash() == &hash).count();
 
     assert_eq!(
         dup_count, 1,
@@ -917,12 +922,8 @@ fn test_y2_from_memory_exceeds_entries_per_page() {
     let entries: Vec<IndexEntry> = (0..10000u64).map(make_entry).collect();
 
     let meta = MetaIndex::new();
-    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(10000, 0.01);
-    for e in &entries {
-        bloom.set(&e.hash);
-    }
     let reader =
-        era_index::IndexReader::from_memory(meta, bloom, entries).expect("Creation should succeed");
+        era_index::IndexReader::from_memory(meta, entries).expect("Creation should succeed");
 
     // Verify it creates the expected number of pages
     let expected_pages = 10000_usize.div_ceil(era_index::ENTRIES_PER_PAGE);
@@ -1209,7 +1210,6 @@ fn test_z13_destroy_removes_file() {
 fn test_z14_chunk_index_custom_config() {
     let config = ChunkIndexConfig {
         mem_limit: 1024 * 1024,
-        temp_dir: std::env::temp_dir(),
     };
     let tree = ChunkIndex::new(config);
     assert!(tree.is_ok(), "ChunkIndex with custom config should succeed");
@@ -1286,26 +1286,27 @@ fn test_aa2_buffered_entries_lost_on_drop() {
     );
 }
 
-/// AA3: BATCH_SIZE constant is hardcoded, not configurable.
+/// AA3: BATCH_SIZE was previously hardcoded (V4 finding). V21-F8 made it configurable.
 ///
-/// The 1000-entry batch size is a compile-time constant in builder.rs.
-/// There is no way for users to tune this for their workload (SSD vs HDD,
-/// small vs large entries, etc.).
+/// The 1000-entry batch size was a compile-time constant in builder.rs.
+/// V21-F8 renamed it to DEFAULT_BATCH_SIZE and added a configurable batch_size field
+/// with a with_batch_size() builder method.
 #[test]
 fn test_aa3_batch_size_not_configurable() {
     let source = include_str!("../src/builder.rs");
 
-    let has_const_batch = source.contains("const BATCH_SIZE: usize = 1000");
-    let has_config_batch = source.contains("config.batch_size")
-        || source.contains("batch_size:")
-        || source.contains("self.batch_size");
-
-    assert!(has_const_batch, "BATCH_SIZE is a compile-time constant");
+    // V21-F8: BATCH_SIZE was renamed to DEFAULT_BATCH_SIZE
+    let has_default_batch = source.contains("const DEFAULT_BATCH_SIZE: usize");
     assert!(
-        !has_config_batch,
-        "FINDING AA3 CONFIRMED: BATCH_SIZE is not configurable. Hardcoded to 1000. \
-         For HDD workloads, a larger batch (10K-100K) would amortize fsync better. \
-         For memory-constrained systems, a smaller batch would be needed."
+        has_default_batch,
+        "DEFAULT_BATCH_SIZE must exist as a compile-time default"
+    );
+
+    // V21-F8: batch_size is now configurable via self.batch_size field
+    let has_config_batch = source.contains("self.batch_size");
+    assert!(
+        has_config_batch,
+        "V21-F8 RESOLVED: BATCH_SIZE is now configurable via self.batch_size"
     );
 }
 

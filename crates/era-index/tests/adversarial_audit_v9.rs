@@ -31,11 +31,12 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 /// Make entry with specific volume/block/offset
 fn make_entry_at(i: u64, vol: VolumeId, block: u64, offset: u32, length: u32) -> IndexEntry {
-    IndexEntry::new(test_hash(i), vol, BlockId::new(block), offset, length)
+    IndexEntry::new(test_hash(i), vol, BlockId::new(block), offset, length).expect("valid entry")
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -52,8 +53,8 @@ fn v9_f1a_meta_index_fields_encapsulated() {
 
     // The fix is verified by the fact that we can only access via pages() getter
     assert_eq!(meta.pages().len(), 1);
-    assert_eq!(meta.pages()[0].min_hash, test_hash(0));
-    assert_eq!(meta.pages()[0].max_hash, test_hash(100));
+    assert_eq!(*meta.pages()[0].min_hash(), test_hash(0));
+    assert_eq!(*meta.pages()[0].max_hash(), test_hash(100));
 }
 
 #[test]
@@ -366,7 +367,8 @@ fn v9_f9a_index_page_dedup_deterministic() {
     let entry = page.find(&test_hash(42)).unwrap();
     println!(
         "V9-F9a: Surviving entry has offset={}, length={} (non-deterministic by design)",
-        entry.offset, entry.length
+        entry.offset(),
+        entry.length()
     );
 }
 
@@ -377,19 +379,15 @@ fn v9_f9a_index_page_dedup_deterministic() {
 
 #[test]
 fn v9_f10a_from_memory_with_nonempty_meta() {
-    use bloomfilter::Bloom;
-
     let mut meta = MetaIndex::new();
     // Pre-add a page to the meta (mimics a non-fresh MetaIndex)
     meta.add_page(test_hash(0), test_hash(50), BlockId::new(99))
         .unwrap();
     assert_eq!(meta.pages().len(), 1);
 
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
-
     // Now create entries that will add more pages
     let entries: Vec<IndexEntry> = (100..200).map(make_entry).collect();
-    let reader = IndexReader::from_memory(meta, bloom, entries);
+    let reader = IndexReader::from_memory(meta, entries);
 
     match reader {
         Ok(r) => {
@@ -565,7 +563,8 @@ fn v9_f14a_index_location_has_volume_id() {
     let mut tree = ChunkIndex::new_default().unwrap();
 
     let vol = VolumeId::new();
-    let entry = IndexEntry::new(test_hash(42), vol, BlockId::new(7), 1024, 4096);
+    let entry =
+        IndexEntry::new(test_hash(42), vol, BlockId::new(7), 1024, 4096).expect("valid entry");
     tree.insert(entry).unwrap();
 
     let reader = tree.finalize().unwrap();
@@ -589,29 +588,17 @@ fn v9_f14b_multi_volume_lookup_preserves_volume_id() {
     let vol3 = VolumeId::new();
 
     // Three entries on different volumes
-    tree.insert(IndexEntry::new(
-        test_hash(100),
-        vol1,
-        BlockId::new(0),
-        0,
-        1024,
-    ))
+    tree.insert(
+        IndexEntry::new(test_hash(100), vol1, BlockId::new(0), 0, 1024).expect("valid entry"),
+    )
     .unwrap();
-    tree.insert(IndexEntry::new(
-        test_hash(200),
-        vol2,
-        BlockId::new(1),
-        0,
-        2048,
-    ))
+    tree.insert(
+        IndexEntry::new(test_hash(200), vol2, BlockId::new(1), 0, 2048).expect("valid entry"),
+    )
     .unwrap();
-    tree.insert(IndexEntry::new(
-        test_hash(300),
-        vol3,
-        BlockId::new(2),
-        0,
-        4096,
-    ))
+    tree.insert(
+        IndexEntry::new(test_hash(300), vol3, BlockId::new(2), 0, 4096).expect("valid entry"),
+    )
     .unwrap();
 
     let reader = tree.finalize().unwrap();
@@ -644,20 +631,24 @@ fn v9_f15a_first_write_wins_in_store() {
     let db_path = temp.path().join("test_fww.redb");
     let mut store = era_index::IndexStore::create(&db_path, 1024).unwrap();
 
-    let entry1 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 1024);
-    let entry2 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(99), 9999, 2048);
+    let entry1 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 1024)
+        .expect("valid entry");
+    let entry2 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(99), 9999, 2048)
+        .expect("valid entry");
 
     store.insert(&entry1).unwrap();
     store.insert(&entry2).unwrap();
 
     let result = store.get(&test_hash(1)).unwrap().unwrap();
     assert_eq!(
-        result.offset, 0,
+        result.offset(),
+        0,
         "V9-F15a: First-write-wins — offset should be 0, got {}",
-        result.offset
+        result.offset()
     );
     assert_eq!(
-        result.length, 1024,
+        result.length(),
+        1024,
         "V9-F15a: First-write-wins — length should be 1024"
     );
     assert_eq!(store.entry_count(), 1, "V9-F15a: Should count only 1 entry");
@@ -669,14 +660,17 @@ fn v9_f15b_first_write_wins_in_batch() {
     let db_path = temp.path().join("test_fww_batch.redb");
     let mut store = era_index::IndexStore::create(&db_path, 1024).unwrap();
 
-    let entry1 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 1024);
-    let entry2 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(99), 9999, 2048);
+    let entry1 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 1024)
+        .expect("valid entry");
+    let entry2 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(99), 9999, 2048)
+        .expect("valid entry");
 
     store.insert_batch(&[entry1, entry2]).unwrap();
 
     let result = store.get(&test_hash(1)).unwrap().unwrap();
     assert_eq!(
-        result.offset, 0,
+        result.offset(),
+        0,
         "V9-F15b: Batch first-write-wins — offset should be 0"
     );
     assert_eq!(store.entry_count(), 1);
@@ -689,16 +683,13 @@ fn v9_f15b_first_write_wins_in_batch() {
 
 #[test]
 fn v9_f16a_from_memory_chunks_pages_correctly() {
-    use bloomfilter::Bloom;
-
     let meta = MetaIndex::new();
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(100_000, 0.01);
 
     // Create 2.5 pages worth of entries
     let count = ENTRIES_PER_PAGE * 2 + ENTRIES_PER_PAGE / 2;
     let entries: Vec<IndexEntry> = (0..count as u64).map(make_entry).collect();
 
-    let reader = IndexReader::from_memory(meta, bloom, entries).unwrap();
+    let reader = IndexReader::from_memory(meta, entries).unwrap();
     let page_count = reader.meta_page_count();
 
     println!(
@@ -714,13 +705,10 @@ fn v9_f16a_from_memory_chunks_pages_correctly() {
 
 #[test]
 fn v9_f16b_from_memory_single_page() {
-    use bloomfilter::Bloom;
-
     let meta = MetaIndex::new();
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(10_000, 0.01);
 
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
-    let reader = IndexReader::from_memory(meta, bloom, entries).unwrap();
+    let reader = IndexReader::from_memory(meta, entries).unwrap();
 
     assert_eq!(
         reader.meta_page_count(),
@@ -789,7 +777,7 @@ fn v9_f18a_bloom_no_false_negatives() {
     let mut hashes = Vec::new();
     for i in 0..5000u64 {
         let entry = make_entry(i);
-        hashes.push(entry.hash);
+        hashes.push(*entry.hash());
         tree.insert(entry).unwrap();
     }
 
@@ -855,7 +843,7 @@ fn v9_f20a_from_pages_ordering() {
     use bloomfilter::Bloom;
 
     let meta = MetaIndex::new();
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
+    let _bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
 
     // Create two pages in correct order
     let page1 = IndexPage::try_new((0..100).map(make_entry).collect()).unwrap();
@@ -863,7 +851,6 @@ fn v9_f20a_from_pages_ordering() {
 
     let result = IndexReader::from_pages(
         meta,
-        bloom,
         vec![(page1, BlockId::new(0)), (page2, BlockId::new(1))],
     );
     assert!(
@@ -877,7 +864,7 @@ fn v9_f20b_from_pages_rejects_disorder() {
     use bloomfilter::Bloom;
 
     let meta = MetaIndex::new();
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
+    let _bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
 
     // Create two pages in REVERSE order (page2 has lower hashes)
     let page1 = IndexPage::try_new((200..300).map(make_entry).collect()).unwrap();
@@ -886,7 +873,6 @@ fn v9_f20b_from_pages_rejects_disorder() {
     // from_pages calls meta.add_page which enforces ordering
     let result = IndexReader::from_pages(
         meta,
-        bloom,
         vec![(page1, BlockId::new(0)), (page2, BlockId::new(1))],
     );
     assert!(
@@ -1006,43 +992,50 @@ fn v9_f23a_concurrent_lookups() {
 
 #[test]
 fn v9_f24a_zero_length_entry() {
-    // IndexEntry with length=0 is accepted (no validation)
-    let entry = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 0);
-    assert_eq!(entry.length, 0);
-    // This is a potential integrity issue — a zero-length chunk is meaningless
-    // but is silently accepted into the index
-    println!(
-        "V9-F24a: Zero-length entry accepted silently. \
-         Downstream consumers must handle length=0 gracefully."
+    // V19-F3: IndexEntry with length=0 is now rejected as a hard error.
+    let result = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), 0, 0);
+    assert!(
+        result.is_err(),
+        "V9-F24a/V19-F3: Zero-length entry must be rejected"
     );
+    println!("V9-F24a: Zero-length entry correctly rejected. (V19-F3 remediation)");
 }
 
 #[test]
 fn v9_f24b_max_offset_entry() {
-    // u32::MAX offset is accepted
-    let entry = IndexEntry::new(
+    // V19-F3: offset + length overflow is now rejected as a hard error.
+    let result = IndexEntry::new(
         test_hash(1),
         VolumeId::new(),
         BlockId::new(0),
         u32::MAX,
         u32::MAX,
     );
-    assert_eq!(entry.offset, u32::MAX);
-    assert_eq!(entry.length, u32::MAX);
+    assert!(
+        result.is_err(),
+        "V9-F24b/V19-F3: offset + length overflow must be rejected"
+    );
 
-    // offset + length wraps around — potential read past end of block
-    let end = entry.offset as u64 + entry.length as u64;
-    println!(
-        "V9-F24b: offset({}) + length({}) = {} (exceeds u32::MAX = {})",
-        entry.offset,
-        entry.length,
-        end,
-        u32::MAX
+    // But u32::MAX offset with length=1 also overflows and should be rejected
+    let result2 = IndexEntry::new(test_hash(1), VolumeId::new(), BlockId::new(0), u32::MAX, 1);
+    assert!(
+        result2.is_err(),
+        "V9-F24b/V19-F3: u32::MAX + 1 overflow must be rejected"
+    );
+
+    // Valid max-range entry (no overflow)
+    let result3 = IndexEntry::new(
+        test_hash(1),
+        VolumeId::new(),
+        BlockId::new(0),
+        u32::MAX - 1,
+        1,
     );
     assert!(
-        end > u32::MAX as u64,
-        "V9-F24b: offset + length overflows u32 — no validation prevents this"
+        result3.is_ok(),
+        "V9-F24b: offset + length = u32::MAX is valid (no overflow)"
     );
+    println!("V9-F24b: overflow entries correctly rejected. (V19-F3 remediation)");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1126,7 +1119,7 @@ fn v9_f27a_cross_page_lookup_correctness() {
     }
 
     let reader = tree.finalize().unwrap();
-    assert_eq!(reader.reader().read().meta_page_count(), 3);
+    assert_eq!(reader.reader().meta_page_count(), 3);
 
     // Lookup entries that should be in different pages
     // Page boundaries are hash-ordered, so we check a spread of hashes
@@ -1163,7 +1156,7 @@ fn v9_f28a_binary_search_all_entries() {
             "V9-F28a: Binary search failed for hash {}",
             i
         );
-        assert_eq!(result.unwrap().hash, test_hash(i));
+        assert_eq!(*result.unwrap().hash(), test_hash(i));
     }
 
     // Non-existent hashes should return None
@@ -1238,29 +1231,17 @@ fn v9_f32a_extreme_hash_values() {
     let max_hash = ChunkHash::from_bytes([0xFF; 32]);
     let mid_hash = test_hash(1000);
 
-    tree.insert(IndexEntry::new(
-        zero_hash,
-        VolumeId::new(),
-        BlockId::new(0),
-        0,
-        1024,
-    ))
+    tree.insert(
+        IndexEntry::new(zero_hash, VolumeId::new(), BlockId::new(0), 0, 1024).expect("valid entry"),
+    )
     .unwrap();
-    tree.insert(IndexEntry::new(
-        max_hash,
-        VolumeId::new(),
-        BlockId::new(1),
-        0,
-        2048,
-    ))
+    tree.insert(
+        IndexEntry::new(max_hash, VolumeId::new(), BlockId::new(1), 0, 2048).expect("valid entry"),
+    )
     .unwrap();
-    tree.insert(IndexEntry::new(
-        mid_hash,
-        VolumeId::new(),
-        BlockId::new(2),
-        0,
-        4096,
-    ))
+    tree.insert(
+        IndexEntry::new(mid_hash, VolumeId::new(), BlockId::new(2), 0, 4096).expect("valid entry"),
+    )
     .unwrap();
 
     let reader = tree.finalize().unwrap();

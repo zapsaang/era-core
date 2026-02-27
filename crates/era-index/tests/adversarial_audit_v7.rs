@@ -69,6 +69,7 @@ fn make_entry(i: u64) -> IndexEntry {
         (i % 100) as u32 * 1024,
         1024,
     )
+    .expect("valid entry")
 }
 
 fn make_entry_with_offset(hash_val: u64, offset: u32, length: u32) -> IndexEntry {
@@ -79,6 +80,7 @@ fn make_entry_with_offset(hash_val: u64, offset: u32, length: u32) -> IndexEntry
         offset,
         length,
     )
+    .expect("valid entry")
 }
 
 // ============================================================================
@@ -341,9 +343,8 @@ fn test_v7_f2c_from_memory_always_one_page() {
 
         // Access the inner reader to inspect page count
         let inner = reader.reader();
-        let guard = inner.read();
 
-        let meta_pages = guard.meta_page_count();
+        let meta_pages = inner.meta_page_count();
         let expected = (n as usize).div_ceil(ENTRIES_PER_PAGE);
 
         // FIXED: from_memory() now chunks entries at ENTRIES_PER_PAGE boundaries
@@ -382,11 +383,12 @@ fn test_v7_f3a_redb_first_write_wins() {
 
     let result = store.get(&test_hash(42)).unwrap().unwrap();
     assert_eq!(
-        result.offset, 0,
+        result.offset(),
+        0,
         "V7-F3: Redb uses FIRST-WRITE-WINS. offset={} (expected 0)",
-        result.offset
+        result.offset()
     );
-    assert_eq!(result.length, 1024);
+    assert_eq!(result.length(), 1024);
 }
 
 /// V7-F3b: IndexPage::new() is FIRST-OCCURRENCE-WINS.
@@ -403,12 +405,13 @@ fn test_v7_f3b_index_page_first_occurrence_wins() {
     // dedup_by_key on a sorted vec keeps the first of consecutive duplicates
     // Since both have the same hash, after sort they're adjacent, and the first is kept
     assert_eq!(
-        result.offset, 0,
+        result.offset(),
+        0,
         "V7-F3: IndexPage::try_new() uses FIRST-OCCURRENCE-WINS via dedup_by_key. \
          offset={} (expected 0). This is OPPOSITE of Redb's LAST-WRITE-WINS.",
-        result.offset
+        result.offset()
     );
-    assert_eq!(result.length, 1024);
+    assert_eq!(result.length(), 1024);
 }
 
 /// V7-F3c: End-to-end consistency — both paths now agree on first-write-wins.
@@ -426,7 +429,7 @@ fn test_v7_f3c_end_to_end_dedup_consistency() {
 
     let drained = builder.read_sorted().unwrap();
     assert_eq!(drained.len(), 1);
-    let redb_result_offset = drained[0].offset;
+    let redb_result_offset = drained[0].offset();
 
     // Path 2: Direct IndexPage construction (first-occurrence-wins)
     let page = IndexPage::try_new(vec![
@@ -434,7 +437,7 @@ fn test_v7_f3c_end_to_end_dedup_consistency() {
         make_entry_with_offset(42, 4096, 2048),
     ])
     .unwrap();
-    let page_result_offset = page.find(&test_hash(42)).unwrap().offset;
+    let page_result_offset = page.find(&test_hash(42)).unwrap().offset();
 
     // FIXED: Both paths now give the same result (first-write-wins)
     assert_eq!(
@@ -493,7 +496,8 @@ fn test_v7_f4a_bloom_fp_rate_at_overcapacity() {
         );
     }
 
-    // At 10× overcapacity, FP rate should now be low thanks to bloom resize
+    // At 10× overcapacity, FP rate should be reasonable after bloom resize.
+    // V16-F1 changed growth factor from 4× to 2×, so the bloom is tighter.
     let mut b = IndexBuilder::new(small_limit).unwrap();
     for i in 0..10240u64 {
         b.insert(make_entry(i)).unwrap();
@@ -503,8 +507,8 @@ fn test_v7_f4a_bloom_fp_rate_at_overcapacity() {
         .count();
     let fp_rate = fp_count as f64 / 10_000.0;
     assert!(
-        fp_rate < 0.05,
-        "V7-F4: At 10× overcapacity, FP rate should be <5% after resize but got {:.2}%.",
+        fp_rate < 0.15,
+        "V7-F4: At 10× overcapacity, FP rate should be <15% after resize but got {:.2}%.",
         fp_rate * 100.0
     );
 }
@@ -594,23 +598,15 @@ fn test_v7_f5a_information_loss_two_volumes_same_block_id() {
     let mut tree = ChunkIndex::new_default().unwrap();
 
     // Entry from vol_a: hash=100, block_id=1
-    tree.insert(IndexEntry::new(
-        test_hash(100),
-        vol_a,
-        BlockId::new(1),
-        0,
-        1024,
-    ))
+    tree.insert(
+        IndexEntry::new(test_hash(100), vol_a, BlockId::new(1), 0, 1024).expect("valid entry"),
+    )
     .unwrap();
 
     // Entry from vol_b: hash=200, block_id=1 (same block_id, different volume!)
-    tree.insert(IndexEntry::new(
-        test_hash(200),
-        vol_b,
-        BlockId::new(1),
-        0,
-        2048,
-    ))
+    tree.insert(
+        IndexEntry::new(test_hash(200), vol_b, BlockId::new(1), 0, 2048).expect("valid entry"),
+    )
     .unwrap();
 
     let reader = tree.finalize().unwrap();
@@ -726,7 +722,7 @@ fn test_v7_f6b_finalize_data_traversal_count() {
     let bloom_start = Instant::now();
     let mut bloom = bloomfilter::Bloom::new_for_fp_rate(drained.len().max(1024), 0.01);
     for entry in &drained {
-        bloom.set(&entry.hash);
+        bloom.set(entry.hash());
     }
     let bloom_time = bloom_start.elapsed();
 
@@ -1238,7 +1234,7 @@ fn test_v7_edge_all_same_hash() {
         drained.len(),
     );
     // First-write-wins: the first inserted entry's offset should survive
-    assert_eq!(drained[0].offset, 0);
+    assert_eq!(drained[0].offset(), 0);
 }
 
 /// V7-EDGE-6: Consecutive hashes — verify sort order is correct.
@@ -1257,7 +1253,7 @@ fn test_v7_edge_sort_order_correctness() {
     // Must be sorted by hash
     for i in 1..drained.len() {
         assert!(
-            drained[i - 1].hash <= drained[i].hash,
+            drained[i - 1].hash() <= drained[i].hash(),
             "Sort invariant violated at index {}",
             i
         );
@@ -1271,21 +1267,14 @@ fn test_v7_edge_extreme_hash_values() {
     let max_hash = ChunkHash::from_bytes([0xFF; 32]);
 
     let mut tree = ChunkIndex::new_default().unwrap();
-    tree.insert(IndexEntry::new(
-        zero_hash,
-        VolumeId::new(),
-        BlockId::new(0),
-        0,
-        1024,
-    ))
+    tree.insert(
+        IndexEntry::new(zero_hash, VolumeId::new(), BlockId::new(0), 0, 1024).expect("valid entry"),
+    )
     .unwrap();
-    tree.insert(IndexEntry::new(
-        max_hash,
-        VolumeId::new(),
-        BlockId::new(1),
-        4096,
-        2048,
-    ))
+    tree.insert(
+        IndexEntry::new(max_hash, VolumeId::new(), BlockId::new(1), 4096, 2048)
+            .expect("valid entry"),
+    )
     .unwrap();
 
     let reader = tree.finalize().unwrap();
