@@ -351,12 +351,17 @@ impl<B: StorageBackend> VolumePool<B> {
     }
 
     /// Calculate which volume slot a shard should go to.
-    fn shard_volume_slot(&self, shard_idx: usize) -> usize {
-        self.config.distribution.strategy.calculate_volume(
+    fn shard_volume_slot(&self, shard_idx: usize) -> era_common::Result<usize> {
+        if self.writers.is_empty() {
+            return Err(era_common::EraError::InvalidConfig(
+                "no volumes available for shard distribution".into(),
+            ));
+        }
+        Ok(self.config.distribution.strategy.calculate_volume(
             shard_idx,
             self.block_sequence,
             self.writers.len(),
-        )
+        ))
     }
 
     /// Check if a volume can fit additional data.
@@ -419,7 +424,7 @@ impl<B: StorageBackend> VolumePool<B> {
         original_len: u32,
         stripe_lengths: Option<&[u32]>,
     ) -> Result<(MatrixShardEntry, VolumeId)> {
-        let preferred_slot = self.shard_volume_slot(shard_idx);
+        let preferred_slot = self.shard_volume_slot(shard_idx)?;
 
         // Validate shard size against max volume constraints
         self.validate_shard_size(shard_data.len() as u64)?;
@@ -586,9 +591,8 @@ impl<B: StorageBackend> VolumePool<B> {
         );
 
         for (shard_idx, shard_data) in shards.iter().enumerate() {
-            let slot = self.shard_volume_slot(shard_idx);
+            let slot = self.shard_volume_slot(shard_idx)?;
             let need_header = !volumes_with_header[slot];
-
             let (entry, _) = self
                 .write_shard(shard_idx, shard_data, need_header, original_len, None)
                 .await?;
@@ -611,7 +615,12 @@ impl<B: StorageBackend> VolumePool<B> {
         self.finalize_with_catalog(0, 0, 0, 0, 0, 0).await
     }
 
-    /// Finalize all volumes with catalog information.
+    /// Finalize all volumes with the same catalog information.
+    ///
+    /// This method broadcasts the same catalog offset to all volumes. This is appropriate
+    /// when using a single catalog location shared across all volumes (the typical case).
+    ///
+    /// For per-volume catalog locations, use [`finalize_with_catalogs`] instead.
     pub async fn finalize_with_catalog(
         &mut self,
         catalog_offset: u64,

@@ -109,6 +109,9 @@ impl Footer {
     }
 
     /// Create a new footer with catalog location
+    /// 
+    /// Note: This method takes many arguments due to the fixed footer format. For simpler usage,
+    /// consider using [`FooterBuilder`] which provides a more ergonomic API.
     #[allow(clippy::too_many_arguments)]
     pub fn with_catalog(
         data_end_offset: u64,
