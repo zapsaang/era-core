@@ -367,7 +367,7 @@ impl SuperHeader {
                 .map(|s| proto::RecipientSlot {
                     r#type: match s.r_type {
                         RecipientType::Argon2idPassword => {
-                            proto::recipient_slot::RecipientType::ScryptPassword.into()
+                            proto::recipient_slot::RecipientType::Argon2idPassword.into()
                         }
                         RecipientType::X25519PubKey => {
                             proto::recipient_slot::RecipientType::X25519Pubkey.into()
@@ -464,7 +464,7 @@ impl From<RecipientSlot> for proto::RecipientSlot {
         Self {
             r#type: match slot.r_type {
                 RecipientType::Argon2idPassword => {
-                    proto::recipient_slot::RecipientType::ScryptPassword.into()
+                    proto::recipient_slot::RecipientType::Argon2idPassword.into()
                 }
                 RecipientType::X25519PubKey => {
                     proto::recipient_slot::RecipientType::X25519Pubkey.into()
@@ -483,7 +483,7 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
 
     fn try_from(proto: proto::RecipientSlot) -> std::result::Result<Self, Self::Error> {
         // EV36-01: Use raw i32 field instead of generated accessor which silently
-        // maps unknown enum values to the default variant (ScryptPassword/0).
+        // maps unknown enum values to the default variant (Argon2idPassword/0).
         let r_type =
             proto::recipient_slot::RecipientType::try_from(proto.r#type).map_err(|_| {
                 era_common::EraError::CorruptedHeader(format!(
@@ -525,7 +525,7 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
 
         Ok(Self {
             r_type: match r_type {
-                proto::recipient_slot::RecipientType::ScryptPassword => {
+                proto::recipient_slot::RecipientType::Argon2idPassword => {
                     RecipientType::Argon2idPassword
                 }
                 proto::recipient_slot::RecipientType::X25519Pubkey => RecipientType::X25519PubKey,

@@ -98,6 +98,17 @@ impl<R: StorageReader> VolumeReader<R> {
             }
         }
 
+        // V30-03: Validate that data_end_offset is not below DATA_REGION_START
+        // (plausibility cross-check for floating footer recovery)
+        if let Some(ref f) = footer {
+            if f.data_end_offset != 0 && f.data_end_offset < DATA_REGION_START {
+                return Err(EraError::CorruptedFooter(format!(
+                    "Footer data_end_offset {} is below minimum data region start {}",
+                    f.data_end_offset, DATA_REGION_START
+                )));
+            }
+        }
+
         Ok(Self {
             reader,
             header,

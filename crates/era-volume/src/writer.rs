@@ -582,6 +582,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         // 1. Write backup header (copy of primary) at current position
         let backup_header_offset = self.position;
+
+        // V30-04: Validate backup header offset is not below DATA_REGION_START
+        if backup_header_offset < DATA_REGION_START {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "backup_header_offset {} is below DATA_REGION_START {}",
+                backup_header_offset, DATA_REGION_START
+            )));
+        }
         let header_bytes = self.header.to_bytes()?;
 
         if self.max_size.is_some() {

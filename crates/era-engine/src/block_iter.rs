@@ -812,11 +812,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         let mut any_shard_seen = false;
 
         for shard_idx in 0..stripe_size {
-            let vol_idx = self.distribution_strategy.calculate_volume(
+            let vol_idx = match self.distribution_strategy.calculate_volume(
                 shard_idx,
                 self.current_stripe_index as u64,
                 self.original_volume_count,
-            );
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let reader_idx_opt = self.vol_index_map.get(vol_idx).copied().flatten();
             if let Some(idx) = reader_idx_opt {

@@ -335,7 +335,9 @@ impl Footer {
     /// fails checksum verification, or has inconsistent cross-field offsets.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < FOOTER_SIZE {
-            return Err(EraError::CorruptedFooter("Footer too small".to_string()));
+            return Err(EraError::CorruptedFooter(format!(
+                "Footer too small: {} bytes, need {}", data.len(), FOOTER_SIZE
+            )));
         }
 
         // Read fields
@@ -351,7 +353,10 @@ impl Footer {
 
         // Validate magic
         if footer.magic != FOOTER_MAGIC {
-            return Err(EraError::CorruptedFooter("Invalid magic".to_string()));
+            return Err(EraError::CorruptedFooter(format!(
+                "Invalid magic: expected {:?}, got {:?}",
+                FOOTER_MAGIC, footer.magic
+            )));
         }
 
         // Validate version
@@ -376,8 +381,13 @@ impl Footer {
         let mut hasher = blake3::Hasher::new();
         hasher.update(FOOTER_DOMAIN);
         hasher.update(&data[0..96]);
-        if hasher.finalize().as_bytes() != &footer.checksum {
-            return Err(EraError::CorruptedFooter("Checksum mismatch".to_string()));
+        let computed = hasher.finalize();
+        if computed.as_bytes() != &footer.checksum {
+            return Err(EraError::CorruptedFooter(format!(
+                "Checksum mismatch: expected {:02x}{:02x}{:02x}{:02x}..., got {:02x}{:02x}{:02x}{:02x}...",
+                footer.checksum[0], footer.checksum[1], footer.checksum[2], footer.checksum[3],
+                computed.as_bytes()[0], computed.as_bytes()[1], computed.as_bytes()[2], computed.as_bytes()[3],
+            )));
         }
 
         // Validate field ranges (Defect #6):

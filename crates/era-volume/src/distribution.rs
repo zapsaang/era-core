@@ -21,7 +21,7 @@ pub trait DistributionCalculator {
     /// # Returns
     /// The volume index (0..volume_count) where this shard should be stored.
     fn calculate_volume(&self, shard_idx: usize, block_sequence: u64, volume_count: usize)
-        -> usize;
+        -> era_common::Result<usize>;
 }
 
 impl DistributionCalculator for MatrixDistributionStrategy {
@@ -30,19 +30,15 @@ impl DistributionCalculator for MatrixDistributionStrategy {
         shard_idx: usize,
         block_sequence: u64,
         volume_count: usize,
-    ) -> usize {
-        debug_assert!(
-            volume_count > 0,
-            "calculate_volume called with zero volumes"
-        );
+    ) -> era_common::Result<usize> {
         if volume_count == 0 {
-            return 0;
+            return Err(era_common::EraError::InvalidConfig("volume_count must be > 0".into()));
         }
         match self {
             MatrixDistributionStrategy::RotatingOffset => {
                 let result = (shard_idx + (block_sequence as usize)) % volume_count;
                 debug_assert!(result < volume_count, "modulo postcondition violated");
-                result
+                Ok(result)
             }
         }
     }
@@ -136,31 +132,30 @@ mod tests {
         let strategy = MatrixDistributionStrategy::RotatingOffset;
 
         // 3 volumes, block 0
-        assert_eq!(strategy.calculate_volume(0, 0, 3), 0);
-        assert_eq!(strategy.calculate_volume(1, 0, 3), 1);
-        assert_eq!(strategy.calculate_volume(2, 0, 3), 2);
-        assert_eq!(strategy.calculate_volume(3, 0, 3), 0);
-        assert_eq!(strategy.calculate_volume(4, 0, 3), 1);
-        assert_eq!(strategy.calculate_volume(5, 0, 3), 2);
+        assert_eq!(strategy.calculate_volume(0, 0, 3).unwrap(), 0);
+        assert_eq!(strategy.calculate_volume(1, 0, 3).unwrap(), 1);
+        assert_eq!(strategy.calculate_volume(2, 0, 3).unwrap(), 2);
+        assert_eq!(strategy.calculate_volume(3, 0, 3).unwrap(), 0);
+        assert_eq!(strategy.calculate_volume(4, 0, 3).unwrap(), 1);
+        assert_eq!(strategy.calculate_volume(5, 0, 3).unwrap(), 2);
 
         // 3 volumes, block 1 (rotated by 1)
-        assert_eq!(strategy.calculate_volume(0, 1, 3), 1);
-        assert_eq!(strategy.calculate_volume(1, 1, 3), 2);
-        assert_eq!(strategy.calculate_volume(2, 1, 3), 0);
+        assert_eq!(strategy.calculate_volume(0, 1, 3).unwrap(), 1);
+        assert_eq!(strategy.calculate_volume(1, 1, 3).unwrap(), 2);
+        assert_eq!(strategy.calculate_volume(2, 1, 3).unwrap(), 0);
 
         // 3 volumes, block 2 (rotated by 2)
-        assert_eq!(strategy.calculate_volume(0, 2, 3), 2);
-        assert_eq!(strategy.calculate_volume(1, 2, 3), 0);
-        assert_eq!(strategy.calculate_volume(2, 2, 3), 1);
+        assert_eq!(strategy.calculate_volume(0, 2, 3).unwrap(), 2);
+        assert_eq!(strategy.calculate_volume(1, 2, 3).unwrap(), 0);
+        assert_eq!(strategy.calculate_volume(2, 2, 3).unwrap(), 1);
     }
 
     #[test]
     fn test_zero_volume_count() {
         let strategy = MatrixDistributionStrategy::RotatingOffset;
-        // The debug_assert only fires in debug builds. Since shard_volume_slot() in volume_pool.rs
-        // validates that writers.len() > 0 before calling calculate_volume(), this zero case
-        // should never occur in production. We test the safe path (volume_count=1) instead.
-        assert_eq!(strategy.calculate_volume(0, 0, 1), 0);
+        assert!(strategy.calculate_volume(0, 0, 0).is_err());
+        // Test the safe path (volume_count=1) still works
+        assert_eq!(strategy.calculate_volume(0, 0, 1).unwrap(), 0);
     }
 
     #[test]

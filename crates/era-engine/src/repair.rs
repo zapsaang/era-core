@@ -641,7 +641,7 @@ pub async fn repair_archive_matrix(
                 shard_idx,
                 block_sequence,
                 total_volumes.max(1),
-            );
+            )?;
 
             let reader_idx_opt = vol_index_map.get(vol_idx).copied().flatten();
             if let Some(reader_idx) = reader_idx_opt {

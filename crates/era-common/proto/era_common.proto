@@ -130,7 +130,7 @@ message SuperHeader {
 
 message RecipientSlot {
   enum RecipientType {
-    RECIPIENT_TYPE_SCRYPT_PASSWORD = 0;
+    RECIPIENT_TYPE_ARGON2ID_PASSWORD = 0;
     RECIPIENT_TYPE_X25519_PUBKEY = 1;
     RECIPIENT_TYPE_FIDO2_HMAC = 2;
   }

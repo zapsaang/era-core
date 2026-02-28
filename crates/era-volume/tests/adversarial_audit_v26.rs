@@ -603,7 +603,7 @@ fn test_v26_f8_distribution_volume_count_one() {
     for shard in 0..10 {
         for block in 0..10 {
             assert_eq!(
-                strategy.calculate_volume(shard, block, 1),
+                strategy.calculate_volume(shard, block, 1).unwrap(),
                 0,
                 "With 1 volume, all shards must go to volume 0"
             );
@@ -617,15 +617,15 @@ fn test_v26_f8_distribution_volume_count_one() {
 fn test_v26_f8_distribution_large_block_sequence() {
     let strategy = MatrixDistributionStrategy::RotatingOffset;
     // Use large but non-overflowing values
-    let result = strategy.calculate_volume(0, 1_000_000_000, 3);
+    let result = strategy.calculate_volume(0, 1_000_000_000, 3).unwrap();
     assert!(result < 3, "Result must be valid volume index");
 
-    let result2 = strategy.calculate_volume(5, 999_999_999, 7);
+    let result2 = strategy.calculate_volume(5, 999_999_999, 7).unwrap();
     assert!(result2 < 7, "Result must be valid volume index");
 
     // Verify deterministic: same inputs → same output
-    let r1 = strategy.calculate_volume(2, 500, 4);
-    let r2 = strategy.calculate_volume(2, 500, 4);
+    let r1 = strategy.calculate_volume(2, 500, 4).unwrap();
+    let r2 = strategy.calculate_volume(2, 500, 4).unwrap();
     assert_eq!(r1, r2);
 }
 
