@@ -256,7 +256,18 @@ impl<R: StorageReader> VolumeReader<R> {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 _ => {
                     shards.push((idx, None));
-                    offset = offset.saturating_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64);
+                    offset = match offset
+                        .checked_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64)
+                    {
+                        Some(o) => o,
+                        None => {
+                            // Overflow: all remaining shards are unreachable
+                            for remaining in (idx + 1)..total_shards {
+                                shards.push((remaining, None));
+                            }
+                            break;
+                        }
+                    };
                     continue;
                 }
             };
@@ -265,7 +276,17 @@ impl<R: StorageReader> VolumeReader<R> {
                 Some(h) => h,
                 None => {
                     shards.push((idx, None));
-                    offset = offset.saturating_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64);
+                    offset = match offset
+                        .checked_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64)
+                    {
+                        Some(o) => o,
+                        None => {
+                            for remaining in (idx + 1)..total_shards {
+                                shards.push((remaining, None));
+                            }
+                            break;
+                        }
+                    };
                     continue;
                 }
             };
@@ -279,11 +300,22 @@ impl<R: StorageReader> VolumeReader<R> {
                     MAX_SHARD_SIZE
                 );
                 shards.push((idx, None));
-                offset = offset.saturating_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64);
+                offset = match offset
+                    .checked_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64)
+                {
+                    Some(o) => o,
+                    None => {
+                        for remaining in (idx + 1)..total_shards {
+                            shards.push((remaining, None));
+                        }
+                        break;
+                    }
+                };
                 continue;
             }
 
-            let shard_data_offset = offset.checked_add(ShardHeader::SIZE as u64)
+            let shard_data_offset = offset
+                .checked_add(ShardHeader::SIZE as u64)
                 .ok_or_else(|| EraError::InvalidFormat("shard data offset overflow".into()))?;
 
             // Read shard data
@@ -297,7 +329,8 @@ impl<R: StorageReader> VolumeReader<R> {
             };
 
             shards.push((idx, shard_data));
-            offset = offset.checked_add(ShardHeader::SIZE as u64 + header.length as u64)
+            offset = offset
+                .checked_add(ShardHeader::SIZE as u64 + header.length as u64)
                 .ok_or_else(|| EraError::InvalidFormat("shard offset overflow".into()))?;
         }
 
@@ -356,7 +389,9 @@ impl<R: StorageReader> VolumeReader<R> {
         }
 
         // Read encrypted data
-        let data_offset = location.physical_offset.checked_add(BlockHeader::SIZE as u64)
+        let data_offset = location
+            .physical_offset
+            .checked_add(BlockHeader::SIZE as u64)
             .ok_or_else(|| EraError::InvalidFormat("block data offset overflow".into()))?;
         let data = self
             .reader

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use era_common::{ArchiveConfig, ArchiveId, BlockId, EncryptedMacroBlock};
 use era_storage::LocalStorageBackend;
-use era_volume::{RecipientSlot, SuperHeader, MultiVolumeConfig, MultiVolumeWriter};
+use era_volume::{MultiVolumeConfig, MultiVolumeWriter, RecipientSlot, SuperHeader};
 use std::time::Instant;
 use tempfile::tempdir;
 

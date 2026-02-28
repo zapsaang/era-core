@@ -382,7 +382,7 @@ impl Footer {
 
         // Validate field ranges (Defect #6):
         // data_end_offset must be 0 or at least HEADER_SIZE + FOOTER_SIZE (minimum structural size)
-        let min_data_end = (crate::header::HEADER_SIZE + FOOTER_SIZE) as u64;
+        let min_data_end = crate::header::DATA_REGION_START;
         if footer.data_end_offset != 0 && footer.data_end_offset < min_data_end {
             return Err(EraError::CorruptedFooter(format!(
                 "data_end_offset {} is below minimum structural size {}",
@@ -391,6 +391,11 @@ impl Footer {
         }
         Self::validate_offset_above_header("catalog_offset", footer.catalog_offset)?;
         Self::validate_offset_above_header("index_offset", footer.index_offset)?;
+        Self::validate_offset_above_header(
+            "last_checkpoint_offset",
+            footer.last_checkpoint_offset,
+        )?;
+        Self::validate_offset_above_header("backup_header_offset", footer.backup_header_offset)?;
 
         // D10-01: Cross-field validation — catalog region must not overflow
         // and must be contained within the data region when present.
@@ -438,13 +443,14 @@ impl Footer {
         if offset != 0 && offset < crate::header::HEADER_SIZE as u64 {
             return Err(EraError::CorruptedFooter(format!(
                 "{} {} is below HEADER_SIZE {}",
-                name, offset, crate::header::HEADER_SIZE
+                name,
+                offset,
+                crate::header::HEADER_SIZE
             )));
         }
         Ok(())
     }
 }
-
 
 /// Builder for constructing a Footer with named fields.
 ///
@@ -589,7 +595,7 @@ mod tests {
             1,
             1,
             0xFFFF_FFFF_FFFF_FFFF, // catalog_offset = max
-            1,                      // catalog_size = 1 → overflows
+            1,                     // catalog_size = 1 → overflows
             0,
             0,
             0,
@@ -612,17 +618,9 @@ mod tests {
         // catalog region extends past data_end_offset
         let footer = Footer::with_catalog(
             10_000, // data_end_offset
-            1,
-            1,
-            9_000,  // catalog_offset
-            2_000,  // catalog_size → end = 11_000 > data_end_offset
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
+            1, 1, 9_000, // catalog_offset
+            2_000, // catalog_size → end = 11_000 > data_end_offset
+            0, 0, 0, 0, 0, 0, 0,
         );
         let bytes = footer.to_bytes().unwrap();
         let err = Footer::from_bytes(&bytes).unwrap_err();
@@ -638,17 +636,9 @@ mod tests {
         // index region extends past data_end_offset
         let footer = Footer::with_catalog(
             10_000, // data_end_offset
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            9_000,  // index_offset
-            2_000,  // index_size → end = 11_000 > data_end_offset
-            0,
-            0,
+            1, 1, 0, 0, 0, 0, 0, 9_000, // index_offset
+            2_000, // index_size → end = 11_000 > data_end_offset
+            0, 0,
         );
         let bytes = footer.to_bytes().unwrap();
         let err = Footer::from_bytes(&bytes).unwrap_err();

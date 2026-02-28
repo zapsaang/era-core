@@ -30,8 +30,8 @@ use era_storage::{LocalStorageBackend, StorageBackend, StorageReader};
 use era_volume::{
     AccessPolicy, EncryptedVolumeKey, Footer, KeyWrapAlgorithm, MultiVolumeConfig,
     MultiVolumeReader, MultiVolumeWriter, RecipientSlot, RecipientType, SuperHeader, VolumePool,
-    VolumePoolConfig, VolumeReader, VolumeWriter, BACKUP_FOOTER_GAP, FOOTER_SIZE, HEADER_SIZE,
-    MAX_SHARD_SIZE, DATA_REGION_START, HEADER_VERSION, MAX_RECIPIENTS,
+    VolumePoolConfig, VolumeReader, VolumeWriter, BACKUP_FOOTER_GAP, DATA_REGION_START,
+    FOOTER_SIZE, HEADER_SIZE, HEADER_VERSION, MAX_RECIPIENTS, MAX_SHARD_SIZE,
 };
 use std::path::Path;
 use tempfile::TempDir;

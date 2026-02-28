@@ -38,7 +38,9 @@ mod volume_pool;
 mod writer;
 
 pub use distribution::{DistributionCalculator, DistributionConfigExt, VolumePoolStatusExt};
-pub use footer::{Footer, FooterBuilder, BACKUP_FOOTER_GAP, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION};
+pub use footer::{
+    Footer, FooterBuilder, BACKUP_FOOTER_GAP, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION,
+};
 pub use header::{
     AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader,
     DATA_REGION_START, HEADER_SIZE, HEADER_VERSION, MAGIC, MAX_RECIPIENTS,

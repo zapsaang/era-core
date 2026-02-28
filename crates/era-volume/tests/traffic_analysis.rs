@@ -151,7 +151,10 @@ async fn test_checkpoint_traffic_safety() {
     // This should trigger padding to max_size if we are to prevent traffic analysis
     // during upload of this snapshot.
     // Use the actual block offset from write_canonical_block as the checkpoint offset.
-    writer.commit_checkpoint(location.physical_offset).await.unwrap();
+    writer
+        .commit_checkpoint(location.physical_offset)
+        .await
+        .unwrap();
 
     // 5. Verify File Size & Entropy
     let file_path = temp_dir.path().join(volume_path);

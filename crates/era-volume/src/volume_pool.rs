@@ -10,8 +10,8 @@ use era_common::{
     ShardHeader, VolumeId,
 };
 use era_storage::StorageBackend;
-use std::path::{Path, PathBuf};
 use std::mem::size_of;
+use std::path::{Path, PathBuf};
 
 use crate::distribution::{DistributionCalculator, DistributionConfigExt};
 use crate::footer::FOOTER_SIZE;
@@ -168,7 +168,10 @@ impl<B: StorageBackend> VolumePool<B> {
             let seq = header.volume_sequence;
             let volume_path = config.volume_path(seq);
             let volume_filename = volume_path.file_name().ok_or_else(|| {
-                era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path))
+                era_common::EraError::InvalidConfig(format!(
+                    "path has no filename: {:?}",
+                    volume_path
+                ))
             })?;
 
             let writer = VolumeWriter::create(&backend, Path::new(volume_filename), header).await?;
@@ -206,7 +209,6 @@ impl<B: StorageBackend> VolumePool<B> {
         mut config: VolumePoolConfig,
         template_header: SuperHeader,
     ) -> Result<Self> {
-
         let volume_count = if template_header.total_volumes > 0 {
             template_header.total_volumes as usize
         } else {
@@ -225,7 +227,10 @@ impl<B: StorageBackend> VolumePool<B> {
             })?;
             let volume_path = config.volume_path(seq_u16);
             let volume_filename = volume_path.file_name().ok_or_else(|| {
-                era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path))
+                era_common::EraError::InvalidConfig(format!(
+                    "path has no filename: {:?}",
+                    volume_path
+                ))
             })?;
 
             let reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
@@ -257,10 +262,10 @@ impl<B: StorageBackend> VolumePool<B> {
             template_header,
             writers,
             sequences,
-        // Note: block_sequence is initialized from max canonical block count.
-        // This doesn't account for raw writes or erasure stripe count, which may
-        // cause slightly suboptimal distribution on append. This is acceptable
-        // because the rotating offset strategy tolerates imprecise counters.
+            // Note: block_sequence is initialized from max canonical block count.
+            // This doesn't account for raw writes or erasure stripe count, which may
+            // cause slightly suboptimal distribution on append. This is acceptable
+            // because the rotating offset strategy tolerates imprecise counters.
             block_sequence: max_block_count as u64,
             stats,
         })
@@ -280,9 +285,9 @@ impl<B: StorageBackend> VolumePool<B> {
     ) -> Result<Self> {
         config.initial_volume_count = 1;
         let volume_path = config.volume_path(0);
-        let volume_filename = volume_path
-            .file_name()
-            .ok_or_else(|| era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path)))?;
+        let volume_filename = volume_path.file_name().ok_or_else(|| {
+            era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path))
+        })?;
 
         let writer =
             VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)
@@ -380,7 +385,10 @@ impl<B: StorageBackend> VolumePool<B> {
 
             let volume_path = self.config.volume_path(next_sequence);
             let volume_filename = volume_path.file_name().ok_or_else(|| {
-                era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path))
+                era_common::EraError::InvalidConfig(format!(
+                    "path has no filename: {:?}",
+                    volume_path
+                ))
             })?;
 
             let writer =
@@ -459,7 +467,10 @@ impl<B: StorageBackend> VolumePool<B> {
             + BACKUP_HEADER_RESERVATION
             + BlockHeader::SIZE as u64
             + ShardHeader::SIZE as u64;
-        current_size.saturating_add(additional_size).saturating_add(reserved) <= self.config.max_volume_size
+        current_size
+            .saturating_add(additional_size)
+            .saturating_add(reserved)
+            <= self.config.max_volume_size
     }
 
     /// Get remaining space in a volume.
@@ -468,7 +479,10 @@ impl<B: StorageBackend> VolumePool<B> {
             return 0;
         }
         let current_size = self.writers[slot].current_size();
-        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + BlockHeader::SIZE as u64 + ShardHeader::SIZE as u64;
+        let reserved = FOOTER_SIZE as u64
+            + BACKUP_HEADER_RESERVATION
+            + BlockHeader::SIZE as u64
+            + ShardHeader::SIZE as u64;
         if current_size.saturating_add(reserved) >= self.config.max_volume_size {
             0
         } else {
@@ -490,8 +504,10 @@ impl<B: StorageBackend> VolumePool<B> {
         }
 
         // MN34-01: Use BlockHeader::SIZE (not raw `4`) to match volume_can_fit()/needs_expansion() reservation
-        let reserved =
-            FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + BlockHeader::SIZE as u64 + ShardHeader::SIZE as u64;
+        let reserved = FOOTER_SIZE as u64
+            + BACKUP_HEADER_RESERVATION
+            + BlockHeader::SIZE as u64
+            + ShardHeader::SIZE as u64;
         let max_volume_shard_size = self.config.max_volume_size.saturating_sub(reserved);
 
         if shard_size > max_volume_shard_size {
@@ -547,15 +563,17 @@ impl<B: StorageBackend> VolumePool<B> {
             })
             .transpose()?
             .unwrap_or(0);
-        let header_size = if include_original_len_header { size_of::<u32>() as u64 } else { 0u64 };
+        let header_size = if include_original_len_header {
+            size_of::<u32>() as u64
+        } else {
+            0u64
+        };
         let total_size = length_prefix_size
             .checked_add(header_size)
             .and_then(|v| v.checked_add(ShardHeader::SIZE as u64))
             .and_then(|v| v.checked_add(shard_size))
             .ok_or_else(|| {
-                era_common::EraError::InvalidConfig(
-                    "calculated shard write size overflow".into(),
-                )
+                era_common::EraError::InvalidConfig("calculated shard write size overflow".into())
             })?;
 
         // Try preferred slot first, then find any available volume
@@ -564,7 +582,10 @@ impl<B: StorageBackend> VolumePool<B> {
         } else {
             // Find any volume with enough space (overflow strategy)
             let mut found_slot = None;
-            debug_assert!(!self.writers.is_empty(), "writers must be non-empty for modulo");
+            debug_assert!(
+                !self.writers.is_empty(),
+                "writers must be non-empty for modulo"
+            );
             for i in 0..self.writers.len() {
                 // Start from preferred slot and wrap around
                 let candidate = (preferred_slot + i) % self.writers.len();
@@ -609,7 +630,11 @@ impl<B: StorageBackend> VolumePool<B> {
         // lengths + original_len + shard_header + shard_data). Now 2 calls: one for
         // the coalesced header buffer, one for shard data.
         let header_capacity = stripe_lengths.map_or(0, std::mem::size_of_val)
-            + if include_original_len_header { size_of::<u32>() } else { 0 }
+            + if include_original_len_header {
+                size_of::<u32>()
+            } else {
+                0
+            }
             + ShardHeader::SIZE;
         let mut header_buf = Vec::with_capacity(header_capacity);
 
@@ -627,10 +652,7 @@ impl<B: StorageBackend> VolumePool<B> {
 
         // Compute CRC and append shard header
         let crc = compute_shard_crc(shard_data);
-        let shard_header = ShardHeader::new(
-            shard_len_u32,
-            crc,
-        );
+        let shard_header = ShardHeader::new(shard_len_u32, crc);
         header_buf.extend_from_slice(&shard_header.to_bytes());
 
         // Write coalesced header (1 syscall) then shard data (1 syscall)
@@ -652,12 +674,7 @@ impl<B: StorageBackend> VolumePool<B> {
         self.stats.total_shards_written += 1;
 
         Ok((
-            MatrixShardEntry::new(
-                volume_sequence,
-                shard_header_offset,
-                shard_len_u32,
-                crc,
-            ),
+            MatrixShardEntry::new(volume_sequence, shard_header_offset, shard_len_u32, crc),
             volume_id,
         ))
     }
@@ -696,7 +713,10 @@ impl<B: StorageBackend> VolumePool<B> {
         } else {
             // Find any volume with enough space
             let mut found_slot = None;
-            debug_assert!(!self.writers.is_empty(), "writers must be non-empty for modulo");
+            debug_assert!(
+                !self.writers.is_empty(),
+                "writers must be non-empty for modulo"
+            );
             for i in 0..self.writers.len() {
                 let candidate = (preferred_slot + i) % self.writers.len();
                 if self.volume_can_fit(candidate, total_size) {
@@ -963,9 +983,9 @@ impl<B: StorageBackend> VolumePool<B> {
             .map_err(|_| era_common::EraError::InvalidConfig("total volumes exceeds u16".into()))?;
 
         let volume_path = self.config.volume_path(new_sequence);
-        let volume_filename = volume_path
-            .file_name()
-            .ok_or_else(|| era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path)))?;
+        let volume_filename = volume_path.file_name().ok_or_else(|| {
+            era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path))
+        })?;
 
         let writer = VolumeWriter::create(backend, Path::new(volume_filename), header).await?;
 
@@ -991,7 +1011,10 @@ impl<B: StorageBackend> VolumePool<B> {
     pub fn needs_expansion(&self, required_size: u64) -> Result<bool> {
         // First check if the data is inherently too large for any single volume
         // Must match volume_can_fit() reservation: structural overhead + minimum block metadata
-        let reserved = FOOTER_SIZE as u64 + BACKUP_HEADER_RESERVATION + BlockHeader::SIZE as u64 + ShardHeader::SIZE as u64;
+        let reserved = FOOTER_SIZE as u64
+            + BACKUP_HEADER_RESERVATION
+            + BlockHeader::SIZE as u64
+            + ShardHeader::SIZE as u64;
         let max_per_volume = self.config.max_volume_size.saturating_sub(reserved);
         if required_size > max_per_volume {
             return Err(era_common::EraError::InvalidConfig(format!(
@@ -1111,8 +1134,8 @@ mod tests {
     /// when distribution.min_volumes exceeds the current count.
     #[test]
     fn bp26_01_with_distribution_auto_adjusts_volume_count() {
-        let config = VolumePoolConfig::new("/tmp/test", 1)
-            .with_distribution(MatrixDistributionConfig {
+        let config =
+            VolumePoolConfig::new("/tmp/test", 1).with_distribution(MatrixDistributionConfig {
                 strategy: era_common::MatrixDistributionStrategy::RotatingOffset,
                 min_volumes: 5,
                 target_volumes: 8,
@@ -1124,8 +1147,8 @@ mod tests {
     /// BP26-01: with_distribution() preserves count when it already meets min_volumes.
     #[test]
     fn bp26_01_with_distribution_preserves_sufficient_count() {
-        let config = VolumePoolConfig::new("/tmp/test", 10)
-            .with_distribution(MatrixDistributionConfig {
+        let config =
+            VolumePoolConfig::new("/tmp/test", 10).with_distribution(MatrixDistributionConfig {
                 strategy: era_common::MatrixDistributionStrategy::RotatingOffset,
                 min_volumes: 3,
                 target_volumes: 6,
@@ -1171,16 +1194,14 @@ mod tests {
     /// BP26-03: with_max_size() clamps values below MIN_VOLUME_SIZE.
     #[test]
     fn bp26_03_with_max_size_clamps_below_minimum() {
-        let config = VolumePoolConfig::new("/tmp/test", 1)
-            .with_max_size(1); // way below MIN_VOLUME_SIZE
+        let config = VolumePoolConfig::new("/tmp/test", 1).with_max_size(1); // way below MIN_VOLUME_SIZE
         assert!(config.max_volume_size >= MIN_VOLUME_SIZE);
     }
 
     /// BP26-03: with_max_size(0) is also clamped.
     #[test]
     fn bp26_03_with_max_size_zero_clamped() {
-        let config = VolumePoolConfig::new("/tmp/test", 1)
-            .with_max_size(0);
+        let config = VolumePoolConfig::new("/tmp/test", 1).with_max_size(0);
         assert_eq!(config.max_volume_size, MIN_VOLUME_SIZE);
     }
 

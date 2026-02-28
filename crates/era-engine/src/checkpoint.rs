@@ -492,7 +492,8 @@ pub async fn write_checkpoint<W: StorageWriter>(
 
     // Update footer's last_checkpoint_offset and block_id for direct decryption
     let checkpoint_block_id = block_id.sequence() as u32;
-    volume_writer.set_last_checkpoint_with_block_id(location.physical_offset, checkpoint_block_id)?;
+    volume_writer
+        .set_last_checkpoint_with_block_id(location.physical_offset, checkpoint_block_id)?;
 
     // CRITICAL: Atomically commit the checkpoint to disk
     // This persists the footer (primary + backup) so that if power is lost after this point,

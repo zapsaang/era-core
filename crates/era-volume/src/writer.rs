@@ -175,7 +175,6 @@ impl<W: StorageWriter> VolumeWriter<W> {
         Ok(())
     }
 
-
     /// Update the last checkpoint offset.
     ///
     /// # Errors
@@ -455,11 +454,13 @@ impl<W: StorageWriter> VolumeWriter<W> {
         } else {
             self.position = self.writer.current_size();
         }
-        self.block_count = self.block_count.saturating_add(1);
+        self.block_count = self
+            .block_count
+            .checked_add(1)
+            .ok_or_else(|| era_common::EraError::InvalidFormat("block_count overflow".into()))?;
 
         Ok(location)
     }
-
 
     /// Sync data to persistent storage without metadata (fdatasync).
     ///
@@ -477,8 +478,18 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// increment `block_count()`, which only counts canonical typed blocks.
     ///
     /// # Errors
+    /// Returns `InvalidConfig` if the data exceeds `MAX_SHARD_SIZE`.
     /// Returns I/O errors from the underlying storage backend.
     pub async fn write_raw(&mut self, data: &[u8]) -> Result<u64> {
+        // SECURITY: Validate raw write size against MAX_SHARD_SIZE (symmetric with reader)
+        if data.len() > MAX_SHARD_SIZE {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "raw write size {} exceeds MAX_SHARD_SIZE ({})",
+                data.len(),
+                MAX_SHARD_SIZE
+            )));
+        }
+
         let offset = self.position;
 
         if self.max_size.is_some() {

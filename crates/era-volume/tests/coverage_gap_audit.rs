@@ -11,9 +11,8 @@
 use era_common::proto;
 use era_common::{ArchiveConfig, ArchiveId, EraError};
 use era_volume::{
-    AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot,
-    RecipientType, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader, VolumeWriter,
-    HEADER_SIZE, MAX_RECIPIENTS,
+    AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader,
+    VolumePool, VolumePoolConfig, VolumeReader, VolumeWriter, HEADER_SIZE, MAX_RECIPIENTS,
 };
 use prost::Message;
 use std::path::Path;
@@ -230,9 +229,8 @@ fn test_tryfrom_rejects_too_many_recipients() {
     // SuperHeader with > MAX_RECIPIENTS (256) should fail TryFrom.
     // We can't encode this into HEADER_SIZE bytes (too large for 4096),
     // so we verify the constructor-level validation directly.
-    let recipients: Vec<RecipientSlot> = (0..MAX_RECIPIENTS + 1)
-        .map(|_| mock_recipient())
-        .collect();
+    let recipients: Vec<RecipientSlot> =
+        (0..MAX_RECIPIENTS + 1).map(|_| mock_recipient()).collect();
 
     let err = SuperHeader::new(
         ArchiveId::new(),
@@ -495,9 +493,7 @@ async fn test_writer_set_catalog_info_rejects_offset_past_position() {
         .unwrap();
 
     // Position is DATA_REGION_START (4224). Use an offset far beyond that.
-    let err = writer
-        .set_catalog_info(u64::MAX, 100, 0)
-        .unwrap_err();
+    let err = writer.set_catalog_info(u64::MAX, 100, 0).unwrap_err();
     match &err {
         EraError::InvalidConfig(msg) => {
             assert!(
@@ -630,12 +626,16 @@ fn test_encrypted_volume_key_debug_redacts_nonce_and_ciphertext() {
     );
     // Must NOT contain raw nonce bytes (0xAA repeated)
     assert!(
-        !debug_output.contains("170") && !debug_output.contains("0xaa") && !debug_output.contains("0xAA"),
+        !debug_output.contains("170")
+            && !debug_output.contains("0xaa")
+            && !debug_output.contains("0xAA"),
         "Debug output must not contain raw nonce bytes, got: {debug_output}"
     );
     // Must NOT contain raw ciphertext bytes (0xBB repeated)
     assert!(
-        !debug_output.contains("187") && !debug_output.contains("0xbb") && !debug_output.contains("0xBB"),
+        !debug_output.contains("187")
+            && !debug_output.contains("0xbb")
+            && !debug_output.contains("0xBB"),
         "Debug output must not contain raw ciphertext bytes, got: {debug_output}"
     );
     // Must still contain the algorithm field (non-sensitive)
@@ -655,12 +655,16 @@ fn test_recipient_slot_debug_redacts_params_and_encrypted_master_key() {
     );
     // Must NOT contain raw params bytes (0xAB repeated)
     assert!(
-        !debug_output.contains("171") && !debug_output.contains("0xab") && !debug_output.contains("0xAB"),
+        !debug_output.contains("171")
+            && !debug_output.contains("0xab")
+            && !debug_output.contains("0xAB"),
         "Debug output must not contain raw params bytes, got: {debug_output}"
     );
     // Must NOT contain raw encrypted_master_key bytes (0xCD repeated)
     assert!(
-        !debug_output.contains("205") && !debug_output.contains("0xcd") && !debug_output.contains("0xCD"),
+        !debug_output.contains("205")
+            && !debug_output.contains("0xcd")
+            && !debug_output.contains("0xCD"),
         "Debug output must not contain raw encrypted_master_key bytes, got: {debug_output}"
     );
     // Must still contain the type field (non-sensitive)
@@ -681,7 +685,9 @@ fn test_super_header_debug_redacts_salt() {
     );
     // Non-sensitive fields should still be present
     assert!(
-        debug_output.contains("magic") && debug_output.contains("version") && debug_output.contains("epoch_id"),
+        debug_output.contains("magic")
+            && debug_output.contains("version")
+            && debug_output.contains("epoch_id"),
         "Debug output must contain non-sensitive field names, got: {debug_output}"
     );
     // Nested EncryptedVolumeKey should also be redacted (inherits custom Debug)

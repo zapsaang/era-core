@@ -269,7 +269,10 @@ impl SuperHeader {
                 )));
             }
             // IS31-01: Threshold must not exceed recipient count (T-of-N requires T <= N)
-            if (t as usize) > recipients.len() {
+            let t_usize = usize::try_from(t).map_err(|_| {
+                era_common::EraError::InvalidConfig(format!("Threshold {} overflows usize", t))
+            })?;
+            if t_usize > recipients.len() {
                 return Err(era_common::EraError::InvalidConfig(format!(
                     "Threshold {} exceeds recipient count {} (T-of-N requires T <= N)",
                     t,
@@ -280,10 +283,7 @@ impl SuperHeader {
         // CB25-02: Validate each recipient slot's field bounds at construction time
         for (i, slot) in recipients.iter().enumerate() {
             slot.validate().map_err(|e| {
-                era_common::EraError::InvalidConfig(format!(
-                    "recipient slot {}: {}",
-                    i, e
-                ))
+                era_common::EraError::InvalidConfig(format!("recipient slot {}: {}", i, e))
             })?;
         }
         let creation_time = unix_timestamp_now()?;
@@ -319,7 +319,9 @@ impl SuperHeader {
             archive_id: self.archive_id,
             volume_sequence: {
                 let next_seq = self.volume_sequence.checked_add(1).ok_or_else(|| {
-                    era_common::EraError::InvalidConfig("volume sequence overflow at u16::MAX".into())
+                    era_common::EraError::InvalidConfig(
+                        "volume sequence overflow at u16::MAX".into(),
+                    )
                 })?;
                 // CV32-02: Prevent creating a volume whose sequence violates the IS31-02 invariant
                 if self.total_volumes > 0 && next_seq >= self.total_volumes {
@@ -359,22 +361,34 @@ impl SuperHeader {
             total_volumes: self.total_volumes as u32,
             creation_time: self.creation_time,
             feature_flags: self.feature_flags,
-            recipients: self.recipients.iter().map(|s| proto::RecipientSlot {
-                r#type: match s.r_type {
-                    RecipientType::Argon2idPassword => proto::recipient_slot::RecipientType::ScryptPassword.into(),
-                    RecipientType::X25519PubKey => proto::recipient_slot::RecipientType::X25519Pubkey.into(),
-                    RecipientType::Fido2Hmac => proto::recipient_slot::RecipientType::Fido2Hmac.into(),
-                },
-                key_id: s.key_id.map(|k| k.to_vec()).unwrap_or_default(),
-                params: s.params.clone(),
-                encrypted_master_key: s.encrypted_master_key.clone(),
-            }).collect(),
+            recipients: self
+                .recipients
+                .iter()
+                .map(|s| proto::RecipientSlot {
+                    r#type: match s.r_type {
+                        RecipientType::Argon2idPassword => {
+                            proto::recipient_slot::RecipientType::ScryptPassword.into()
+                        }
+                        RecipientType::X25519PubKey => {
+                            proto::recipient_slot::RecipientType::X25519Pubkey.into()
+                        }
+                        RecipientType::Fido2Hmac => {
+                            proto::recipient_slot::RecipientType::Fido2Hmac.into()
+                        }
+                    },
+                    key_id: s.key_id.map(|k| k.to_vec()).unwrap_or_default(),
+                    params: s.params.clone(),
+                    encrypted_master_key: s.encrypted_master_key.clone(),
+                })
+                .collect(),
             config: Some(self.config.clone().into()),
             salt: self.salt.to_vec(),
             epoch_id: self.epoch_id,
             encrypted_volume_key: Some(proto::EncryptedVolumeKey {
                 algorithm: match self.encrypted_volume_key.algorithm {
-                    KeyWrapAlgorithm::XChaCha20Poly1305 => proto::KeyWrapAlgorithm::Xchacha20Poly1305.into(),
+                    KeyWrapAlgorithm::XChaCha20Poly1305 => {
+                        proto::KeyWrapAlgorithm::Xchacha20Poly1305.into()
+                    }
                 },
                 nonce: self.encrypted_volume_key.nonce.to_vec(),
                 ciphertext: self.encrypted_volume_key.ciphertext.clone(),
@@ -470,14 +484,13 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
     fn try_from(proto: proto::RecipientSlot) -> std::result::Result<Self, Self::Error> {
         // EV36-01: Use raw i32 field instead of generated accessor which silently
         // maps unknown enum values to the default variant (ScryptPassword/0).
-        let r_type = proto::recipient_slot::RecipientType::try_from(proto.r#type).map_err(
-            |_| {
+        let r_type =
+            proto::recipient_slot::RecipientType::try_from(proto.r#type).map_err(|_| {
                 era_common::EraError::CorruptedHeader(format!(
                     "Unknown RecipientType value: {}",
                     proto.r#type
                 ))
-            },
-        )?;
+            })?;
 
         let key_id = if proto.key_id.is_empty() {
             None
@@ -572,9 +585,7 @@ impl TryFrom<proto::EncryptedVolumeKey> for EncryptedVolumeKey {
         }
         // EV36-03: Validate algorithm field instead of hardcoding.
         let algorithm = match proto::KeyWrapAlgorithm::try_from(proto.algorithm) {
-            Ok(proto::KeyWrapAlgorithm::Xchacha20Poly1305) => {
-                KeyWrapAlgorithm::XChaCha20Poly1305
-            }
+            Ok(proto::KeyWrapAlgorithm::Xchacha20Poly1305) => KeyWrapAlgorithm::XChaCha20Poly1305,
             Err(_) => {
                 return Err(era_common::EraError::CorruptedHeader(format!(
                     "Unknown KeyWrapAlgorithm value: {}",
@@ -680,7 +691,10 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
         }
         // IS31-01: Cross-validate threshold against recipient count on deserialization
         if let AccessPolicy::Threshold(t) = access_policy {
-            if (t as usize) > recipients.len() {
+            let t_usize = usize::try_from(t).map_err(|_| {
+                era_common::EraError::CorruptedHeader(format!("Threshold {} overflows usize", t))
+            })?;
+            if t_usize > recipients.len() {
                 return Err(era_common::EraError::CorruptedHeader(format!(
                     "Threshold {} exceeds recipient count {} (T-of-N requires T <= N)",
                     t,
@@ -850,7 +864,10 @@ mod tests {
             mock_encrypted_vk(),
             AccessPolicy::Threshold(0),
         );
-        assert!(result.is_err(), "Threshold(0) must be rejected by SuperHeader::new()");
+        assert!(
+            result.is_err(),
+            "Threshold(0) must be rejected by SuperHeader::new()"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("Invalid threshold") || err.contains("minimum 2"),
@@ -868,7 +885,10 @@ mod tests {
             mock_encrypted_vk(),
             AccessPolicy::Threshold(1),
         );
-        assert!(result.is_err(), "Threshold(1) must be rejected by SuperHeader::new()");
+        assert!(
+            result.is_err(),
+            "Threshold(1) must be rejected by SuperHeader::new()"
+        );
     }
 
     #[test]
@@ -924,7 +944,10 @@ mod tests {
             mock_encrypted_vk(),
             AccessPolicy::AnyOfN,
         );
-        assert!(result.is_err(), "Oversized encrypted_master_key must be rejected");
+        assert!(
+            result.is_err(),
+            "Oversized encrypted_master_key must be rejected"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("encrypted_master_key too large"),
@@ -948,7 +971,10 @@ mod tests {
             mock_encrypted_vk(),
             AccessPolicy::AnyOfN,
         );
-        assert!(result.is_err(), "Short encrypted_master_key must be rejected");
+        assert!(
+            result.is_err(),
+            "Short encrypted_master_key must be rejected"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("too short"),
@@ -969,7 +995,10 @@ mod tests {
             vec![0u8; MAX_RECIPIENT_FIELD_SIZE],
             vec![0xCD; 48],
         );
-        assert!(at_limit.validate().is_ok(), "Exactly MAX_RECIPIENT_FIELD_SIZE should pass");
+        assert!(
+            at_limit.validate().is_ok(),
+            "Exactly MAX_RECIPIENT_FIELD_SIZE should pass"
+        );
 
         // Key at exactly 24 bytes — should pass
         let min_key = RecipientSlot::new(
@@ -980,5 +1009,4 @@ mod tests {
         );
         assert!(min_key.validate().is_ok(), "Exactly 24 bytes should pass");
     }
-
 }

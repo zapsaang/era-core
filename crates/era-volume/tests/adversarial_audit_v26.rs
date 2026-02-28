@@ -24,8 +24,8 @@ use era_storage::LocalStorageBackend;
 use era_volume::{
     AccessPolicy, DistributionCalculator, EncryptedVolumeKey, Footer, KeyWrapAlgorithm,
     RecipientSlot, RecipientType, SuperHeader, VolumePoolConfig, VolumePoolStatusExt, VolumeReader,
-    VolumeWriter, BACKUP_FOOTER_GAP, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION, HEADER_SIZE,
-    DATA_REGION_START, HEADER_VERSION, MAGIC, MAX_RECIPIENTS,
+    VolumeWriter, BACKUP_FOOTER_GAP, DATA_REGION_START, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION,
+    HEADER_SIZE, HEADER_VERSION, MAGIC, MAX_RECIPIENTS,
 };
 use std::path::Path;
 use tempfile::TempDir;
@@ -74,17 +74,17 @@ fn test_block(id: u64, size: usize) -> EncryptedMacroBlock {
 fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
     let footer = Footer::with_catalog(
         16384, // data_end_offset (above min structural size, covers all regions)
-        42,   // block_count
-        7,    // sequence_number
-        5000, // catalog_offset
-        1024, // catalog_size
-        3,    // catalog_block_id
-        6000, // last_checkpoint_offset
-        5,    // last_checkpoint_block_id
-        7000, // index_offset
-        2048, // index_size
-        10,   // index_block_id
-        4224, // backup_header_offset
+        42,    // block_count
+        7,     // sequence_number
+        5000,  // catalog_offset
+        1024,  // catalog_size
+        3,     // catalog_block_id
+        6000,  // last_checkpoint_offset
+        5,     // last_checkpoint_block_id
+        7000,  // index_offset
+        2048,  // index_size
+        10,    // index_block_id
+        4224,  // backup_header_offset
     );
 
     let bytes = footer.to_bytes().unwrap();
@@ -305,7 +305,8 @@ fn test_v26_f2_header_max_recipients_roundtrip() {
 fn test_v26_f2_header_roundtrip_with_threshold_policy() {
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![RecipientSlot::new(
+        vec![
+            RecipientSlot::new(
                 RecipientType::Argon2idPassword,
                 Some([0x12; 8]),
                 vec![0xAB; 16],
@@ -347,7 +348,8 @@ fn test_v26_f2_threshold_below_2_rejected() {
     // Create header with Threshold(3) — valid for serialization
     let mut header = SuperHeader::new(
         ArchiveId::new(),
-        vec![RecipientSlot::new(
+        vec![
+            RecipientSlot::new(
                 RecipientType::Argon2idPassword,
                 Some([0x12; 8]),
                 vec![0xAB; 16],
@@ -651,7 +653,8 @@ fn test_v26_f8_can_fit_invalid_index() {
 #[test]
 fn test_v26_f8_can_fit_with_reservation() {
     let reserved = (FOOTER_SIZE + HEADER_SIZE) as u64
-        + era_common::BlockHeader::SIZE as u64 + era_common::ShardHeader::SIZE as u64; // 4248
+        + era_common::BlockHeader::SIZE as u64
+        + era_common::ShardHeader::SIZE as u64; // 4248
     let status = VolumePoolStatus {
         active_volumes: 1,
         volume_sequences: vec![0],

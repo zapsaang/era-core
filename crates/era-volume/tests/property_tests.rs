@@ -6,9 +6,8 @@
 
 use era_common::{ArchiveConfig, ArchiveId, VolumeId};
 use era_volume::{
-    AccessPolicy, EncryptedVolumeKey, Footer, KeyWrapAlgorithm, RecipientSlot,
-    RecipientType, SuperHeader, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION, HEADER_SIZE,
-    HEADER_VERSION, MAGIC,
+    AccessPolicy, EncryptedVolumeKey, Footer, KeyWrapAlgorithm, RecipientSlot, RecipientType,
+    SuperHeader, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION, HEADER_SIZE, HEADER_VERSION, MAGIC,
 };
 use proptest::prelude::*;
 
@@ -328,13 +327,13 @@ fn arb_super_header() -> impl Strategy<Value = SuperHeader> {
                     // total_volumes > 0: sequence must be < total_volumes
                     (1u16..=1000).prop_flat_map(|tv| (0..tv, Just(tv))),
                 ],
-                0i64..=i64::MAX,                         // creation_time (positive)
-                Just(0u64),                              // feature_flags (FC39-01: no flags currently defined)
+                0i64..=i64::MAX, // creation_time (positive)
+                Just(0u64),      // feature_flags (FC39-01: no flags currently defined)
                 Just(recipients),
-                proptest::array::uniform16(any::<u8>()),  // salt
-                any::<u32>(),                             // epoch_id
+                proptest::array::uniform16(any::<u8>()), // salt
+                any::<u32>(),                            // epoch_id
                 arb_evk(),
-                arb_access_policy_for(num),               // IS31-01: policy consistent with recipients
+                arb_access_policy_for(num), // IS31-01: policy consistent with recipients
             )
         })
         .prop_map(

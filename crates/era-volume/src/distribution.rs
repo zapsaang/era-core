@@ -56,7 +56,7 @@ pub trait DistributionConfigExt {
     fn from_erasure_config(erasure: ErasureCodeConfig) -> Self;
 
     /// Validate volume count against this configuration.
-    fn validate_volume_count(&self, volume_count: usize) -> Result<(), String>;
+    fn validate_volume_count(&self, volume_count: usize) -> era_common::Result<()>;
 }
 
 impl DistributionConfigExt for MatrixDistributionConfig {
@@ -70,12 +70,12 @@ impl DistributionConfigExt for MatrixDistributionConfig {
         }
     }
 
-    fn validate_volume_count(&self, volume_count: usize) -> Result<(), String> {
+    fn validate_volume_count(&self, volume_count: usize) -> era_common::Result<()> {
         if volume_count < self.min_volumes {
-            Err(format!(
+            Err(era_common::EraError::InvalidConfig(format!(
                 "Insufficient volumes: have {}, need at least {}",
                 volume_count, self.min_volumes
-            ))
+            )))
         } else {
             Ok(())
         }
@@ -99,13 +99,21 @@ impl VolumePoolStatusExt for VolumePoolStatus {
         }
         // Reserve space for footer + backup header + block/shard headers
         // to be consistent with VolumePool::volume_can_fit()
-        let reserved = FOOTER_SIZE as u64 + HEADER_SIZE as u64
-            + era_common::BlockHeader::SIZE as u64 + era_common::ShardHeader::SIZE as u64;
-        self.volume_sizes[volume_idx].saturating_add(block_size).saturating_add(reserved) <= self.max_volume_size
+        let reserved = FOOTER_SIZE as u64
+            + HEADER_SIZE as u64
+            + era_common::BlockHeader::SIZE as u64
+            + era_common::ShardHeader::SIZE as u64;
+        self.volume_sizes[volume_idx]
+            .saturating_add(block_size)
+            .saturating_add(reserved)
+            <= self.max_volume_size
     }
 
     fn find_available_volume(&self, start_idx: usize, block_size: u64) -> Option<usize> {
-        debug_assert!(self.active_volumes > 0, "active_volumes must be non-zero for modulo");
+        debug_assert!(
+            self.active_volumes > 0,
+            "active_volumes must be non-zero for modulo"
+        );
         if self.active_volumes == 0 {
             return None;
         }
