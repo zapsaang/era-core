@@ -1055,7 +1055,9 @@ impl ArchiveWriter {
 
             let entries = collect_files_async(path.to_path_buf()).await?;
             for entry_path in entries {
-                self.add_file_with_path(&entry_path, &entry_path).await?;
+                // Compute relative path from the input directory
+                let relative_path = entry_path.strip_prefix(path).unwrap_or(&entry_path);
+                self.add_file_with_path(&entry_path, relative_path).await?;
             }
         } else {
             self.add_file_with_path(path, path).await?;

@@ -28,7 +28,11 @@ async fn test_native_directory_recursion() {
     // Currently, based on audit, this might fail or not exist
     let result = writer.add_path(&source_dir, true).await; // true for recursive
 
-    assert!(result.is_ok(), "Adding directory should succeed");
+    assert!(
+        result.is_ok(),
+        "Adding directory should succeed: {:?}",
+        result
+    );
 
     writer.finalize().await.unwrap();
 
