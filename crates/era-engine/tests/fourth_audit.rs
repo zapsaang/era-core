@@ -1081,9 +1081,10 @@ fn behavioral_short_encrypted_master_key_rejected() {
 fn behavioral_threshold_0_header_rejected() {
     use prost::Message;
 
-    let header = make_valid_header(AccessPolicy::Threshold(3));
+    let header = make_valid_header(AccessPolicy::AnyOfN);
     let mut proto: era_common::proto::SuperHeader = header.into();
     proto.threshold = 0;
+    proto.access_policy = 1; // ACCESS_POLICY_THRESHOLD
 
     let mut data = Vec::new();
     proto.encode_length_delimited(&mut data).unwrap();
@@ -1101,9 +1102,10 @@ fn behavioral_threshold_0_header_rejected() {
 fn behavioral_threshold_1_header_rejected() {
     use prost::Message;
 
-    let header = make_valid_header(AccessPolicy::Threshold(3));
+    let header = make_valid_header(AccessPolicy::AnyOfN);
     let mut proto: era_common::proto::SuperHeader = header.into();
     proto.threshold = 1;
+    proto.access_policy = 1; // ACCESS_POLICY_THRESHOLD
 
     let mut data = Vec::new();
     proto.encode_length_delimited(&mut data).unwrap();
