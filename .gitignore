@@ -22,6 +22,10 @@ Cargo.lock
 *.sh
 *.txt
 *.md
+!README.md
+!AGENTS.md
+!CLAUDE.md
+!doc_gen/**/*.md
 *.bak
 !README.md
 !AGENTS.md
