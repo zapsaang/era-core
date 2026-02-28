@@ -743,12 +743,15 @@ async fn test_volume_headers_contain_correct_metadata() {
 
         println!(
             "Volume {}: sequence={}, total={}",
-            i, header.volume_sequence, header.total_volumes
+            i,
+            header.volume_sequence(),
+            header.total_volumes()
         );
 
         // All volumes should have correct total_volumes
         assert_eq!(
-            header.total_volumes, 6,
+            header.total_volumes(),
+            6,
             "Volume {} should have total_volumes=6",
             i
         );
@@ -877,7 +880,7 @@ async fn test_archive_id_verification() {
     let header = reader.header();
     // We can't easily check archive_id content, but we can verify
     // that the reader was created successfully
-    assert!(header.total_volumes > 0);
+    assert!(header.total_volumes() > 0);
 }
 
 /// Test without erasure coding - single volume behavior
@@ -917,8 +920,8 @@ async fn test_single_volume_no_erasure() {
         .await
         .unwrap();
     let header = reader.header();
-    assert_eq!(header.volume_sequence, 0);
-    assert_eq!(header.total_volumes, 1);
+    assert_eq!(header.volume_sequence(), 0);
+    assert_eq!(header.total_volumes(), 1);
 
     let extract_dir = temp_dir.path().join("extracted");
     fs::create_dir_all(&extract_dir).unwrap();

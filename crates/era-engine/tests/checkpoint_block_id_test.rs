@@ -50,7 +50,8 @@ async fn test_footer_supports_checkpoint_block_id() {
 
     println!(
         "Checkpoint offset: {}, block_id: {}",
-        footer.last_checkpoint_offset, footer.last_checkpoint_block_id
+        footer.last_checkpoint_offset(),
+        footer.last_checkpoint_block_id()
     );
 
     // Note: For normal archives without explicit checkpoint commit,
@@ -155,11 +156,12 @@ async fn test_checkpoint_detection_via_footer() {
     let footer = reader.footer().expect("Missing footer");
 
     // The correct way to detect checkpoint in v2.2 is via footer
-    let has_checkpoint = footer.last_checkpoint_offset > 0;
+    let has_checkpoint = footer.last_checkpoint_offset() > 0;
 
     println!(
         "Checkpoint detection via footer: {} (offset={})",
-        has_checkpoint, footer.last_checkpoint_offset
+        has_checkpoint,
+        footer.last_checkpoint_offset()
     );
 
     // This test documents the correct detection method

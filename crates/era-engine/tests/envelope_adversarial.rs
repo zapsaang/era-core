@@ -179,12 +179,12 @@ fn auth_04_any_of_n_correct_logic() {
             kdf_parallelism: kdf.parallelism,
         };
 
-        slots.push(RecipientSlot {
-            r_type: RecipientType::Argon2idPassword,
-            key_id: None,
-            params: rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
-            encrypted_master_key: combined,
-        });
+        slots.push(RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            None,
+            rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
+            combined,
+        ));
     }
 
     // Each password should individually unlock
@@ -220,12 +220,12 @@ fn auth_04_any_of_n_correct_logic() {
 /// Verify wrong-type slot is ignored (Argon2idPassword provider on X25519PubKey slot).
 #[test]
 fn auth_05_provider_ignores_wrong_type() {
-    let slot = RecipientSlot {
-        r_type: RecipientType::X25519PubKey,
-        key_id: None,
-        params: vec![0u8; 32],               // dummy
-        encrypted_master_key: vec![0u8; 72], // dummy
-    };
+    let slot = RecipientSlot::new(
+        RecipientType::X25519PubKey,
+        None,
+        vec![0u8; 32],
+        vec![0u8; 72],
+    );
     let provider = PasswordProvider::new("any_password".to_string());
     let result = provider.try_unlock(&slot).unwrap();
     assert!(
@@ -251,13 +251,13 @@ fn auth_06_corrupt_emk_rejected_gracefully() {
         kdf_parallelism: kdf.parallelism,
     };
 
-    let slot = RecipientSlot {
-        r_type: RecipientType::Argon2idPassword,
-        key_id: None,
-        params: rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
+    let slot = RecipientSlot::new(
+        RecipientType::Argon2idPassword,
+        None,
+        rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
         // Corrupt: random garbage instead of [nonce(24) | ciphertext]
-        encrypted_master_key: vec![0xDE, 0xAD, 0xBE, 0xEF],
-    };
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+    );
 
     let provider = PasswordProvider::new("test_password".to_string());
     // Should return Ok(None) or Err(_), NOT panic

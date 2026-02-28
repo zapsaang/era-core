@@ -251,8 +251,8 @@ async fn test_archive_info() {
     let header = reader.header();
 
     // Verify header is valid
-    assert_eq!(&header.magic[..3], b"ERA");
-    assert!(header.creation_time > 0);
+    assert_eq!(&header.magic()[..3], b"ERA");
+    assert!(header.creation_time() > 0);
 }
 
 #[tokio::test]
@@ -573,10 +573,10 @@ async fn test_erasure_coding_roundtrip() {
         .unwrap();
     let header = reader.header();
     assert!(
-        header.config.erasure.is_some(),
+        header.config().erasure.is_some(),
         "Erasure config should be stored in header"
     );
-    let stored_erasure = header.config.erasure.as_ref().unwrap();
+    let stored_erasure = header.config().erasure.as_ref().unwrap();
     assert_eq!(stored_erasure.data_shards, 4);
     assert_eq!(stored_erasure.parity_shards, 2);
     drop(reader);
@@ -690,7 +690,7 @@ async fn test_erasure_different_configs() {
 
         // Check header
         let header = reader.header();
-        let stored = header.config.erasure.as_ref().unwrap();
+        let stored = header.config().erasure.as_ref().unwrap();
         assert_eq!(stored.data_shards, data);
         assert_eq!(stored.parity_shards, parity);
 

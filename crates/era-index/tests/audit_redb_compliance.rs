@@ -75,11 +75,11 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
         )],
         ArchiveConfig::default(),
         nonce_context,
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     )
     .unwrap()

@@ -470,15 +470,15 @@ pub async fn info(archive: &Path, password: Option<&str>) -> Result<()> {
         .context("Failed to load catalog")?;
 
     // ERA version is encoded in magic bytes: magic[3] = major, magic[4] = minor
-    let era_version_major = header.magic[3];
-    let era_version_minor = header.magic[4];
+    let era_version_major = header.magic()[3];
+    let era_version_minor = header.magic()[4];
 
     info!("ERA Archive Information");
     info!("=======================");
     info!("");
-    info!("Archive ID:      {}", header.archive_id);
-    info!("Volume ID:       {}", header.volume_id);
-    info!("Volume Sequence: {}", header.volume_sequence);
+    info!("Archive ID:      {}", header.archive_id());
+    info!("Volume ID:       {}", header.volume_id());
+    info!("Volume Sequence: {}", header.volume_sequence());
     info!(
         "ERA Version:     {}.{}",
         era_version_major, era_version_minor
@@ -487,16 +487,19 @@ pub async fn info(archive: &Path, password: Option<&str>) -> Result<()> {
     info!("Configuration:");
     info!(
         "  Max Volume Size:    {}",
-        HumanBytes(header.config.volume.max_size)
+        HumanBytes(header.config().volume.max_size)
     );
-    info!("  Compression Level:  {}", header.config.compression.level);
+    info!(
+        "  Compression Level:  {}",
+        header.config().compression.level
+    );
     info!(
         "  KDF Memory Cost:    {} KB",
-        header.config.encryption.kdf_memory_cost
+        header.config().encryption.kdf_memory_cost
     );
     info!(
         "  KDF Time Cost:      {}",
-        header.config.encryption.kdf_time_cost
+        header.config().encryption.kdf_time_cost
     );
     info!("");
     info!("Contents:");
@@ -635,9 +638,9 @@ pub async fn repair(
 
         // Check if erasure coding is enabled
         let header = reader.header();
-        let erasure_enabled = header.config.erasure.is_some();
+        let erasure_enabled = header.config().erasure.is_some();
         if erasure_enabled {
-            let erasure_config = header.config.erasure.as_ref().unwrap();
+            let erasure_config = header.config().erasure.as_ref().unwrap();
             info!(
                 "Erasure coding:     Enabled ({}/{} data/parity shards)",
                 erasure_config.data_shards, erasure_config.parity_shards

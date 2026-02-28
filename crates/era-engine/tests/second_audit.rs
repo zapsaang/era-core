@@ -72,11 +72,11 @@ fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBu
 }
 
 fn mock_encrypted_vk() -> EncryptedVolumeKey {
-    EncryptedVolumeKey {
-        algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-        nonce: [0xAA; 24],
-        ciphertext: vec![0xBB; 48],
-    }
+    EncryptedVolumeKey::new(
+        KeyWrapAlgorithm::XChaCha20Poly1305,
+        [0xAA; 24],
+        vec![0xBB; 48],
+    )
 }
 
 // ============================================================================
@@ -374,7 +374,7 @@ fn nv2e_behavioral_truncated_salt_accepted() {
 
     // Deserialize — this should work
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.salt, [0xAB; 16], "Normal salt roundtrip failed");
+    assert_eq!(restored.salt(), &[0xAB; 16], "Normal salt roundtrip failed");
 
     // Now test: if protobuf field has wrong-length salt, does TryFrom still succeed?
     // We can't easily truncate a single protobuf field, but we can verify the source
@@ -1077,11 +1077,11 @@ fn header_full_roundtrip() {
         )],
         era_common::ArchiveConfig::default(),
         salt,
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0xEE; 24],
-            ciphertext: vec![0xFF; 48],
-        },
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0xEE; 24],
+            vec![0xFF; 48],
+        ),
         AccessPolicy::Threshold(3),
     )
     .unwrap();
@@ -1089,13 +1089,19 @@ fn header_full_roundtrip() {
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
 
-    assert_eq!(restored.magic, MAGIC);
-    assert_eq!(restored.salt, salt, "Salt not preserved in roundtrip!");
-    assert_eq!(restored.encrypted_volume_key.nonce, [0xEE; 24]);
-    assert_eq!(restored.encrypted_volume_key.ciphertext, vec![0xFF; 48]);
-    assert_eq!(restored.access_policy, AccessPolicy::Threshold(3));
-    assert_eq!(restored.recipients.len(), 1);
-    assert_eq!(restored.recipients[0].encrypted_master_key, vec![0xCD; 48]);
+    assert_eq!(*restored.magic(), MAGIC);
+    assert_eq!(restored.salt(), &salt, "Salt not preserved in roundtrip!");
+    assert_eq!(restored.encrypted_volume_key().nonce(), &[0xEE; 24]);
+    assert_eq!(
+        restored.encrypted_volume_key().ciphertext(),
+        &vec![0xFF; 48][..]
+    );
+    assert_eq!(restored.access_policy(), AccessPolicy::Threshold(3));
+    assert_eq!(restored.recipients().len(), 1);
+    assert_eq!(
+        restored.recipients()[0].encrypted_master_key(),
+        &vec![0xCD; 48][..]
+    );
 }
 
 // ============================================================================

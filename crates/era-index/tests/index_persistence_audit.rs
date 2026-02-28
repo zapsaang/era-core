@@ -62,11 +62,11 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
         )],
         ArchiveConfig::default(),
         nonce_context,
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     )
     .unwrap()
@@ -148,8 +148,8 @@ async fn test_embedded_finalize_writes_typed_blocks() {
         footer.has_index(),
         "Footer must report has_index()=true when index was written"
     );
-    assert_eq!(footer.index_offset, manifest_location.physical_offset);
-    assert_eq!(footer.index_size, manifest_location.encrypted_size);
+    assert_eq!(footer.index_offset(), manifest_location.physical_offset);
+    assert_eq!(footer.index_size(), manifest_location.encrypted_size);
 }
 
 /// Verify MetaIndex serialization roundtrip via rkyv preserves all data.
@@ -693,9 +693,9 @@ async fn test_footer_has_index_false_when_no_index() {
         !footer.has_index(),
         "Footer must report has_index()=false when no index was written"
     );
-    assert_eq!(footer.index_offset, 0);
-    assert_eq!(footer.index_size, 0);
-    assert_eq!(footer.index_block_id, 0);
+    assert_eq!(footer.index_offset(), 0);
+    assert_eq!(footer.index_size(), 0);
+    assert_eq!(footer.index_block_id(), 0);
 }
 
 /// Verify that multiple index writes (overwrite scenario) use the last one.
@@ -761,7 +761,7 @@ async fn test_multiple_index_writes_uses_last() {
 
     let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
     let footer = reader.footer().unwrap();
-    assert_eq!(footer.index_offset, loc2.physical_offset);
+    assert_eq!(footer.index_offset(), loc2.physical_offset);
 }
 
 /// Verify IndexReader from_memory handles empty entry list gracefully.
@@ -1105,10 +1105,13 @@ async fn test_footer_index_fields_populated_after_full_flow() {
 
     // All three index fields must be non-zero
     assert!(
-        footer.index_offset > 0,
+        footer.index_offset() > 0,
         "Footer index_offset must be populated"
     );
-    assert!(footer.index_size > 0, "Footer index_size must be populated");
+    assert!(
+        footer.index_size() > 0,
+        "Footer index_size must be populated"
+    );
     // block_id could be 0 if there's only one page, so just check offset and size
     assert!(footer.has_index(), "Footer has_index() must be true");
 }

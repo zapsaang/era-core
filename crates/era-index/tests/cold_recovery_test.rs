@@ -58,11 +58,11 @@ async fn test_cold_recovery_from_orphaned_volume() {
         )],
         ArchiveConfig::default(),
         nonce_context,
-        era_volume::EncryptedVolumeKey {
-            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -198,11 +198,11 @@ async fn test_index_embedded_in_volume() {
         )],
         ArchiveConfig::default(),
         nonce_context,
-        era_volume::EncryptedVolumeKey {
-            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();

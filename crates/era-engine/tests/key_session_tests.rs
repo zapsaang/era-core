@@ -38,14 +38,14 @@ fn derive_session_from_header(
     password: &str,
 ) -> era_common::Result<KeySession> {
     let slot = header
-        .recipients
+        .recipients()
         .iter()
-        .find(|s| s.r_type == RecipientType::Argon2idPassword)
+        .find(|s| s.r_type() == RecipientType::Argon2idPassword)
         .ok_or(era_common::EraError::InvalidKey(
             "No password slot found".into(),
         ))?;
 
-    let archived = rkyv::check_archived_root::<PasswordSlotParams>(&slot.params)
+    let archived = rkyv::check_archived_root::<PasswordSlotParams>(slot.params())
         .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
 
     let salt = Salt::from_bytes(archived.salt);
@@ -60,7 +60,7 @@ fn derive_session_from_header(
         .map_err(|_| era_common::EraError::InvalidKey("KDF failed".into()))?;
 
     // 2. Decrypt MK
-    let combined = &slot.encrypted_master_key;
+    let combined = slot.encrypted_master_key();
     if combined.len() < 24 {
         return Err(era_common::EraError::InvalidKey(
             "Invalid encrypted key length".into(),

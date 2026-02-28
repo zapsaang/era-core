@@ -60,11 +60,11 @@ fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBu
 }
 
 fn mock_encrypted_vk() -> EncryptedVolumeKey {
-    EncryptedVolumeKey {
-        algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-        nonce: [0xAA; 24],
-        ciphertext: vec![0xBB; 48],
-    }
+    EncryptedVolumeKey::new(
+        KeyWrapAlgorithm::XChaCha20Poly1305,
+        [0xAA; 24],
+        vec![0xBB; 48],
+    )
 }
 
 fn make_valid_header(policy: AccessPolicy) -> SuperHeader {
@@ -456,7 +456,7 @@ fn rv6b_wrong_version_accepted() {
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
     // Normal roundtrip works — version should be HEADER_VERSION (3)
-    assert_eq!(restored.version, 3);
+    assert_eq!(restored.version(), 3);
 
     // Now manually create a header, serialize it, tamper with version in proto,
     // and verify it's STILL accepted (proving the vulnerability)
@@ -478,7 +478,7 @@ fn rv6b_wrong_version_accepted() {
     let result = SuperHeader::from_bytes(&tampered_data);
     if let Ok(restored) = result {
         // If it succeeds with version=999, that's the vulnerability
-        if restored.version == 999 {
+        if restored.version() == 999 {
             panic!(
                 "🚨 RV6b: Header with version=999 was accepted without error!\n\
                  HEADER_VERSION is 3, but arbitrary versions pass through.\n\
@@ -532,13 +532,13 @@ fn rv7_volume_sequence_truncation() {
 
         match SuperHeader::from_bytes(&data) {
             Ok(h) => {
-                if h.volume_sequence == 1 {
+                if h.volume_sequence() == 1 {
                     // proved truncation without detection
                     panic!(
                         "🚨 RV7: volume_sequence=65537 silently truncated to {}!\n\
                          Proto u32 → struct u16 without bounds check.\n\
                          This causes volume misordering in archives with >65535 volumes.",
-                        h.volume_sequence
+                        h.volume_sequence()
                     );
                 }
             }
@@ -586,7 +586,7 @@ fn rv8_empty_recipients_accepted() {
     }
 
     let restored = result.unwrap();
-    assert_eq!(restored.recipients.len(), 0);
+    assert_eq!(restored.recipients().len(), 0);
 
     // This creates an archive that is PERMANENTLY unreadable
     // The header should either:
@@ -666,7 +666,7 @@ fn rv9_empty_encrypted_master_key_accepted() {
 
     // Verify it roundtripped with empty encrypted_master_key
     assert!(
-        restored.recipients[0].encrypted_master_key.is_empty(),
+        restored.recipients()[0].encrypted_master_key().is_empty(),
         "Expected empty encrypted_master_key to survive roundtrip"
     );
 
@@ -725,7 +725,7 @@ fn rv10_access_policy_downgrade_attack() {
     let header = make_valid_header(AccessPolicy::Threshold(3));
     let bytes = header.to_bytes().unwrap();
     let original = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(original.access_policy, AccessPolicy::Threshold(3));
+    assert_eq!(original.access_policy(), AccessPolicy::Threshold(3));
 
     // Tamper: change access_policy to AnyOfN in proto
     let proto: era_common::proto::SuperHeader = original.clone().into();
@@ -744,7 +744,7 @@ fn rv10_access_policy_downgrade_attack() {
 
     // Verify the downgrade worked
     assert_eq!(
-        downgraded.access_policy,
+        downgraded.access_policy(),
         AccessPolicy::AnyOfN,
         "🚨 RV10: access_policy downgrade from Threshold(3) to AnyOfN succeeded!\n\
          An attacker who can modify the archive file changed the access policy\n\
@@ -754,8 +754,8 @@ fn rv10_access_policy_downgrade_attack() {
     );
 
     // The tampered archive_id, volume_id etc are THE SAME
-    assert_eq!(downgraded.archive_id, original.archive_id);
-    assert_eq!(downgraded.salt, original.salt);
+    assert_eq!(downgraded.archive_id(), original.archive_id());
+    assert_eq!(downgraded.salt(), original.salt());
 }
 
 // ============================================================================
@@ -837,7 +837,7 @@ fn rv12_invalid_threshold_values_accepted_in_header() {
 
         let result = SuperHeader::from_bytes(&data);
         if let Ok(h) = result {
-            if matches!(h.access_policy, AccessPolicy::Threshold(t) if t == invalid_t) {
+            if matches!(h.access_policy(), AccessPolicy::Threshold(t) if t == invalid_t) {
                 // Header accepted invalid threshold — vulnerability confirmed
                 // The reader DOES validate later, but defense-in-depth requires
                 // the header to also validate
@@ -1610,7 +1610,7 @@ fn boundary_all_ff_salt() {
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.salt, [0xFF; 16]);
+    assert_eq!(restored.salt(), &[0xFF; 16]);
 }
 
 /// Boundary: Verify header with all-zero salt is distinguishable from missing
@@ -1634,5 +1634,5 @@ fn boundary_all_zero_salt_is_valid() {
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
     // All-zero salt should roundtrip correctly (it IS a valid salt, just unwise)
-    assert_eq!(restored.salt, [0x00; 16]);
+    assert_eq!(restored.salt(), &[0x00; 16]);
 }
