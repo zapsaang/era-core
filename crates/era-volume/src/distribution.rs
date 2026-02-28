@@ -20,8 +20,12 @@ pub trait DistributionCalculator {
     ///
     /// # Returns
     /// The volume index (0..volume_count) where this shard should be stored.
-    fn calculate_volume(&self, shard_idx: usize, block_sequence: u64, volume_count: usize)
-        -> era_common::Result<usize>;
+    fn calculate_volume(
+        &self,
+        shard_idx: usize,
+        block_sequence: u64,
+        volume_count: usize,
+    ) -> era_common::Result<usize>;
 }
 
 impl DistributionCalculator for MatrixDistributionStrategy {
@@ -32,7 +36,9 @@ impl DistributionCalculator for MatrixDistributionStrategy {
         volume_count: usize,
     ) -> era_common::Result<usize> {
         if volume_count == 0 {
-            return Err(era_common::EraError::InvalidConfig("volume_count must be > 0".into()));
+            return Err(era_common::EraError::InvalidConfig(
+                "volume_count must be > 0".into(),
+            ));
         }
         match self {
             MatrixDistributionStrategy::RotatingOffset => {

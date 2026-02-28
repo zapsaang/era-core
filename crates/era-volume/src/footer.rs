@@ -336,7 +336,9 @@ impl Footer {
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < FOOTER_SIZE {
             return Err(EraError::CorruptedFooter(format!(
-                "Footer too small: {} bytes, need {}", data.len(), FOOTER_SIZE
+                "Footer too small: {} bytes, need {}",
+                data.len(),
+                FOOTER_SIZE
             )));
         }
 

@@ -117,11 +117,9 @@ fn arb_evk() -> impl Strategy<Value = EncryptedVolumeKey> {
         proptest::array::uniform24(any::<u8>()),
         proptest::collection::vec(any::<u8>(), 16..=256),
     )
-        .prop_map(|(nonce, ciphertext)| EncryptedVolumeKey::new(
-            KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce,
-            ciphertext,
-        ))
+        .prop_map(|(nonce, ciphertext)| {
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, nonce, ciphertext)
+        })
 }
 
 /// Generate a valid `RecipientSlot`.

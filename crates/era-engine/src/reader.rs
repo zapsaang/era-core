@@ -317,8 +317,8 @@ impl ArchiveReader {
 
         // Unwrap volume key from header's encrypted envelope
         let volume_key = session.unwrap_volume_key(
-            &header.encrypted_volume_key().nonce(),
-            &header.encrypted_volume_key().ciphertext(),
+            header.encrypted_volume_key().nonce(),
+            header.encrypted_volume_key().ciphertext(),
         )?;
 
         // Store nonce context
@@ -378,8 +378,8 @@ impl ArchiveReader {
 
         let owned_session = session.try_clone()?;
         let volume_key = owned_session.unwrap_volume_key(
-            &header.encrypted_volume_key().nonce(),
-            &header.encrypted_volume_key().ciphertext(),
+            header.encrypted_volume_key().nonce(),
+            header.encrypted_volume_key().ciphertext(),
         )?;
 
         let nonce_context = *header.salt();
@@ -565,7 +565,10 @@ impl ArchiveReader {
 
         debug!(
             "Loading catalog from volume {} at offset={}, size={}, block_id={}",
-            reader_idx, footer.catalog_offset(), footer.catalog_size(), footer.catalog_block_id()
+            reader_idx,
+            footer.catalog_offset(),
+            footer.catalog_size(),
+            footer.catalog_block_id()
         );
 
         let encrypted_block = self.volume_readers[reader_idx]
@@ -1058,7 +1061,11 @@ impl ArchiveReader {
         // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             // Read distribution config from header
-            let dist_strategy = self.volume_readers[0].header().config().distribution.strategy;
+            let dist_strategy = self.volume_readers[0]
+                .header()
+                .config()
+                .distribution
+                .strategy;
 
             Box::new(SessionErasureBlockIterator::new(
                 SessionErasureBlockIteratorArgs {
@@ -1110,7 +1117,11 @@ impl ArchiveReader {
         // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             // Read distribution config from header
-            let dist_strategy = self.volume_readers[0].header().config().distribution.strategy;
+            let dist_strategy = self.volume_readers[0]
+                .header()
+                .config()
+                .distribution
+                .strategy;
 
             Box::new(SessionErasureBlockIterator::new(
                 SessionErasureBlockIteratorArgs {

@@ -51,7 +51,11 @@ fn test_header() -> SuperHeader {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     )
     .unwrap()
@@ -420,7 +424,8 @@ async fn test_v27_10_multi_volume_header_is_deterministic() {
 
         // V27-10: Must always return the volume_sequence==0 header
         assert_eq!(
-            hdr.volume_sequence(), 0,
+            hdr.volume_sequence(),
+            0,
             "header() must return volume_sequence==0 deterministically"
         );
         assert_eq!(hdr.archive_id().0, archive_id.0);
@@ -511,27 +516,33 @@ async fn test_v27_12_checkpoint_footer_fields() {
 
     // V27-12: checkpoint footer must have 0 for catalog/index fields
     assert_eq!(
-        backup_footer.catalog_offset(), 0,
+        backup_footer.catalog_offset(),
+        0,
         "checkpoint footer catalog_offset must be 0"
     );
     assert_eq!(
-        backup_footer.catalog_size(), 0,
+        backup_footer.catalog_size(),
+        0,
         "checkpoint footer catalog_size must be 0"
     );
     assert_eq!(
-        backup_footer.catalog_block_id(), 0,
+        backup_footer.catalog_block_id(),
+        0,
         "checkpoint footer catalog_block_id must be 0"
     );
     assert_eq!(
-        backup_footer.index_offset(), 0,
+        backup_footer.index_offset(),
+        0,
         "checkpoint footer index_offset must be 0"
     );
     assert_eq!(
-        backup_footer.index_size(), 0,
+        backup_footer.index_size(),
+        0,
         "checkpoint footer index_size must be 0"
     );
     assert_eq!(
-        backup_footer.index_block_id(), 0,
+        backup_footer.index_block_id(),
+        0,
         "checkpoint footer index_block_id must be 0"
     );
 }
@@ -548,7 +559,11 @@ fn test_v27_13_empty_recipients_rejected_at_construction() {
         vec![], // empty recipients
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     );
     assert!(
@@ -583,7 +598,11 @@ fn test_v27_13b_max_recipients_enforced() {
         too_many,
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     );
     assert!(
@@ -608,7 +627,11 @@ fn test_v27_13b_max_recipients_enforced() {
         exact,
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     );
     assert!(
@@ -727,7 +750,11 @@ fn test_v27_16_test_headers_use_valid_recipients() {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     );
     assert!(result.is_ok(), "Valid recipients must return Ok");
@@ -741,7 +768,11 @@ fn test_v27_16_test_headers_use_valid_recipients() {
         vec![], // no recipients
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     );
     assert!(

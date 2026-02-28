@@ -87,7 +87,11 @@ impl std::fmt::Debug for EncryptedVolumeKey {
 impl EncryptedVolumeKey {
     /// Creates a new encrypted volume key container.
     pub fn new(algorithm: KeyWrapAlgorithm, nonce: [u8; 24], ciphertext: Vec<u8>) -> Self {
-        Self { algorithm, nonce, ciphertext }
+        Self {
+            algorithm,
+            nonce,
+            ciphertext,
+        }
     }
 
     /// Returns the AEAD algorithm used for wrapping.
@@ -658,9 +662,8 @@ impl SuperHeader {
             epoch_id,
             encrypted_volume_key,
             access_policy,
+        }
     }
-}
-
 }
 
 use era_common::proto;
@@ -1011,7 +1014,10 @@ mod tests {
         assert_eq!(restored.recipients()[0].params(), TEST_PARAMS.as_slice());
         assert_eq!(restored.epoch_id(), 0);
         assert_eq!(restored.encrypted_volume_key().nonce(), &[0xAA; 24]);
-        assert_eq!(restored.encrypted_volume_key().ciphertext(), &vec![0xBB; 48]);
+        assert_eq!(
+            restored.encrypted_volume_key().ciphertext(),
+            &vec![0xBB; 48]
+        );
         assert_eq!(restored.access_policy(), AccessPolicy::AnyOfN);
     }
 

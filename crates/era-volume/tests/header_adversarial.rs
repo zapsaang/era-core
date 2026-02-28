@@ -16,11 +16,7 @@ fn mock_evk() -> EncryptedVolumeKey {
     OsRng.fill_bytes(&mut nonce);
     let mut ct = vec![0u8; 48]; // 32 VK + 16 tag
     OsRng.fill_bytes(&mut ct);
-    EncryptedVolumeKey::new(
-        KeyWrapAlgorithm::XChaCha20Poly1305,
-        nonce,
-        ct,
-    )
+    EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, nonce, ct)
 }
 
 fn mock_slot(encrypted_mk: Vec<u8>) -> RecipientSlot {
@@ -112,11 +108,13 @@ fn header_04_evk_serialization_roundtrip() {
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
 
     assert_eq!(
-        restored.encrypted_volume_key().nonce(), &original_nonce,
+        restored.encrypted_volume_key().nonce(),
+        &original_nonce,
         "EVK nonce corrupted during serialization!"
     );
     assert_eq!(
-        restored.encrypted_volume_key().ciphertext(), original_ct,
+        restored.encrypted_volume_key().ciphertext(),
+        original_ct,
         "EVK ciphertext corrupted during serialization!"
     );
     assert_eq!(
@@ -255,12 +253,21 @@ fn header_09_multi_recipient_roundtrip() {
         restored.recipients()[0].r_type(),
         RecipientType::Argon2idPassword
     );
-    assert_eq!(restored.recipients()[1].r_type(), RecipientType::X25519PubKey);
+    assert_eq!(
+        restored.recipients()[1].r_type(),
+        RecipientType::X25519PubKey
+    );
     assert_eq!(restored.recipients()[0].key_id(), Some(&[0x01; 8]));
     assert_eq!(restored.recipients()[1].key_id(), Some(&[0x02; 8]));
     assert_eq!(restored.recipients()[2].key_id(), None);
-    assert_eq!(restored.recipients()[0].encrypted_master_key(), &vec![0xAA; 56]);
-    assert_eq!(restored.recipients()[1].encrypted_master_key(), &vec![0xBB; 64]);
+    assert_eq!(
+        restored.recipients()[0].encrypted_master_key(),
+        &vec![0xAA; 56]
+    );
+    assert_eq!(
+        restored.recipients()[1].encrypted_master_key(),
+        &vec![0xBB; 64]
+    );
 }
 
 /// Header with zero recipients must be rejected at construction (defense-in-depth).

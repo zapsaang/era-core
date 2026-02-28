@@ -407,7 +407,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap()

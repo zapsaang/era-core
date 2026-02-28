@@ -407,7 +407,7 @@ impl ArchiveWriterBuilder {
                 ) = (&self.auth_mode, slot.r_type())
                 {
                     if let Ok(archived) =
-                        rkyv::check_archived_root::<PasswordSlotParams>(&slot.params())
+                        rkyv::check_archived_root::<PasswordSlotParams>(slot.params())
                     {
                         let salt = Salt::from_bytes(archived.salt);
                         let kdf_params = KdfParams {

@@ -45,7 +45,11 @@ fn test_header() -> SuperHeader {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     )
     .unwrap()
@@ -279,7 +283,11 @@ fn test_v26_f2_header_max_recipients_roundtrip() {
         recipients,
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -319,7 +327,11 @@ fn test_v26_f2_header_roundtrip_with_threshold_policy() {
         ],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::Threshold(3),
     )
     .unwrap();
@@ -358,7 +370,11 @@ fn test_v26_f2_threshold_below_2_rejected() {
         ],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         AccessPolicy::Threshold(3),
     )
     .unwrap();

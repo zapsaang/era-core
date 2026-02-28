@@ -104,7 +104,8 @@ impl<R: StorageReader> VolumeReader<R> {
             if f.data_end_offset() != 0 && f.data_end_offset() < DATA_REGION_START {
                 return Err(EraError::CorruptedFooter(format!(
                     "Footer data_end_offset {} is below minimum data region start {}",
-                    f.data_end_offset(), DATA_REGION_START
+                    f.data_end_offset(),
+                    DATA_REGION_START
                 )));
             }
         }
@@ -616,7 +617,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -648,7 +653,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap();

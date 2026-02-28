@@ -116,7 +116,8 @@ impl<W: StorageWriter> VolumeWriter<W> {
         if footer.data_end_offset() > actual_size {
             return Err(era_common::EraError::CorruptedFooter(format!(
                 "footer data_end_offset {} exceeds actual file size {}",
-                footer.data_end_offset(), actual_size
+                footer.data_end_offset(),
+                actual_size
             )));
         }
 
@@ -680,7 +681,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -709,7 +714,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -751,7 +760,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -793,7 +806,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -836,7 +853,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap();

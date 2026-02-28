@@ -14,7 +14,10 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use crate::distribution::{DistributionCalculator, DistributionConfigExt};
-use crate::{extract_filename, DEFAULT_MAX_VOLUME_SIZE, MIN_VOLUME_SIZE, SuperHeader, VolumeReader, VolumeWriter};
+use crate::{
+    extract_filename, SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE,
+    MIN_VOLUME_SIZE,
+};
 /// Configuration for the volume pool.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -945,8 +948,9 @@ impl<B: StorageBackend> VolumePool<B> {
         // Without this, add_volume() would reuse the template's volume_id, causing collisions.
         header.set_volume_id(VolumeId::new());
         header.set_volume_sequence(new_sequence);
-        header.set_total_volumes(u16::try_from(self.writers.len() + 1)
-            .map_err(|_| era_common::EraError::InvalidConfig("total volumes exceeds u16".into()))?);
+        header.set_total_volumes(u16::try_from(self.writers.len() + 1).map_err(|_| {
+            era_common::EraError::InvalidConfig("total volumes exceeds u16".into())
+        })?);
 
         let volume_path = self.config.volume_path(new_sequence);
         let volume_filename = extract_filename(&volume_path)?;
@@ -1022,7 +1026,11 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
             AccessPolicy::AnyOfN,
         )
         .unwrap()

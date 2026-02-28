@@ -94,7 +94,11 @@ async fn test_atomicity_failure_recovery() {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();

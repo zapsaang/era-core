@@ -41,7 +41,11 @@ async fn test_malicious_block_header_huge_length_returns_error() {
         dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
-        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -111,7 +115,11 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
         dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
-        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -185,7 +193,11 @@ async fn test_scan_handles_malicious_length_gracefully() {
         dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
-        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -281,7 +293,11 @@ async fn test_length_at_max_shard_size_boundary() {
         dummy_recipients(),
         ArchiveConfig::default(),
         [0u8; 16],
-        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0u8; 24],
+            vec![0u8; 48],
+        ),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();

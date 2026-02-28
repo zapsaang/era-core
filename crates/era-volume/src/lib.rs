@@ -53,8 +53,8 @@ pub use reader::VolumeReader;
 pub use volume_pool::{VolumePool, VolumePoolConfig, VolumePoolStats};
 pub use writer::VolumeWriter;
 
-use std::path::{Path, PathBuf};
 use era_common::Result;
+use std::path::{Path, PathBuf};
 
 /// Per-volume structural overhead: footer + backup header + block/shard header space.
 /// Footer (128) + HEADER_SIZE (4096) + BlockHeader (16) + ShardHeader (8) = 4248 bytes
@@ -78,8 +78,11 @@ pub fn volume_path(base_path: &Path, sequence: u16) -> PathBuf {
 /// Returns `InvalidConfig` if the path has no filename or if the filename is not valid UTF-8.
 pub(crate) fn extract_filename(path: &Path) -> Result<&str> {
     path.file_name()
-        .ok_or_else(|| era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", path)))?
+        .ok_or_else(|| {
+            era_common::EraError::InvalidConfig(format!("path has no filename: {:?}", path))
+        })?
         .to_str()
-        .ok_or_else(|| era_common::EraError::InvalidConfig(format!("path is not valid UTF-8: {:?}", path)))
+        .ok_or_else(|| {
+            era_common::EraError::InvalidConfig(format!("path is not valid UTF-8: {:?}", path))
+        })
 }
-
