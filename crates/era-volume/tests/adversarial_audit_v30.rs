@@ -6,15 +6,19 @@
 //! Coverage:
 //! - V30-01: Pub field encapsulation — all 4 structs (SuperHeader, Footer,
 //!   EncryptedVolumeKey, RecipientSlot) have private fields + accessor methods
+//! - V30-02: DistributionCalculator::calculate_volume rejects volume_count=0
+//! - V30-04: Footer field-range validation (backup_header_offset below HEADER_SIZE)
 //! - V30-05: Proto rename — Argon2idPassword variant exists and serializes correctly
 //! - V30-06: Path helper — `volume_path()` is public and consistent (extract_filename
 //!   is pub(crate) — tested indirectly via volume operations)
 //! - V30-07: PER_VOLUME_OVERHEAD constant extracted (no more duplicated 4248 formula)
+//! - V30-08/09: Error messages contain diagnostic context (hex for checksum, sizes
+//!   for "too small")
 
-use era_common::{ArchiveConfig, ArchiveId};
+use era_common::{ArchiveConfig, ArchiveId, MatrixDistributionStrategy};
 use era_volume::{
-    AccessPolicy, EncryptedVolumeKey, Footer, KeyWrapAlgorithm, RecipientSlot, RecipientType,
-    SuperHeader, FOOTER_SIZE, HEADER_SIZE, PER_VOLUME_OVERHEAD,
+    AccessPolicy, DistributionCalculator, EncryptedVolumeKey, Footer, KeyWrapAlgorithm,
+    RecipientSlot, RecipientType, SuperHeader, FOOTER_SIZE, HEADER_SIZE, PER_VOLUME_OVERHEAD,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -536,4 +540,98 @@ fn test_v30_23_superheader_salt_accessor() {
     .unwrap();
 
     assert_eq!(*header.salt(), salt);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V30-02: DistributionCalculator rejects zero volume_count
+// V30-04: Footer field-range validation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// V30-02: calculate_volume returns Err when volume_count is 0.
+/// V30-04: Footer rejects backup_header_offset below HEADER_SIZE on roundtrip.
+#[test]
+fn test_v30_24_calculate_volume_zero_and_backup_header_validation() {
+    // V30-02: zero volume_count must be rejected
+    let strategy = MatrixDistributionStrategy::RotatingOffset;
+    let result = strategy.calculate_volume(0, 0, 0);
+    assert!(result.is_err(), "volume_count=0 must return Err");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("volume_count") || err_msg.contains("0"),
+        "Error should mention volume_count or zero: {}",
+        err_msg
+    );
+
+    // V30-02: volume_count=1 works (boundary)
+    assert_eq!(strategy.calculate_volume(0, 0, 1).unwrap(), 0);
+
+    // V30-04: backup_header_offset below HEADER_SIZE is rejected on deserialize
+    // Build a footer with backup_header_offset = 100 (which is < HEADER_SIZE=4096)
+    let footer = Footer::builder(10000, 5, 1).backup_header(100).build();
+    let bytes = footer.to_bytes().unwrap();
+    let result = Footer::from_bytes(&bytes);
+    assert!(
+        result.is_err(),
+        "backup_header_offset below HEADER_SIZE must be rejected"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("below HEADER_SIZE") || err_msg.contains("100"),
+        "Error should mention below HEADER_SIZE or the offset value: {}",
+        err_msg
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V30-08/09/13: Error messages contain diagnostic context
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// V30-08/09: Footer error messages include diagnostic context —
+/// size values for "too small", hex bytes for checksum mismatch,
+/// and field values for data_end_offset validation.
+#[test]
+fn test_v30_25_footer_error_messages_have_diagnostic_context() {
+    // V30-13: Footer too small — error includes actual and expected sizes
+    let short_data = [0u8; 64];
+    let result = Footer::from_bytes(&short_data);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("64") && err_msg.contains("128"),
+        "'Too small' error should contain actual size 64 and expected size 128: {}",
+        err_msg
+    );
+
+    // V30-08: Checksum mismatch — error includes hex context
+    let footer = Footer::new(10000, 5, 1);
+    let mut bytes = footer.to_bytes().unwrap();
+    // Corrupt a data byte (not the checksum) to trigger checksum mismatch
+    bytes[10] ^= 0xFF;
+    let result = Footer::from_bytes(&bytes);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Checksum mismatch"),
+        "Error should say 'Checksum mismatch': {}",
+        err_msg
+    );
+    // The error format includes hex digits like "expected aa01..."
+    assert!(
+        err_msg.contains("..."),
+        "Checksum error should contain truncated hex ('...'): {}",
+        err_msg
+    );
+
+    // V30-09: data_end_offset below minimum — error includes the value
+    // Use with_catalog to set data_end_offset to a value below DATA_REGION_START
+    let footer = Footer::new(100, 1, 1); // 100 < DATA_REGION_START (4224)
+    let bytes = footer.to_bytes().unwrap();
+    let result = Footer::from_bytes(&bytes);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("100"),
+        "data_end_offset error should contain the actual offset value: {}",
+        err_msg
+    );
 }
