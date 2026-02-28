@@ -284,12 +284,12 @@ impl IndexReader {
                 // accessor. read_typed_block on a single-volume reader ignores the volume_id.
                 let location = BlockLocation::single(
                     era_common::VolumeId::new(),
-                    footer.index_block_id,
-                    footer.index_offset,
-                    footer.index_size,
+                    footer.index_block_id(),
+                    footer.index_offset(),
+                    footer.index_size(),
                 );
 
-                tracing::info!("Found index in footer at offset {}", footer.index_offset);
+                tracing::info!("Found index in footer at offset {}", footer.index_offset());
 
                 // Read and decrypt MetaIndex
                 let (block_type, encrypted_block) =
@@ -311,7 +311,7 @@ impl IndexReader {
                 }
 
                 // Decrypt MetaIndex
-                let block_id = BlockId::new(footer.index_block_id as u64);
+                let block_id = BlockId::new(footer.index_block_id() as u64);
                 let block_key = session.derive_block_key(
                     volume_key,
                     block_id.sequence(),

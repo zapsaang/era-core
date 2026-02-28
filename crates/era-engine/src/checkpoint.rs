@@ -257,7 +257,7 @@ impl CheckpointManager {
             return false;
         }
         match era_volume::Footer::from_bytes(&buf) {
-            Ok(footer) => footer.last_checkpoint_offset > 0,
+            Ok(footer) => footer.last_checkpoint_offset() > 0,
             Err(_) => {
                 // Try backup footer at HEADER_SIZE offset
                 if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
@@ -274,7 +274,7 @@ impl CheckpointManager {
                     return false;
                 }
                 match era_volume::Footer::from_bytes(&backup_buf) {
-                    Ok(footer) => footer.last_checkpoint_offset > 0,
+                    Ok(footer) => footer.last_checkpoint_offset() > 0,
                     Err(_) => false,
                 }
             }
@@ -627,8 +627,8 @@ pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
 
     // Get initial checkpoint offset and block_id from footer
     if let Some(footer) = volume_reader.footer() {
-        let checkpoint_offset = footer.last_checkpoint_offset;
-        let checkpoint_block_id = footer.last_checkpoint_block_id;
+        let checkpoint_offset = footer.last_checkpoint_offset();
+        let checkpoint_block_id = footer.last_checkpoint_block_id();
 
         // Only attempt recovery if there's a checkpoint
         if checkpoint_offset > 0 {

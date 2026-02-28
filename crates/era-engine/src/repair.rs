@@ -103,12 +103,12 @@ pub async fn repair_archive(
 
     // Verify erasure coding is enabled
     let header = volume_reader.header();
-    let erasure_config = header.config.erasure.ok_or_else(|| {
+    let erasure_config = header.config().erasure.ok_or_else(|| {
         EraError::ErasureError("Archive does not use erasure coding - repair not available".into())
     })?;
 
     // If the archive is multi-volume, use matrix-aware repair
-    if header.total_volumes > 1 {
+    if header.total_volumes() > 1 {
         return Box::pin(repair_archive_matrix(path, password, options)).await;
     }
 
@@ -122,7 +122,7 @@ pub async fn repair_archive(
     let provider = crate::auth::PasswordProvider::new(password.to_string());
 
     let mut master_key = None;
-    for slot in &header.recipients {
+    for slot in header.recipients() {
         use crate::auth::AuthProvider;
         if let Ok(Some(mk)) = provider.try_unlock(slot) {
             master_key = Some(mk);
@@ -141,7 +141,7 @@ pub async fn repair_archive(
 
     // Create compressor (kept for future decode-based validation if needed)
     let _compressor: Box<dyn era_codec::Compressor> =
-        Box::new(ZstdCompressor::new(header.config.compression.level));
+        Box::new(ZstdCompressor::new(header.config().compression.level));
 
     // Create backup if requested
     if options.create_backup && !options.dry_run {
@@ -161,7 +161,7 @@ pub async fn repair_archive(
     let (data_start, data_end) = volume_reader.data_region();
     let erasure_data_end = volume_reader
         .footer()
-        .map(|f| f.catalog_offset)
+        .map(|f| f.catalog_offset())
         .unwrap_or(data_end);
 
     let mut offset = data_start;
@@ -485,9 +485,9 @@ pub async fn repair_archive_matrix(
     // Open first volume
     let volume_filename = path.file_name().unwrap_or_default();
     let first_reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
-    let archive_id = first_reader.header().archive_id;
+    let archive_id = first_reader.header().archive_id();
     let header = first_reader.header().clone();
-    let total_volumes = first_reader.header().total_volumes;
+    let total_volumes = first_reader.header().total_volumes();
 
     volume_sequences.push(0);
     volume_paths.push(path.to_path_buf());
@@ -505,7 +505,7 @@ pub async fn repair_archive_matrix(
 
         match VolumeReader::open(&backend, Path::new(next_filename)).await {
             Ok(reader) => {
-                if reader.header().archive_id != archive_id {
+                if reader.header().archive_id() != archive_id {
                     break;
                 }
                 volume_sequences.push(seq);
@@ -536,7 +536,7 @@ pub async fn repair_archive_matrix(
 
     // Verify erasure coding is enabled
     let erasure_config = header
-        .config
+        .config()
         .erasure
         .ok_or_else(|| EraError::ErasureError("Archive does not use erasure coding".into()))?;
 
@@ -551,7 +551,7 @@ pub async fn repair_archive_matrix(
     let provider = crate::auth::PasswordProvider::new(password.to_string());
 
     let mut master_key = None;
-    for slot in &header.recipients {
+    for slot in header.recipients() {
         use crate::auth::AuthProvider;
         if let Ok(Some(mk)) = provider.try_unlock(slot) {
             master_key = Some(mk);
@@ -566,7 +566,7 @@ pub async fn repair_archive_matrix(
     let _session = KeySession::from_master_key(&mk_array)?;
 
     let _compressor: Box<dyn era_codec::Compressor> =
-        Box::new(ZstdCompressor::new(header.config.compression.level));
+        Box::new(ZstdCompressor::new(header.config().compression.level));
 
     // Create backups if requested
     if options.create_backup && !options.dry_run {
@@ -593,8 +593,8 @@ pub async fn repair_archive_matrix(
     let mut volume_offsets: Vec<u64> = volume_readers.iter().map(|r| r.data_region().0).collect();
 
     let mut block_sequence: u64 = 0;
-    let distribution_strategy = header.config.distribution.strategy;
-    let total_volumes = header.total_volumes as usize;
+    let distribution_strategy = header.config().distribution.strategy;
+    let total_volumes = header.total_volumes() as usize;
 
     // Map volume sequence -> reader index
     let mut vol_index_map = vec![None; total_volumes.max(1)];
@@ -611,12 +611,12 @@ pub async fn repair_archive_matrix(
             let (_, end) = reader.data_region();
             if let Some(f) = reader.footer() {
                 let mut limit = if f.has_catalog_location() {
-                    f.catalog_offset
+                    f.catalog_offset()
                 } else {
                     end
                 };
-                if f.has_index() && f.index_offset < limit {
-                    limit = f.index_offset;
+                if f.has_index() && f.index_offset() < limit {
+                    limit = f.index_offset();
                 }
                 limit
             } else {

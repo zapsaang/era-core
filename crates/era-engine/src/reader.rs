@@ -130,10 +130,10 @@ impl ArchiveReader {
         let first_reader = VolumeReader::open(&backend, Path::new(base_filename)).await?;
 
         // Read volume metadata from header (copy values before moving reader)
-        let first_vol_sequence = first_reader.header().volume_sequence as usize;
-        let total_volumes = first_reader.header().total_volumes as usize;
-        let erasure_config = first_reader.header().config.erasure;
-        let first_archive_id = first_reader.header().archive_id;
+        let first_vol_sequence = first_reader.header().volume_sequence() as usize;
+        let total_volumes = first_reader.header().total_volumes() as usize;
+        let erasure_config = first_reader.header().config().erasure;
+        let first_archive_id = first_reader.header().archive_id();
 
         // 2. Determine scan tolerance based on erasure configuration
         let scan_tolerance = if let Some(config) = erasure_config {
@@ -202,8 +202,8 @@ impl ArchiveReader {
 
             match VolumeReader::open(&backend, &volume_path).await {
                 Ok(reader) => {
-                    if reader.header().archive_id == first_archive_id {
-                        let vol_seq = reader.header().volume_sequence as usize;
+                    if reader.header().archive_id() == first_archive_id {
+                        let vol_seq = reader.header().volume_sequence() as usize;
                         found_readers.push((vol_seq, reader));
                     } else {
                         tracing::warn!(
@@ -262,10 +262,10 @@ impl ArchiveReader {
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
 
-        let mk_array: [u8; 32] = match header.access_policy {
+        let mk_array: [u8; 32] = match header.access_policy() {
             era_volume::AccessPolicy::AnyOfN => {
                 let mut master_key = None;
-                'outer: for slot in &header.recipients {
+                'outer: for slot in header.recipients() {
                     for provider in &providers {
                         if let Ok(Some(mk)) = provider.try_unlock(slot) {
                             master_key = Some(mk);
@@ -287,7 +287,7 @@ impl ArchiveReader {
                     return Err(EraError::InvalidConfig("Threshold must be >= 2".into()));
                 }
                 let mut shares = Vec::new();
-                for slot in &header.recipients {
+                for slot in header.recipients() {
                     for provider in &providers {
                         if let Ok(Some(share)) = provider.try_unlock(slot) {
                             shares.push(share);
@@ -317,15 +317,15 @@ impl ArchiveReader {
 
         // Unwrap volume key from header's encrypted envelope
         let volume_key = session.unwrap_volume_key(
-            &header.encrypted_volume_key.nonce,
-            &header.encrypted_volume_key.ciphertext,
+            &header.encrypted_volume_key().nonce(),
+            &header.encrypted_volume_key().ciphertext(),
         )?;
 
         // Store nonce context
-        let nonce_context = header.salt;
+        let nonce_context = *header.salt();
 
-        let compression_level = header.config.compression.level;
-        let compression_algorithm = header.config.compression.algorithm;
+        let compression_level = header.config().compression.level;
+        let compression_algorithm = header.config().compression.algorithm;
 
         Ok(Self {
             volume_readers,
@@ -370,7 +370,7 @@ impl ArchiveReader {
         let volume_reader = &volume_readers[0];
         let header = volume_reader.header();
 
-        if let era_volume::AccessPolicy::Threshold(t) = header.access_policy {
+        if let era_volume::AccessPolicy::Threshold(t) = header.access_policy() {
             return Err(EraError::InvalidConfig(
                 format!("Cannot open Threshold({}) archive with session — requires multi-party authentication", t),
             ));
@@ -378,13 +378,13 @@ impl ArchiveReader {
 
         let owned_session = session.try_clone()?;
         let volume_key = owned_session.unwrap_volume_key(
-            &header.encrypted_volume_key.nonce,
-            &header.encrypted_volume_key.ciphertext,
+            &header.encrypted_volume_key().nonce(),
+            &header.encrypted_volume_key().ciphertext(),
         )?;
 
-        let nonce_context = header.salt;
-        let compression_level = header.config.compression.level;
-        let compression_algorithm = header.config.compression.algorithm;
+        let nonce_context = *header.salt();
+        let compression_level = header.config().compression.level;
+        let compression_algorithm = header.config().compression.algorithm;
 
         Ok(Self {
             volume_readers,
@@ -539,7 +539,7 @@ impl ArchiveReader {
                     debug!(
                         "Found catalog in volume {} (sequence {})",
                         i,
-                        reader.header().volume_sequence
+                        reader.header().volume_sequence()
                     );
                     break;
                 }
@@ -557,15 +557,15 @@ impl ArchiveReader {
         })?;
 
         let catalog_location = BlockLocation::single(
-            reader.header().volume_id,
-            footer.catalog_block_id,
-            footer.catalog_offset,
-            footer.catalog_size,
+            reader.header().volume_id(),
+            footer.catalog_block_id(),
+            footer.catalog_offset(),
+            footer.catalog_size(),
         );
 
         debug!(
             "Loading catalog from volume {} at offset={}, size={}, block_id={}",
-            reader_idx, footer.catalog_offset, footer.catalog_size, footer.catalog_block_id
+            reader_idx, footer.catalog_offset(), footer.catalog_size(), footer.catalog_block_id()
         );
 
         let encrypted_block = self.volume_readers[reader_idx]
@@ -646,7 +646,7 @@ impl ArchiveReader {
                     // We need to find the reader that matches location.volume_id
                     // iterating explicitly is safest because volume_readers might not be sorted/complete
                     for (i, r) in self.volume_readers.iter().enumerate() {
-                        if r.header().volume_id == location.volume_id {
+                        if r.header().volume_id() == location.volume_id {
                             return Some(i);
                         }
                     }
@@ -664,7 +664,7 @@ impl ArchiveReader {
                     if let Some(&seq) = shard_volumes.get(vec_idx) {
                         // Find reader with this sequence
                         for (i, r) in self.volume_readers.iter().enumerate() {
-                            if r.header().volume_sequence as usize == seq as usize {
+                            if r.header().volume_sequence() as usize == seq as usize {
                                 return Some(i);
                             }
                         }
@@ -1053,18 +1053,18 @@ impl ArchiveReader {
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
-        let erasure_config = self.volume_readers[0].header().config.erasure;
+        let erasure_config = self.volume_readers[0].header().config().erasure;
 
         // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             // Read distribution config from header
-            let dist_strategy = self.volume_readers[0].header().config.distribution.strategy;
+            let dist_strategy = self.volume_readers[0].header().config().distribution.strategy;
 
             Box::new(SessionErasureBlockIterator::new(
                 SessionErasureBlockIteratorArgs {
                     volume_readers: &self.volume_readers,
                     volume_indices: &self.volume_indices,
-                    original_volume_count: self.volume_readers[0].header().total_volumes.into(),
+                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
                     session: &self.session,
                     volume_key: &self.volume_key,
                     nonce_context: self.nonce_context,
@@ -1105,18 +1105,18 @@ impl ArchiveReader {
         let catalog = self.catalog.as_ref().unwrap();
 
         // Check if erasure coding is enabled
-        let erasure_config = self.volume_readers[0].header().config.erasure;
+        let erasure_config = self.volume_readers[0].header().config().erasure;
 
         // Create session-based iterators with per-block key derivation
         let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
             // Read distribution config from header
-            let dist_strategy = self.volume_readers[0].header().config.distribution.strategy;
+            let dist_strategy = self.volume_readers[0].header().config().distribution.strategy;
 
             Box::new(SessionErasureBlockIterator::new(
                 SessionErasureBlockIteratorArgs {
                     volume_readers: &self.volume_readers,
                     volume_indices: &self.volume_indices,
-                    original_volume_count: self.volume_readers[0].header().total_volumes.into(),
+                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
                     session: &self.session,
                     volume_key: &self.volume_key,
                     nonce_context: self.nonce_context,

@@ -54,7 +54,7 @@ async fn volume_has_checkpoint(archive_path: &Path) -> bool {
         Ok(reader) => {
             if let Some(footer) = reader.footer() {
                 // V2.2+: Checkpoint exists if last_checkpoint_offset > 0
-                footer.last_checkpoint_offset > 0
+                footer.last_checkpoint_offset() > 0
             } else {
                 false
             }
@@ -131,7 +131,7 @@ impl RecoveryManager {
 
         let reader = VolumeReader::open(&backend, Path::new(volume_name)).await?;
         if let Some(footer) = reader.footer() {
-            Ok(footer.data_end_offset)
+            Ok(footer.data_end_offset())
         } else {
             Ok(0)
         }

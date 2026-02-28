@@ -40,12 +40,12 @@ impl PasswordProvider {
 
 impl AuthProvider for PasswordProvider {
     fn try_unlock(&self, slot: &RecipientSlot) -> Result<Option<Vec<u8>>> {
-        if slot.r_type != RecipientType::Argon2idPassword {
+        if slot.r_type() != RecipientType::Argon2idPassword {
             return Ok(None);
         }
 
         // Deserialize parameters using rkyv zero-copy
-        let archived = rkyv::check_archived_root::<PasswordSlotParams>(&slot.params)
+        let archived = rkyv::check_archived_root::<PasswordSlotParams>(slot.params())
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         // Derive KEK (Key Encryption Key)
@@ -63,7 +63,7 @@ impl AuthProvider for PasswordProvider {
         // Decrypt the Master Key
         // Format of encrypted_master_key: [Nonce (24) | Ciphertext]
 
-        let encrypted = &slot.encrypted_master_key;
+        let encrypted = slot.encrypted_master_key();
         if encrypted.len() < NONCE_SIZE + 16 {
             // Minimal size (nonce + minimal ciphertext/tag)
             return Ok(None);
@@ -95,27 +95,27 @@ impl CertificateProvider {
 
 impl AuthProvider for CertificateProvider {
     fn try_unlock(&self, slot: &RecipientSlot) -> Result<Option<Vec<u8>>> {
-        if slot.r_type != RecipientType::X25519PubKey {
+        if slot.r_type() != RecipientType::X25519PubKey {
             return Ok(None);
         }
 
         // Optional optimization: Check key_id
-        if let Some(slot_kid) = slot.key_id {
+        if let Some(slot_kid) = slot.key_id() {
             let my_kid = self.keypair.key_id();
-            if my_kid.len() >= 8 && slot_kid != my_kid[..8] {
+            if my_kid.len() >= 8 && *slot_kid != my_kid[..8] {
                 return Ok(None);
             }
         }
 
         let ephemeral_public: [u8; 32] = slot
-            .params
-            .clone()
+            .params()
+            .to_vec()
             .try_into()
             .map_err(|_| EraError::InvalidKey("Invalid ephemeral public".into()))?;
 
         let encapsulation = KeyEncapsulation {
             ephemeral_public,
-            encrypted_master_key: slot.encrypted_master_key.clone(),
+            encrypted_master_key: slot.encrypted_master_key().to_vec(),
         };
 
         match self.keypair.decapsulate(&encapsulation) {

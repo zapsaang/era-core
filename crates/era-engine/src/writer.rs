@@ -392,10 +392,10 @@ impl ArchiveWriterBuilder {
             let loaded_header = vol0_reader.header().clone();
 
             // 2. DNA Check & Inheritance (Mandatory)
-            config = loaded_header.config.clone();
-            archive_id = loaded_header.archive_id;
-            archive_salt = Salt::from_bytes(loaded_header.salt);
-            recipients = loaded_header.recipients.clone();
+            config = loaded_header.config().clone();
+            archive_id = loaded_header.archive_id();
+            archive_salt = Salt::from_bytes(*loaded_header.salt());
+            recipients = loaded_header.recipients().to_vec();
 
             // 3. Hydrate Key Session (Recover Master Key)
             let mut recovered_mk: Option<[u8; 32]> = None;
@@ -404,10 +404,10 @@ impl ArchiveWriterBuilder {
                 if let (
                     AuthMode::Password(pwd) | AuthMode::Hybrid { password: pwd, .. },
                     RecipientType::Argon2idPassword,
-                ) = (&self.auth_mode, slot.r_type)
+                ) = (&self.auth_mode, slot.r_type())
                 {
                     if let Ok(archived) =
-                        rkyv::check_archived_root::<PasswordSlotParams>(&slot.params)
+                        rkyv::check_archived_root::<PasswordSlotParams>(&slot.params())
                     {
                         let salt = Salt::from_bytes(archived.salt);
                         let kdf_params = KdfParams {
@@ -418,11 +418,11 @@ impl ArchiveWriterBuilder {
                         if let Ok(kek) = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)
                         {
                             if let Ok(ctx) = XChaCha20Poly1305Context::from_derived_key(&kek) {
-                                if slot.encrypted_master_key.len() >= 24 {
+                                if slot.encrypted_master_key().len() >= 24 {
                                     if let Ok(nonce_arr) =
-                                        slot.encrypted_master_key[0..24].try_into()
+                                        slot.encrypted_master_key()[0..24].try_into()
                                     {
-                                        let ct = &slot.encrypted_master_key[24..];
+                                        let ct = &slot.encrypted_master_key()[24..];
                                         if let Ok(mk) = ctx.decrypt(nonce_arr, &[], ct) {
                                             if let Ok(mk_arr) = mk.try_into() {
                                                 recovered_mk = Some(mk_arr);
@@ -469,9 +469,9 @@ impl ArchiveWriterBuilder {
             if let Some(f) = last_valid_reader.footer() {
                 append_footer = Some(f.clone());
                 // Load catalog if present
-                if f.catalog_offset > 0 && f.catalog_size > 0 {
+                if f.catalog_offset() > 0 && f.catalog_size() > 0 {
                     if let Ok(catalog_bytes) = last_valid_reader
-                        .read_raw(f.catalog_offset, f.catalog_size as usize)
+                        .read_raw(f.catalog_offset(), f.catalog_size() as usize)
                         .await
                     {
                         if let Ok(catalog) = Catalog::from_bytes(&catalog_bytes) {
@@ -549,16 +549,16 @@ impl ArchiveWriterBuilder {
                                 kdf_parallelism: kdf_params.parallelism,
                             };
 
-                            recipients.push(RecipientSlot {
-                                r_type: RecipientType::Argon2idPassword,
-                                key_id: None,
-                                params: rkyv::to_bytes::<_, 64>(&p_params)
+                            recipients.push(RecipientSlot::new(
+                                RecipientType::Argon2idPassword,
+                                None,
+                                rkyv::to_bytes::<_, 64>(&p_params)
                                     .map_err(|e| {
                                         era_common::EraError::Serialization(e.to_string())
                                     })?
                                     .to_vec(),
-                                encrypted_master_key: combined,
-                            });
+                                combined,
+                            ));
                         }
                     }
                     era_volume::AccessPolicy::AnyOfN => {
@@ -581,14 +581,14 @@ impl ArchiveWriterBuilder {
                             kdf_parallelism: kdf_params.parallelism,
                         };
 
-                        recipients.push(RecipientSlot {
-                            r_type: RecipientType::Argon2idPassword,
-                            key_id: None,
-                            params: rkyv::to_bytes::<_, 64>(&p_params)
+                        recipients.push(RecipientSlot::new(
+                            RecipientType::Argon2idPassword,
+                            None,
+                            rkyv::to_bytes::<_, 64>(&p_params)
                                 .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
                                 .to_vec(),
-                            encrypted_master_key: combined,
-                        });
+                            combined,
+                        ));
                     }
                     _ => {
                         return Err(era_common::EraError::InvalidConfig(
@@ -615,12 +615,12 @@ impl ArchiveWriterBuilder {
                     era_common::EraError::InvalidKey("Certificate key_id too short".into())
                 })?;
 
-                recipients.push(RecipientSlot {
-                    r_type: RecipientType::X25519PubKey,
-                    key_id: Some(key_id_bytes),
-                    params: encapsulation.ephemeral_public.to_vec(),
-                    encrypted_master_key: encapsulation.encrypted_master_key,
-                });
+                recipients.push(RecipientSlot::new(
+                    RecipientType::X25519PubKey,
+                    Some(key_id_bytes),
+                    encapsulation.ephemeral_public.to_vec(),
+                    encapsulation.encrypted_master_key,
+                ));
             }
         }
 
@@ -629,11 +629,11 @@ impl ArchiveWriterBuilder {
 
         // Generate random Volume Key and wrap it with IK derived from MK
         let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
-        let encrypted_volume_key = era_volume::EncryptedVolumeKey {
-            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: wrapped_vk.nonce,
-            ciphertext: wrapped_vk.ciphertext,
-        };
+        let encrypted_volume_key = era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            wrapped_vk.nonce,
+            wrapped_vk.ciphertext,
+        );
 
         // Store nonce context (salt) for block encryption
         let nonce_context = *archive_salt.as_bytes();
@@ -2069,14 +2069,14 @@ pub mod generic {
                 kdf_parallelism: kdf_params.parallelism,
             };
 
-            let slot = RecipientSlot {
-                r_type: RecipientType::Argon2idPassword,
-                key_id: None,
-                params: rkyv::to_bytes::<_, 64>(&p_params)
+            let slot = RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                None,
+                rkyv::to_bytes::<_, 64>(&p_params)
                     .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
                     .to_vec(),
-                encrypted_master_key: combined,
-            };
+                combined,
+            );
 
             let recipients = vec![slot];
 
@@ -2086,11 +2086,11 @@ pub mod generic {
 
             // Generate random Volume Key and wrap it with IK
             let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
-            let encrypted_volume_key = era_volume::EncryptedVolumeKey {
-                algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: wrapped_vk.nonce,
-                ciphertext: wrapped_vk.ciphertext,
-            };
+            let encrypted_volume_key = era_volume::EncryptedVolumeKey::new(
+                era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+                wrapped_vk.nonce,
+                wrapped_vk.ciphertext,
+            );
 
             // Create volume writer
             let header = SuperHeader::new(

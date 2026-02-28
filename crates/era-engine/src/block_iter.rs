@@ -165,7 +165,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
         }
 
         let location = BlockLocation::single(
-            self.volume_reader.header().volume_id,
+            self.volume_reader.header().volume_id(),
             self.block_index,
             self.current_offset,
             block_size,
@@ -257,7 +257,7 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             let footer = reader.footer();
             let mut limit = if let Some(f) = footer {
                 if f.has_catalog_location() {
-                    f.catalog_offset
+                    f.catalog_offset()
                 } else {
                     end
                 }
@@ -266,8 +266,8 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             };
 
             if let Some(f) = footer {
-                if f.has_index() && f.index_offset < limit {
-                    limit = f.index_offset;
+                if f.has_index() && f.index_offset() < limit {
+                    limit = f.index_offset();
                 }
             }
             current_offsets.push(start);
@@ -620,7 +620,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
         }
 
         let location = BlockLocation::single(
-            self.volume_reader.header().volume_id,
+            self.volume_reader.header().volume_id(),
             self.block_index,
             self.current_offset,
             block_size,
@@ -742,7 +742,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             let footer = reader.footer();
             let mut limit = if let Some(f) = footer {
                 if f.has_catalog_location() {
-                    f.catalog_offset
+                    f.catalog_offset()
                 } else {
                     end
                 }
@@ -751,8 +751,8 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             };
 
             if let Some(f) = footer {
-                if f.has_index() && f.index_offset < limit {
-                    limit = f.index_offset;
+                if f.has_index() && f.index_offset() < limit {
+                    limit = f.index_offset();
                 }
             }
             current_offsets.push(start);
