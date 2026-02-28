@@ -16,20 +16,20 @@ fn mock_evk() -> EncryptedVolumeKey {
     OsRng.fill_bytes(&mut nonce);
     let mut ct = vec![0u8; 48]; // 32 VK + 16 tag
     OsRng.fill_bytes(&mut ct);
-    EncryptedVolumeKey {
-        algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+    EncryptedVolumeKey::new(
+        KeyWrapAlgorithm::XChaCha20Poly1305,
         nonce,
-        ciphertext: ct,
-    }
+        ct,
+    )
 }
 
 fn mock_slot(encrypted_mk: Vec<u8>) -> RecipientSlot {
-    RecipientSlot {
-        r_type: RecipientType::Argon2idPassword,
-        key_id: None,
-        params: vec![0xAB; 24],
-        encrypted_master_key: encrypted_mk,
-    }
+    RecipientSlot::new(
+        RecipientType::Argon2idPassword,
+        None,
+        vec![0xAB; 24],
+        encrypted_mk,
+    )
 }
 
 // ============================================================================
@@ -51,11 +51,11 @@ fn header_01_has_encrypted_volume_key() {
 
     // The field exists and is NOT default/empty
     assert_eq!(
-        header.encrypted_volume_key.algorithm,
+        header.encrypted_volume_key().algorithm(),
         KeyWrapAlgorithm::XChaCha20Poly1305,
     );
-    assert_eq!(header.encrypted_volume_key.nonce.len(), 24);
-    assert!(!header.encrypted_volume_key.ciphertext.is_empty());
+    assert_eq!(header.encrypted_volume_key().nonce().len(), 24);
+    assert!(!header.encrypted_volume_key().ciphertext().is_empty());
 }
 
 /// SuperHeader MUST contain `epoch_id` field.
@@ -72,7 +72,7 @@ fn header_02_has_epoch_id() {
     .unwrap();
 
     // Default epoch_id should be 0 for new archives
-    assert_eq!(header.epoch_id, 0);
+    assert_eq!(header.epoch_id(), 0);
 }
 
 /// SuperHeader MUST contain `access_policy` field.
@@ -88,15 +88,15 @@ fn header_03_has_access_policy() {
     )
     .unwrap();
 
-    assert_eq!(header.access_policy, AccessPolicy::AnyOfN);
+    assert_eq!(header.access_policy(), AccessPolicy::AnyOfN);
 }
 
 /// EncryptedVolumeKey survives serialization roundtrip.
 #[test]
 fn header_04_evk_serialization_roundtrip() {
     let evk = mock_evk();
-    let original_nonce = evk.nonce;
-    let original_ct = evk.ciphertext.clone();
+    let original_nonce = *evk.nonce();
+    let original_ct = evk.ciphertext().to_vec();
 
     let header = SuperHeader::new(
         ArchiveId::new(),
@@ -112,15 +112,15 @@ fn header_04_evk_serialization_roundtrip() {
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
 
     assert_eq!(
-        restored.encrypted_volume_key.nonce, original_nonce,
+        restored.encrypted_volume_key().nonce(), &original_nonce,
         "EVK nonce corrupted during serialization!"
     );
     assert_eq!(
-        restored.encrypted_volume_key.ciphertext, original_ct,
+        restored.encrypted_volume_key().ciphertext(), original_ct,
         "EVK ciphertext corrupted during serialization!"
     );
     assert_eq!(
-        restored.encrypted_volume_key.algorithm,
+        restored.encrypted_volume_key().algorithm(),
         KeyWrapAlgorithm::XChaCha20Poly1305,
     );
 }
@@ -137,11 +137,11 @@ fn header_05_epoch_id_survives_serialization() {
         AccessPolicy::AnyOfN,
     )
     .unwrap();
-    header.epoch_id = 42;
+    header.set_epoch_id(42);
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.epoch_id, 42);
+    assert_eq!(restored.epoch_id(), 42);
 }
 
 /// AccessPolicy::Threshold survives serialization with correct threshold value.
@@ -165,7 +165,7 @@ fn header_06_threshold_policy_survives_serialization() {
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.access_policy, AccessPolicy::Threshold(5));
+    assert_eq!(restored.access_policy(), AccessPolicy::Threshold(5));
 }
 
 /// next_volume() must share the same EVK, epoch_id, access_policy.
@@ -180,22 +180,22 @@ fn header_07_next_volume_inherits_crypto() {
         AccessPolicy::AnyOfN,
     )
     .unwrap();
-    header.epoch_id = 7;
-    header.access_policy = AccessPolicy::Threshold(3);
+    header.set_epoch_id(7);
+    header.set_access_policy(AccessPolicy::Threshold(3));
 
     let next = header.next_volume().unwrap();
-    assert_eq!(next.archive_id.0, header.archive_id.0);
-    assert_ne!(next.volume_id.0, header.volume_id.0); // New UUID
-    assert_eq!(next.volume_sequence, 1);
-    assert_eq!(next.epoch_id, 7);
-    assert_eq!(next.access_policy, AccessPolicy::Threshold(3));
+    assert_eq!(next.archive_id().0, header.archive_id().0);
+    assert_ne!(next.volume_id().0, header.volume_id().0); // New UUID
+    assert_eq!(next.volume_sequence(), 1);
+    assert_eq!(next.epoch_id(), 7);
+    assert_eq!(next.access_policy(), AccessPolicy::Threshold(3));
     assert_eq!(
-        next.encrypted_volume_key.nonce,
-        header.encrypted_volume_key.nonce
+        next.encrypted_volume_key().nonce(),
+        header.encrypted_volume_key().nonce()
     );
     assert_eq!(
-        next.encrypted_volume_key.ciphertext,
-        header.encrypted_volume_key.ciphertext
+        next.encrypted_volume_key().ciphertext(),
+        header.encrypted_volume_key().ciphertext()
     );
 }
 
@@ -217,24 +217,24 @@ fn header_08_only_xchacha20_allowed() {
 #[test]
 fn header_09_multi_recipient_roundtrip() {
     let recipients = vec![
-        RecipientSlot {
-            r_type: RecipientType::Argon2idPassword,
-            key_id: Some([0x01; 8]),
-            params: vec![1; 24],
-            encrypted_master_key: vec![0xAA; 56],
-        },
-        RecipientSlot {
-            r_type: RecipientType::X25519PubKey,
-            key_id: Some([0x02; 8]),
-            params: vec![2; 32],
-            encrypted_master_key: vec![0xBB; 64],
-        },
-        RecipientSlot {
-            r_type: RecipientType::Argon2idPassword,
-            key_id: None,
-            params: vec![3; 24],
-            encrypted_master_key: vec![0xCC; 56],
-        },
+        RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            Some([0x01; 8]),
+            vec![1; 24],
+            vec![0xAA; 56],
+        ),
+        RecipientSlot::new(
+            RecipientType::X25519PubKey,
+            Some([0x02; 8]),
+            vec![2; 32],
+            vec![0xBB; 64],
+        ),
+        RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            None,
+            vec![3; 24],
+            vec![0xCC; 56],
+        ),
     ];
 
     let header = SuperHeader::new(
@@ -250,17 +250,17 @@ fn header_09_multi_recipient_roundtrip() {
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
 
-    assert_eq!(restored.recipients.len(), 3);
+    assert_eq!(restored.recipients().len(), 3);
     assert_eq!(
-        restored.recipients[0].r_type,
+        restored.recipients()[0].r_type(),
         RecipientType::Argon2idPassword
     );
-    assert_eq!(restored.recipients[1].r_type, RecipientType::X25519PubKey);
-    assert_eq!(restored.recipients[0].key_id, Some([0x01; 8]));
-    assert_eq!(restored.recipients[1].key_id, Some([0x02; 8]));
-    assert_eq!(restored.recipients[2].key_id, None);
-    assert_eq!(restored.recipients[0].encrypted_master_key, vec![0xAA; 56]);
-    assert_eq!(restored.recipients[1].encrypted_master_key, vec![0xBB; 64]);
+    assert_eq!(restored.recipients()[1].r_type(), RecipientType::X25519PubKey);
+    assert_eq!(restored.recipients()[0].key_id(), Some(&[0x01; 8]));
+    assert_eq!(restored.recipients()[1].key_id(), Some(&[0x02; 8]));
+    assert_eq!(restored.recipients()[2].key_id(), None);
+    assert_eq!(restored.recipients()[0].encrypted_master_key(), &vec![0xAA; 56]);
+    assert_eq!(restored.recipients()[1].encrypted_master_key(), &vec![0xBB; 64]);
 }
 
 /// Header with zero recipients must be rejected at construction (defense-in-depth).

@@ -31,11 +31,7 @@ async fn test_rotation_latency_under_load() {
         recipients,
         archive_config,
         salt,
-        era_volume::EncryptedVolumeKey {
-            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();

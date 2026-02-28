@@ -67,11 +67,11 @@ pub enum AccessPolicy {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct EncryptedVolumeKey {
     /// The AEAD algorithm used for wrapping the Volume Key.
-    pub algorithm: KeyWrapAlgorithm,
+    algorithm: KeyWrapAlgorithm,
     /// Random nonce for the wrapping operation (24 bytes for XChaCha20)
-    pub nonce: [u8; 24],
+    nonce: [u8; 24],
     /// The random VK encrypted by the IK (ciphertext + Poly1305 tag)
-    pub ciphertext: Vec<u8>,
+    ciphertext: Vec<u8>,
 }
 
 impl std::fmt::Debug for EncryptedVolumeKey {
@@ -81,6 +81,34 @@ impl std::fmt::Debug for EncryptedVolumeKey {
             .field("nonce", &"[REDACTED]")
             .field("ciphertext", &"[REDACTED]")
             .finish()
+    }
+}
+
+impl EncryptedVolumeKey {
+    /// Creates a new encrypted volume key container.
+    pub fn new(algorithm: KeyWrapAlgorithm, nonce: [u8; 24], ciphertext: Vec<u8>) -> Self {
+        Self { algorithm, nonce, ciphertext }
+    }
+
+    /// Returns the AEAD algorithm used for wrapping.
+    pub fn algorithm(&self) -> KeyWrapAlgorithm {
+        self.algorithm
+    }
+
+    /// Returns a reference to the random nonce (24 bytes).
+    pub fn nonce(&self) -> &[u8; 24] {
+        &self.nonce
+    }
+
+    /// Returns a slice of the ciphertext (encrypted VK + Poly1305 tag).
+    pub fn ciphertext(&self) -> &[u8] {
+        &self.ciphertext
+    }
+
+    /// Test-only setter for ciphertext (adversarial mutation scenarios).
+    #[doc(hidden)]
+    pub fn set_ciphertext(&mut self, ct: Vec<u8>) {
+        self.ciphertext = ct;
     }
 }
 
@@ -100,13 +128,13 @@ pub enum RecipientType {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecipientSlot {
     /// The type of credential used to protect this slot's master key.
-    pub r_type: RecipientType,
+    r_type: RecipientType,
     /// Optional Key ID (e.g., fingerprint) for fast matching
-    pub key_id: Option<[u8; 8]>,
+    key_id: Option<[u8; 8]>,
     /// Dynamic parameters (Salt, Nonce, Scrypt params, etc.)
-    pub params: Vec<u8>,
+    params: Vec<u8>,
     /// The Master Key wrapped by this recipient's specific credential
-    pub encrypted_master_key: Vec<u8>,
+    encrypted_master_key: Vec<u8>,
 }
 
 impl RecipientSlot {
@@ -163,8 +191,39 @@ impl RecipientSlot {
         }
         Ok(())
     }
-}
 
+    /// Returns the type of credential used to protect this slot.
+    pub fn r_type(&self) -> RecipientType {
+        self.r_type
+    }
+
+    /// Returns the optional key ID (8-byte fingerprint).
+    pub fn key_id(&self) -> Option<&[u8; 8]> {
+        self.key_id.as_ref()
+    }
+
+    /// Returns a slice of the dynamic parameters.
+    pub fn params(&self) -> &[u8] {
+        &self.params
+    }
+
+    /// Returns a slice of the encrypted master key.
+    pub fn encrypted_master_key(&self) -> &[u8] {
+        &self.encrypted_master_key
+    }
+
+    /// Test-only setter for params (adversarial mutation scenarios).
+    #[doc(hidden)]
+    pub fn set_params(&mut self, p: Vec<u8>) {
+        self.params = p;
+    }
+
+    /// Test-only setter for encrypted_master_key (adversarial mutation scenarios).
+    #[doc(hidden)]
+    pub fn set_encrypted_master_key(&mut self, emk: Vec<u8>) {
+        self.encrypted_master_key = emk;
+    }
+}
 impl std::fmt::Debug for RecipientSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecipientSlot")
@@ -180,34 +239,34 @@ impl std::fmt::Debug for RecipientSlot {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SuperHeader {
     /// Magic bytes to identify ERA format
-    pub magic: [u8; 8],
+    magic: [u8; 8],
     /// Header version
-    pub version: u16,
+    version: u16,
     /// Volume UUID
-    pub volume_id: VolumeId,
+    volume_id: VolumeId,
     /// Archive UUID (same across all volumes in an archive set)
-    pub archive_id: ArchiveId,
+    archive_id: ArchiveId,
     /// Volume sequence number (0-based)
-    pub volume_sequence: u16,
+    volume_sequence: u16,
     /// Total number of volumes in this archive set
     /// Set to 0 if unknown at creation time (will be updated on finalize)
-    pub total_volumes: u16,
+    total_volumes: u16,
     /// Creation timestamp (Unix seconds)
-    pub creation_time: i64,
+    creation_time: i64,
     /// Feature flags
-    pub feature_flags: u64,
+    feature_flags: u64,
     /// Recipient slots (Dynamic Multi-Recipient Envelope)
-    pub recipients: Vec<RecipientSlot>,
+    recipients: Vec<RecipientSlot>,
     /// Archive configuration
-    pub config: ArchiveConfig,
+    config: ArchiveConfig,
     /// Archive-wide salt (16 bytes) for key context/nonce generation
-    pub salt: [u8; 16],
+    salt: [u8; 16],
     /// Key Epoch ID. Increments when MK is rotated.
-    pub epoch_id: u32,
+    epoch_id: u32,
     /// The Encrypted Volume Key (VK wrapped by IK derived from MK)
-    pub encrypted_volume_key: EncryptedVolumeKey,
+    encrypted_volume_key: EncryptedVolumeKey,
     /// Access control policy
-    pub access_policy: AccessPolicy,
+    access_policy: AccessPolicy,
 }
 
 impl std::fmt::Debug for SuperHeader {
@@ -455,6 +514,153 @@ impl SuperHeader {
 
         Ok(header)
     }
+
+    // ── Accessors ──
+
+    /// Returns the magic bytes.
+    pub fn magic(&self) -> &[u8; 8] {
+        &self.magic
+    }
+
+    /// Returns the header version.
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// Returns the volume UUID.
+    pub fn volume_id(&self) -> VolumeId {
+        self.volume_id
+    }
+
+    /// Returns the archive UUID.
+    pub fn archive_id(&self) -> ArchiveId {
+        self.archive_id
+    }
+
+    /// Returns the volume sequence number (0-based).
+    pub fn volume_sequence(&self) -> u16 {
+        self.volume_sequence
+    }
+
+    /// Returns the total number of volumes (0 if unknown).
+    pub fn total_volumes(&self) -> u16 {
+        self.total_volumes
+    }
+
+    /// Returns the creation timestamp (Unix seconds).
+    pub fn creation_time(&self) -> i64 {
+        self.creation_time
+    }
+
+    /// Returns the feature flags.
+    pub fn feature_flags(&self) -> u64 {
+        self.feature_flags
+    }
+
+    /// Returns a slice of recipient slots.
+    pub fn recipients(&self) -> &[RecipientSlot] {
+        &self.recipients
+    }
+
+    /// Returns a reference to the archive configuration.
+    pub fn config(&self) -> &ArchiveConfig {
+        &self.config
+    }
+
+    /// Returns a reference to the archive-wide salt (16 bytes).
+    pub fn salt(&self) -> &[u8; 16] {
+        &self.salt
+    }
+
+    /// Returns the key epoch ID.
+    pub fn epoch_id(&self) -> u32 {
+        self.epoch_id
+    }
+
+    /// Returns a reference to the encrypted volume key container.
+    pub fn encrypted_volume_key(&self) -> &EncryptedVolumeKey {
+        &self.encrypted_volume_key
+    }
+
+    /// Returns the access control policy.
+    pub fn access_policy(&self) -> AccessPolicy {
+        self.access_policy
+    }
+
+    // ── Setters (internal use + adversarial tests) ──
+
+    /// Sets the volume UUID (used by volume pool during rotation).
+    #[doc(hidden)]
+    pub fn set_volume_id(&mut self, id: VolumeId) {
+        self.volume_id = id;
+    }
+
+    /// Sets the volume sequence number.
+    #[doc(hidden)]
+    pub fn set_volume_sequence(&mut self, seq: u16) {
+        self.volume_sequence = seq;
+    }
+
+    /// Sets the total number of volumes.
+    #[doc(hidden)]
+    pub fn set_total_volumes(&mut self, total: u16) {
+        self.total_volumes = total;
+    }
+
+    // ── Test-only setters (adversarial mutation scenarios) ──
+
+    /// Test-only setter for epoch_id.
+    #[doc(hidden)]
+    pub fn set_epoch_id(&mut self, id: u32) {
+        self.epoch_id = id;
+    }
+
+    /// Test-only setter for access_policy.
+    #[doc(hidden)]
+    pub fn set_access_policy(&mut self, policy: AccessPolicy) {
+        self.access_policy = policy;
+    }
+
+    /// Test-only setter for version.
+    #[doc(hidden)]
+    pub fn set_version(&mut self, v: u16) {
+        self.version = v;
+    }
+    /// Test-only constructor with full field control (property tests).
+    /// Does NOT validate fields — callers are responsible for providing valid data.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_testing(
+        archive_id: ArchiveId,
+        volume_id: VolumeId,
+        volume_sequence: u16,
+        total_volumes: u16,
+        creation_time: i64,
+        feature_flags: u64,
+        recipients: Vec<RecipientSlot>,
+        salt: [u8; 16],
+        epoch_id: u32,
+        encrypted_volume_key: EncryptedVolumeKey,
+        access_policy: AccessPolicy,
+    ) -> Self {
+        Self {
+            magic: MAGIC,
+            version: HEADER_VERSION,
+            volume_id,
+            archive_id,
+            volume_sequence,
+            total_volumes,
+            creation_time,
+            feature_flags,
+            recipients,
+            config: ArchiveConfig::default(),
+            salt,
+            epoch_id,
+            encrypted_volume_key,
+            access_policy,
+    }
+}
+
 }
 
 use era_common::proto;
@@ -469,6 +675,7 @@ impl From<RecipientSlot> for proto::RecipientSlot {
                 RecipientType::X25519PubKey => {
                     proto::recipient_slot::RecipientType::X25519Pubkey.into()
                 }
+
                 RecipientType::Fido2Hmac => proto::recipient_slot::RecipientType::Fido2Hmac.into(),
             },
             key_id: slot.key_id.map(|k| k.to_vec()).unwrap_or_default(),
@@ -773,11 +980,11 @@ mod tests {
     }
 
     fn mock_encrypted_vk() -> EncryptedVolumeKey {
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0xAA; 24],
-            ciphertext: vec![0xBB; 48], // 32 bytes VK + 16 bytes tag
-        }
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            [0xAA; 24],
+            vec![0xBB; 48], // 32 bytes VK + 16 bytes tag
+        )
     }
 
     #[test]
@@ -797,15 +1004,15 @@ mod tests {
         assert_eq!(bytes.len(), HEADER_SIZE, "Header must be 4KB padded");
 
         let restored = SuperHeader::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.magic, MAGIC);
-        assert_eq!(restored.version, HEADER_VERSION);
-        assert_eq!(restored.archive_id.0, header.archive_id.0);
-        assert_eq!(restored.recipients.len(), 1);
-        assert_eq!(restored.recipients[0].params, TEST_PARAMS.to_vec());
-        assert_eq!(restored.epoch_id, 0);
-        assert_eq!(restored.encrypted_volume_key.nonce, [0xAA; 24]);
-        assert_eq!(restored.encrypted_volume_key.ciphertext, vec![0xBB; 48]);
-        assert_eq!(restored.access_policy, AccessPolicy::AnyOfN);
+        assert_eq!(restored.magic(), &MAGIC);
+        assert_eq!(restored.version(), HEADER_VERSION);
+        assert_eq!(restored.archive_id().0, header.archive_id().0);
+        assert_eq!(restored.recipients().len(), 1);
+        assert_eq!(restored.recipients()[0].params(), TEST_PARAMS.as_slice());
+        assert_eq!(restored.epoch_id(), 0);
+        assert_eq!(restored.encrypted_volume_key().nonce(), &[0xAA; 24]);
+        assert_eq!(restored.encrypted_volume_key().ciphertext(), &vec![0xBB; 48]);
+        assert_eq!(restored.access_policy(), AccessPolicy::AnyOfN);
     }
 
     #[test]
@@ -823,14 +1030,14 @@ mod tests {
 
         let header2 = header.next_volume().unwrap();
 
-        assert_eq!(header2.archive_id.0, header.archive_id.0);
-        assert_ne!(header2.volume_id.0, header.volume_id.0);
-        assert_eq!(header2.volume_sequence, 1);
-        assert_eq!(header2.recipients.len(), 1);
-        assert_eq!(header2.epoch_id, header.epoch_id);
+        assert_eq!(header2.archive_id().0, header.archive_id().0);
+        assert_ne!(header2.volume_id().0, header.volume_id().0);
+        assert_eq!(header2.volume_sequence(), 1);
+        assert_eq!(header2.recipients().len(), 1);
+        assert_eq!(header2.epoch_id(), header.epoch_id());
         assert_eq!(
-            header2.encrypted_volume_key.nonce,
-            header.encrypted_volume_key.nonce
+            header2.encrypted_volume_key().nonce(),
+            header.encrypted_volume_key().nonce()
         );
     }
 
@@ -849,7 +1056,7 @@ mod tests {
 
         let bytes = header.to_bytes().unwrap();
         let restored = SuperHeader::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.access_policy, AccessPolicy::Threshold(3));
+        assert_eq!(restored.access_policy(), AccessPolicy::Threshold(3));
     }
 
     // ===== CB25: Configuration Boundary Audit Tests =====

@@ -51,11 +51,7 @@ fn test_header() -> SuperHeader {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     )
     .unwrap()
@@ -83,19 +79,19 @@ fn test_v27_01_creation_time_uses_safe_i64_conversion() {
     let header = test_header();
     // creation_time should be positive (post-UNIX-epoch)
     assert!(
-        header.creation_time > 0,
+        header.creation_time() > 0,
         "creation_time must be positive, got {}",
-        header.creation_time
+        header.creation_time()
     );
     // Verify it roundtrips through serialization
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.creation_time, header.creation_time);
+    assert_eq!(restored.creation_time(), header.creation_time());
 
     // next_volume() uses map_err variant — verify it also produces valid time
     let next = header.next_volume().unwrap();
     assert!(
-        next.creation_time > 0,
+        next.creation_time() > 0,
         "next_volume creation_time must be positive"
     );
 }
@@ -398,7 +394,7 @@ async fn test_v27_10_multi_volume_header_is_deterministic() {
     let backend = LocalStorageBackend::new(temp_dir.path());
 
     let header = test_header();
-    let archive_id = header.archive_id;
+    let archive_id = header.archive_id();
     let config = MultiVolumeConfig::new(
         temp_dir.path().join("det").to_str().unwrap(),
         50 * 1024, // 50KB volumes to get multiple
@@ -424,10 +420,10 @@ async fn test_v27_10_multi_volume_header_is_deterministic() {
 
         // V27-10: Must always return the volume_sequence==0 header
         assert_eq!(
-            hdr.volume_sequence, 0,
+            hdr.volume_sequence(), 0,
             "header() must return volume_sequence==0 deterministically"
         );
-        assert_eq!(hdr.archive_id.0, archive_id.0);
+        assert_eq!(hdr.archive_id().0, archive_id.0);
     }
 }
 
@@ -515,27 +511,27 @@ async fn test_v27_12_checkpoint_footer_fields() {
 
     // V27-12: checkpoint footer must have 0 for catalog/index fields
     assert_eq!(
-        backup_footer.catalog_offset, 0,
+        backup_footer.catalog_offset(), 0,
         "checkpoint footer catalog_offset must be 0"
     );
     assert_eq!(
-        backup_footer.catalog_size, 0,
+        backup_footer.catalog_size(), 0,
         "checkpoint footer catalog_size must be 0"
     );
     assert_eq!(
-        backup_footer.catalog_block_id, 0,
+        backup_footer.catalog_block_id(), 0,
         "checkpoint footer catalog_block_id must be 0"
     );
     assert_eq!(
-        backup_footer.index_offset, 0,
+        backup_footer.index_offset(), 0,
         "checkpoint footer index_offset must be 0"
     );
     assert_eq!(
-        backup_footer.index_size, 0,
+        backup_footer.index_size(), 0,
         "checkpoint footer index_size must be 0"
     );
     assert_eq!(
-        backup_footer.index_block_id, 0,
+        backup_footer.index_block_id(), 0,
         "checkpoint footer index_block_id must be 0"
     );
 }
@@ -552,11 +548,7 @@ fn test_v27_13_empty_recipients_rejected_at_construction() {
         vec![], // empty recipients
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     );
     assert!(
@@ -591,11 +583,7 @@ fn test_v27_13b_max_recipients_enforced() {
         too_many,
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     );
     assert!(
@@ -620,11 +608,7 @@ fn test_v27_13b_max_recipients_enforced() {
         exact,
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     );
     assert!(
@@ -743,17 +727,13 @@ fn test_v27_16_test_headers_use_valid_recipients() {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     );
     assert!(result.is_ok(), "Valid recipients must return Ok");
     let header = result.unwrap();
-    assert_eq!(header.version, HEADER_VERSION);
-    assert_eq!(header.recipients.len(), 1);
+    assert_eq!(header.version(), HEADER_VERSION);
+    assert_eq!(header.recipients().len(), 1);
 
     // Failure case: empty recipients returns Err
     let result = SuperHeader::new(
@@ -761,11 +741,7 @@ fn test_v27_16_test_headers_use_valid_recipients() {
         vec![], // no recipients
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     );
     assert!(

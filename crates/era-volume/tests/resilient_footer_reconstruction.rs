@@ -29,11 +29,7 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
         )],
         config,
         [0u8; 16],
-        era_volume::EncryptedVolumeKey {
-            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -83,7 +79,7 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
     );
 
     // 6. Verify we can still read parts (like header)
-    assert_eq!(reader.header().archive_id.0, header.archive_id.0);
+    assert_eq!(reader.header().archive_id().0, header.archive_id().0);
 
     Ok(())
 }
@@ -110,11 +106,7 @@ async fn test_fail_without_erasure() -> Result<()> {
         )],
         config,
         [0u8; 16],
-        era_volume::EncryptedVolumeKey {
-            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();

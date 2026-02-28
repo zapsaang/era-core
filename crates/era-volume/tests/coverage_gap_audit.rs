@@ -31,11 +31,7 @@ fn mock_recipient() -> RecipientSlot {
 }
 
 fn mock_encrypted_vk() -> EncryptedVolumeKey {
-    EncryptedVolumeKey {
-        algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-        nonce: [0xAA; 24],
-        ciphertext: vec![0xBB; 48],
-    }
+    EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0xAA; 24], vec![0xBB; 48])
 }
 
 fn make_header() -> SuperHeader {

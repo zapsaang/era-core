@@ -28,11 +28,7 @@ fn test_header() -> SuperHeader {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     )
     .unwrap()
@@ -159,8 +155,8 @@ async fn test_open_append_forged_data_end_offset() {
     // Forge a footer with data_end_offset way beyond file size
     let forged_footer = Footer::with_catalog(
         999_999_999, // way beyond actual file size
-        footer.block_count,
-        footer.sequence_number,
+        footer.block_count(),
+        footer.sequence_number(),
         0,
         0,
         0,

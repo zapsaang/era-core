@@ -146,18 +146,18 @@ impl<B: StorageBackend> VolumePool<B> {
         for i in 0..volume_count {
             let mut header = template_header.clone();
             // Each volume must have a unique volume_id for identification
-            header.volume_id = VolumeId::new();
-            header.volume_sequence = u16::try_from(i).map_err(|_| {
+            header.set_volume_id(VolumeId::new());
+            header.set_volume_sequence(u16::try_from(i).map_err(|_| {
                 era_common::EraError::InvalidConfig(format!("volume index {} exceeds u16", i))
-            })?;
-            header.total_volumes = u16::try_from(volume_count).map_err(|_| {
+            })?);
+            header.set_total_volumes(u16::try_from(volume_count).map_err(|_| {
                 era_common::EraError::InvalidConfig(format!(
                     "volume count {} exceeds u16",
                     volume_count
                 ))
-            })?;
+            })?);
 
-            let seq = header.volume_sequence;
+            let seq = header.volume_sequence();
             let volume_path = config.volume_path(seq);
             let volume_filename = extract_filename(&volume_path)?;
 
@@ -196,8 +196,8 @@ impl<B: StorageBackend> VolumePool<B> {
         mut config: VolumePoolConfig,
         template_header: SuperHeader,
     ) -> Result<Self> {
-        let volume_count = if template_header.total_volumes > 0 {
-            template_header.total_volumes as usize
+        let volume_count = if template_header.total_volumes() > 0 {
+            template_header.total_volumes() as usize
         } else {
             config.initial_volume_count
         };
@@ -230,7 +230,7 @@ impl<B: StorageBackend> VolumePool<B> {
 
             max_block_count = max_block_count.max(writer.block_count());
             writers.push(writer);
-            sequences.push(reader.header().volume_sequence);
+            sequences.push(reader.header().volume_sequence());
         }
 
         let stats = VolumePoolStats {
@@ -354,14 +354,14 @@ impl<B: StorageBackend> VolumePool<B> {
 
             let mut header = self.template_header.clone();
             // Each rotated volume must have a unique volume_id
-            header.volume_id = VolumeId::new();
-            header.volume_sequence = next_sequence;
+            header.set_volume_id(VolumeId::new());
+            header.set_volume_sequence(next_sequence);
             // total_volumes = next_sequence + 1 represents the count of volumes
             // up to and including this one. The reader takes the maximum across
             // all volumes when discovering the archive set.
-            header.total_volumes = next_sequence.checked_add(1).ok_or_else(|| {
+            header.set_total_volumes(next_sequence.checked_add(1).ok_or_else(|| {
                 era_common::EraError::InvalidConfig("total_volumes overflow".into())
-            })?;
+            })?);
 
             let volume_path = self.config.volume_path(next_sequence);
             let volume_filename = extract_filename(&volume_path)?;
@@ -415,7 +415,7 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Get the archive ID from the template header.
     #[must_use]
     pub fn archive_id(&self) -> era_common::ArchiveId {
-        self.template_header.archive_id
+        self.template_header.archive_id()
     }
 
     /// Calculate which volume slot a shard should go to.
@@ -943,10 +943,10 @@ impl<B: StorageBackend> VolumePool<B> {
         let mut header = self.template_header.clone();
         // CV32-01: Each volume must have a unique volume_id for identification in the reader's HashMap.
         // Without this, add_volume() would reuse the template's volume_id, causing collisions.
-        header.volume_id = VolumeId::new();
-        header.volume_sequence = new_sequence;
-        header.total_volumes = u16::try_from(self.writers.len() + 1)
-            .map_err(|_| era_common::EraError::InvalidConfig("total volumes exceeds u16".into()))?;
+        header.set_volume_id(VolumeId::new());
+        header.set_volume_sequence(new_sequence);
+        header.set_total_volumes(u16::try_from(self.writers.len() + 1)
+            .map_err(|_| era_common::EraError::InvalidConfig("total volumes exceeds u16".into()))?);
 
         let volume_path = self.config.volume_path(new_sequence);
         let volume_filename = extract_filename(&volume_path)?;
@@ -1022,11 +1022,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap()

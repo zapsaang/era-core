@@ -61,37 +61,37 @@ const FOOTER_CHECKSUM_SIZE: usize = 32;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Footer {
     /// Magic bytes: "ERAF"
-    pub magic: [u8; 4],
+    magic: [u8; 4],
     /// Format version
-    pub version: u8,
+    version: u8,
     /// Status flags
-    pub flags: u16,
+    flags: u16,
     /// Offset of the data region end
-    pub data_end_offset: u64,
+    data_end_offset: u64,
     /// Number of blocks in this volume
-    pub block_count: u32,
+    block_count: u32,
     /// Sequence number (monotonically increasing)
-    pub sequence_number: u64,
+    sequence_number: u64,
     /// Offset of the catalog block (for fast lookup)
-    pub catalog_offset: u64,
+    catalog_offset: u64,
     /// Size of the catalog block (encrypted size)
-    pub catalog_size: u32,
+    catalog_size: u32,
     /// Block ID of the catalog (for correct decryption)
-    pub catalog_block_id: u32,
+    catalog_block_id: u32,
     /// Offset of the last checkpoint (for atomic updates)
-    pub last_checkpoint_offset: u64,
+    last_checkpoint_offset: u64,
     /// Block ID of the last checkpoint (for direct decryption)
-    pub last_checkpoint_block_id: u32,
+    last_checkpoint_block_id: u32,
     /// Offset of the index block
-    pub index_offset: u64,
+    index_offset: u64,
     /// Size of the index block
-    pub index_size: u32,
+    index_size: u32,
     /// Block ID of the index
-    pub index_block_id: u32,
+    index_block_id: u32,
     /// Offset of the backup header (for redundancy layout)
-    pub backup_header_offset: u64,
+    backup_header_offset: u64,
     /// Blake3 checksum of the footer (excluding this field)
-    pub checksum: [u8; 32],
+    checksum: [u8; 32],
 }
 
 impl Footer {
@@ -460,6 +460,122 @@ impl Footer {
         }
         Ok(())
     }
+
+    // ── Accessor methods ──────────────────────────────────────────────
+
+    /// Magic bytes ("ERAF")
+    #[must_use]
+    pub fn magic(&self) -> &[u8; 4] {
+        &self.magic
+    }
+
+    /// Format version
+    #[must_use]
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// Status flags
+    #[must_use]
+    pub fn flags(&self) -> u16 {
+        self.flags
+    }
+
+    /// Offset of the data region end
+    #[must_use]
+    pub fn data_end_offset(&self) -> u64 {
+        self.data_end_offset
+    }
+
+    /// Number of blocks in this volume
+    #[must_use]
+    pub fn block_count(&self) -> u32 {
+        self.block_count
+    }
+
+    /// Sequence number (monotonically increasing)
+    #[must_use]
+    pub fn sequence_number(&self) -> u64 {
+        self.sequence_number
+    }
+
+    /// Offset of the catalog block
+    #[must_use]
+    pub fn catalog_offset(&self) -> u64 {
+        self.catalog_offset
+    }
+
+    /// Size of the catalog block (encrypted size)
+    #[must_use]
+    pub fn catalog_size(&self) -> u32 {
+        self.catalog_size
+    }
+
+    /// Block ID of the catalog
+    #[must_use]
+    pub fn catalog_block_id(&self) -> u32 {
+        self.catalog_block_id
+    }
+
+    /// Offset of the last checkpoint
+    #[must_use]
+    pub fn last_checkpoint_offset(&self) -> u64 {
+        self.last_checkpoint_offset
+    }
+
+    /// Block ID of the last checkpoint
+    #[must_use]
+    pub fn last_checkpoint_block_id(&self) -> u32 {
+        self.last_checkpoint_block_id
+    }
+
+    /// Offset of the index block
+    #[must_use]
+    pub fn index_offset(&self) -> u64 {
+        self.index_offset
+    }
+
+    /// Size of the index block
+    #[must_use]
+    pub fn index_size(&self) -> u32 {
+        self.index_size
+    }
+
+    /// Block ID of the index
+    #[must_use]
+    pub fn index_block_id(&self) -> u32 {
+        self.index_block_id
+    }
+
+    /// Offset of the backup header
+    #[must_use]
+    pub fn backup_header_offset(&self) -> u64 {
+        self.backup_header_offset
+    }
+
+    /// Blake3 checksum of the footer
+    #[must_use]
+    pub fn checksum(&self) -> &[u8; 32] {
+        &self.checksum
+    }
+}
+
+#[cfg(test)]
+impl Footer {
+    /// Test-only setter for magic bytes.
+    pub(crate) fn set_magic(&mut self, m: [u8; 4]) {
+        self.magic = m;
+    }
+
+    /// Test-only setter for block_count.
+    pub(crate) fn set_block_count(&mut self, c: u32) {
+        self.block_count = c;
+    }
+
+    /// Test-only: recompute and update the checksum.
+    pub(crate) fn recompute_checksum(&mut self) {
+        self.update_checksum();
+    }
 }
 
 /// Builder for constructing a Footer with named fields.
@@ -549,11 +665,11 @@ mod tests {
         assert_eq!(bytes.len(), FOOTER_SIZE);
 
         let restored = Footer::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.magic, FOOTER_MAGIC);
-        assert_eq!(restored.version, FOOTER_VERSION);
-        assert_eq!(restored.data_end_offset, 1024 * 1024);
-        assert_eq!(restored.block_count, 10);
-        assert_eq!(restored.sequence_number, 1);
+        assert_eq!(restored.magic(), &FOOTER_MAGIC);
+        assert_eq!(restored.version(), FOOTER_VERSION);
+        assert_eq!(restored.data_end_offset(), 1024 * 1024);
+        assert_eq!(restored.block_count(), 10);
+        assert_eq!(restored.sequence_number(), 1);
     }
 
     #[test]
@@ -589,12 +705,12 @@ mod tests {
         );
 
         let restored = Footer::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.data_end_offset, data_end);
-        assert_eq!(restored.block_count, 0xFFFF_FFFF);
-        assert_eq!(restored.catalog_offset, catalog_offset);
-        assert_eq!(restored.catalog_size, catalog_size);
-        assert_eq!(restored.index_offset, index_offset);
-        assert_eq!(restored.index_size, index_size);
+        assert_eq!(restored.data_end_offset(), data_end);
+        assert_eq!(restored.block_count(), 0xFFFF_FFFF);
+        assert_eq!(restored.catalog_offset(), catalog_offset);
+        assert_eq!(restored.catalog_size(), catalog_size);
+        assert_eq!(restored.index_offset(), index_offset);
+        assert_eq!(restored.index_size(), index_size);
     }
 
     #[test]
@@ -666,15 +782,15 @@ mod tests {
 
         // Tamper with the footer
         let mut tampered = footer.clone();
-        tampered.block_count = 100;
+        tampered.set_block_count(100);
         assert!(!tampered.verify_checksum());
     }
 
     #[test]
     fn test_corrupted_magic() {
         let mut footer = Footer::new(1024, 5, 1);
-        footer.magic = [0, 0, 0, 0];
-        footer.update_checksum();
+        footer.set_magic([0, 0, 0, 0]);
+        footer.recompute_checksum();
 
         let bytes = footer.to_bytes().unwrap();
         let result = Footer::from_bytes(&bytes);

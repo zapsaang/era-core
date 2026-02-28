@@ -45,11 +45,7 @@ fn test_header() -> SuperHeader {
         )],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     )
     .unwrap()
@@ -91,20 +87,20 @@ fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
     assert_eq!(bytes.len(), FOOTER_SIZE);
 
     let restored = Footer::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.magic, FOOTER_MAGIC);
-    assert_eq!(restored.version, FOOTER_VERSION);
-    assert_eq!(restored.data_end_offset, 16384);
-    assert_eq!(restored.block_count, 42);
-    assert_eq!(restored.sequence_number, 7);
-    assert_eq!(restored.catalog_offset, 5000);
-    assert_eq!(restored.catalog_size, 1024);
-    assert_eq!(restored.catalog_block_id, 3);
-    assert_eq!(restored.last_checkpoint_offset, 6000);
-    assert_eq!(restored.last_checkpoint_block_id, 5);
-    assert_eq!(restored.index_offset, 7000);
-    assert_eq!(restored.index_size, 2048);
-    assert_eq!(restored.index_block_id, 10);
-    assert_eq!(restored.backup_header_offset, 4224);
+    assert_eq!(restored.magic(), &FOOTER_MAGIC);
+    assert_eq!(restored.version(), FOOTER_VERSION);
+    assert_eq!(restored.data_end_offset(), 16384);
+    assert_eq!(restored.block_count(), 42);
+    assert_eq!(restored.sequence_number(), 7);
+    assert_eq!(restored.catalog_offset(), 5000);
+    assert_eq!(restored.catalog_size(), 1024);
+    assert_eq!(restored.catalog_block_id(), 3);
+    assert_eq!(restored.last_checkpoint_offset(), 6000);
+    assert_eq!(restored.last_checkpoint_block_id(), 5);
+    assert_eq!(restored.index_offset(), 7000);
+    assert_eq!(restored.index_size(), 2048);
+    assert_eq!(restored.index_block_id(), 10);
+    assert_eq!(restored.backup_header_offset(), 4224);
     assert!(restored.verify_checksum());
 }
 
@@ -217,18 +213,18 @@ fn test_v26_f1_footer_builder_roundtrip() {
         .backup_header(4224)
         .build();
 
-    assert_eq!(footer.magic, FOOTER_MAGIC);
-    assert_eq!(footer.version, FOOTER_VERSION);
+    assert_eq!(footer.magic(), &FOOTER_MAGIC);
+    assert_eq!(footer.version(), FOOTER_VERSION);
     assert!(footer.verify_checksum());
     assert!(footer.has_catalog_location());
     assert!(footer.has_index());
 
     let bytes = footer.to_bytes().unwrap();
     let restored = Footer::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.data_end_offset, 16384);
-    assert_eq!(restored.block_count, 10);
-    assert_eq!(restored.catalog_offset, 5000);
-    assert_eq!(restored.index_offset, 7000);
+    assert_eq!(restored.data_end_offset(), 16384);
+    assert_eq!(restored.block_count(), 10);
+    assert_eq!(restored.catalog_offset(), 5000);
+    assert_eq!(restored.index_offset(), 7000);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -239,7 +235,7 @@ fn test_v26_f1_footer_builder_roundtrip() {
 #[test]
 fn test_v26_f2_next_volume_at_u16_max_returns_err() {
     let mut header = test_header();
-    header.volume_sequence = u16::MAX;
+    header.set_volume_sequence(u16::MAX);
 
     let result = header.next_volume();
     assert!(
@@ -252,16 +248,16 @@ fn test_v26_f2_next_volume_at_u16_max_returns_err() {
 #[test]
 fn test_v26_f2_next_volume_chain_increments() {
     let header = test_header();
-    assert_eq!(header.volume_sequence, 0);
+    assert_eq!(header.volume_sequence(), 0);
 
     let h1 = header.next_volume().unwrap();
-    assert_eq!(h1.volume_sequence, 1);
-    assert_eq!(h1.archive_id.0, header.archive_id.0);
-    assert_ne!(h1.volume_id.0, header.volume_id.0);
+    assert_eq!(h1.volume_sequence(), 1);
+    assert_eq!(h1.archive_id().0, header.archive_id().0);
+    assert_ne!(h1.volume_id().0, header.volume_id().0);
 
     let h2 = h1.next_volume().unwrap();
-    assert_eq!(h2.volume_sequence, 2);
-    assert_eq!(h2.archive_id.0, header.archive_id.0);
+    assert_eq!(h2.volume_sequence(), 2);
+    assert_eq!(h2.archive_id().0, header.archive_id().0);
 }
 
 /// V26 P0-2: Roundtrip header with MAX_RECIPIENTS recipients.
@@ -283,11 +279,7 @@ fn test_v26_f2_header_max_recipients_roundtrip() {
         recipients,
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -327,19 +319,15 @@ fn test_v26_f2_header_roundtrip_with_threshold_policy() {
         ],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::Threshold(3),
     )
     .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.access_policy, AccessPolicy::Threshold(3));
-    assert_eq!(restored.version, HEADER_VERSION);
+    assert_eq!(restored.access_policy(), AccessPolicy::Threshold(3));
+    assert_eq!(restored.version(), HEADER_VERSION);
 }
 
 /// V26 P0-2: Threshold(1) must be rejected by from_bytes (minimum is 2).
@@ -370,11 +358,7 @@ fn test_v26_f2_threshold_below_2_rejected() {
         ],
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::Threshold(3),
     )
     .unwrap();
@@ -384,7 +368,7 @@ fn test_v26_f2_threshold_below_2_rejected() {
     assert!(SuperHeader::from_bytes(&valid_bytes).is_ok());
 
     // Now change the policy to Threshold(1) before serializing
-    header.access_policy = AccessPolicy::Threshold(1);
+    header.set_access_policy(AccessPolicy::Threshold(1));
     let bad_bytes = header.to_bytes().unwrap();
     let result = SuperHeader::from_bytes(&bad_bytes);
     assert!(
@@ -401,7 +385,7 @@ fn test_v26_f2_threshold_below_2_rejected() {
 #[test]
 fn test_v26_f5_header_version_zero_rejected() {
     let mut header = test_header();
-    header.version = 0;
+    header.set_version(0);
     let bytes = header.to_bytes().unwrap();
     let result = SuperHeader::from_bytes(&bytes);
     assert!(result.is_err(), "Header version 0 must be rejected");
@@ -411,7 +395,7 @@ fn test_v26_f5_header_version_zero_rejected() {
 #[test]
 fn test_v26_f5_header_version_future_rejected() {
     let mut header = test_header();
-    header.version = 999;
+    header.set_version(999);
     let bytes = header.to_bytes().unwrap();
     let result = SuperHeader::from_bytes(&bytes);
     assert!(
@@ -424,10 +408,10 @@ fn test_v26_f5_header_version_future_rejected() {
 #[test]
 fn test_v26_f5_header_correct_version_accepted() {
     let header = test_header();
-    assert_eq!(header.version, HEADER_VERSION);
+    assert_eq!(header.version(), HEADER_VERSION);
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.version, HEADER_VERSION);
+    assert_eq!(restored.version(), HEADER_VERSION);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -550,9 +534,9 @@ async fn test_v26_f7_open_append_data_end_beyond_file_size() {
     // so actual file size ≈ data_end + 4224. We use data_end + 999999 to ensure
     // our forged offset exceeds the actual file size.
     let forged = Footer::with_catalog(
-        real_footer.data_end_offset + 999_999, // far beyond actual file
-        real_footer.block_count,
-        real_footer.sequence_number,
+        real_footer.data_end_offset() + 999_999, // far beyond actual file
+        real_footer.block_count(),
+        real_footer.sequence_number(),
         0,
         0,
         0,
@@ -583,13 +567,13 @@ async fn test_v26_f6_reader_volume_id_matches_header() {
     let path = Path::new("volid.era");
 
     let header = test_header();
-    let expected_id = header.volume_id;
+    let expected_id = header.volume_id();
     let writer = VolumeWriter::create(&backend, path, header).await.unwrap();
     assert_eq!(writer.volume_id(), expected_id);
     writer.finalize().await.unwrap();
 
     let reader = VolumeReader::open(&backend, path).await.unwrap();
-    assert_eq!(reader.header().volume_id, expected_id);
+    assert_eq!(reader.header().volume_id(), expected_id);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -752,7 +736,7 @@ fn test_v26_f1_footer_catalog_offset_zero_accepted() {
     let footer = Footer::new(8192, 1, 1);
     let bytes = footer.to_bytes().unwrap();
     let restored = Footer::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.catalog_offset, 0);
+    assert_eq!(restored.catalog_offset(), 0);
     assert!(!restored.has_catalog_location());
 }
 

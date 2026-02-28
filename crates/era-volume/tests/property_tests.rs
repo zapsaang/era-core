@@ -4,7 +4,7 @@
 //! invariants, postconditions, and domain constraints that hand-written
 //! tests cannot exhaustively cover.
 
-use era_common::{ArchiveConfig, ArchiveId, VolumeId};
+use era_common::{ArchiveId, VolumeId};
 use era_volume::{
     AccessPolicy, EncryptedVolumeKey, Footer, KeyWrapAlgorithm, RecipientSlot, RecipientType,
     SuperHeader, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION, HEADER_SIZE, HEADER_VERSION, MAGIC,
@@ -117,11 +117,11 @@ fn arb_evk() -> impl Strategy<Value = EncryptedVolumeKey> {
         proptest::array::uniform24(any::<u8>()),
         proptest::collection::vec(any::<u8>(), 16..=256),
     )
-        .prop_map(|(nonce, ciphertext)| EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+        .prop_map(|(nonce, ciphertext)| EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
             nonce,
             ciphertext,
-        })
+        ))
 }
 
 /// Generate a valid `RecipientSlot`.
@@ -180,13 +180,13 @@ proptest! {
     /// P3: Footer magic is always FOOTER_MAGIC.
     #[test]
     fn footer_magic_invariant(ref footer in arb_footer()) {
-        prop_assert_eq!(footer.magic, FOOTER_MAGIC);
+        prop_assert_eq!(footer.magic(), &FOOTER_MAGIC);
     }
 
     /// P4: Footer version is always FOOTER_VERSION.
     #[test]
     fn footer_version_invariant(ref footer in arb_footer()) {
-        prop_assert_eq!(footer.version, FOOTER_VERSION);
+        prop_assert_eq!(footer.version(), FOOTER_VERSION);
     }
 
     /// P5: Footer checksum verification always passes for freshly constructed footers.
@@ -223,8 +223,8 @@ proptest! {
         seq in any::<u64>(),
     ) {
         let footer = Footer::builder(data_end, block_count, seq).build();
-        prop_assert_eq!(footer.magic, FOOTER_MAGIC);
-        prop_assert_eq!(footer.version, FOOTER_VERSION);
+        prop_assert_eq!(footer.magic(), &FOOTER_MAGIC);
+        prop_assert_eq!(footer.version(), FOOTER_VERSION);
         prop_assert!(footer.verify_checksum());
     }
 }
@@ -248,7 +248,7 @@ proptest! {
     fn evk_nonce_length_invariant(ref evk in arb_evk()) {
         let proto_evk: era_common::proto::EncryptedVolumeKey = evk.clone().into();
         let restored = EncryptedVolumeKey::try_from(proto_evk).unwrap();
-        prop_assert_eq!(restored.nonce.len(), 24);
+        prop_assert_eq!(restored.nonce().len(), 24);
     }
 }
 
@@ -271,7 +271,7 @@ proptest! {
     fn recipient_slot_key_id_roundtrip(ref slot in arb_recipient_slot()) {
         let proto_slot: era_common::proto::RecipientSlot = slot.clone().into();
         let restored = RecipientSlot::try_from(proto_slot).unwrap();
-        prop_assert_eq!(slot.key_id, restored.key_id);
+        prop_assert_eq!(slot.key_id(), restored.key_id());
     }
 }
 
@@ -293,24 +293,20 @@ fn make_super_header(
     evk: EncryptedVolumeKey,
     access_policy: AccessPolicy,
 ) -> SuperHeader {
-    SuperHeader {
-        magic: MAGIC,
-        version: HEADER_VERSION,
-        volume_id,
+    SuperHeader::new_for_testing(
         archive_id,
+        volume_id,
         volume_sequence,
         total_volumes,
         creation_time,
         feature_flags,
         recipients,
-        config: ArchiveConfig::default(),
         salt,
         epoch_id,
-        encrypted_volume_key: evk,
+        evk,
         access_policy,
-    }
+    )
 }
-
 /// Strategy for generating a valid SuperHeader (deterministic fields, no SystemTime).
 fn arb_super_header() -> impl Strategy<Value = SuperHeader> {
     // First generate recipients so we can derive a valid access_policy
@@ -378,20 +374,20 @@ proptest! {
         let restored = SuperHeader::from_bytes(&bytes).expect("valid bytes should deserialize");
 
         // Compare all fields individually (SuperHeader lacks PartialEq due to ArchiveConfig)
-        prop_assert_eq!(restored.magic, header.magic);
-        prop_assert_eq!(restored.version, header.version);
-        prop_assert_eq!(restored.volume_id, header.volume_id);
-        prop_assert_eq!(restored.archive_id, header.archive_id);
-        prop_assert_eq!(restored.volume_sequence, header.volume_sequence);
-        prop_assert_eq!(restored.total_volumes, header.total_volumes);
-        prop_assert_eq!(restored.creation_time, header.creation_time);
-        prop_assert_eq!(restored.feature_flags, header.feature_flags);
-        prop_assert_eq!(restored.salt, header.salt);
-        prop_assert_eq!(restored.epoch_id, header.epoch_id);
-        prop_assert_eq!(restored.encrypted_volume_key, header.encrypted_volume_key.clone());
-        prop_assert_eq!(restored.access_policy, header.access_policy);
-        prop_assert_eq!(restored.recipients.len(), header.recipients.len());
-        for (orig, rest) in header.recipients.iter().zip(restored.recipients.iter()) {
+        prop_assert_eq!(restored.magic(), header.magic());
+        prop_assert_eq!(restored.version(), header.version());
+        prop_assert_eq!(restored.volume_id(), header.volume_id());
+        prop_assert_eq!(restored.archive_id(), header.archive_id());
+        prop_assert_eq!(restored.volume_sequence(), header.volume_sequence());
+        prop_assert_eq!(restored.total_volumes(), header.total_volumes());
+        prop_assert_eq!(restored.creation_time(), header.creation_time());
+        prop_assert_eq!(restored.feature_flags(), header.feature_flags());
+        prop_assert_eq!(restored.salt(), header.salt());
+        prop_assert_eq!(restored.epoch_id(), header.epoch_id());
+        prop_assert_eq!(restored.encrypted_volume_key(), header.encrypted_volume_key());
+        prop_assert_eq!(restored.access_policy(), header.access_policy());
+        prop_assert_eq!(restored.recipients().len(), header.recipients().len());
+        for (orig, rest) in header.recipients().iter().zip(restored.recipients().iter()) {
             prop_assert_eq!(orig, rest);
         }
     }
@@ -408,8 +404,8 @@ proptest! {
     fn super_header_magic_preserved(ref header in arb_super_header()) {
         let bytes = header.to_bytes().expect("valid header should serialize");
         let restored = SuperHeader::from_bytes(&bytes).unwrap();
-        prop_assert_eq!(restored.magic, MAGIC);
-        prop_assert_eq!(restored.version, HEADER_VERSION);
+        prop_assert_eq!(restored.magic(), &MAGIC);
+        prop_assert_eq!(restored.version(), HEADER_VERSION);
     }
 
     /// P15: AccessPolicy roundtrip is lossless.
@@ -426,16 +422,16 @@ proptest! {
                 0, 1, 1000, 0,
                 recipients.clone(),
                 [0u8; 16], 0,
-                EncryptedVolumeKey {
-                    algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                    nonce: [0xAA; 24],
-                    ciphertext: vec![0xBB; 48],
-                },
+                EncryptedVolumeKey::new(
+                    KeyWrapAlgorithm::XChaCha20Poly1305,
+                    [0xAA; 24],
+                    vec![0xBB; 48],
+                ),
                 *policy,
             );
             let bytes = header.to_bytes().expect("serialize");
             let restored = SuperHeader::from_bytes(&bytes).expect("deserialize");
-            prop_assert_eq!(restored.access_policy, *policy);
+            prop_assert_eq!(restored.access_policy(), *policy);
         }
     }
 
@@ -454,11 +450,11 @@ proptest! {
                 vec![0xCD; 48],
             )],
             [0u8; 16], 0,
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0xAA; 24],
-                ciphertext: vec![0xBB; 48],
-            },
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0xAA; 24],
+                vec![0xBB; 48],
+            ),
             AccessPolicy::Threshold(3), // valid value first
         );
         // Serialize to proto, mutate threshold, re-encode

@@ -57,7 +57,7 @@ impl<R: StorageReader> VolumeReader<R> {
         let header = Self::try_read_header(&reader, 0).await?;
 
         // Check if erasure coding is likely enabled
-        let erasure_enabled = header.config.erasure.is_some();
+        let erasure_enabled = header.config().erasure.is_some();
 
         // === FOOTER RECOVERY ===
         // 1. Try primary footer (at end of file)
@@ -90,10 +90,10 @@ impl<R: StorageReader> VolumeReader<R> {
 
         // Validate that the file is not truncated: footer.data_end_offset must not exceed file size
         if let Some(ref f) = footer {
-            if f.data_end_offset > size {
+            if f.data_end_offset() > size {
                 return Err(EraError::CorruptedFooter(format!(
                     "Archive appears truncated: footer claims data_end_offset={} but file size is {}",
-                    f.data_end_offset, size
+                    f.data_end_offset(), size
                 )));
             }
         }
@@ -101,10 +101,10 @@ impl<R: StorageReader> VolumeReader<R> {
         // V30-03: Validate that data_end_offset is not below DATA_REGION_START
         // (plausibility cross-check for floating footer recovery)
         if let Some(ref f) = footer {
-            if f.data_end_offset != 0 && f.data_end_offset < DATA_REGION_START {
+            if f.data_end_offset() != 0 && f.data_end_offset() < DATA_REGION_START {
                 return Err(EraError::CorruptedFooter(format!(
                     "Footer data_end_offset {} is below minimum data region start {}",
-                    f.data_end_offset, DATA_REGION_START
+                    f.data_end_offset(), DATA_REGION_START
                 )));
             }
         }
@@ -217,7 +217,7 @@ impl<R: StorageReader> VolumeReader<R> {
     /// Get the number of blocks in this volume
     #[must_use]
     pub fn block_count(&self) -> u32 {
-        self.footer.as_ref().map(|f| f.block_count).unwrap_or(0)
+        self.footer.as_ref().map(|f| f.block_count()).unwrap_or(0)
     }
 
     /// Read a block at the given location (BlockHeader format)
@@ -358,7 +358,7 @@ impl<R: StorageReader> VolumeReader<R> {
         let end = self
             .footer
             .as_ref()
-            .map(|f| f.data_end_offset)
+            .map(|f| f.data_end_offset())
             .unwrap_or(self.reader.size());
         (start, end)
     }
@@ -515,7 +515,7 @@ impl<R: StorageReader> VolumeReader<R> {
                                                     ))
                                                 })?;
                                             found_blocks.push(BlockLocation::single(
-                                                self.header.volume_id,
+                                                self.header.volume_id(),
                                                 slot_index,
                                                 current_offset,
                                                 BlockHeader::SIZE as u32 + header.length,
@@ -616,22 +616,18 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
-        let archive_id = header.archive_id;
+        let archive_id = header.archive_id();
 
         let writer = VolumeWriter::create(&backend, path, header).await.unwrap();
         writer.finalize().await.unwrap();
 
         // Open and verify
         let reader = VolumeReader::open(&backend, path).await.unwrap();
-        assert_eq!(reader.header().archive_id.0, archive_id.0);
+        assert_eq!(reader.header().archive_id().0, archive_id.0);
         assert_eq!(reader.block_count(), 0);
     }
 
@@ -652,11 +648,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap();

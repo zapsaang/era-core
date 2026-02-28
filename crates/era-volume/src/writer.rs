@@ -113,31 +113,31 @@ impl<W: StorageWriter> VolumeWriter<W> {
         // SECURITY: Validate footer.data_end_offset against actual file size
         // to prevent seeking past end of file with a corrupted footer
         let actual_size = writer.current_size();
-        if footer.data_end_offset > actual_size {
+        if footer.data_end_offset() > actual_size {
             return Err(era_common::EraError::CorruptedFooter(format!(
                 "footer data_end_offset {} exceeds actual file size {}",
-                footer.data_end_offset, actual_size
+                footer.data_end_offset(), actual_size
             )));
         }
 
-        writer.truncate(footer.data_end_offset).await?;
+        writer.truncate(footer.data_end_offset()).await?;
 
         Ok(Self {
             writer,
             header,
-            position: footer.data_end_offset,
-            block_count: footer.block_count,
+            position: footer.data_end_offset(),
+            block_count: footer.block_count(),
             raw_bytes_written: 0,
-            sequence: footer.sequence_number,
+            sequence: footer.sequence_number(),
             max_size: None,
-            last_checkpoint_offset: footer.last_checkpoint_offset,
-            last_checkpoint_block_id: footer.last_checkpoint_block_id,
-            last_catalog_offset: footer.catalog_offset,
-            last_catalog_size: footer.catalog_size,
-            last_catalog_block_id: footer.catalog_block_id,
-            last_index_offset: footer.index_offset,
-            last_index_size: footer.index_size,
-            last_index_block_id: footer.index_block_id,
+            last_checkpoint_offset: footer.last_checkpoint_offset(),
+            last_checkpoint_block_id: footer.last_checkpoint_block_id(),
+            last_catalog_offset: footer.catalog_offset(),
+            last_catalog_size: footer.catalog_size(),
+            last_catalog_block_id: footer.catalog_block_id(),
+            last_index_offset: footer.index_offset(),
+            last_index_size: footer.index_size(),
+            last_index_block_id: footer.index_block_id(),
         })
     }
 
@@ -364,7 +364,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// Get the volume ID
     #[must_use]
     pub fn volume_id(&self) -> VolumeId {
-        self.header.volume_id
+        self.header.volume_id()
     }
 
     /// Get the current size of the volume (valid data size)
@@ -425,7 +425,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             let footer_size = crate::footer::FOOTER_SIZE as u64;
             if offset + total_len + footer_size > max_size {
                 return Err(era_common::EraError::VolumeFull {
-                    volume_id: self.header.volume_id.to_string(),
+                    volume_id: self.header.volume_id().to_string(),
                 });
             }
         }
@@ -447,7 +447,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         }
 
         let location =
-            BlockLocation::single(self.header.volume_id, self.block_count, offset, block_len);
+            BlockLocation::single(self.header.volume_id(), self.block_count, offset, block_len);
 
         if self.max_size.is_some() {
             self.position += total_len;
@@ -680,11 +680,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -713,11 +709,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -759,11 +751,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -805,11 +793,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap();
@@ -852,11 +836,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap();

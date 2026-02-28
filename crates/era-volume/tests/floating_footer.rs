@@ -22,11 +22,7 @@ async fn test_floating_footer_recovery() {
         )],
         config,
         [0u8; 16],
-        era_volume::EncryptedVolumeKey {
-            algorithm: era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        era_volume::EncryptedVolumeKey::new(era_volume::KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         era_volume::AccessPolicy::AnyOfN,
     )
     .unwrap();
@@ -76,6 +72,6 @@ async fn test_floating_footer_recovery() {
     assert!(loaded_footer.is_some(), "Should find floating footer");
 
     let loaded_footer = loaded_footer.unwrap();
-    assert_eq!(loaded_footer.sequence_number, 1);
-    assert_eq!(loaded_footer.block_count, 1);
+    assert_eq!(loaded_footer.sequence_number(), 1);
+    assert_eq!(loaded_footer.block_count(), 1);
 }

@@ -50,11 +50,7 @@ fn test_header() -> SuperHeader {
         make_recipients(1),
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::AnyOfN,
     )
     .unwrap()
@@ -82,11 +78,7 @@ fn test_v29_01_threshold_valid_construction() {
         make_recipients(3),
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::Threshold(2),
     );
     assert!(
@@ -103,11 +95,7 @@ fn test_v29_01_threshold_exceeds_recipients_rejected() {
         make_recipients(2),
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::Threshold(5),
     );
     assert!(
@@ -124,11 +112,7 @@ fn test_v29_01_threshold_equals_recipients_accepted() {
         make_recipients(3),
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::Threshold(3),
     );
     assert!(
@@ -145,11 +129,7 @@ fn test_v29_01_threshold_survives_roundtrip() {
         make_recipients(3),
         ArchiveConfig::default(),
         [0u8; 16],
-        EncryptedVolumeKey {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 48],
-        },
+        EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
         AccessPolicy::Threshold(3),
     )
     .unwrap();
@@ -157,7 +137,7 @@ fn test_v29_01_threshold_survives_roundtrip() {
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes);
     assert!(restored.is_ok(), "Threshold header must survive roundtrip");
-    assert_eq!(restored.unwrap().access_policy, AccessPolicy::Threshold(3));
+    assert_eq!(restored.unwrap().access_policy(), AccessPolicy::Threshold(3));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

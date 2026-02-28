@@ -299,8 +299,8 @@ impl<R: StorageReader> MultiVolumeReader<R> {
         let volume_filename = extract_filename(first_volume_path)?;
         let first_reader =
             crate::VolumeReader::open(backend, std::path::Path::new(volume_filename)).await?;
-        let archive_id = first_reader.header().archive_id;
-        let first_volume_id = first_reader.header().volume_id;
+        let archive_id = first_reader.header().archive_id();
+        let first_volume_id = first_reader.header().volume_id();
 
         let mut readers = std::collections::HashMap::new();
         readers.insert(first_volume_id, first_reader);
@@ -316,10 +316,10 @@ impl<R: StorageReader> MultiVolumeReader<R> {
             match crate::VolumeReader::open(backend, std::path::Path::new(next_filename)).await {
                 Ok(reader) => {
                     // Verify it belongs to the same archive
-                    if reader.header().archive_id != archive_id {
+                    if reader.header().archive_id() != archive_id {
                         break;
                     }
-                    let vol_id = reader.header().volume_id;
+                    let vol_id = reader.header().volume_id();
                     volume_paths.push(next_path);
                     readers.insert(vol_id, reader);
                 }
@@ -368,7 +368,7 @@ impl<R: StorageReader> MultiVolumeReader<R> {
                 // Since all readers share the same archive_id, we need the one with volume_sequence=0
                 self.readers
                     .values()
-                    .find(|r| r.header().volume_sequence == 0)
+                    .find(|r| r.header().volume_sequence() == 0)
                     .or_else(|| self.readers.values().next())
             })
             .map(|r| r.header())
@@ -407,11 +407,7 @@ mod tests {
             )],
             ArchiveConfig::default(),
             [0u8; 16],
-            EncryptedVolumeKey {
-                algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
-                nonce: [0u8; 24],
-                ciphertext: vec![0u8; 48],
-            },
+            EncryptedVolumeKey::new(KeyWrapAlgorithm::XChaCha20Poly1305, [0u8; 24], vec![0u8; 48]),
             AccessPolicy::AnyOfN,
         )
         .unwrap()
