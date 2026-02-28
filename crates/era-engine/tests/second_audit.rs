@@ -1035,8 +1035,9 @@ fn cross_concurrent_vk_unique() {
 /// Header with Threshold(0) in from_bytes should be caught somewhere
 #[test]
 fn header_threshold_0_handled() {
-    // Create a header with Threshold(0) — this is a malformed header
-    let header = SuperHeader::new(
+    // V30: SuperHeader::new() now validates at construction time,
+    // so Threshold(0) is rejected before it can ever be serialized.
+    let result = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
             RecipientType::Argon2idPassword,
@@ -1048,16 +1049,11 @@ fn header_threshold_0_handled() {
         [0xAB; 16],
         mock_encrypted_vk(),
         AccessPolicy::Threshold(0),
-    )
-    .unwrap();
+    );
 
-    let bytes = header.to_bytes().unwrap();
-
-    // After RV12 fix, header layer validates threshold >= 2
-    let result = SuperHeader::from_bytes(&bytes);
     assert!(
         result.is_err(),
-        "Header should reject Threshold(0) — defense-in-depth validation"
+        "SuperHeader::new() should reject Threshold(0) — defense-in-depth validation"
     );
 }
 
@@ -1067,14 +1063,29 @@ fn header_full_roundtrip() {
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
 
+    // V30: Threshold(3) requires at least 3 recipients to pass validation
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![RecipientSlot::new(
-            RecipientType::Argon2idPassword,
-            Some([0x12; 8]),
-            vec![0xAB; 16],
-            vec![0xCD; 48],
-        )],
+        vec![
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            ),
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x13; 8]),
+                vec![0xAC; 16],
+                vec![0xCE; 48],
+            ),
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x14; 8]),
+                vec![0xAD; 16],
+                vec![0xCF; 48],
+            ),
+        ],
         era_common::ArchiveConfig::default(),
         salt,
         EncryptedVolumeKey::new(
@@ -1097,7 +1108,7 @@ fn header_full_roundtrip() {
         &vec![0xFF; 48][..]
     );
     assert_eq!(restored.access_policy(), AccessPolicy::Threshold(3));
-    assert_eq!(restored.recipients().len(), 1);
+    assert_eq!(restored.recipients().len(), 3);
     assert_eq!(
         restored.recipients()[0].encrypted_master_key(),
         &vec![0xCD; 48][..]
