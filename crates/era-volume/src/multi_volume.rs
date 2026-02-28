@@ -22,6 +22,7 @@ pub const MIN_VOLUME_SIZE: u64 = HEADER_SIZE as u64 + FOOTER_SIZE as u64 + 16 * 
 const MAX_VOLUME_SCAN: u16 = 1000;
 
 /// Configuration for multi-volume archives
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct MultiVolumeConfig {
     /// Maximum size per volume in bytes
@@ -32,6 +33,10 @@ pub struct MultiVolumeConfig {
 
 impl MultiVolumeConfig {
     /// Create a new multi-volume configuration
+    ///
+    /// # Errors
+    /// This method currently always succeeds but returns `Result` for forward compatibility.
+    /// The `max_volume_size` is clamped to [`MIN_VOLUME_SIZE`] if the provided value is smaller.
     pub fn new(base_path: impl Into<PathBuf>, max_volume_size: u64) -> Result<Self> {
         let max_volume_size = max_volume_size.max(MIN_VOLUME_SIZE);
         Ok(Self {
@@ -42,16 +47,12 @@ impl MultiVolumeConfig {
 
     /// Generate the path for a specific volume number
     pub fn volume_path(&self, volume_num: u16) -> PathBuf {
-        if volume_num == 0 {
-            self.base_path.with_extension("era")
-        } else {
-            let ext = format!("era.{:03}", volume_num);
-            self.base_path.with_extension(ext)
-        }
+        crate::volume_path(&self.base_path, volume_num)
     }
 }
 
 /// Statistics about a multi-volume archive
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct MultiVolumeStats {
     /// Total number of volumes created
@@ -80,6 +81,11 @@ pub struct MultiVolumeWriter<W: StorageWriter> {
 
 impl<W: StorageWriter> MultiVolumeWriter<W> {
     /// Create a new multi-volume writer
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if the volume path has no filename.
+    /// Returns `Serialization` if the header cannot be encoded.
+    /// Returns I/O errors from creating the volume or setting its max size.
     pub async fn create<B: StorageBackend<Writer = W>>(
         backend: &B,
         config: MultiVolumeConfig,
@@ -88,7 +94,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         let volume_path = config.volume_path(0);
         let volume_filename = volume_path
             .file_name()
-            .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+            .ok_or_else(|| EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path)))?;
 
         let mut volume_writer = VolumeWriter::create(
             backend,
@@ -114,6 +120,11 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
     }
 
     /// Write a block, automatically switching volumes if needed
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if the block size exceeds `u32::MAX`.
+    /// Returns `Io` if no active volume writer exists.
+    /// Returns I/O errors from writing the block or switching volumes.
     pub async fn write_block<B: StorageBackend<Writer = W>>(
         &mut self,
         backend: &B,
@@ -125,13 +136,23 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
     }
 
     /// Write a canonical block, automatically switching volumes if needed
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if the block size exceeds `u32::MAX`.
+    /// Returns `Io` if no active volume writer exists.
+    /// Returns I/O errors from writing the block or switching volumes.
     pub async fn write_canonical_block<B: StorageBackend<Writer = W>>(
         &mut self,
         backend: &B,
         block: &EncryptedMacroBlock,
         block_type: era_common::BlockType,
     ) -> Result<BlockLocation> {
-        let block_size = block.data.len() as u32;
+        let block_size = u32::try_from(block.data.len()).map_err(|_| {
+            era_common::EraError::InvalidConfig(format!(
+                "block size {} exceeds u32",
+                block.data.len()
+            ))
+        })?;
 
         // Check if we need to switch to a new volume
         if !self.would_fit(block_size) {
@@ -147,14 +168,23 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         })?;
 
         let location = writer.write_canonical_block(block, block_type).await?;
-        self.stats.total_blocks += 1;
+        self.stats.total_blocks = self.stats.total_blocks.saturating_add(1);
         // Format uses BlockHeader::SIZE (16 bytes) instead of 4 bytes
         self.stats.total_bytes += block.data.len() as u64 + era_common::BlockHeader::SIZE as u64;
 
         Ok(location)
     }
 
-    /// Switch to a new volume
+    /// Switch to a new volume.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// If cancelled after `take()` but before re-assignment at the end,
+    /// `self.current_writer` remains `None`. Subsequent writes will
+    /// return `Err(InvalidConfig)` via `ok_or_else`. The old volume is
+    /// finalized on disk; the new volume file may be orphaned if created
+    /// but not assigned. This is recoverable: the engine re-opens or
+    /// re-creates volumes on restart.
     async fn switch_volume<B: StorageBackend<Writer = W>>(&mut self, backend: &B) -> Result<()> {
         // Finalize current volume
         if let Some(writer) = self.current_writer.take() {
@@ -170,7 +200,7 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         let volume_path = self.config.volume_path(self.stats.volume_count);
         let volume_filename = volume_path
             .file_name()
-            .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+            .ok_or_else(|| EraError::InvalidConfig(format!("path has no filename: {:?}", volume_path)))?;
 
         let mut volume_writer = VolumeWriter::create(
             backend,
@@ -186,12 +216,16 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         self.current_writer = Some(volume_writer);
         // Only update template header after successful creation to ensure atomicity
         self.template_header = next_header;
-        self.stats.volume_count += 1;
+        self.stats.volume_count = self.stats.volume_count.saturating_add(1);
 
         Ok(())
     }
 
     /// Finalize all volumes and return statistics
+    ///
+    /// # Errors
+    /// Returns `Serialization` if the header or footer cannot be encoded.
+    /// Returns I/O errors from finalizing the current volume.
     pub async fn finalize(mut self) -> Result<MultiVolumeStats> {
         if let Some(writer) = self.current_writer.take() {
             let current_size = writer.current_size();
@@ -203,11 +237,15 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
         Ok(self.stats)
     }
 
-    /// Remaining space in current volume (conservative estimate)
+    /// Remaining space in current volume.
+    ///
+    /// Reserves space for footer (128B) + backup header (4096B) = 4224 bytes.
+    /// Callers that write blocks should use `would_fit()` which additionally
+    /// accounts for BlockHeader overhead, making the effective reservation 4240 bytes.
     fn remaining_space(&self) -> u64 {
         if let Some(ref writer) = self.current_writer {
             let current_size = writer.current_size();
-            let reserved = FOOTER_SIZE as u64 + 4096; // Reserve for footer + padding
+            let reserved = FOOTER_SIZE as u64 + HEADER_SIZE as u64; // Structural: footer (128) + backup header (4096)
             if current_size + reserved >= self.config.max_volume_size {
                 0
             } else {
@@ -219,17 +257,20 @@ impl<W: StorageWriter> MultiVolumeWriter<W> {
     }
 
     /// Check if a block of given size would fit in the current volume
+    #[must_use]
     pub fn would_fit(&self, block_size: u32) -> bool {
         let needed = block_size as u64 + era_common::BlockHeader::SIZE as u64;
         self.remaining_space() >= needed
     }
 
     /// Get current volume number
+    #[must_use]
     pub fn current_volume_num(&self) -> u16 {
         self.stats.volume_count.saturating_sub(1)
     }
 
     /// Get statistics about the multi-volume archive
+    #[must_use]
     pub fn stats(&self) -> &MultiVolumeStats {
         &self.stats
     }
@@ -249,6 +290,11 @@ pub struct MultiVolumeReader<R: StorageReader> {
 
 impl<R: StorageReader> MultiVolumeReader<R> {
     /// Open a multi-volume archive from the first volume
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if the volume path has no filename.
+    /// Returns `CorruptedHeader` if the first volume cannot be opened.
+    /// Returns I/O errors from the storage backend during volume discovery.
     pub async fn open<B: StorageBackend<Reader = R>>(
         backend: &B,
         first_volume_path: &std::path::Path,
@@ -256,7 +302,7 @@ impl<R: StorageReader> MultiVolumeReader<R> {
         // Open the first volume
         let volume_filename = first_volume_path
             .file_name()
-            .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+            .ok_or_else(|| EraError::InvalidConfig(format!("path has no filename: {:?}", first_volume_path)))?;
         let first_reader =
             crate::VolumeReader::open(backend, std::path::Path::new(volume_filename)).await?;
         let archive_id = first_reader.header().archive_id;
@@ -274,7 +320,7 @@ impl<R: StorageReader> MultiVolumeReader<R> {
             let next_path = base_path.with_extension(ext);
             let next_filename = next_path
                 .file_name()
-                .ok_or_else(|| EraError::InvalidConfig("path has no filename".into()))?;
+            .ok_or_else(|| EraError::InvalidConfig(format!("path has no filename: {:?}", next_path)))?;
 
             match crate::VolumeReader::open(backend, std::path::Path::new(next_filename)).await {
                 Ok(reader) => {
@@ -298,11 +344,17 @@ impl<R: StorageReader> MultiVolumeReader<R> {
     }
 
     /// Get the number of volumes in the archive
+    #[must_use]
     pub fn volume_count(&self) -> usize {
         self.readers.len()
     }
 
     /// Read a block by its location
+    ///
+    /// # Errors
+    /// Returns `VolumeNotFound` if the block's volume ID does not match any loaded volume.
+    /// Returns `InvalidFormat` or `IntegrityError` if the block header or CRC is invalid.
+    /// Returns I/O errors from the underlying storage backend.
     pub async fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
         let reader = self.readers.get(&location.volume_id).ok_or_else(|| {
             era_common::EraError::VolumeNotFound {
@@ -314,19 +366,31 @@ impl<R: StorageReader> MultiVolumeReader<R> {
     }
 
     /// Get the header from the first volume
+    #[must_use]
     pub fn header(&self) -> Option<&SuperHeader> {
+        // V27-10: Use ordered volume_paths to find the first volume deterministically
+        // instead of non-deterministic HashMap iteration
         self.volume_paths
             .first()
-            .and_then(|_| self.readers.values().next())
+            .and_then(|_| {
+                // Find the reader matching the first volume by checking archive_id match
+                // Since all readers share the same archive_id, we need the one with volume_sequence=0
+                self.readers
+                    .values()
+                    .find(|r| r.header().volume_sequence == 0)
+                    .or_else(|| self.readers.values().next())
+            })
             .map(|r| r.header())
     }
 
     /// Get the archive ID
+    #[must_use]
     pub fn archive_id(&self) -> era_common::ArchiveId {
         self.archive_id
     }
 
     /// Get list of volume paths
+    #[must_use]
     pub fn volume_paths(&self) -> &[PathBuf] {
         &self.volume_paths
     }
@@ -359,6 +423,7 @@ mod tests {
             },
             AccessPolicy::AnyOfN,
         )
+        .unwrap()
     }
 
     fn create_test_block(size: usize) -> EncryptedMacroBlock {
@@ -414,11 +479,14 @@ mod tests {
         let header = create_test_header();
         let backend = LocalStorageBackend::new(temp_dir.path());
 
+        // TQ37-04: Use expect() to surface the actual error on failure
+        // instead of assert!(is_ok()) which only says "assertion failed".
         let writer =
             MultiVolumeWriter::<era_storage::LocalStorageWriter>::create(&backend, config, header)
-                .await;
-
-        assert!(writer.is_ok());
+                .await
+                .expect("MultiVolumeWriter::create should succeed");
+        // Verify initial state
+        assert_eq!(writer.current_volume_num(), 0, "Writer should start on volume 0");
     }
 
     #[tokio::test]
@@ -504,11 +572,12 @@ mod tests {
         let block = create_test_block(5 * 1024);
         writer.write_block(&backend, &block).await.unwrap();
 
-        // Large block might not fit anymore
-        // This depends on remaining space calculation
-        let large_block_fits = writer.would_fit(15 * 1024);
-        // Just verify the method works - actual result depends on implementation
-        let _ = large_block_fits;
+        // TQ37-05: After writing 5KB into a 20KB volume (with ~8KB overhead),
+        // a 15KB block should not fit. Assert the actual result instead of discarding it.
+        assert!(
+            !writer.would_fit(15 * 1024),
+            "15KB block should not fit in 20KB volume after writing 5KB (overhead ~8KB)"
+        );
 
         writer.finalize().await.unwrap();
     }

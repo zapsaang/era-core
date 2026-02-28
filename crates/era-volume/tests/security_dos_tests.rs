@@ -47,7 +47,8 @@ async fn test_malicious_block_header_huge_length_returns_error() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
@@ -120,7 +121,8 @@ async fn test_malicious_shard_header_huge_length_marks_corrupted() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let writer = VolumeWriter::create(&backend, volume_path, header)
         .await
@@ -197,7 +199,8 @@ async fn test_scan_handles_malicious_length_gracefully() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
@@ -296,7 +299,8 @@ async fn test_length_at_max_shard_size_boundary() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await

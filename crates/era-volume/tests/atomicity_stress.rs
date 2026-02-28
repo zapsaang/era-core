@@ -21,7 +21,12 @@ async fn test_multi_volume_padding_and_atomicity() {
 
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![],
+        vec![era_volume::RecipientSlot::new(
+            era_volume::RecipientType::Argon2idPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )],
         ArchiveConfig::default(),
         [0u8; 16],
         era_volume::EncryptedVolumeKey {
@@ -30,7 +35,8 @@ async fn test_multi_volume_padding_and_atomicity() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header)
         .await

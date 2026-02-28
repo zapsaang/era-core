@@ -46,7 +46,8 @@ fn header_01_has_encrypted_volume_key() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     // The field exists and is NOT default/empty
     assert_eq!(
@@ -67,7 +68,8 @@ fn header_02_has_epoch_id() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     // Default epoch_id should be 0 for new archives
     assert_eq!(header.epoch_id, 0);
@@ -83,7 +85,8 @@ fn header_03_has_access_policy() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     assert_eq!(header.access_policy, AccessPolicy::AnyOfN);
 }
@@ -102,7 +105,8 @@ fn header_04_evk_serialization_roundtrip() {
         [0u8; 16],
         evk,
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
@@ -131,7 +135,8 @@ fn header_05_epoch_id_survives_serialization() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
     header.epoch_id = 42;
 
     let bytes = header.to_bytes().unwrap();
@@ -142,15 +147,21 @@ fn header_05_epoch_id_survives_serialization() {
 /// AccessPolicy::Threshold survives serialization with correct threshold value.
 #[test]
 fn header_06_threshold_policy_survives_serialization() {
-    let mut header = SuperHeader::new(
+    let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![mock_slot(vec![1; 56])],
+        vec![
+            mock_slot(vec![1; 56]),
+            mock_slot(vec![2; 56]),
+            mock_slot(vec![3; 56]),
+            mock_slot(vec![4; 56]),
+            mock_slot(vec![5; 56]),
+        ],
         ArchiveConfig::default(),
         [0u8; 16],
         mock_evk(),
-        AccessPolicy::AnyOfN,
-    );
-    header.access_policy = AccessPolicy::Threshold(5);
+        AccessPolicy::Threshold(5),
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
@@ -167,7 +178,8 @@ fn header_07_next_volume_inherits_crypto() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
     header.epoch_id = 7;
     header.access_policy = AccessPolicy::Threshold(3);
 
@@ -192,7 +204,7 @@ fn header_07_next_volume_inherits_crypto() {
 fn header_08_only_xchacha20_allowed() {
     // This is a compile-time test — we verify the enum has exactly 1 variant.
     let algo = KeyWrapAlgorithm::XChaCha20Poly1305;
-    assert_eq!(algo as u8, 1);
+    assert_eq!(algo as u8, 0);
     // If someone adds AES-CBC = 2, this test file won't catch it at compile time,
     // but the CI review will flag it.
 }
@@ -232,7 +244,8 @@ fn header_09_multi_recipient_roundtrip() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
@@ -250,10 +263,10 @@ fn header_09_multi_recipient_roundtrip() {
     assert_eq!(restored.recipients[1].encrypted_master_key, vec![0xBB; 64]);
 }
 
-/// Header with zero recipients must be rejected at deserialization (defense-in-depth).
+/// Header with zero recipients must be rejected at construction (defense-in-depth).
 #[test]
 fn header_10_zero_recipients() {
-    let header = SuperHeader::new(
+    let result = SuperHeader::new(
         ArchiveId::new(),
         vec![],
         ArchiveConfig::default(),
@@ -261,12 +274,9 @@ fn header_10_zero_recipients() {
         mock_evk(),
         AccessPolicy::AnyOfN,
     );
-
-    let bytes = header.to_bytes().unwrap();
-    let result = SuperHeader::from_bytes(&bytes);
     assert!(
         result.is_err(),
-        "Header should reject zero recipients — creates unreadable archive"
+        "SuperHeader::new should reject zero recipients — creates unreadable archive"
     );
 }
 
@@ -284,7 +294,8 @@ fn header_11_corrupted_bytes_fail() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let mut bytes = header.to_bytes().unwrap();
 
@@ -309,7 +320,8 @@ fn header_12_truncated_header_fails() {
         [0u8; 16],
         mock_evk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let truncated = &bytes[..100]; // Way too short

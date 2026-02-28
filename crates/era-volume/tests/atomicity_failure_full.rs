@@ -100,7 +100,8 @@ async fn test_atomicity_failure_recovery() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let mut multi_writer = MultiVolumeWriter::create(&backend, config.clone(), header)
         .await

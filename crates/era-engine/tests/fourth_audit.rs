@@ -40,9 +40,9 @@
 use era_common::{ArchiveConfig, ArchiveId};
 use era_crypto::{KeySession, VolumeKey};
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
-use era_volume::header::HEADER_VERSION;
 use era_volume::{
     AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader,
+    HEADER_VERSION,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -87,6 +87,7 @@ fn make_valid_header(policy: AccessPolicy) -> SuperHeader {
         mock_encrypted_vk(),
         policy,
     )
+    .unwrap()
 }
 
 // ============================================================================

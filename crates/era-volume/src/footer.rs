@@ -22,6 +22,10 @@ pub const BACKUP_FOOTER_GAP: usize = FOOTER_SIZE;
 /// Footer format version
 pub const FOOTER_VERSION: u8 = 1;
 
+/// MN34-02: Blake3 checksum size in the footer (32 bytes).
+/// The checksum occupies the final 32 bytes of the footer.
+const FOOTER_CHECKSUM_SIZE: usize = 32;
+
 /// Volume footer - stored at the end of each volume
 ///
 /// The footer is designed to be exactly 128 bytes to fit within a single
@@ -53,6 +57,7 @@ pub const FOOTER_VERSION: u8 = 1;
 /// | 96     | 32   | checksum (Blake3)        |
 /// | **128**|      | **Total**                |
 ///
+#[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Footer {
     /// Magic bytes: "ERAF"
@@ -171,11 +176,13 @@ impl Footer {
     }
 
     /// Check if catalog location is available
+    #[must_use]
     pub fn has_catalog_location(&self) -> bool {
         self.catalog_offset > 0 && self.catalog_size > 0
     }
 
     /// Check if index location is available
+    #[must_use]
     pub fn has_index(&self) -> bool {
         self.index_offset > 0 && self.index_size > 0
     }
@@ -186,7 +193,7 @@ impl Footer {
         self.checksum = [0u8; 32];
 
         // Serialize without checksum (first 96 bytes)
-        let mut data = [0u8; FOOTER_SIZE - 32];
+        let mut data = [0u8; FOOTER_SIZE - FOOTER_CHECKSUM_SIZE];
         self.write_fields_to(&mut data);
 
         // Calculate Blake3 hash with domain separation prefix
@@ -197,9 +204,10 @@ impl Footer {
     }
 
     /// Verify the checksum (domain-separated Blake3)
+    #[must_use = "security: ignoring checksum verification may accept corrupted data"]
     pub fn verify_checksum(&self) -> bool {
         // Serialize without checksum (first 96 bytes)
-        let mut data = [0u8; FOOTER_SIZE - 32];
+        let mut data = [0u8; FOOTER_SIZE - FOOTER_CHECKSUM_SIZE];
         self.write_fields_to(&mut data);
 
         let mut hasher = blake3::Hasher::new();
@@ -209,7 +217,7 @@ impl Footer {
     }
 
     /// Write all fields except checksum to a buffer
-    fn write_fields_to(&self, buf: &mut [u8; FOOTER_SIZE - 32]) {
+    fn write_fields_to(&self, buf: &mut [u8; FOOTER_SIZE - FOOTER_CHECKSUM_SIZE]) {
         // Offset 0: magic (4 bytes)
         buf[0..4].copy_from_slice(&self.magic);
         // Offset 4: version (1 byte)
@@ -251,7 +259,7 @@ impl Footer {
     }
 
     /// Read fields from a buffer (excluding checksum)
-    fn read_fields_from(buf: &[u8; FOOTER_SIZE - 32]) -> Result<Self> {
+    fn read_fields_from(buf: &[u8; FOOTER_SIZE - FOOTER_CHECKSUM_SIZE]) -> Result<Self> {
         Ok(Self {
             magic: buf[0..4]
                 .try_into()
@@ -302,12 +310,15 @@ impl Footer {
         })
     }
 
-    /// Serialize the footer to bytes (always exactly 128 bytes)
+    /// Serialize the footer to bytes (always exactly [`FOOTER_SIZE`] bytes).
+    ///
+    /// # Errors
+    /// Returns `CorruptedFooter` if internal field slicing fails (should not happen for valid footers).
     pub fn to_bytes(&self) -> Result<[u8; FOOTER_SIZE]> {
         let mut result = [0u8; FOOTER_SIZE];
 
         // Write fields (first 96 bytes)
-        let mut fields_buf = [0u8; FOOTER_SIZE - 32];
+        let mut fields_buf = [0u8; FOOTER_SIZE - FOOTER_CHECKSUM_SIZE];
         self.write_fields_to(&mut fields_buf);
         result[0..96].copy_from_slice(&fields_buf);
 
@@ -317,14 +328,18 @@ impl Footer {
         Ok(result)
     }
 
-    /// Deserialize a footer from bytes
+    /// Deserialize a footer from bytes.
+    ///
+    /// # Errors
+    /// Returns `CorruptedFooter` if the data is too small, has invalid magic/version,
+    /// fails checksum verification, or has inconsistent cross-field offsets.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < FOOTER_SIZE {
             return Err(EraError::CorruptedFooter("Footer too small".to_string()));
         }
 
         // Read fields
-        let fields_buf: [u8; FOOTER_SIZE - 32] = data[0..96]
+        let fields_buf: [u8; FOOTER_SIZE - FOOTER_CHECKSUM_SIZE] = data[0..96]
             .try_into()
             .map_err(|_| EraError::CorruptedFooter("invalid footer data length".into()))?;
         let mut footer = Self::read_fields_from(&fields_buf)?;
@@ -340,15 +355,28 @@ impl Footer {
         }
 
         // Validate version
-        if footer.version > FOOTER_VERSION {
+        if footer.version == 0 || footer.version > FOOTER_VERSION {
             return Err(EraError::CorruptedFooter(format!(
                 "Unsupported footer version: {} (max supported: {})",
                 footer.version, FOOTER_VERSION
             )));
         }
 
-        // Validate checksum
-        if !footer.verify_checksum() {
+        // FC39-02: Reject unknown footer flags. No flags are currently defined,
+        // so any non-zero value indicates a newer format this reader cannot handle.
+        if footer.flags != 0 {
+            return Err(EraError::CorruptedFooter(format!(
+                "Unknown footer flags: 0x{:04X} (this reader supports none)",
+                footer.flags
+            )));
+        }
+
+        // Validate checksum against the raw input bytes (not re-serialized),
+        // so mutations in reserved fields are also detected.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(FOOTER_DOMAIN);
+        hasher.update(&data[0..96]);
+        if hasher.finalize().as_bytes() != &footer.checksum {
             return Err(EraError::CorruptedFooter("Checksum mismatch".to_string()));
         }
 
@@ -361,30 +389,67 @@ impl Footer {
                 footer.data_end_offset, min_data_end
             )));
         }
-        // catalog_offset must be 0 or at least HEADER_SIZE
-        if footer.catalog_offset != 0 && footer.catalog_offset < crate::header::HEADER_SIZE as u64 {
-            return Err(EraError::CorruptedFooter(format!(
-                "catalog_offset {} is below HEADER_SIZE {}",
-                footer.catalog_offset,
-                crate::header::HEADER_SIZE
-            )));
-        }
-        // index_offset must be 0 or at least HEADER_SIZE
-        if footer.index_offset != 0 && footer.index_offset < crate::header::HEADER_SIZE as u64 {
-            return Err(EraError::CorruptedFooter(format!(
-                "index_offset {} is below HEADER_SIZE {}",
-                footer.index_offset,
-                crate::header::HEADER_SIZE
-            )));
-        }
+        Self::validate_offset_above_header("catalog_offset", footer.catalog_offset)?;
+        Self::validate_offset_above_header("index_offset", footer.index_offset)?;
+
+        // D10-01: Cross-field validation — catalog region must not overflow
+        // and must be contained within the data region when present.
+        Self::validate_region_bounds(
+            "catalog",
+            footer.catalog_offset,
+            footer.catalog_size,
+            footer.data_end_offset,
+        )?;
+        // D10-01: Cross-field validation — index region must not overflow
+        // and must be contained within the data region when present.
+        Self::validate_region_bounds(
+            "index",
+            footer.index_offset,
+            footer.index_size,
+            footer.data_end_offset,
+        )?;
 
         Ok(footer)
     }
+
+    /// Validate that a region (offset+size) does not overflow u64 and fits within `data_end_offset`.
+    fn validate_region_bounds(
+        name: &str,
+        offset: u64,
+        size: u32,
+        data_end_offset: u64,
+    ) -> Result<()> {
+        if offset != 0 && size != 0 {
+            let region_end = offset.checked_add(size as u64).ok_or_else(|| {
+                EraError::CorruptedFooter(format!("{}_offset + {}_size overflows u64", name, name))
+            })?;
+            if data_end_offset != 0 && region_end > data_end_offset {
+                return Err(EraError::CorruptedFooter(format!(
+                    "{} region [{}, {}) exceeds data_end_offset {}",
+                    name, offset, region_end, data_end_offset
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that a non-zero offset is at least `HEADER_SIZE`.
+    fn validate_offset_above_header(name: &str, offset: u64) -> Result<()> {
+        if offset != 0 && offset < crate::header::HEADER_SIZE as u64 {
+            return Err(EraError::CorruptedFooter(format!(
+                "{} {} is below HEADER_SIZE {}",
+                name, offset, crate::header::HEADER_SIZE
+            )));
+        }
+        Ok(())
+    }
 }
+
 
 /// Builder for constructing a Footer with named fields.
 ///
 /// Replaces the 12-argument `Footer::with_catalog` for better readability.
+#[must_use]
 pub struct FooterBuilder {
     data_end_offset: u64,
     block_count: u32,
@@ -401,6 +466,7 @@ pub struct FooterBuilder {
 }
 
 impl FooterBuilder {
+    /// Sets the catalog location (offset, size, and block ID).
     pub fn catalog(mut self, offset: u64, size: u32, block_id: u32) -> Self {
         self.catalog_offset = offset;
         self.catalog_size = size;
@@ -408,12 +474,14 @@ impl FooterBuilder {
         self
     }
 
+    /// Sets the last checkpoint location (offset and block ID).
     pub fn checkpoint(mut self, offset: u64, block_id: u32) -> Self {
         self.last_checkpoint_offset = offset;
         self.last_checkpoint_block_id = block_id;
         self
     }
 
+    /// Sets the dedup index location (offset, size, and block ID).
     pub fn index(mut self, offset: u64, size: u32, block_id: u32) -> Self {
         self.index_offset = offset;
         self.index_size = size;
@@ -421,11 +489,13 @@ impl FooterBuilder {
         self
     }
 
+    /// Sets the backup header offset within the volume.
     pub fn backup_header(mut self, offset: u64) -> Self {
         self.backup_header_offset = offset;
         self
     }
 
+    /// Consumes the builder and produces a [`Footer`] with all configured fields.
     pub fn build(self) -> Footer {
         Footer::with_catalog(
             self.data_end_offset,
@@ -472,17 +542,24 @@ mod tests {
 
     #[test]
     fn test_footer_with_all_fields() {
+        // Use large but logically valid values: offset + size must not overflow u64,
+        // and catalog/index regions must be within data_end_offset when non-zero.
+        let data_end: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+        let catalog_offset: u64 = 0xFFFF_FFFF_0000_0000;
+        let catalog_size: u32 = 0x0FFF_FFFF; // fits within data_end
+        let index_offset: u64 = 0xFFFF_FFFE_0000_0000;
+        let index_size: u32 = 0x0FFF_FFFF; // fits within data_end
         let footer = Footer::with_catalog(
-            0xFFFF_FFFF_FFFF_FFFF, // max u64
-            0xFFFF_FFFF,           // max u32
-            0xFFFF_FFFF_FFFF_FFFF, // max u64
-            0xFFFF_FFFF_FFFF_FFFF, // catalog_offset
-            0xFFFF_FFFF,           // catalog_size
+            data_end,
+            0xFFFF_FFFF,           // block_count
+            0xFFFF_FFFF_FFFF_FFFF, // sequence_number
+            catalog_offset,
+            catalog_size,
             0xFFFF_FFFF,           // catalog_block_id
             0xFFFF_FFFF_FFFF_FFFF, // last_checkpoint_offset
             0xFFFF_FFFF,           // last_checkpoint_block_id
-            0xFFFF_FFFF_FFFF_FFFF, // index_offset
-            0xFFFF_FFFF,           // index_size
+            index_offset,
+            index_size,
             0xFFFF_FFFF,           // index_block_id
             0xFFFF_FFFF_FFFF_FFFF, // backup_header_offset
         );
@@ -496,10 +573,90 @@ mod tests {
         );
 
         let restored = Footer::from_bytes(&bytes).unwrap();
-        assert_eq!(restored.data_end_offset, 0xFFFF_FFFF_FFFF_FFFF);
+        assert_eq!(restored.data_end_offset, data_end);
         assert_eq!(restored.block_count, 0xFFFF_FFFF);
-        assert_eq!(restored.catalog_offset, 0xFFFF_FFFF_FFFF_FFFF);
-        assert_eq!(restored.index_offset, 0xFFFF_FFFF_FFFF_FFFF);
+        assert_eq!(restored.catalog_offset, catalog_offset);
+        assert_eq!(restored.catalog_size, catalog_size);
+        assert_eq!(restored.index_offset, index_offset);
+        assert_eq!(restored.index_size, index_size);
+    }
+
+    #[test]
+    fn test_footer_rejects_catalog_overflow() {
+        // catalog_offset + catalog_size overflows u64
+        let footer = Footer::with_catalog(
+            0xFFFF_FFFF_FFFF_FFFF,
+            1,
+            1,
+            0xFFFF_FFFF_FFFF_FFFF, // catalog_offset = max
+            1,                      // catalog_size = 1 → overflows
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        let bytes = footer.to_bytes().unwrap();
+        let err = Footer::from_bytes(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("overflows"),
+            "Expected overflow error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_footer_rejects_catalog_past_data_end() {
+        // catalog region extends past data_end_offset
+        let footer = Footer::with_catalog(
+            10_000, // data_end_offset
+            1,
+            1,
+            9_000,  // catalog_offset
+            2_000,  // catalog_size → end = 11_000 > data_end_offset
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        let bytes = footer.to_bytes().unwrap();
+        let err = Footer::from_bytes(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds data_end_offset"),
+            "Expected region-exceeds-data error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_footer_rejects_index_past_data_end() {
+        // index region extends past data_end_offset
+        let footer = Footer::with_catalog(
+            10_000, // data_end_offset
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            9_000,  // index_offset
+            2_000,  // index_size → end = 11_000 > data_end_offset
+            0,
+            0,
+        );
+        let bytes = footer.to_bytes().unwrap();
+        let err = Footer::from_bytes(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds data_end_offset"),
+            "Expected region-exceeds-data error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -536,6 +693,8 @@ mod tests {
 
         let result = Footer::from_bytes(&bytes);
         assert!(result.is_err());
+        // TQ37-01: Verify specific error variant, matching test_corrupted_magic's pattern
+        assert!(matches!(result, Err(EraError::CorruptedFooter(_))));
     }
 
     #[test]

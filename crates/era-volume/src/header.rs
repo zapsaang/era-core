@@ -3,6 +3,20 @@
 use era_common::{ArchiveConfig, ArchiveId, VolumeId};
 use serde::{Deserialize, Serialize};
 
+/// Return the current Unix timestamp as `i64`, or `InvalidConfig` on overflow.
+///
+/// Centralises the `SystemTime → i64` boilerplate used by both
+/// [`SuperHeader::new()`] and [`SuperHeader::next_volume()`].
+fn unix_timestamp_now() -> era_common::Result<i64> {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::from_secs(0))
+            .as_secs(),
+    )
+    .map_err(|_| era_common::EraError::InvalidConfig("creation_time exceeds i64::MAX".into()))
+}
+
 /// Magic bytes for ERA format: "ERA\x08\x01\x00\x00\x00"
 pub const MAGIC: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00];
 
@@ -19,14 +33,27 @@ pub const MAX_RECIPIENTS: usize = 256;
 /// V8.1 layout: [Header 4096] [Backup Footer Gap 128] [Data Region...]
 pub const DATA_REGION_START: u64 = (HEADER_SIZE + crate::footer::BACKUP_FOOTER_GAP) as u64; // 4224
 
+/// Maximum allowed size for any single recipient field (params, encrypted_master_key).
+/// Kyber-768 ciphertext is ~1088 bytes; Argon2id params ~32 bytes.
+/// 4 KiB is generous headroom for any current or near-future KEM.
+const MAX_RECIPIENT_FIELD_SIZE: usize = 4096;
+
+/// Maximum allowed size for the EncryptedVolumeKey ciphertext.
+/// VK is 32 bytes; XChaCha20-Poly1305 adds 16-byte tag = 48 bytes.
+/// 4 KiB is generous headroom.
+const MAX_EVK_CIPHERTEXT_SIZE: usize = 4096;
+
 /// The encryption algorithm used for Key Wrapping (IK -> VK)
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum KeyWrapAlgorithm {
-    XChaCha20Poly1305 = 1,
+    /// XChaCha20-Poly1305 AEAD (256-bit key, 192-bit nonce).
+    XChaCha20Poly1305 = 0,
 }
 
 /// Access policy for multi-party decryption
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AccessPolicy {
     /// Any single recipient can unlock (OR logic)
@@ -37,8 +64,9 @@ pub enum AccessPolicy {
 }
 
 /// The encrypted Volume Key container
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct EncryptedVolumeKey {
+    /// The AEAD algorithm used for wrapping the Volume Key.
     pub algorithm: KeyWrapAlgorithm,
     /// Random nonce for the wrapping operation (24 bytes for XChaCha20)
     pub nonce: [u8; 24],
@@ -46,17 +74,32 @@ pub struct EncryptedVolumeKey {
     pub ciphertext: Vec<u8>,
 }
 
+impl std::fmt::Debug for EncryptedVolumeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedVolumeKey")
+            .field("algorithm", &self.algorithm)
+            .field("nonce", &"[REDACTED]")
+            .field("ciphertext", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Recipient type for the multi-recipient envelope
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecipientType {
+    /// Password-based: Argon2id KDF derives the Master Key.
     Argon2idPassword,
+    /// Public-key: X25519 (+ Kyber-768 hybrid KEM) encapsulates the Master Key.
     X25519PubKey,
+    /// Hardware token: FIDO2 HMAC-secret extension derives the Master Key.
     Fido2Hmac,
 }
 
 /// A recipient slot containing an encrypted master key
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecipientSlot {
+    /// The type of credential used to protect this slot's master key.
     pub r_type: RecipientType,
     /// Optional Key ID (e.g., fingerprint) for fast matching
     pub key_id: Option<[u8; 8]>,
@@ -67,6 +110,7 @@ pub struct RecipientSlot {
 }
 
 impl RecipientSlot {
+    /// Creates a new recipient slot with the given credential type and encrypted key material.
     pub fn new(
         r_type: RecipientType,
         key_id: Option<[u8; 8]>,
@@ -80,10 +124,60 @@ impl RecipientSlot {
             encrypted_master_key,
         }
     }
+    /// Validates that this recipient slot's fields are within acceptable bounds.
+    ///
+    /// This mirrors the validation performed by `TryFrom<proto::RecipientSlot>` on
+    /// the deserialization path, ensuring that programmatically-constructed slots
+    /// are also checked before being accepted into a [`SuperHeader`].
+    ///
+    /// **Note:** [`SuperHeader::new()`] calls this method automatically for each slot,
+    /// so callers do not need to invoke `validate()` before passing slots to the constructor.
+    /// Direct use is appropriate when validating slots independently of header construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidConfig` if:
+    /// - `params` exceeds `MAX_RECIPIENT_FIELD_SIZE` (4096 bytes)
+    /// - `encrypted_master_key` exceeds `MAX_RECIPIENT_FIELD_SIZE` (4096 bytes)
+    /// - `encrypted_master_key` is shorter than 24 bytes (minimum for any AEAD output)
+    pub fn validate(&self) -> era_common::Result<()> {
+        if self.params.len() > MAX_RECIPIENT_FIELD_SIZE {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "recipient params too large: {} bytes (max {})",
+                self.params.len(),
+                MAX_RECIPIENT_FIELD_SIZE
+            )));
+        }
+        if self.encrypted_master_key.len() > MAX_RECIPIENT_FIELD_SIZE {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "encrypted_master_key too large: {} bytes (max {})",
+                self.encrypted_master_key.len(),
+                MAX_RECIPIENT_FIELD_SIZE
+            )));
+        }
+        if self.encrypted_master_key.len() < 24 {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "encrypted_master_key too short: {} bytes (minimum 24)",
+                self.encrypted_master_key.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for RecipientSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecipientSlot")
+            .field("r_type", &self.r_type)
+            .field("key_id", &self.key_id)
+            .field("params", &"[REDACTED]")
+            .field("encrypted_master_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Super header - stored at the beginning of each volume
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SuperHeader {
     /// Magic bytes to identify ERA format
     pub magic: [u8; 8],
@@ -116,8 +210,36 @@ pub struct SuperHeader {
     pub access_policy: AccessPolicy,
 }
 
+impl std::fmt::Debug for SuperHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuperHeader")
+            .field("magic", &self.magic)
+            .field("version", &self.version)
+            .field("volume_id", &self.volume_id)
+            .field("archive_id", &self.archive_id)
+            .field("volume_sequence", &self.volume_sequence)
+            .field("total_volumes", &self.total_volumes)
+            .field("creation_time", &self.creation_time)
+            .field("feature_flags", &self.feature_flags)
+            .field("recipients", &self.recipients)
+            .field("config", &self.config)
+            .field("salt", &"[REDACTED]")
+            .field("epoch_id", &self.epoch_id)
+            .field("encrypted_volume_key", &self.encrypted_volume_key)
+            .field("access_policy", &self.access_policy)
+            .finish()
+    }
+}
+
 impl SuperHeader {
-    /// Create a new super header for a new archive
+    /// Create a new super header for a new archive.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if:
+    /// - `recipients` is empty or exceeds [`MAX_RECIPIENTS`]
+    /// - `access_policy` is `Threshold(t)` with `t < 2` or `t > recipients.len()`
+    /// - any recipient slot fails [`RecipientSlot::validate()`] (params/key size bounds)
+    /// - the system clock returns a timestamp exceeding `i64::MAX`
     pub fn new(
         archive_id: ArchiveId,
         recipients: Vec<RecipientSlot>,
@@ -125,18 +247,54 @@ impl SuperHeader {
         salt: [u8; 16],
         encrypted_volume_key: EncryptedVolumeKey,
         access_policy: AccessPolicy,
-    ) -> Self {
-        Self {
+    ) -> era_common::Result<Self> {
+        if recipients.is_empty() {
+            return Err(era_common::EraError::InvalidConfig(
+                "Archive must have at least one recipient".into(),
+            ));
+        }
+        if recipients.len() > MAX_RECIPIENTS {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "too many recipients: {} exceeds maximum {}",
+                recipients.len(),
+                MAX_RECIPIENTS
+            )));
+        }
+        // CB25-01: Validate AccessPolicy at construction time, not just on deserialization
+        if let AccessPolicy::Threshold(t) = access_policy {
+            if t < 2 {
+                return Err(era_common::EraError::InvalidConfig(format!(
+                    "Invalid threshold: {} (minimum 2)",
+                    t
+                )));
+            }
+            // IS31-01: Threshold must not exceed recipient count (T-of-N requires T <= N)
+            if (t as usize) > recipients.len() {
+                return Err(era_common::EraError::InvalidConfig(format!(
+                    "Threshold {} exceeds recipient count {} (T-of-N requires T <= N)",
+                    t,
+                    recipients.len()
+                )));
+            }
+        }
+        // CB25-02: Validate each recipient slot's field bounds at construction time
+        for (i, slot) in recipients.iter().enumerate() {
+            slot.validate().map_err(|e| {
+                era_common::EraError::InvalidConfig(format!(
+                    "recipient slot {}: {}",
+                    i, e
+                ))
+            })?;
+        }
+        let creation_time = unix_timestamp_now()?;
+        Ok(Self {
             magic: MAGIC,
             version: HEADER_VERSION,
             volume_id: VolumeId::new(),
             archive_id,
             volume_sequence: 0,
             total_volumes: 0,
-            creation_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::from_secs(0))
-                .as_secs() as i64,
+            creation_time,
             feature_flags: 0,
             recipients,
             config,
@@ -144,24 +302,36 @@ impl SuperHeader {
             epoch_id: 0,
             encrypted_volume_key,
             access_policy,
-        }
+        })
     }
 
-    /// Create a header for a subsequent volume in the same archive
+    /// Create a header for a subsequent volume in the same archive.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if `volume_sequence` would overflow `u16::MAX`,
+    /// if `total_volumes > 0` and the next sequence would equal or exceed it,
+    /// or if the system clock returns a timestamp exceeding `i64::MAX`.
     pub fn next_volume(&self) -> era_common::Result<Self> {
         Ok(Self {
             magic: self.magic,
             version: self.version,
             volume_id: VolumeId::new(),
             archive_id: self.archive_id,
-            volume_sequence: self.volume_sequence.checked_add(1).ok_or_else(|| {
-                era_common::EraError::InvalidConfig("volume sequence overflow at u16::MAX".into())
-            })?,
+            volume_sequence: {
+                let next_seq = self.volume_sequence.checked_add(1).ok_or_else(|| {
+                    era_common::EraError::InvalidConfig("volume sequence overflow at u16::MAX".into())
+                })?;
+                // CV32-02: Prevent creating a volume whose sequence violates the IS31-02 invariant
+                if self.total_volumes > 0 && next_seq >= self.total_volumes {
+                    return Err(era_common::EraError::InvalidConfig(format!(
+                        "next volume_sequence {} would equal or exceed total_volumes {}",
+                        next_seq, self.total_volumes
+                    )));
+                }
+                next_seq
+            },
             total_volumes: self.total_volumes,
-            creation_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::from_secs(0))
-                .as_secs() as i64,
+            creation_time: unix_timestamp_now()?,
             feature_flags: self.feature_flags,
             recipients: self.recipients.clone(),
             config: self.config.clone(),
@@ -172,10 +342,55 @@ impl SuperHeader {
         })
     }
 
-    /// Serialize the header to bytes (padded to HEADER_SIZE)
+    /// Convert to protobuf representation by borrowing, avoiding a full struct clone.
+    /// Only heap-allocated fields (`recipients`, `config`, `encrypted_volume_key`) are
+    /// cloned individually; fixed-size fields are copied.
+    fn to_proto(&self) -> proto::SuperHeader {
+        let (access_policy, threshold) = match self.access_policy {
+            AccessPolicy::AnyOfN => (proto::AccessPolicy::AnyOfN.into(), 0u32),
+            AccessPolicy::Threshold(t) => (proto::AccessPolicy::Threshold.into(), t),
+        };
+        proto::SuperHeader {
+            magic: self.magic.to_vec(),
+            version: self.version as u32,
+            volume_id: self.volume_id.0.as_bytes().to_vec(),
+            archive_id: self.archive_id.0.as_bytes().to_vec(),
+            volume_sequence: self.volume_sequence as u32,
+            total_volumes: self.total_volumes as u32,
+            creation_time: self.creation_time,
+            feature_flags: self.feature_flags,
+            recipients: self.recipients.iter().map(|s| proto::RecipientSlot {
+                r#type: match s.r_type {
+                    RecipientType::Argon2idPassword => proto::recipient_slot::RecipientType::ScryptPassword.into(),
+                    RecipientType::X25519PubKey => proto::recipient_slot::RecipientType::X25519Pubkey.into(),
+                    RecipientType::Fido2Hmac => proto::recipient_slot::RecipientType::Fido2Hmac.into(),
+                },
+                key_id: s.key_id.map(|k| k.to_vec()).unwrap_or_default(),
+                params: s.params.clone(),
+                encrypted_master_key: s.encrypted_master_key.clone(),
+            }).collect(),
+            config: Some(self.config.clone().into()),
+            salt: self.salt.to_vec(),
+            epoch_id: self.epoch_id,
+            encrypted_volume_key: Some(proto::EncryptedVolumeKey {
+                algorithm: match self.encrypted_volume_key.algorithm {
+                    KeyWrapAlgorithm::XChaCha20Poly1305 => proto::KeyWrapAlgorithm::Xchacha20Poly1305.into(),
+                },
+                nonce: self.encrypted_volume_key.nonce.to_vec(),
+                ciphertext: self.encrypted_volume_key.ciphertext.clone(),
+            }),
+            access_policy,
+            threshold,
+        }
+    }
+
+    /// Serialize the header to bytes (padded to [`HEADER_SIZE`]).
+    ///
+    /// # Errors
+    /// Returns `Serialization` if protobuf encoding fails or the encoded header exceeds [`HEADER_SIZE`].
     pub fn to_bytes(&self) -> era_common::Result<Vec<u8>> {
         use prost::Message;
-        let proto: proto::SuperHeader = self.clone().into();
+        let proto = self.to_proto();
         let mut data = Vec::new();
         proto
             .encode_length_delimited(&mut data)
@@ -195,9 +410,24 @@ impl SuperHeader {
         Ok(data)
     }
 
-    /// Deserialize a header from bytes
+    /// Deserialize a header from bytes.
+    ///
+    /// # Errors
+    /// Returns `CorruptedHeader` if the data exceeds [`HEADER_SIZE`], has invalid magic/version,
+    /// or contains malformed protobuf fields.
     pub fn from_bytes(data: &[u8]) -> era_common::Result<Self> {
         use prost::Message;
+
+        // D10-03: Pre-decode size limit to prevent prost from allocating
+        // unbounded memory during protobuf decoding. The header region is
+        // HEADER_SIZE (4096) bytes, so legitimate protobuf data cannot exceed this.
+        if data.len() > HEADER_SIZE {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "header data too large: {} bytes (max {})",
+                data.len(),
+                HEADER_SIZE
+            )));
+        }
 
         let proto = proto::SuperHeader::decode_length_delimited(data)
             .map_err(|e| era_common::EraError::Deserialization(e.to_string()))?;
@@ -238,7 +468,16 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
     type Error = era_common::EraError;
 
     fn try_from(proto: proto::RecipientSlot) -> std::result::Result<Self, Self::Error> {
-        let r_type = proto.r#type();
+        // EV36-01: Use raw i32 field instead of generated accessor which silently
+        // maps unknown enum values to the default variant (ScryptPassword/0).
+        let r_type = proto::recipient_slot::RecipientType::try_from(proto.r#type).map_err(
+            |_| {
+                era_common::EraError::CorruptedHeader(format!(
+                    "Unknown RecipientType value: {}",
+                    proto.r#type
+                ))
+            },
+        )?;
 
         let key_id = if proto.key_id.is_empty() {
             None
@@ -247,6 +486,23 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
                 era_common::EraError::CorruptedHeader("Invalid key_id length".into())
             })?)
         };
+
+        // D10-02: Upper bound on params to prevent allocation bomb
+        if proto.params.len() > MAX_RECIPIENT_FIELD_SIZE {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "recipient params too large: {} bytes (max {})",
+                proto.params.len(),
+                MAX_RECIPIENT_FIELD_SIZE
+            )));
+        }
+        // D10-02: Upper bound on encrypted_master_key
+        if proto.encrypted_master_key.len() > MAX_RECIPIENT_FIELD_SIZE {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "encrypted_master_key too large: {} bytes (max {})",
+                proto.encrypted_master_key.len(),
+                MAX_RECIPIENT_FIELD_SIZE
+            )));
+        }
 
         if proto.encrypted_master_key.len() < 24 {
             return Err(era_common::EraError::CorruptedHeader(
@@ -297,8 +553,37 @@ impl TryFrom<proto::EncryptedVolumeKey> for EncryptedVolumeKey {
                 "Missing ciphertext".into(),
             ));
         }
+        // C12-02: Minimum ciphertext length — Poly1305 tag alone is 16 bytes
+        const MIN_EVK_CIPHERTEXT_SIZE: usize = 16;
+        if proto.ciphertext.len() < MIN_EVK_CIPHERTEXT_SIZE {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "EVK ciphertext too short: {} bytes (minimum {})",
+                proto.ciphertext.len(),
+                MIN_EVK_CIPHERTEXT_SIZE
+            )));
+        }
+        // D10-02: Upper bound on ciphertext to prevent allocation bomb
+        if proto.ciphertext.len() > MAX_EVK_CIPHERTEXT_SIZE {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "EVK ciphertext too large: {} bytes (max {})",
+                proto.ciphertext.len(),
+                MAX_EVK_CIPHERTEXT_SIZE
+            )));
+        }
+        // EV36-03: Validate algorithm field instead of hardcoding.
+        let algorithm = match proto::KeyWrapAlgorithm::try_from(proto.algorithm) {
+            Ok(proto::KeyWrapAlgorithm::Xchacha20Poly1305) => {
+                KeyWrapAlgorithm::XChaCha20Poly1305
+            }
+            Err(_) => {
+                return Err(era_common::EraError::CorruptedHeader(format!(
+                    "Unknown KeyWrapAlgorithm value: {}",
+                    proto.algorithm
+                )));
+            }
+        };
         Ok(Self {
-            algorithm: KeyWrapAlgorithm::XChaCha20Poly1305,
+            algorithm,
             nonce,
             ciphertext: proto.ciphertext,
         })
@@ -351,7 +636,16 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
                 version: proto.version,
             });
         }
-        let access_policy = match proto.access_policy() {
+        // EV36-02: Use raw i32 field instead of generated accessor which silently
+        // maps unknown enum values to the default variant (AnyOfN/0).
+        let proto_access_policy =
+            proto::AccessPolicy::try_from(proto.access_policy).map_err(|_| {
+                era_common::EraError::CorruptedHeader(format!(
+                    "Unknown AccessPolicy value: {}",
+                    proto.access_policy
+                ))
+            })?;
+        let access_policy = match proto_access_policy {
             proto::AccessPolicy::AnyOfN => AccessPolicy::AnyOfN,
             proto::AccessPolicy::Threshold => {
                 if proto.threshold < 2 {
@@ -384,6 +678,29 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
                 MAX_RECIPIENTS
             )));
         }
+        // IS31-01: Cross-validate threshold against recipient count on deserialization
+        if let AccessPolicy::Threshold(t) = access_policy {
+            if (t as usize) > recipients.len() {
+                return Err(era_common::EraError::CorruptedHeader(format!(
+                    "Threshold {} exceeds recipient count {} (T-of-N requires T <= N)",
+                    t,
+                    recipients.len()
+                )));
+            }
+        }
+        // IS31-02: Cross-validate volume_sequence against total_volumes on deserialization
+        let volume_sequence = u16::try_from(proto.volume_sequence).map_err(|_| {
+            era_common::EraError::CorruptedHeader("volume_sequence exceeds u16".into())
+        })?;
+        let total_volumes = u16::try_from(proto.total_volumes).map_err(|_| {
+            era_common::EraError::CorruptedHeader("total_volumes exceeds u16".into())
+        })?;
+        if total_volumes > 0 && volume_sequence >= total_volumes {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "volume_sequence {} >= total_volumes {} (0-based sequence must be < total)",
+                volume_sequence, total_volumes
+            )));
+        }
         Ok(Self {
             magic,
             version,
@@ -395,14 +712,20 @@ impl TryFrom<proto::SuperHeader> for SuperHeader {
                 uuid::Uuid::from_slice(&proto.archive_id)
                     .map_err(|_| era_common::EraError::CorruptedHeader("Invalid UUID".into()))?,
             ),
-            volume_sequence: u16::try_from(proto.volume_sequence).map_err(|_| {
-                era_common::EraError::CorruptedHeader("volume_sequence exceeds u16".into())
-            })?,
-            total_volumes: u16::try_from(proto.total_volumes).map_err(|_| {
-                era_common::EraError::CorruptedHeader("total_volumes exceeds u16".into())
-            })?,
+            volume_sequence,
+            total_volumes,
             creation_time: proto.creation_time,
-            feature_flags: proto.feature_flags,
+            // FC39-01: Reject unknown feature flags. No flags are currently defined,
+            // so any non-zero value indicates a newer format that this reader cannot handle.
+            feature_flags: {
+                if proto.feature_flags != 0 {
+                    return Err(era_common::EraError::CorruptedHeader(format!(
+                        "Unknown feature flags: 0x{:016X} (this reader supports none)",
+                        proto.feature_flags
+                    )));
+                }
+                proto.feature_flags
+            },
             recipients,
             config: proto
                 .config
@@ -453,7 +776,8 @@ mod tests {
             [0u8; 16],
             mock_encrypted_vk(),
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let bytes = header.to_bytes().unwrap();
         assert_eq!(bytes.len(), HEADER_SIZE, "Header must be 4KB padded");
@@ -480,7 +804,8 @@ mod tests {
             [0u8; 16],
             mock_encrypted_vk(),
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let header2 = header.next_volume().unwrap();
 
@@ -499,16 +824,161 @@ mod tests {
     fn test_threshold_policy_roundtrip() {
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![mock_recipient()],
+            vec![mock_recipient(), mock_recipient(), mock_recipient()],
             ArchiveConfig::default(),
             [0u8; 16],
             mock_encrypted_vk(),
             AccessPolicy::Threshold(3),
-        );
+        )
+        .unwrap();
         // No need to manually set access_policy — it's passed to new()
 
         let bytes = header.to_bytes().unwrap();
         let restored = SuperHeader::from_bytes(&bytes).unwrap();
         assert_eq!(restored.access_policy, AccessPolicy::Threshold(3));
     }
+
+    // ===== CB25: Configuration Boundary Audit Tests =====
+
+    #[test]
+    fn cb25_01_threshold_zero_rejected_at_construction() {
+        let result = SuperHeader::new(
+            ArchiveId::new(),
+            vec![mock_recipient()],
+            ArchiveConfig::default(),
+            [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::Threshold(0),
+        );
+        assert!(result.is_err(), "Threshold(0) must be rejected by SuperHeader::new()");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid threshold") || err.contains("minimum 2"),
+            "Error should mention threshold: {err}"
+        );
+    }
+
+    #[test]
+    fn cb25_01_threshold_one_rejected_at_construction() {
+        let result = SuperHeader::new(
+            ArchiveId::new(),
+            vec![mock_recipient()],
+            ArchiveConfig::default(),
+            [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::Threshold(1),
+        );
+        assert!(result.is_err(), "Threshold(1) must be rejected by SuperHeader::new()");
+    }
+
+    #[test]
+    fn cb25_01_threshold_two_accepted() {
+        let result = SuperHeader::new(
+            ArchiveId::new(),
+            vec![mock_recipient(), mock_recipient()],
+            ArchiveConfig::default(),
+            [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::Threshold(2),
+        );
+        assert!(result.is_ok(), "Threshold(2) is the minimum valid value");
+    }
+
+    #[test]
+    fn cb25_02_recipient_params_too_large_rejected() {
+        let oversized_slot = RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            Some([0x12; 8]),
+            vec![0xAB; MAX_RECIPIENT_FIELD_SIZE + 1], // 4097 bytes
+            vec![0xCD; 48],
+        );
+        let result = SuperHeader::new(
+            ArchiveId::new(),
+            vec![oversized_slot],
+            ArchiveConfig::default(),
+            [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::AnyOfN,
+        );
+        assert!(result.is_err(), "Oversized params must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("params too large"),
+            "Error should mention params: {err}"
+        );
+    }
+
+    #[test]
+    fn cb25_02_recipient_key_too_large_rejected() {
+        let oversized_slot = RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            Some([0x12; 8]),
+            TEST_PARAMS.to_vec(),
+            vec![0xCD; MAX_RECIPIENT_FIELD_SIZE + 1], // 4097 bytes
+        );
+        let result = SuperHeader::new(
+            ArchiveId::new(),
+            vec![oversized_slot],
+            ArchiveConfig::default(),
+            [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::AnyOfN,
+        );
+        assert!(result.is_err(), "Oversized encrypted_master_key must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("encrypted_master_key too large"),
+            "Error should mention key size: {err}"
+        );
+    }
+
+    #[test]
+    fn cb25_02_recipient_key_too_short_rejected() {
+        let short_key_slot = RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            Some([0x12; 8]),
+            TEST_PARAMS.to_vec(),
+            vec![0xCD; 23], // 23 bytes, below minimum 24
+        );
+        let result = SuperHeader::new(
+            ArchiveId::new(),
+            vec![short_key_slot],
+            ArchiveConfig::default(),
+            [0u8; 16],
+            mock_encrypted_vk(),
+            AccessPolicy::AnyOfN,
+        );
+        assert!(result.is_err(), "Short encrypted_master_key must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("too short"),
+            "Error should mention minimum length: {err}"
+        );
+    }
+
+    #[test]
+    fn cb25_02_recipient_validate_direct() {
+        // Valid slot passes validation
+        let valid = mock_recipient();
+        assert!(valid.validate().is_ok());
+
+        // Params at exactly MAX size — should pass
+        let at_limit = RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            None,
+            vec![0u8; MAX_RECIPIENT_FIELD_SIZE],
+            vec![0xCD; 48],
+        );
+        assert!(at_limit.validate().is_ok(), "Exactly MAX_RECIPIENT_FIELD_SIZE should pass");
+
+        // Key at exactly 24 bytes — should pass
+        let min_key = RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            None,
+            vec![0u8; 16],
+            vec![0xCD; 24],
+        );
+        assert!(min_key.validate().is_ok(), "Exactly 24 bytes should pass");
+    }
+
 }

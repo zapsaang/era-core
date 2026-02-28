@@ -35,7 +35,8 @@ async fn test_resilient_footer_open_with_erasure() -> Result<()> {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     // 2. Write a valid volume first
     let writer = VolumeWriter::create(&backend, path, header.clone()).await?;
@@ -115,7 +116,8 @@ async fn test_fail_without_erasure() -> Result<()> {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     // 2. Write
     let writer = VolumeWriter::create(&backend, path, header).await?;

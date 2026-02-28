@@ -416,7 +416,12 @@ mod tests {
     fn create_test_header() -> SuperHeader {
         SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![era_volume::RecipientSlot::new(
+                era_volume::RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             era_volume::EncryptedVolumeKey {
@@ -426,6 +431,7 @@ mod tests {
             },
             era_volume::AccessPolicy::AnyOfN,
         )
+        .unwrap()
     }
 
     fn create_test_chunk(data: &[u8]) -> UniqueChunk {

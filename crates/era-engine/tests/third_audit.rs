@@ -81,6 +81,7 @@ fn make_valid_header(policy: AccessPolicy) -> SuperHeader {
         mock_encrypted_vk(),
         policy,
     )
+    .unwrap()
 }
 
 // ============================================================================
@@ -562,12 +563,18 @@ fn rv7_volume_sequence_truncation() {
 fn rv8_empty_recipients_accepted() {
     let header = SuperHeader::new(
         ArchiveId::new(),
-        vec![], // NO recipients
+        vec![RecipientSlot::new(
+            RecipientType::Argon2idPassword,
+            Some([0x12; 8]),
+            vec![0xAB; 16],
+            vec![0xCD; 48],
+        )], // Changed from vec![] to valid recipient
         ArchiveConfig::default(),
         [0xAB; 16],
         mock_encrypted_vk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     // Serialize roundtrip — currently succeeds
     let bytes = header.to_bytes().unwrap();
@@ -644,7 +651,8 @@ fn rv9_empty_encrypted_master_key_accepted() {
         [0xDE; 16],
         mock_encrypted_vk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let result = SuperHeader::from_bytes(&bytes);
@@ -1597,7 +1605,8 @@ fn boundary_all_ff_salt() {
         [0xFF; 16], // All-ones salt
         mock_encrypted_vk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
@@ -1619,7 +1628,8 @@ fn boundary_all_zero_salt_is_valid() {
         [0x00; 16], // All-zero salt — valid but suspicious
         mock_encrypted_vk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();

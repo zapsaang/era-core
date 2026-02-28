@@ -590,6 +590,11 @@ impl ArchiveWriterBuilder {
                             encrypted_master_key: combined,
                         });
                     }
+                    _ => {
+                        return Err(era_common::EraError::InvalidConfig(
+                            "Unsupported access policy".into(),
+                        ));
+                    }
                 }
             }
 
@@ -662,7 +667,7 @@ impl ArchiveWriterBuilder {
             *archive_salt.as_bytes(),
             encrypted_volume_key,
             self.access_policy,
-        );
+        )?;
 
         let base_filename = self.output_path.file_name().unwrap_or_default();
 
@@ -2096,7 +2101,7 @@ pub mod generic {
                 encrypted_volume_key,
                 self.access_policy
                     .unwrap_or(era_volume::AccessPolicy::AnyOfN),
-            );
+            )?;
 
             let volume_writer =
                 VolumeWriter::create(&self.backend, Path::new(&self.filename), header).await?;

@@ -69,6 +69,7 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
         },
         AccessPolicy::AnyOfN,
     )
+    .unwrap()
 }
 
 // ============================================================================

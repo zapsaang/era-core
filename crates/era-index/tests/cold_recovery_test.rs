@@ -64,7 +64,8 @@ async fn test_cold_recovery_from_orphaned_volume() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
@@ -203,7 +204,8 @@ async fn test_index_embedded_in_volume() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();

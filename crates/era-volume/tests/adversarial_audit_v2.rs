@@ -35,6 +35,7 @@ fn test_header() -> SuperHeader {
         },
         AccessPolicy::AnyOfN,
     )
+    .unwrap()
 }
 
 fn test_block(id: u64, size: usize) -> EncryptedMacroBlock {
@@ -100,6 +101,12 @@ fn test_footer_future_version_rejected() {
                     // Recompute checksum won't help — from_bytes checks version before checksum
     let result = Footer::from_bytes(&bytes);
     assert!(result.is_err());
+    // TQ37-02: Verify specific error variant — future version must yield CorruptedFooter
+    assert!(
+        matches!(result, Err(era_common::EraError::CorruptedFooter(ref msg)) if msg.contains("version")),
+        "Expected CorruptedFooter with version info, got {:?}",
+        result
+    );
 }
 
 /// FINDING-VOL-5: commit_checkpoint without set_max_size must return Err, not panic.
@@ -168,9 +175,10 @@ async fn test_open_append_forged_data_end_offset() {
     // open_append will truncate to this offset — this extends the file
     // This is not a crash, but it's a resource exhaustion vector
     let result = VolumeWriter::open_append(&backend, path, header, &forged_footer).await;
-    // The operation itself may succeed (truncate can extend), but the writer
-    // position will be at a nonsensical offset. Verify it doesn't panic.
-    assert!(result.is_ok() || result.is_err());
+    // TQ37-03: Previous assertion `is_ok() || is_err()` was tautological (always true).
+    // The real test is that execution reaches here without panicking.
+    // Explicitly drop to acknowledge we intentionally discard the result.
+    drop(result);
 }
 
 /// FINDING-VOL-1: Interleaved write_at and append correctness.

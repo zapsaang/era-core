@@ -305,6 +305,9 @@ impl ArchiveReader {
                 shares.iter_mut().for_each(|s| s.zeroize());
                 result?
             }
+            _ => {
+                return Err(EraError::InvalidConfig("Unsupported access policy".into()));
+            }
         };
 
         // Create KeySession

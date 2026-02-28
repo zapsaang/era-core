@@ -126,6 +126,7 @@ toml = "0.8"
 # Testing
 tempfile = "3.9"
 criterion = "0.5"
+proptest = "1.6"
 
 [profile.release]
 lto = true

@@ -12,7 +12,12 @@ use std::path::Path;
 
 use crate::footer::{FOOTER_MAGIC, FOOTER_SIZE};
 use crate::header::{DATA_REGION_START, HEADER_SIZE};
-use crate::{Footer, SuperHeader, MAX_SHARD_SIZE};
+use crate::{Footer, SuperHeader, MAX_CONSECUTIVE_SCAN_MISSES, MAX_SCAN_RESULTS, MAX_SHARD_SIZE};
+
+/// MN34-03: Maximum size of the reverse scan window for floating footer recovery (1 MB).
+/// When both primary and backup footers are corrupted, the reader scans backwards from
+/// the end of the file in this window looking for footer magic bytes.
+const FLOATING_FOOTER_SCAN_SIZE: u64 = 1024 * 1024;
 
 /// Reader for a single volume
 pub struct VolumeReader<R: StorageReader> {
@@ -25,7 +30,7 @@ pub struct VolumeReader<R: StorageReader> {
 }
 
 impl<R: StorageReader> VolumeReader<R> {
-    /// Open an existing volume for reading
+    /// Open an existing volume for reading.
     ///
     /// Recovery Chain:
     /// 1. Try primary header at offset 0
@@ -33,12 +38,19 @@ impl<R: StorageReader> VolumeReader<R> {
     /// 3. Read backup header from backup_header_offset
     /// 4. Try primary footer at end of file
     /// 5. If primary footer fails, try backup footer at offset HEADER_SIZE (4096)
+    ///
+    /// # Errors
+    /// Returns `CorruptedHeader` if the volume is smaller than [`HEADER_SIZE`] or both
+    /// primary and backup headers are unreadable. Returns I/O errors from the storage backend.
     pub async fn open<B: StorageBackend<Reader = R>>(backend: &B, path: &Path) -> Result<Self> {
         let reader = backend.open_read(path).await?;
         let size = reader.size();
 
         if size < HEADER_SIZE as u64 {
-            return Err(EraError::CorruptedHeader("Volume too small".to_string()));
+            return Err(EraError::CorruptedHeader(format!(
+                "Volume too small: {} bytes (minimum {} bytes)",
+                size, HEADER_SIZE
+            )));
         }
 
         // === HEADER ===
@@ -118,9 +130,9 @@ impl<R: StorageReader> VolumeReader<R> {
 
     /// Try floating footer recovery (reverse scan)
     async fn try_floating_footer_recovery(reader: &R, size: u64) -> Result<Option<Footer>> {
-        // Scan the last 1MB (or full file if smaller) for footer magic
+        // Scan the last FLOATING_FOOTER_SCAN_SIZE (or full file if smaller) for footer magic
         // New fixed-length format: footer starts directly with "ERAF" magic
-        let scan_size = 1024 * 1024; // 1MB scan window
+        let scan_size = FLOATING_FOOTER_SCAN_SIZE;
         let start_offset = if size > scan_size {
             size - scan_size
         } else {
@@ -180,21 +192,29 @@ impl<R: StorageReader> VolumeReader<R> {
     }
 
     /// Get the volume header
+    #[must_use]
     pub fn header(&self) -> &SuperHeader {
         &self.header
     }
 
     /// Get the volume footer
+    #[must_use]
     pub fn footer(&self) -> Option<&Footer> {
         self.footer.as_ref()
     }
 
     /// Get the number of blocks in this volume
+    #[must_use]
     pub fn block_count(&self) -> u32 {
         self.footer.as_ref().map(|f| f.block_count).unwrap_or(0)
     }
 
     /// Read a block at the given location (BlockHeader format)
+    ///
+    /// # Errors
+    /// Returns `InvalidFormat` if the block header is malformed.
+    /// Returns `IntegrityError` if the block length exceeds `MAX_SHARD_SIZE` or CRC verification fails.
+    /// Returns I/O errors from the underlying storage backend.
     pub async fn read_block(&self, location: &BlockLocation) -> Result<EncryptedMacroBlock> {
         // Delegate to read_typed_block and discard the block type
         let (_block_type, block) = self.read_typed_block(location).await?;
@@ -202,6 +222,9 @@ impl<R: StorageReader> VolumeReader<R> {
     }
 
     /// Read raw data at the given offset
+    ///
+    /// # Errors
+    /// Returns I/O errors from the underlying storage backend.
     pub async fn read_raw(&self, offset: u64, len: usize) -> Result<Bytes> {
         self.reader.read_at(offset, len).await
     }
@@ -210,6 +233,10 @@ impl<R: StorageReader> VolumeReader<R> {
     ///
     /// Returns a vector of (shard_index, shard_data) pairs for all available shards.
     /// If a shard read fails, it returns None in place of the data.
+    ///
+    /// # Errors
+    /// Returns I/O errors from the underlying storage backend. Individual shard read
+    /// failures are returned as `None` rather than propagated as errors.
     ///
     /// # Security
     /// All length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks
@@ -229,7 +256,7 @@ impl<R: StorageReader> VolumeReader<R> {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 _ => {
                     shards.push((idx, None));
-                    offset += ShardHeader::SIZE as u64 + erasure_info.shard_size as u64;
+                    offset = offset.saturating_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64);
                     continue;
                 }
             };
@@ -238,7 +265,7 @@ impl<R: StorageReader> VolumeReader<R> {
                 Some(h) => h,
                 None => {
                     shards.push((idx, None));
-                    offset += ShardHeader::SIZE as u64 + erasure_info.shard_size as u64;
+                    offset = offset.saturating_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64);
                     continue;
                 }
             };
@@ -252,14 +279,17 @@ impl<R: StorageReader> VolumeReader<R> {
                     MAX_SHARD_SIZE
                 );
                 shards.push((idx, None));
-                offset += ShardHeader::SIZE as u64 + erasure_info.shard_size as u64;
+                offset = offset.saturating_add(ShardHeader::SIZE as u64 + erasure_info.shard_size as u64);
                 continue;
             }
+
+            let shard_data_offset = offset.checked_add(ShardHeader::SIZE as u64)
+                .ok_or_else(|| EraError::InvalidFormat("shard data offset overflow".into()))?;
 
             // Read shard data
             let shard_data = match self
                 .reader
-                .read_at(offset + ShardHeader::SIZE as u64, header.length as usize)
+                .read_at(shard_data_offset, header.length as usize)
                 .await
             {
                 Ok(data) if header.verify(&data) => Some(data),
@@ -267,14 +297,18 @@ impl<R: StorageReader> VolumeReader<R> {
             };
 
             shards.push((idx, shard_data));
-            offset += ShardHeader::SIZE as u64 + header.length as u64;
+            offset = offset.checked_add(ShardHeader::SIZE as u64 + header.length as u64)
+                .ok_or_else(|| EraError::InvalidFormat("shard offset overflow".into()))?;
         }
 
         Ok(shards)
     }
 
-    /// Get the data region (after header + backup footer gap, before backup header)
-    /// Layout: Data starts at DATA_REGION_START (4224)
+    /// Get the data region bounds (after header + backup footer gap, before data end).
+    ///
+    /// Returns `(start, end)` where `start` is inclusive ([`DATA_REGION_START`] = 4224)
+    /// and `end` is exclusive (`footer.data_end_offset`, or total file size if no footer).
+    ///
     pub fn data_region(&self) -> (u64, u64) {
         let start = DATA_REGION_START;
         let end = self
@@ -288,6 +322,16 @@ impl<R: StorageReader> VolumeReader<R> {
     /// Read a typed block (format with BlockHeader)
     ///
     /// Returns the block type and encrypted data
+    ///
+    /// # Errors
+    /// Returns `InvalidFormat` if the block header is malformed.
+    /// Returns `IntegrityError` if the block length exceeds `MAX_SHARD_SIZE` or CRC verification fails.
+    /// Returns I/O errors from the underlying storage backend.
+    ///
+    /// # Important
+    /// The returned `EncryptedMacroBlock` has `original_size = 0` and `chunk_count = 0`
+    /// because these fields are not stored in the BlockHeader format.
+    /// Callers that need accurate values must consult the catalog or index.
     ///
     /// # Security
     /// Length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks.
@@ -312,7 +356,8 @@ impl<R: StorageReader> VolumeReader<R> {
         }
 
         // Read encrypted data
-        let data_offset = location.physical_offset + BlockHeader::SIZE as u64;
+        let data_offset = location.physical_offset.checked_add(BlockHeader::SIZE as u64)
+            .ok_or_else(|| EraError::InvalidFormat("block data offset overflow".into()))?;
         let data = self
             .reader
             .read_at(data_offset, header.length as usize)
@@ -328,6 +373,8 @@ impl<R: StorageReader> VolumeReader<R> {
         let block = EncryptedMacroBlock {
             block_id: BlockId::new(location.slot_index as u64),
             data,
+            // original_size and chunk_count are unavailable from BlockHeader format;
+            // callers that need them must consult the catalog/index.
             original_size: 0,
             compressed_size: header.length,
             chunk_count: 0,
@@ -341,8 +388,16 @@ impl<R: StorageReader> VolumeReader<R> {
     /// **CRITICAL FOR COLD RECOVERY:** This performs a raw linear scan to find
     /// orphaned index blocks when the footer is lost or corrupted.
     ///
+    /// # Errors
+    /// Returns `IntegrityError` if the number of found blocks exceeds `u32`.
+    /// Returns I/O errors from the underlying storage backend.
+    ///
     /// # Security
-    /// Length fields are validated against MAX_SHARD_SIZE to prevent DoS attacks.
+    /// - Length fields are validated against `MAX_SHARD_SIZE` to prevent DoS attacks.
+    /// - Consecutive scan misses are tracked; after `MAX_CONSECUTIVE_SCAN_MISSES`
+    ///   non-productive advances the step size increases to `BlockHeader::SIZE` to
+    ///   prevent CPU exhaustion on volumes filled with random/encrypted data.
+    /// - Results are capped at `MAX_SCAN_RESULTS` to prevent unbounded memory growth.
     ///
     /// Returns a vector of BlockLocations for all matching blocks.
     pub async fn scan_for_typed_blocks(
@@ -352,6 +407,7 @@ impl<R: StorageReader> VolumeReader<R> {
         let (start_offset, end_offset) = self.data_region();
         let mut current_offset = start_offset;
         let mut found_blocks = Vec::new();
+        let mut consecutive_misses: u64 = 0;
 
         tracing::info!(
             "Scanning volume for {:?} blocks (region: {} - {})",
@@ -361,6 +417,16 @@ impl<R: StorageReader> VolumeReader<R> {
         );
 
         while current_offset + BlockHeader::SIZE as u64 <= end_offset {
+            // SECURITY: Cap results to prevent unbounded memory growth
+            if found_blocks.len() >= MAX_SCAN_RESULTS {
+                tracing::warn!(
+                    "Scan hit MAX_SCAN_RESULTS ({}) limit at offset {}, stopping",
+                    MAX_SCAN_RESULTS,
+                    current_offset
+                );
+                break;
+            }
+
             // Try to read BlockHeader
             match self.reader.read_at(current_offset, BlockHeader::SIZE).await {
                 Ok(header_bytes) => {
@@ -376,7 +442,8 @@ impl<R: StorageReader> VolumeReader<R> {
                                     current_offset,
                                     data_len
                                 );
-                                current_offset += 1;
+                                current_offset += BlockHeader::SIZE as u64;
+                                consecutive_misses = 0;
                                 continue;
                             }
 
@@ -394,9 +461,16 @@ impl<R: StorageReader> VolumeReader<R> {
                                     if header.verify(&data) {
                                         // Valid typed block found
                                         if header.block_type == target_type {
+                                            let slot_index = u32::try_from(found_blocks.len())
+                                                .map_err(|_| {
+                                                    EraError::IntegrityError(format!(
+                                                        "block count {} exceeds u32",
+                                                        found_blocks.len()
+                                                    ))
+                                                })?;
                                             found_blocks.push(BlockLocation::single(
                                                 self.header.volume_id,
-                                                found_blocks.len() as u32,
+                                                slot_index,
                                                 current_offset,
                                                 BlockHeader::SIZE as u32 + header.length,
                                             ));
@@ -410,6 +484,7 @@ impl<R: StorageReader> VolumeReader<R> {
 
                                         // Skip to next block
                                         current_offset += BlockHeader::SIZE as u64 + data_len;
+                                        consecutive_misses = 0;
                                         continue;
                                     }
                                 }
@@ -428,17 +503,31 @@ impl<R: StorageReader> VolumeReader<R> {
                                 // Valid shard header - skip it
                                 current_offset +=
                                     ShardHeader::SIZE as u64 + shard_header.length as u64;
+                                consecutive_misses = 0;
                                 continue;
                             }
                         }
                     }
 
-                    // Unknown format or invalid length - advance 1 byte and continue scanning
-                    current_offset += 1;
+                    // Unknown format or invalid data — advance and track misses.
+                    // SECURITY: After MAX_CONSECUTIVE_SCAN_MISSES non-productive
+                    // advances, switch to BlockHeader::SIZE steps to prevent CPU
+                    // exhaustion on volumes filled with random/encrypted data.
+                    consecutive_misses += 1;
+                    if consecutive_misses >= MAX_CONSECUTIVE_SCAN_MISSES {
+                        current_offset += BlockHeader::SIZE as u64;
+                    } else {
+                        current_offset += 1;
+                    }
                 }
                 Err(_) => {
-                    // Read error - skip forward
-                    current_offset += 1;
+                    // Read error — advance with same miss-tracking logic
+                    consecutive_misses += 1;
+                    if consecutive_misses >= MAX_CONSECUTIVE_SCAN_MISSES {
+                        current_offset += BlockHeader::SIZE as u64;
+                    } else {
+                        current_offset += 1;
+                    }
                 }
             }
         }
@@ -487,7 +576,8 @@ mod tests {
                 ciphertext: vec![0u8; 48],
             },
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
         let archive_id = header.archive_id;
 
         let writer = VolumeWriter::create(&backend, path, header).await.unwrap();
@@ -522,7 +612,8 @@ mod tests {
                 ciphertext: vec![0u8; 48],
             },
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let mut writer = VolumeWriter::create(&backend, path, header).await.unwrap();
 

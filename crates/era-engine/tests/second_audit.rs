@@ -366,7 +366,8 @@ fn nv2e_behavioral_truncated_salt_accepted() {
         [0xAB; 16], // Valid salt
         mock_encrypted_vk(),
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     // Serialize to bytes
     let bytes = header.to_bytes().unwrap();
@@ -1047,7 +1048,8 @@ fn header_threshold_0_handled() {
         [0xAB; 16],
         mock_encrypted_vk(),
         AccessPolicy::Threshold(0),
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
 
@@ -1081,7 +1083,8 @@ fn header_full_roundtrip() {
             ciphertext: vec![0xFF; 48],
         },
         AccessPolicy::Threshold(3),
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();

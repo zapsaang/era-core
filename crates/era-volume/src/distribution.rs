@@ -40,7 +40,9 @@ impl DistributionCalculator for MatrixDistributionStrategy {
         }
         match self {
             MatrixDistributionStrategy::RotatingOffset => {
-                (shard_idx + (block_sequence as usize)) % volume_count
+                let result = (shard_idx + (block_sequence as usize)) % volume_count;
+                debug_assert!(result < volume_count, "modulo postcondition violated");
+                result
             }
         }
     }
@@ -95,12 +97,18 @@ impl VolumePoolStatusExt for VolumePoolStatus {
         if volume_idx >= self.volume_sizes.len() {
             return false;
         }
-        // Reserve space for footer + backup header to be consistent with VolumePool::volume_can_fit()
-        let reserved = FOOTER_SIZE as u64 + HEADER_SIZE as u64;
-        self.volume_sizes[volume_idx] + block_size + reserved <= self.max_volume_size
+        // Reserve space for footer + backup header + block/shard headers
+        // to be consistent with VolumePool::volume_can_fit()
+        let reserved = FOOTER_SIZE as u64 + HEADER_SIZE as u64
+            + era_common::BlockHeader::SIZE as u64 + era_common::ShardHeader::SIZE as u64;
+        self.volume_sizes[volume_idx].saturating_add(block_size).saturating_add(reserved) <= self.max_volume_size
     }
 
     fn find_available_volume(&self, start_idx: usize, block_size: u64) -> Option<usize> {
+        debug_assert!(self.active_volumes > 0, "active_volumes must be non-zero for modulo");
+        if self.active_volumes == 0 {
+            return None;
+        }
         for i in 0..self.active_volumes {
             let idx = (start_idx + i) % self.active_volumes;
             if self.can_fit(idx, block_size) {
@@ -175,13 +183,13 @@ mod tests {
             active_volumes: 3,
             volume_sequences: vec![0, 1, 2],
             volume_sizes: vec![100, 200, 300],
-            max_volume_size: 4424, // Accounts for footer (128) + header (4096) reservation
+            max_volume_size: 4448, // Accounts for footer (128) + header (4096) + block header (16) + shard header (8) reservation
         };
 
-        // With 4224-byte reservation: can_fit checks if size + block_size + 4224 <= max
-        assert!(status.can_fit(0, 100)); // 100 + 100 + 4224 = 4424 <= 4424
-        assert!(!status.can_fit(0, 101)); // 100 + 101 + 4224 = 4425 > 4424
-        assert!(!status.can_fit(2, 201)); // 300 + 201 + 4224 = 4725 > 4424
+        // With 4248-byte reservation: can_fit checks if size + block_size + 4248 <= max
+        assert!(status.can_fit(0, 100)); // 100 + 100 + 4248 = 4448 <= 4448
+        assert!(!status.can_fit(0, 101)); // 100 + 101 + 4248 = 4449 > 4448
+        assert!(!status.can_fit(2, 201)); // 300 + 201 + 4248 = 4749 > 4448
         assert!(!status.can_fit(5, 100)); // invalid index
     }
 
@@ -191,20 +199,20 @@ mod tests {
             active_volumes: 3,
             volume_sequences: vec![0, 1, 2],
             volume_sizes: vec![400, 200, 300],
-            max_volume_size: 4624, // 400 + 4224 reservation = 4624
+            max_volume_size: 4648, // 400 + 4248 reservation = 4648
         };
 
-        // With 4224-byte reservation:
-        // Volume 0: 400 + 100 + 4224 = 4724 > 4624 (doesn't fit)
-        // Volume 1: 200 + 100 + 4224 = 4524 <= 4624 (fits)
+        // With 4248-byte reservation:
+        // Volume 0: 400 + 100 + 4248 = 4748 > 4648 (doesn't fit)
+        // Volume 1: 200 + 100 + 4248 = 4548 <= 4648 (fits)
         assert_eq!(status.find_available_volume(0, 100), Some(1));
 
-        // Volume 0: 400 + 150 + 4224 = 4774 > 4624 (doesn't fit)
-        // Volume 1: 200 + 150 + 4224 = 4574 <= 4624 (fits)
+        // Volume 0: 400 + 150 + 4248 = 4798 > 4648 (doesn't fit)
+        // Volume 1: 200 + 150 + 4248 = 4598 <= 4648 (fits)
         assert_eq!(status.find_available_volume(0, 150), Some(1));
 
-        // Volume 1: 200 + 250 + 4224 = 4674 > 4624 (doesn't fit)
-        // Volume 2: 300 + 250 + 4224 = 4774 > 4624 (doesn't fit)
+        // Volume 1: 200 + 250 + 4248 = 4698 > 4648 (doesn't fit)
+        // Volume 2: 300 + 250 + 4248 = 4798 > 4648 (doesn't fit)
         assert_eq!(status.find_available_volume(0, 250), None);
 
         // No volume can fit 400

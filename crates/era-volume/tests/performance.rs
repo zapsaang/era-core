@@ -1,8 +1,7 @@
 use bytes::Bytes;
 use era_common::{ArchiveConfig, ArchiveId, BlockId, EncryptedMacroBlock};
 use era_storage::LocalStorageBackend;
-use era_volume::header::{RecipientSlot, SuperHeader};
-use era_volume::{MultiVolumeConfig, MultiVolumeWriter};
+use era_volume::{RecipientSlot, SuperHeader, MultiVolumeConfig, MultiVolumeWriter};
 use std::time::Instant;
 use tempfile::tempdir;
 
@@ -18,7 +17,12 @@ async fn test_rotation_latency_under_load() {
     let backend = LocalStorageBackend::new(dir.path());
 
     // Construct SuperHeader
-    let recipients: Vec<RecipientSlot> = vec![];
+    let recipients = vec![RecipientSlot::new(
+        era_volume::RecipientType::Argon2idPassword,
+        Some([0x12; 8]),
+        vec![0xAB; 16],
+        vec![0xCD; 48],
+    )];
     let archive_config = ArchiveConfig::default();
     let salt = [0u8; 16];
 
@@ -33,7 +37,8 @@ async fn test_rotation_latency_under_load() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     let mut writer = MultiVolumeWriter::create(&backend, config, template_header)
         .await

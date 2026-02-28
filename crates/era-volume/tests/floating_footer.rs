@@ -1,8 +1,7 @@
 use era_common::{ArchiveConfig, ArchiveId};
 use era_storage::memory::MemoryStorageBackend;
 use era_storage::{StorageBackend, StorageWriter};
-use era_volume::footer::Footer;
-use era_volume::{SuperHeader, VolumeReader};
+use era_volume::{Footer, SuperHeader, VolumeReader};
 
 #[tokio::test]
 async fn test_floating_footer_recovery() {
@@ -29,7 +28,8 @@ async fn test_floating_footer_recovery() {
             ciphertext: vec![0u8; 48],
         },
         era_volume::AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
     let header_bytes = header.to_bytes().unwrap();
 
     // 2. Write initial data and a valid footer (Checkpoint 1)

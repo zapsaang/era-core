@@ -18,6 +18,9 @@ use crate::{Footer, SuperHeader, MAX_SHARD_SIZE};
 use rand::rngs::OsRng;
 use rand::RngCore;
 
+/// Space reserved at the end of a fixed-size volume for the backup header + primary footer.
+const BACKUP_HEADER_FOOTER_RESERVED: u64 = (HEADER_SIZE + FOOTER_SIZE) as u64;
+
 /// Writer for a single volume
 pub struct VolumeWriter<W: StorageWriter> {
     /// Underlying storage writer
@@ -38,15 +41,30 @@ pub struct VolumeWriter<W: StorageWriter> {
     last_checkpoint_offset: u64,
     /// Last checkpoint block ID (for direct decryption)
     last_checkpoint_block_id: u32,
+    /// Last catalog offset (preserved across checkpoints)
+    last_catalog_offset: u64,
+    /// Last catalog size (preserved across checkpoints)
+    last_catalog_size: u32,
+    /// Last catalog block ID (preserved across checkpoints)
+    last_catalog_block_id: u32,
+    /// Last index offset (preserved across checkpoints)
+    last_index_offset: u64,
+    /// Last index size (preserved across checkpoints)
+    last_index_size: u32,
+    /// Last index block ID (preserved across checkpoints)
+    last_index_block_id: u32,
 }
 
 impl<W: StorageWriter> VolumeWriter<W> {
-    /// Create a new volume with the given header
+    /// Create a new volume with the given header.
     ///
     /// Layout on create:
     /// - Write primary header at offset 0 (4096 bytes)
     /// - Reserve backup footer gap at offset 4096 (128 bytes of zeros)
     /// - Data region starts at offset 4224 (DATA_REGION_START)
+    ///
+    /// # Errors
+    /// Returns `Serialization` if the header cannot be encoded, or I/O errors from the backend.
     pub async fn create<B: StorageBackend<Writer = W>>(
         backend: &B,
         path: &Path,
@@ -74,6 +92,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
             max_size: None,
             last_checkpoint_offset: 0,
             last_checkpoint_block_id: 0,
+            last_catalog_offset: 0,
+            last_catalog_size: 0,
+            last_catalog_block_id: 0,
+            last_index_offset: 0,
+            last_index_size: 0,
+            last_index_block_id: 0,
         })
     }
 
@@ -108,24 +132,121 @@ impl<W: StorageWriter> VolumeWriter<W> {
             max_size: None,
             last_checkpoint_offset: footer.last_checkpoint_offset,
             last_checkpoint_block_id: footer.last_checkpoint_block_id,
+            last_catalog_offset: footer.catalog_offset,
+            last_catalog_size: footer.catalog_size,
+            last_catalog_block_id: footer.catalog_block_id,
+            last_index_offset: footer.index_offset,
+            last_index_size: footer.index_size,
+            last_index_block_id: footer.index_block_id,
         })
     }
 
-    /// Set the maximum size for this volume
+    /// Set the maximum size for this volume.
+    ///
+    /// Pads the underlying storage to `max_size` immediately. Subsequent writes
+    /// use positional `write_at` instead of `append`.
+    ///
+    /// # Errors
+    /// Returns I/O errors from the underlying storage backend during padding.
     pub async fn set_max_size(&mut self, max_size: u64) -> Result<()> {
         self.max_size = Some(max_size);
         self.pad_to_size(max_size).await
     }
 
-    /// Update the last checkpoint offset
-    pub fn set_last_checkpoint(&mut self, offset: u64) {
-        self.last_checkpoint_offset = offset;
+    /// Validate that a non-zero offset does not exceed the current write position.
+    fn validate_offset_in_bounds(&self, name: &str, offset: u64) -> era_common::Result<()> {
+        if offset != 0 && offset > self.position {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "{}_offset {} exceeds current position {}",
+                name, offset, self.position
+            )));
+        }
+        Ok(())
     }
 
-    /// Update the last checkpoint offset and block ID (for direct decryption)
-    pub fn set_last_checkpoint_with_block_id(&mut self, offset: u64, block_id: u32) {
+    /// Validate that offset and size are either both zero or both non-zero.
+    fn validate_offset_size_pair(name: &str, offset: u64, size: u32) -> era_common::Result<()> {
+        if (offset == 0) != (size == 0) {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "{} offset and size must both be zero or both non-zero",
+                name
+            )));
+        }
+        Ok(())
+    }
+
+
+    /// Update the last checkpoint offset.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if `offset` is non-zero and exceeds the current write position.
+    pub fn set_last_checkpoint(&mut self, offset: u64) -> era_common::Result<()> {
+        self.validate_offset_in_bounds("checkpoint", offset)?;
+        self.last_checkpoint_offset = offset;
+        Ok(())
+    }
+
+    /// Update the last checkpoint offset and block ID (for direct decryption).
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if `offset` is non-zero and exceeds the current write position.
+    pub fn set_last_checkpoint_with_block_id(
+        &mut self,
+        offset: u64,
+        block_id: u32,
+    ) -> era_common::Result<()> {
+        self.validate_offset_in_bounds("checkpoint", offset)?;
         self.last_checkpoint_offset = offset;
         self.last_checkpoint_block_id = block_id;
+        Ok(())
+    }
+
+    /// Update the last catalog location info.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if offset/size consistency is violated or offset exceeds position.
+    pub fn set_catalog_info(
+        &mut self,
+        offset: u64,
+        size: u32,
+        block_id: u32,
+    ) -> era_common::Result<()> {
+        Self::validate_offset_size_pair("catalog", offset, size)?;
+        self.validate_offset_in_bounds("catalog", offset)?;
+        self.last_catalog_offset = offset;
+        self.last_catalog_size = size;
+        self.last_catalog_block_id = block_id;
+        debug_assert!(
+            self.last_catalog_offset == 0 || self.last_catalog_offset <= self.position,
+            "catalog postcondition violated: offset {} > position {}",
+            self.last_catalog_offset,
+            self.position
+        );
+        Ok(())
+    }
+
+    /// Update the last index location info.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if offset/size consistency is violated or offset exceeds position.
+    pub fn set_index_info(
+        &mut self,
+        offset: u64,
+        size: u32,
+        block_id: u32,
+    ) -> era_common::Result<()> {
+        Self::validate_offset_size_pair("index", offset, size)?;
+        self.validate_offset_in_bounds("index", offset)?;
+        self.last_index_offset = offset;
+        self.last_index_size = size;
+        self.last_index_block_id = block_id;
+        debug_assert!(
+            self.last_index_offset == 0 || self.last_index_offset <= self.position,
+            "index postcondition violated: offset {} > position {}",
+            self.last_index_offset,
+            self.position
+        );
+        Ok(())
     }
 
     /// Internal helper to pad the volume with random data up to target_size.
@@ -155,6 +276,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
     ///
     /// max_size is required for proper backup header/footer layout
     ///
+    /// # Errors
+    /// Returns `InvalidConfig` if `max_size` has not been set on this writer.
+    /// Returns `InvalidConfig` if the checkpoint offset exceeds the current write position.
+    /// Returns `CorruptedFooter` if the footer cannot be serialized.
+    /// Returns I/O errors from padding, syncing, or writing footers to the backend.
+    ///
     /// # Crash Safety Protocol
     ///
     /// This function ensures crash-safe checkpoint commits:
@@ -165,6 +292,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// On power loss, the volume will either have:
     /// - Old footer (checkpoint not committed) - safe
     /// - New footer with valid padding - safe
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This method borrows `&mut self` and can be cancelled at any `.await` point.
+    /// If cancelled before `sync_data()` (step 2): no visible change — padding not on disk.
+    /// If cancelled between `sync_data()` and footer writes: padding on disk, old footer valid.
+    /// If cancelled between footer writes and `sync()`: footers buffered but not persistent —
+    /// old footer still valid on disk, new footer lost.
     pub async fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
         let max_size = self.max_size.ok_or_else(|| {
             era_common::EraError::InvalidConfig("max_size required for volumes".into())
@@ -173,8 +308,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         // Fixed Size Mode: Update footer at fixed location
 
         // 1. Ensure padding (leave space for backup header + footer at end)
-        let reserved_end = (HEADER_SIZE + FOOTER_SIZE) as u64;
-        let pad_target = max_size.saturating_sub(reserved_end);
+        let pad_target = max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED);
         self.pad_to_size(pad_target).await?;
 
         // 2. CRITICAL: Sync padding data to disk BEFORE updating footer
@@ -184,7 +318,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.writer.sync_data().await?;
 
         // 3. Update state
-        self.set_last_checkpoint(checkpoint_offset);
+        self.set_last_checkpoint(checkpoint_offset)?;
 
         // 4. Calculate backup header offset (where backup header will be written on finalize)
         let backup_header_offset = pad_target;
@@ -194,14 +328,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.position,
             self.block_count,
             self.sequence,
-            0,
-            0,
-            0,
+            self.last_catalog_offset,
+            self.last_catalog_size,
+            self.last_catalog_block_id,
             self.last_checkpoint_offset,
             self.last_checkpoint_block_id,
-            0,
-            0,
-            0,
+            self.last_index_offset,
+            self.last_index_size,
+            self.last_index_block_id,
             backup_header_offset,
         );
 
@@ -219,15 +353,23 @@ impl<W: StorageWriter> VolumeWriter<W> {
         // 8. Final sync to ensure footer is persisted
         self.writer.sync().await?;
 
+        debug_assert!(
+            self.last_checkpoint_offset <= self.position,
+            "checkpoint postcondition violated: offset {} > position {}",
+            self.last_checkpoint_offset,
+            self.position
+        );
         Ok(())
     }
 
     /// Get the volume ID
+    #[must_use]
     pub fn volume_id(&self) -> VolumeId {
         self.header.volume_id
     }
 
     /// Get the current size of the volume (valid data size)
+    #[must_use]
     pub fn current_size(&self) -> u64 {
         self.position
     }
@@ -236,6 +378,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
     ///
     /// This only counts blocks written via `write_canonical_block()`.
     /// Raw writes via `write_raw()` are tracked separately.
+    #[must_use]
     pub fn block_count(&self) -> u32 {
         self.block_count
     }
@@ -243,11 +386,17 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// Get the total bytes written via `write_raw()`.
     ///
     /// This is separate from `block_count()` which only tracks canonical blocks.
+    #[must_use]
     pub fn raw_bytes_written(&self) -> u64 {
         self.raw_bytes_written
     }
 
     /// Write a canonical block with explicit BlockType
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if the block data exceeds `MAX_SHARD_SIZE` or `u32::MAX`.
+    /// Returns `VolumeFull` if `max_size` is set and the block would exceed the volume limit.
+    /// Returns I/O errors from the underlying storage backend.
     pub async fn write_canonical_block(
         &mut self,
         block: &EncryptedMacroBlock,
@@ -276,9 +425,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
         if let Some(max_size) = self.max_size {
             let footer_size = crate::footer::FOOTER_SIZE as u64;
             if offset + total_len + footer_size > max_size {
-                return Err(era_common::EraError::Io(std::io::Error::other(
-                    "Volume full",
-                )));
+                return Err(era_common::EraError::VolumeFull {
+                    volume_id: self.header.volume_id.to_string(),
+                });
             }
         }
 
@@ -306,15 +455,29 @@ impl<W: StorageWriter> VolumeWriter<W> {
         } else {
             self.position = self.writer.current_size();
         }
-        self.block_count += 1;
+        self.block_count = self.block_count.saturating_add(1);
 
         Ok(location)
     }
 
+
+    /// Sync data to persistent storage without metadata (fdatasync).
+    ///
+    /// This ensures all previously written block data is on stable storage.
+    /// More efficient than a full sync when metadata changes are not critical.
+    ///
+    /// # Errors
+    /// Returns I/O errors from the underlying storage backend.
+    pub async fn sync_data(&mut self) -> Result<()> {
+        self.writer.sync_data().await
+    }
     /// Write raw bytes to the volume (for index embedding and low-level access).
     ///
     /// Raw writes are tracked separately via `raw_bytes_written()` and do NOT
     /// increment `block_count()`, which only counts canonical typed blocks.
+    ///
+    /// # Errors
+    /// Returns I/O errors from the underlying storage backend.
     pub async fn write_raw(&mut self, data: &[u8]) -> Result<u64> {
         let offset = self.position;
 
@@ -332,6 +495,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
     }
 
     /// Finalize the volume by writing the footer and syncing
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if catalog or index offsets exceed the current write position.
+    /// Returns `Serialization` if the header or footer cannot be encoded.
+    /// Returns I/O errors from padding, writing backup header/footer, syncing, or closing.
     pub async fn finalize(self) -> Result<SuperHeader> {
         self.finalize_with_catalog(0, 0, 0, 0, 0, 0).await
     }
@@ -352,6 +520,26 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// [N]           Backup Header (4096 bytes) - copy of primary
     /// [N+4096]      Primary Footer (128 bytes)
     /// ```
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if catalog or index offsets exceed the current write position.
+    /// Returns `Serialization` if the header or footer cannot be encoded.
+    /// Returns I/O errors from padding, writing backup header/footer, syncing, or closing.
+    ///
+    /// # Crash Safety
+    ///
+    /// This method syncs padding data to disk (fdatasync) before writing
+    /// backup header and footers, preventing "garbage tail" on power loss.
+    /// On crash, the volume will either have:
+    /// - Old footer (finalize not committed) — data intact, recoverable via re-finalize
+    /// - New footer with synced padding — fully valid
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This method consumes `self`, so cancellation (dropping the future) drops the
+    /// writer without syncing. The volume file remains on disk with valid data blocks
+    /// but no footer. Recovery: re-open via `open_append()` using floating footer
+    /// recovery (if a checkpoint was committed) or re-create.
     pub async fn finalize_with_catalog(
         mut self,
         catalog_offset: u64,
@@ -362,28 +550,23 @@ impl<W: StorageWriter> VolumeWriter<W> {
         index_block_id: u32,
     ) -> Result<SuperHeader> {
         // Validate offsets: non-zero offsets must not exceed current write position
-        if catalog_offset != 0 && catalog_offset > self.position {
-            return Err(era_common::EraError::InvalidConfig(format!(
-                "catalog_offset {} exceeds current position {}",
-                catalog_offset, self.position
-            )));
-        }
-        if index_offset != 0 && index_offset > self.position {
-            return Err(era_common::EraError::InvalidConfig(format!(
-                "index_offset {} exceeds current position {}",
-                index_offset, self.position
-            )));
-        }
+        self.validate_offset_in_bounds("catalog", catalog_offset)?;
+        self.validate_offset_in_bounds("index", index_offset)?;
 
         self.sequence += 1;
 
         // Random padding if max_size is set
         if let Some(max_size) = self.max_size {
             // Ensure full padding to max_size minus space for backup header + footer
-            let reserved_end = (HEADER_SIZE + FOOTER_SIZE) as u64;
-            let pad_target = max_size.saturating_sub(reserved_end);
+            let pad_target = max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED);
             self.pad_to_size(pad_target).await?;
             self.position = pad_target;
+
+            // CRASH SAFETY: Sync padding data to disk BEFORE writing backup header
+            // and footers. This matches the protocol in commit_checkpoint() and
+            // prevents "garbage tail" — where footer references padding that
+            // never reached disk. Uses fdatasync (metadata sync not required).
+            self.writer.sync_data().await?;
         }
 
         // 1. Write backup header (copy of primary) at current position
@@ -400,6 +583,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         // 2. Calculate data_end_offset (where data region ends, before backup header)
         let data_end_offset = backup_header_offset;
+
+        // V27-12: Store catalog/index info so future checkpoints preserve it
+        self.last_catalog_offset = catalog_offset;
+        self.last_catalog_size = catalog_size;
+        self.last_catalog_block_id = catalog_block_id;
+        self.last_index_offset = index_offset;
+        self.last_index_size = index_size;
+        self.last_index_block_id = index_block_id;
 
         // 3. Create footer with backup_header_offset
         let footer = Footer::with_catalog(
@@ -449,7 +640,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm};
+    use crate::{AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType};
     use bytes::Bytes;
     use era_common::{ArchiveConfig, ArchiveId, BlockId};
     use era_storage::LocalStorageBackend;
@@ -462,7 +653,12 @@ mod tests {
 
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {
@@ -471,7 +667,8 @@ mod tests {
                 ciphertext: vec![0u8; 48],
             },
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
             .await
@@ -489,7 +686,12 @@ mod tests {
 
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {
@@ -498,7 +700,8 @@ mod tests {
                 ciphertext: vec![0u8; 48],
             },
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
             .await
@@ -529,7 +732,12 @@ mod tests {
 
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {
@@ -538,7 +746,8 @@ mod tests {
                 ciphertext: vec![0u8; 48],
             },
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
             .await
@@ -569,7 +778,12 @@ mod tests {
 
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {
@@ -578,7 +792,8 @@ mod tests {
                 ciphertext: vec![0u8; 48],
             },
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
             .await
@@ -610,7 +825,12 @@ mod tests {
 
         let header = SuperHeader::new(
             ArchiveId::new(),
-            vec![],
+            vec![RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
             ArchiveConfig::default(),
             [0u8; 16],
             EncryptedVolumeKey {
@@ -619,7 +839,8 @@ mod tests {
                 ciphertext: vec![0u8; 48],
             },
             AccessPolicy::AnyOfN,
-        );
+        )
+        .unwrap();
 
         let mut writer = VolumeWriter::create(&backend, Path::new("test.era"), header)
             .await

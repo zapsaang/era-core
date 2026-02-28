@@ -21,12 +21,11 @@ use era_common::{
     VolumePoolStatus,
 };
 use era_storage::LocalStorageBackend;
-use era_volume::footer::{BACKUP_FOOTER_GAP, FOOTER_MAGIC, FOOTER_VERSION};
-use era_volume::header::{DATA_REGION_START, HEADER_VERSION, MAGIC, MAX_RECIPIENTS};
 use era_volume::{
     AccessPolicy, DistributionCalculator, EncryptedVolumeKey, Footer, KeyWrapAlgorithm,
     RecipientSlot, RecipientType, SuperHeader, VolumePoolConfig, VolumePoolStatusExt, VolumeReader,
-    VolumeWriter, FOOTER_SIZE, HEADER_SIZE,
+    VolumeWriter, BACKUP_FOOTER_GAP, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION, HEADER_SIZE,
+    DATA_REGION_START, HEADER_VERSION, MAGIC, MAX_RECIPIENTS,
 };
 use std::path::Path;
 use tempfile::TempDir;
@@ -53,6 +52,7 @@ fn test_header() -> SuperHeader {
         },
         AccessPolicy::AnyOfN,
     )
+    .unwrap()
 }
 
 fn test_block(id: u64, size: usize) -> EncryptedMacroBlock {
@@ -73,7 +73,7 @@ fn test_block(id: u64, size: usize) -> EncryptedMacroBlock {
 #[test]
 fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
     let footer = Footer::with_catalog(
-        8192, // data_end_offset (above min structural size)
+        16384, // data_end_offset (above min structural size, covers all regions)
         42,   // block_count
         7,    // sequence_number
         5000, // catalog_offset
@@ -93,7 +93,7 @@ fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
     let restored = Footer::from_bytes(&bytes).unwrap();
     assert_eq!(restored.magic, FOOTER_MAGIC);
     assert_eq!(restored.version, FOOTER_VERSION);
-    assert_eq!(restored.data_end_offset, 8192);
+    assert_eq!(restored.data_end_offset, 16384);
     assert_eq!(restored.block_count, 42);
     assert_eq!(restored.sequence_number, 7);
     assert_eq!(restored.catalog_offset, 5000);
@@ -210,7 +210,7 @@ fn test_v26_f1_footer_index_offset_below_header() {
 /// V26 P0-1: FooterBuilder roundtrip produces a valid footer.
 #[test]
 fn test_v26_f1_footer_builder_roundtrip() {
-    let footer = Footer::builder(8192, 10, 3)
+    let footer = Footer::builder(16384, 10, 3)
         .catalog(5000, 1024, 1)
         .checkpoint(6000, 2)
         .index(7000, 2048, 3)
@@ -225,7 +225,7 @@ fn test_v26_f1_footer_builder_roundtrip() {
 
     let bytes = footer.to_bytes().unwrap();
     let restored = Footer::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.data_end_offset, 8192);
+    assert_eq!(restored.data_end_offset, 16384);
     assert_eq!(restored.block_count, 10);
     assert_eq!(restored.catalog_offset, 5000);
     assert_eq!(restored.index_offset, 7000);
@@ -289,7 +289,8 @@ fn test_v26_f2_header_max_recipients_roundtrip() {
             ciphertext: vec![0u8; 48],
         },
         AccessPolicy::AnyOfN,
-    );
+    )
+    .unwrap();
 
     // This might fail if the header is too large for 4096 bytes.
     // That's expected — MAX_RECIPIENTS=256 slots won't all fit in 4KB.
@@ -305,11 +306,24 @@ fn test_v26_f2_header_roundtrip_with_threshold_policy() {
     let header = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::Argon2idPassword,
-            Some([0x12; 8]),
-            vec![0xAB; 16],
-            vec![0xCD; 48],
-        )],
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            ),
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x13; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            ),
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x14; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            ),
+        ],
         ArchiveConfig::default(),
         [0u8; 16],
         EncryptedVolumeKey {
@@ -318,7 +332,8 @@ fn test_v26_f2_header_roundtrip_with_threshold_policy() {
             ciphertext: vec![0u8; 48],
         },
         AccessPolicy::Threshold(3),
-    );
+    )
+    .unwrap();
 
     let bytes = header.to_bytes().unwrap();
     let restored = SuperHeader::from_bytes(&bytes).unwrap();
@@ -333,11 +348,24 @@ fn test_v26_f2_threshold_below_2_rejected() {
     let mut header = SuperHeader::new(
         ArchiveId::new(),
         vec![RecipientSlot::new(
-            RecipientType::Argon2idPassword,
-            Some([0x12; 8]),
-            vec![0xAB; 16],
-            vec![0xCD; 48],
-        )],
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            ),
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x13; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            ),
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x14; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            ),
+        ],
         ArchiveConfig::default(),
         [0u8; 16],
         EncryptedVolumeKey {
@@ -346,7 +374,8 @@ fn test_v26_f2_threshold_below_2_rejected() {
             ciphertext: vec![0u8; 48],
         },
         AccessPolicy::Threshold(3),
-    );
+    )
+    .unwrap();
 
     let valid_bytes = header.to_bytes().unwrap();
     // Verify the valid one works
@@ -618,20 +647,21 @@ fn test_v26_f8_can_fit_invalid_index() {
     );
 }
 
-/// V26 P3-4: can_fit correctly accounts for FOOTER_SIZE + HEADER_SIZE reservation.
+/// V26 P3-4: can_fit correctly accounts for FOOTER_SIZE + HEADER_SIZE + BlockHeader::SIZE + ShardHeader::SIZE reservation.
 #[test]
 fn test_v26_f8_can_fit_with_reservation() {
-    let reserved = (FOOTER_SIZE + HEADER_SIZE) as u64; // 4224
+    let reserved = (FOOTER_SIZE + HEADER_SIZE) as u64
+        + era_common::BlockHeader::SIZE as u64 + era_common::ShardHeader::SIZE as u64; // 4248
     let status = VolumePoolStatus {
         active_volumes: 1,
         volume_sequences: vec![0],
         volume_sizes: vec![0],
-        max_volume_size: reserved + 100, // exactly 4324
+        max_volume_size: reserved + 100, // exactly 4348
     };
 
-    // 0 + 100 + 4224 = 4324 <= 4324 — should fit
+    // 0 + 100 + 4248 = 4348 <= 4348 — should fit
     assert!(status.can_fit(0, 100));
-    // 0 + 101 + 4224 = 4325 > 4324 — should NOT fit
+    // 0 + 101 + 4248 = 4349 > 4348 — should NOT fit
     assert!(!status.can_fit(0, 101));
 }
 
@@ -678,9 +708,11 @@ fn test_v26_f9_volume_path_sequence_nonzero() {
 // Footer edge cases (additional coverage)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// V26: Footer version=0 is accepted (from_bytes checks > FOOTER_VERSION, not !=).
+/// V26→V27: Footer version=0 is now rejected (V27-02 fix).
+/// Previously this test asserted is_ok(). After the V27-02 fix to footer.rs,
+/// version 0 footers are correctly rejected.
 #[test]
-fn test_v26_f1_footer_version_zero_accepted() {
+fn test_v26_f1_footer_version_zero_rejected() {
     let footer = Footer::new(8192, 1, 1);
     let mut bytes = footer.to_bytes().unwrap();
     // Patch version (offset 4) to 0
@@ -694,8 +726,8 @@ fn test_v26_f1_footer_version_zero_accepted() {
 
     let result = Footer::from_bytes(&bytes);
     assert!(
-        result.is_ok(),
-        "Footer version 0 should be accepted (version <= FOOTER_VERSION)"
+        result.is_err(),
+        "Footer version 0 must now be rejected (V27-02 fix)"
     );
 }
 

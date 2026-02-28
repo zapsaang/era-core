@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f382890b808e71c6261f4deb82c34057c0dbc17e292227539a7e9199a3b9054a # shrinks to ref footer = Footer { magic: [69, 82, 65, 70], version: 1, flags: 0, data_end_offset: 0, block_count: 459, sequence_number: 9213306480644929016, catalog_offset: 0, catalog_size: 0, catalog_block_id: 1842339659, last_checkpoint_offset: 56095096746073001, last_checkpoint_block_id: 3398148035, index_offset: 0, index_size: 0, index_block_id: 1949707254, backup_header_offset: 12618477034129968551, checksum: [58, 205, 92, 208, 205, 203, 225, 222, 245, 145, 67, 156, 200, 32, 195, 101, 93, 148, 58, 170, 200, 110, 238, 96, 76, 40, 188, 253, 211, 222, 74, 204] }, byte_idx = 93, bit_idx = 6
+cc 631fdc72dabc035e13a3d6e1a9790000a65a2780f4eaa72ff2f3fae9a86cd5f1 # shrinks to policy = Threshold(2)
