@@ -217,7 +217,7 @@ pub async fn repair_archive(
                         block_index, shard_idx
                     );
                     corrupted_indices.push(shard_idx);
-                    break 'stripe_loop;
+                    continue;
                 }
             };
 
@@ -432,9 +432,19 @@ fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
         let crc = compute_shard_crc(&repair.data);
         let header = ShardHeader::new(repair.data.len() as u32, crc);
 
-        file.seek(SeekFrom::Start(repair.offset))?;
-        file.write_all(&header.to_bytes())?;
+        // Write shard data first, then flush, then write header
+        // This ensures a crash between writes leaves the header unwritten (detectable)
+        // rather than pointing to garbage data (V2-SEC-06 fix)
+        let header_bytes = header.to_bytes();
+        let data_offset = repair.offset + header_bytes.len() as u64;
+        
+        file.seek(SeekFrom::Start(data_offset))?;
         file.write_all(&repair.data)?;
+        file.flush()?;
+        
+        // Now write the header (which points to the data we just wrote)
+        file.seek(SeekFrom::Start(repair.offset))?;
+        file.write_all(&header_bytes)?;
 
         debug!(
             "Repaired shard {} at offset {} ({} bytes)",

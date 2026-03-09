@@ -593,6 +593,7 @@ fn m2_auth_mode_password_no_zeroize() {
 
     // Check if the Password variant's String is zeroized
     let has_zeroize = enum_area.contains("Zeroize")
+        || enum_area.contains("Zeroizing")
         || enum_area.contains("ZeroizeOnDrop")
         || writer_source.contains("impl Drop for AuthMode");
 

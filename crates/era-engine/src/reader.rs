@@ -36,6 +36,8 @@ const INTERNAL_META_PREFIX: &str = ".era/meta/";
 /// Maximum allowed file size declared in catalog (100 GB) - sanity check
 const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
 
+const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
+
 /// Options for extraction
 #[derive(Debug, Clone, Default)]
 pub struct ExtractOptions {
@@ -754,6 +756,11 @@ impl ArchiveReader {
             .read_raw(offset, era_common::ShardHeader::SIZE)
             .await?;
         if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
+            if header.length as u64 > MAX_SHARD_SIZE {
+                return Err(EraError::InvalidFormat(
+                    "Shard size exceeds maximum".into(),
+                ));
+            }
             let data = reader
                 .read_raw(
                     offset + era_common::ShardHeader::SIZE as u64,
@@ -784,6 +791,9 @@ impl ArchiveReader {
         options: &ExtractOptions,
     ) -> Result<ExtractStats> {
         let mut stats = ExtractStats::default();
+
+        fs::create_dir_all(&options.output_dir)?;
+        let canonical_output_dir = fs::canonicalize(&options.output_dir)?;
 
         // Build maps for extraction
         let mut context = ExtractionContext::new();
@@ -830,6 +840,27 @@ impl ArchiveReader {
                 )));
             }
 
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let canonical_path = std::fs::canonicalize(&output_path).or_else(|_| {
+                let parent = output_path.parent().unwrap_or(Path::new("."));
+                let canonical_parent = std::fs::canonicalize(parent)?;
+                let file_name = output_path.file_name().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Output path has no file name",
+                    )
+                })?;
+                Ok::<PathBuf, std::io::Error>(canonical_parent.join(file_name))
+            })?;
+            if !canonical_path.starts_with(&canonical_output_dir) {
+                return Err(EraError::Security(format!(
+                    "Symlink escape detected: {} resolves outside output directory",
+                    output_path.display()
+                )));
+            }
+
             if entry.is_chunked() {
                 let chunk_count = entry.chunks.len();
 
@@ -850,9 +881,6 @@ impl ArchiveReader {
                         .push((file_idx, packed_info.file_index, output_path));
                 } else {
                     // Normal multi-chunk file: pre-create file
-                    if let Some(parent) = output_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
                     let file = File::create(&output_path)?;
                     file.set_len(entry.size)?;
 

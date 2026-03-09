@@ -150,7 +150,13 @@ impl RecoveryManager {
         }
 
         // Load footer to populate bytes_written from data_end_offset
-        let bytes_written = Self::read_footer_data_end(archive_path).await.unwrap_or(0);
+        let bytes_written = match Self::read_footer_data_end(archive_path).await {
+            Ok(val) => val,
+            Err(e) => {
+                warn!("Failed to read footer data_end offset: {}. Defaulting to 0.", e);
+                0
+            }
+        };
 
         debug!(
             "Checkpoint detected in volume footer for {:?}, data_end_offset={}",

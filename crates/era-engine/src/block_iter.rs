@@ -248,7 +248,18 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
         erasure_unpacker: &'a ErasureBlockUnpacker,
         data_shards: u8,
         parity_shards: u8,
-    ) -> Self {
+    ) -> Result<Self> {
+        if volume_readers.is_empty() {
+            return Err(EraError::InvalidFormat("No volume readers provided".into()));
+        }
+        if volume_readers.len() != volume_indices.len() {
+            return Err(EraError::InvalidFormat(format!(
+                "volume_readers length ({}) != volume_indices length ({})",
+                volume_readers.len(),
+                volume_indices.len()
+            )));
+        }
+
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
@@ -286,7 +297,7 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             }
         }
 
-        Self {
+        Ok(Self {
             volume_readers,
             erasure_unpacker,
             data_shards,
@@ -298,7 +309,7 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             data_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
-        }
+        })
     }
 }
 
@@ -454,6 +465,8 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             .collect();
 
         // Decode and extract chunks
+        let valid_shard_count = valid_shards.len();
+
         let result = match self.erasure_unpacker.decode_and_extract_all(
             valid_shards,
             &erasure_info,
@@ -469,6 +482,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
             Err(e) => {
                 self.stats.blocks_failed += 1;
+                tracing::warn!(
+                    "Erasure block {} decode failed: {}. Valid shards: {}/{}, first shard size: {}",
+                    self.block_index,
+                    e,
+                    valid_shard_count,
+                    self.total_shards,
+                    first_shard_size
+                );
                 Err(e)
             }
         };
@@ -742,7 +763,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
     /// * `compressor` - The compressor for decompression
     /// * `data_shards` - Number of data shards in erasure config
     /// * `parity_shards` - Number of parity shards in erasure config
-    pub fn new(args: SessionErasureBlockIteratorArgs<'a, R>) -> Self {
+    pub fn new(args: SessionErasureBlockIteratorArgs<'a, R>) -> Result<Self> {
         let SessionErasureBlockIteratorArgs {
             volume_readers,
             volume_indices,
@@ -757,6 +778,17 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             parity_shards,
             distribution_strategy,
         } = args;
+        if volume_readers.is_empty() {
+            return Err(EraError::InvalidFormat("No volume readers provided".into()));
+        }
+        if volume_readers.len() != volume_indices.len() {
+            return Err(EraError::InvalidFormat(format!(
+                "volume_readers length ({}) != volume_indices length ({})",
+                volume_readers.len(),
+                volume_indices.len()
+            )));
+        }
+
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
@@ -803,7 +835,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             compressor,
         );
 
-        Self {
+        Ok(Self {
             volume_readers,
             unpacker,
             data_shards,
@@ -818,6 +850,41 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             distribution_strategy,
             stats: BlockIterStats::default(),
             pending_blocks: VecDeque::new(),
+        })
+    }
+}
+
+#[async_trait(?Send)]
+impl<'a, R: era_storage::StorageReader> BlockIterator
+    for Result<SessionErasureBlockIterator<'a, R>>
+{
+    async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
+        match self {
+            Ok(iter) => iter.next_block().await,
+            Err(e) => Some(Err(std::mem::replace(
+                e,
+                EraError::InvalidFormat("Session erasure iterator initialization failed".into()),
+            ))),
+        }
+    }
+
+    fn has_more(&self) -> bool {
+        match self {
+            Ok(iter) => iter.has_more(),
+            Err(_) => true,
+        }
+    }
+
+    fn stats(&self) -> &BlockIterStats {
+        static EMPTY_STATS: BlockIterStats = BlockIterStats {
+            blocks_read: 0,
+            blocks_failed: 0,
+            corrupted_shards: 0,
+        };
+
+        match self {
+            Ok(iter) => iter.stats(),
+            Err(_) => &EMPTY_STATS,
         }
     }
 }

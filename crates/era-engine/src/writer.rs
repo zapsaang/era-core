@@ -56,11 +56,10 @@ use crate::volume_stage::VolumeStage;
 use crate::write_pipeline::WritePipeline;
 
 /// Authentication mode for archive encryption
-#[derive(Clone, Debug)]
 pub enum AuthMode {
     /// Password-based authentication using Argon2id
     /// This is the traditional mode with ~50-300ms key derivation overhead.
-    Password(String),
+    Password(Zeroizing<String>),
 
     /// Certificate-based authentication using X25519 key exchange
     /// This mode is ~1000x faster than password mode (~0.05ms).
@@ -70,26 +69,28 @@ pub enum AuthMode {
     /// Hybrid mode: both password AND certificate required
     /// Provides defense-in-depth for high-security scenarios.
     Hybrid {
-        password: String,
+        password: Zeroizing<String>,
         certificate: EraCertificate,
     },
 }
 
-impl Drop for AuthMode {
-    fn drop(&mut self) {
+impl std::fmt::Debug for AuthMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuthMode::Password(ref mut pwd) => pwd.zeroize(),
-            AuthMode::Hybrid {
-                ref mut password, ..
-            } => password.zeroize(),
-            _ => {}
+            AuthMode::Password(_) => f.debug_tuple("Password").field(&"[REDACTED]").finish(),
+            AuthMode::Certificate(cert) => f.debug_tuple("Certificate").field(cert).finish(),
+            AuthMode::Hybrid { certificate, .. } => f
+                .debug_struct("Hybrid")
+                .field("password", &"[REDACTED]")
+                .field("certificate", certificate)
+                .finish(),
         }
     }
 }
 
 impl Default for AuthMode {
     fn default() -> Self {
-        AuthMode::Password(String::new())
+        AuthMode::Password(Zeroizing::new(String::new()))
     }
 }
 
@@ -170,7 +171,7 @@ impl ArchiveWriterBuilder {
     /// This uses Argon2id for key derivation (~50-300ms overhead).
     /// For faster key derivation, consider using `certificate()` instead.
     pub fn password(mut self, password: impl Into<String>) -> Self {
-        self.auth_mode = AuthMode::Password(password.into());
+        self.auth_mode = AuthMode::Password(Zeroizing::new(password.into()));
         self
     }
 
@@ -399,6 +400,12 @@ impl ArchiveWriterBuilder {
             archive_salt = Salt::from_bytes(*loaded_header.salt());
             recipients = loaded_header.recipients().to_vec();
 
+            if matches!(loaded_header.access_policy(), era_volume::AccessPolicy::Threshold(_)) {
+                return Err(era_common::EraError::InvalidFormat(
+                    "Threshold authentication not supported for append mode".into(),
+                ));
+            }
+
             // 3. Hydrate Key Session (Recover Master Key)
             let mut recovered_mk: Option<[u8; 32]> = None;
 
@@ -512,7 +519,7 @@ impl ArchiveWriterBuilder {
                 match self.access_policy {
                     era_volume::AccessPolicy::Threshold(t) => {
                         // Collect all passwords
-                        let mut all_passwords = vec![pwd.clone()];
+                        let mut all_passwords = vec![pwd.as_str().to_string()];
                         all_passwords.extend(self.additional_passwords.iter().cloned());
                         let n = all_passwords.len();
 

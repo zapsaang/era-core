@@ -117,6 +117,16 @@ impl ExtractionContext {
             if let Some(file_refs) = self.chunk_to_files.remove(&hash) {
                 for (file_idx, chunk_idx, chunk_offset) in file_refs {
                     if let Some(state) = self.multi_chunk_files.get_mut(&file_idx) {
+                        // Bounds validation: ensure chunk write stays within expected file size
+                        if chunk_offset + data.len() as u64 > state.expected_size {
+                            return Err(era_common::EraError::InvalidFormat(
+                                format!(
+                                    "Chunk write exceeds file bounds: offset {} + size {} > expected {}",
+                                    chunk_offset, data.len(), state.expected_size
+                                )
+                            ));
+                        }
+
                         // Seek to correct position and write chunk
                         state.file.seek(SeekFrom::Start(chunk_offset))?;
                         state.file.write_all(&data)?;

@@ -599,34 +599,6 @@ pub async fn write_checkpoint<W: StorageWriter>(
         }
     }
 
-    // Fall back to brute-force for legacy volumes (block_id = 0 or decryption failed)
-    for candidate_id in 0..100u64 {
-        let block_id = BlockId::new(candidate_id);
-        let block_key =
-            session.derive_block_key(volume_key, block_id.sequence(), &nonce_context)?;
-        let derived_key = block_key.to_derived_key()?;
-
-        if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
-            &derived_key,
-            &nonce_context,
-            &archive_id,
-            epoch_id,
-            block_id,
-            &encrypted_block.data,
-        ) {
-            // Try to deserialize as Checkpoint
-            if let Ok(checkpoint) = Checkpoint::from_bytes(&decrypted_data) {
-                tracing::info!(
-                    "Checkpoint recovered (brute-force id {}): {} chunks, {} files",
-                    candidate_id,
-                    checkpoint.chunks_written,
-                    checkpoint.total_files_processed
-                );
-                return Ok(checkpoint);
-            }
-        }
-    }
-
     Err(EraError::Decryption(
         "Could not decrypt checkpoint with any candidate block ID".into(),
     ))
