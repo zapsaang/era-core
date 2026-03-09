@@ -98,21 +98,19 @@ impl<B: StorageBackend> WritePipeline<B> {
         chunks: Vec<UniqueChunk>,
         extra_hashes: Vec<ChunkHash>,
     ) -> Result<()> {
-        // Collect all hashes that need index update for this block
         let mut hashes: Vec<ChunkHash> = chunks.iter().map(|c| c.hash).collect();
         hashes.extend(extra_hashes);
 
-        let block_meta = BlockMeta {
-            chunk_hashes: hashes.clone(),
-            chunk_entries: Vec::new(),
-        };
-
         // Create encrypted block
         let compressor = self.create_compressor();
-        let builder = self.encryption.create_block_builder(compressor);
+        let builder = self.encryption.create_block_builder(compressor)?;
         let encrypted_block = builder.pack_chunks(chunks)?;
 
         if self.erasure.is_enabled() {
+            let block_meta = BlockMeta {
+                chunk_hashes: hashes,
+                chunk_entries: Vec::new(),
+            };
             // Erasure Coding Path: buffer block until stripe is complete
             let maybe_stripe = self.erasure.buffer_block(encrypted_block, block_meta)?;
             if let Some(stripe) = maybe_stripe {
@@ -174,7 +172,7 @@ impl<B: StorageBackend> WritePipeline<B> {
             } else {
                 // Create padding block for partial stripe
                 let compressor = self.create_compressor();
-                let builder = self.encryption.create_block_builder(compressor);
+                let builder = self.encryption.create_block_builder(compressor)?;
                 let encrypted_block = builder.pack_chunks(vec![])?;
                 stripe_lengths[i] = encrypted_block.data.len() as u32;
                 padding_blocks[i] = Some(encrypted_block);
@@ -335,7 +333,12 @@ impl<B: StorageBackend> WritePipeline<B> {
     ///
     /// This should be called at safe points during archiving to enable
     /// crash recovery.
+    #[deprecated(
+        since = "2.2.0",
+        note = "Use commit_to_volume() for checkpoint persistence"
+    )]
     pub fn sync_checkpoint(&mut self) -> Result<()> {
+        #[allow(deprecated)]
         self.index.sync_checkpoint()
     }
 

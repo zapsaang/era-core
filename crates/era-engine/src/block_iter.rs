@@ -63,8 +63,8 @@ pub trait BlockIterator {
     fn stats(&self) -> &BlockIterStats;
 }
 
-/// Maximum allowed block size (1 GB) - Increased to support large blocks
-const MAX_BLOCK_SIZE: u32 = 1024 * 1024 * 1024;
+/// Maximum allowed block size (64 MB) — read-path sanity check (~16x typical block sizes)
+const MAX_BLOCK_SIZE: u32 = 64 * 1024 * 1024;
 
 /// Iterator for standard (non-erasure) blocks
 pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {
@@ -1060,9 +1060,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             }
 
             if decoded.is_none() && parity_shards > 0 {
-                let mut override_shards = shard_array.clone();
-                override_shards[i] = None;
-                if let Ok(alt_recovered) = coder.recover_data_shards(&override_shards, shard_size) {
+                let original = shard_array[i].take();
+                let result = coder.recover_data_shards(&shard_array, shard_size);
+                shard_array[i] = original;
+                if let Ok(alt_recovered) = result {
                     if let Some(chunks) = attempt_decode(&alt_recovered[i]) {
                         decoded = Some(chunks);
                         self.stats.corrupted_shards += 1;

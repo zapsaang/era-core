@@ -206,13 +206,13 @@ impl ChunkPipeline {
         let sender = self.sender.clone();
         let original_size = data.len();
 
-        let hash = task::spawn_blocking(move || {
+        let hash = task::spawn_blocking(move || -> Result<ChunkHash> {
             // Compute hash on original data (for dedup)
             let hash_result = era_crypto::hash(&data);
             let hash = ChunkHash::from_bytes(*hash_result.as_bytes());
 
             // Compress data
-            let compressed_data = compress_zstd(&data, compression_level);
+            let compressed_data = compress_zstd(&data, compression_level)?;
             let compressed_size = compressed_data.len();
 
             let processed = ProcessedChunk {
@@ -227,10 +227,10 @@ impl ChunkPipeline {
             }
 
             drop(permit);
-            hash
+            Ok(hash)
         })
         .await
-        .map_err(|e| EraError::AsyncError(format!("Task join failed: {}", e)))?;
+        .map_err(|e| EraError::AsyncError(format!("Task join failed: {}", e)))??;
 
         Ok(hash)
     }
@@ -295,15 +295,15 @@ impl ChunkPipeline {
 ///
 /// This is a helper function for CPU-bound compression work.
 /// It should be called from within `spawn_blocking`.
-fn compress_zstd(data: &[u8], level: i32) -> Bytes {
+fn compress_zstd(data: &[u8], level: i32) -> Result<Bytes> {
     use zstd::stream::encode_all;
 
     match encode_all(data, level) {
-        Ok(compressed) => Bytes::from(compressed),
-        Err(e) => {
-            tracing::warn!("Compression failed: {}, using uncompressed data", e);
-            Bytes::copy_from_slice(data)
-        }
+        Ok(compressed) => Ok(Bytes::from(compressed)),
+        Err(e) => Err(EraError::Compression(format!(
+            "zstd compression failed: {}",
+            e
+        ))),
     }
 }
 

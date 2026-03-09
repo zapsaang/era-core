@@ -15,6 +15,9 @@ use era_common::{BlockId, BlockLocation, ChunkHash, Result as EraResult};
 use era_index::{IndexBuilder, IndexEntry};
 use parking_lot::{Mutex, RwLock};
 
+/// Maximum number of entries allowed in `MemoryChunkIndex` to prevent unbounded memory growth.
+const MAX_MEMORY_INDEX_ENTRIES: usize = 1_000_000;
+
 /// Trait for chunk deduplication index implementations.
 ///
 /// Provides a unified interface for looking up and recording chunk locations,
@@ -77,7 +80,14 @@ impl ChunkIndex for MemoryChunkIndex {
     }
 
     fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
-        self.map.write().insert(hash, location);
+        let mut map = self.map.write();
+        if map.len() >= MAX_MEMORY_INDEX_ENTRIES {
+            return Err(era_common::EraError::IntegrityError(format!(
+                "MemoryChunkIndex capacity exceeded: max {} entries",
+                MAX_MEMORY_INDEX_ENTRIES
+            )));
+        }
+        map.insert(hash, location);
         Ok(())
     }
 
