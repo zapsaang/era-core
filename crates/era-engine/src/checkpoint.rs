@@ -116,13 +116,23 @@ impl Checkpoint {
 
     /// Deserialize from bytes with validation
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        // Validate the archived data before deserializing
         let archived = rkyv::check_archived_root::<Self>(bytes).map_err(|e| {
             EraError::Deserialization(format!("Checkpoint validation failed: {}", e))
         })?;
 
-        // Deserialize (infallible after validation)
-        Ok(archived.deserialize(&mut rkyv::Infallible).unwrap())
+        // SAFETY: rkyv::Infallible is an uninhabited type (like core::convert::Infallible) — it
+        // cannot be constructed, so deserialize() cannot produce an error. After check_archived_root
+        // succeeds, the unwrap is provably safe and will never panic.
+        let checkpoint: Self = archived.deserialize(&mut rkyv::Infallible).unwrap();
+
+        if checkpoint.version != CHECKPOINT_VERSION {
+            return Err(EraError::Deserialization(format!(
+                "Checkpoint version mismatch: expected {}, found {}",
+                CHECKPOINT_VERSION, checkpoint.version
+            )));
+        }
+
+        Ok(checkpoint)
     }
 
     /// Get the size of the serialized checkpoint

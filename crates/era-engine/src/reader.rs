@@ -601,7 +601,9 @@ impl ArchiveReader {
         );
 
         self.catalog = Some(catalog);
-        Ok(self.catalog.as_ref().unwrap())
+        self.catalog.as_ref().ok_or_else(|| {
+            EraError::IntegrityError("catalog not initialized after assignment".into())
+        })
     }
 
     /// Read a block and extract all chunks, handling both erasure and non-erasure blocks
@@ -823,7 +825,9 @@ impl ArchiveReader {
                 if is_packed {
                     // Packed chunk: handle like single-chunk file
                     let chunk_ref = &entry.chunks[0];
-                    let packed_info = chunk_ref.packed_info.as_ref().unwrap();
+                    let packed_info = chunk_ref.packed_info.as_ref().ok_or_else(|| {
+                        EraError::IntegrityError("packed_info missing for packed chunk".into())
+                    })?;
 
                     context
                         .packed_chunks
@@ -1053,7 +1057,9 @@ impl ArchiveReader {
         info!("Extracting to: {}", options.output_dir.display());
 
         self.preflight_metadata_recovery().await?;
-        let catalog = self.catalog.as_ref().unwrap();
+        let catalog = self.catalog.as_ref().ok_or_else(|| {
+            EraError::IntegrityError("catalog not populated after preflight".into())
+        })?;
 
         // Check if erasure coding is enabled
         let erasure_config = self.volume_readers[0].header().config().erasure;
@@ -1109,7 +1115,9 @@ impl ArchiveReader {
         info!("Verifying archive integrity...");
 
         self.preflight_metadata_recovery().await?;
-        let catalog = self.catalog.as_ref().unwrap();
+        let catalog = self.catalog.as_ref().ok_or_else(|| {
+            EraError::IntegrityError("catalog not populated after preflight".into())
+        })?;
 
         // Check if erasure coding is enabled
         let erasure_config = self.volume_readers[0].header().config().erasure;

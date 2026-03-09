@@ -43,24 +43,69 @@ pub struct RecoveryStatus {
     pub bytes_written: u64,
 }
 
-/// Check if a volume has a checkpoint by reading its footer
+/// Check if a volume has a checkpoint by reading its footer.
+///
+/// Reads only the 128-byte footer from the end of the file instead of
+/// opening a full `VolumeReader` (which parses the 4096-byte header and
+/// allocates reader state). This is the same lightweight pattern used by
+/// `CheckpointManager::exists()`.
 async fn volume_has_checkpoint(archive_path: &Path) -> bool {
-    // Try to open the volume and check footer
-    let parent_dir = archive_path.parent().unwrap_or(Path::new("."));
-    let backend = LocalStorageBackend::new(parent_dir);
-    let volume_name = archive_path.file_name().unwrap_or_default();
+    let path = archive_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
 
-    match VolumeReader::open(&backend, Path::new(volume_name)).await {
-        Ok(reader) => {
-            if let Some(footer) = reader.footer() {
-                // V2.2+: Checkpoint exists if last_checkpoint_offset > 0
-                footer.last_checkpoint_offset() > 0
-            } else {
-                false
+        let metadata = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let file_len = metadata.len();
+        if file_len < era_volume::FOOTER_SIZE as u64 {
+            return false;
+        }
+
+        let mut file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        // Read primary footer (last FOOTER_SIZE bytes)
+        if file
+            .seek(SeekFrom::End(-(era_volume::FOOTER_SIZE as i64)))
+            .is_err()
+        {
+            return false;
+        }
+        let mut buf = [0u8; era_volume::FOOTER_SIZE];
+        if file.read_exact(&mut buf).is_err() {
+            return false;
+        }
+
+        match era_volume::Footer::from_bytes(&buf) {
+            Ok(footer) => footer.last_checkpoint_offset() > 0,
+            Err(_) => {
+                // Try backup footer at HEADER_SIZE offset
+                if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
+                    return false;
+                }
+                if file
+                    .seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
+                    .is_err()
+                {
+                    return false;
+                }
+                let mut backup_buf = [0u8; era_volume::FOOTER_SIZE];
+                if file.read_exact(&mut backup_buf).is_err() {
+                    return false;
+                }
+                match era_volume::Footer::from_bytes(&backup_buf) {
+                    Ok(footer) => footer.last_checkpoint_offset() > 0,
+                    Err(_) => false,
+                }
             }
         }
-        Err(_) => false,
-    }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Recovery manager for handling interrupted archive creation
@@ -290,9 +335,6 @@ pub struct RecoveryOptions {
 
     /// Whether to backup the incomplete archive before recovery
     pub backup_before_recovery: bool,
-
-    /// HMAC key for checkpoint integrity (derived from archive password)
-    pub hmac_key: Option<[u8; 32]>,
 }
 
 impl Default for RecoveryOptions {
@@ -301,7 +343,6 @@ impl Default for RecoveryOptions {
             strategy: RecoveryStrategy::Resume,
             verify_existing_chunks: false, // Skip verification for speed
             backup_before_recovery: false,
-            hmac_key: None,
         }
     }
 }
@@ -331,21 +372,19 @@ impl RecoveryOptions {
             ..Default::default()
         }
     }
-
-    /// Create options with HMAC key for checkpoint integrity
-    pub fn with_hmac_key(mut self, key: [u8; 32]) -> Self {
-        self.hmac_key = Some(key);
-        self
-    }
 }
 
-/// A recoverable archive writer that integrates checkpointing
 pub struct RecoverableWriter {
-    /// Checkpoint manager for tracking progress
     checkpoint: CheckpointManager,
-
-    /// Recovery options
     options: RecoveryOptions,
+}
+
+impl std::fmt::Debug for RecoverableWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoverableWriter")
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RecoverableWriter {
@@ -372,19 +411,11 @@ impl RecoverableWriter {
                     let old = CheckpointManager::load_or_create(archive_path)?;
                     old.delete()?;
                 }
-                match options.hmac_key {
-                    Some(key) => CheckpointManager::with_hmac_key(archive_path, key),
-                    None => CheckpointManager::new(archive_path),
-                }
+                CheckpointManager::new(archive_path)
             }
             RecoveryStrategy::Resume => {
                 // Use existing checkpoint or error if none exists
-                let manager = match options.hmac_key {
-                    Some(key) => {
-                        CheckpointManager::load_or_create_with_key(archive_path, Some(key))?
-                    }
-                    None => CheckpointManager::load_or_create(archive_path)?,
-                };
+                let manager = CheckpointManager::load_or_create(archive_path)?;
                 if manager.checkpoint().completed_files.is_empty()
                     && manager.checkpoint().written_chunks.is_empty()
                 {
@@ -404,8 +435,11 @@ impl RecoverableWriter {
                 manager
             }
             RecoveryStrategy::Abort => {
-                // This case is handled above, but included for completeness
-                unreachable!("Abort strategy should have returned error above");
+                return Err(EraError::CheckpointError(
+                    "Abort strategy specified but no checkpoint exists to abort. \
+                     Use StartFresh to begin a new archive."
+                        .into(),
+                ));
             }
         };
 
@@ -455,8 +489,12 @@ impl RecoverableWriter {
         self.checkpoint.update_position(volume, offset, bytes)
     }
 
-    /// Force sync checkpoint to disk
+    #[deprecated(
+        since = "2.2.0",
+        note = "Use commit_to_volume() for checkpoint persistence"
+    )]
     pub fn sync(&mut self) -> Result<()> {
+        #[allow(deprecated)]
         self.checkpoint.sync()
     }
 
@@ -529,20 +567,12 @@ mod tests {
         let opts = RecoveryOptions::default();
         assert_eq!(opts.strategy, RecoveryStrategy::Resume);
         assert!(!opts.verify_existing_chunks);
-        assert!(opts.hmac_key.is_none());
     }
 
     #[test]
     fn test_recovery_options_start_fresh() {
         let opts = RecoveryOptions::start_fresh();
         assert_eq!(opts.strategy, RecoveryStrategy::StartFresh);
-    }
-
-    #[test]
-    fn test_recovery_options_with_hmac() {
-        let key = [42u8; 32];
-        let opts = RecoveryOptions::resume().with_hmac_key(key);
-        assert_eq!(opts.hmac_key, Some(key));
     }
 
     // ============ RecoverableWriter Tests ============
@@ -561,16 +591,20 @@ mod tests {
     #[test]
     fn test_recoverable_writer_abort_without_checkpoint() {
         let temp = TempDir::new().unwrap();
-        let _archive_path = temp.path().join("test.era");
+        let archive_path = temp.path().join("test.era");
 
-        // Abort strategy should succeed when no checkpoint exists
-        let _opts = RecoveryOptions {
+        let opts = RecoveryOptions {
             strategy: RecoveryStrategy::Abort,
             ..Default::default()
         };
-        // This will still fail because Abort + no checkpoint leads to unreachable
-        // Actually, when there's no checkpoint, Abort should work like StartFresh
-        // Let's check the actual behavior - it seems the logic needs adjustment
+        // Abort strategy should return a CheckpointError, not panic
+        let result = RecoverableWriter::new(&archive_path, opts);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, era_common::EraError::CheckpointError(_)),
+            "Expected CheckpointError, got: {err:?}"
+        );
     }
 
     #[test]
@@ -600,7 +634,7 @@ mod tests {
         assert!(cp.get_chunk_location(&test_hash(99)).is_some());
         assert_eq!(cp.total_bytes_written, 1000);
 
-        // Sync and finalize
+        #[allow(deprecated)]
         writer.sync().unwrap();
         writer.finalize().unwrap();
 
