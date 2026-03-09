@@ -14,6 +14,7 @@ use era_common::{BlockLocation, ChunkHash, EraError, Result};
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use std::path::{Path, PathBuf};
+use tokio::task::spawn_blocking;
 use tracing::{debug, info, warn};
 
 use crate::checkpoint::{Checkpoint, CheckpointManager, InProgressFile};
@@ -153,7 +154,10 @@ impl RecoveryManager {
         let bytes_written = match Self::read_footer_data_end(archive_path).await {
             Ok(val) => val,
             Err(e) => {
-                warn!("Failed to read footer data_end offset: {}. Defaulting to 0.", e);
+                warn!(
+                    "Failed to read footer data_end offset: {}. Defaulting to 0.",
+                    e
+                );
                 0
             }
         };
@@ -302,11 +306,15 @@ impl RecoveryManager {
             ));
         }
 
-        let file = std::fs::File::options()
-            .write(true)
-            .open(&self.archive_path)?;
-        file.set_len(data_end)?;
-        file.sync_all()?;
+        let archive_path = self.archive_path.clone();
+        spawn_blocking(move || {
+            let file = std::fs::File::options().write(true).open(&archive_path)?;
+            file.set_len(data_end)?;
+            file.sync_all()?;
+            Ok::<(), EraError>(())
+        })
+        .await
+        .map_err(|e| EraError::Other(format!("spawn_blocking join error: {}", e)))??;
 
         info!(
             "Truncated {:?} to {} bytes (data_end_offset from footer)",
@@ -395,9 +403,9 @@ impl std::fmt::Debug for RecoverableWriter {
 
 impl RecoverableWriter {
     /// Create a new recoverable writer
-    pub fn new(archive_path: &Path, options: RecoveryOptions) -> Result<Self> {
+    pub async fn new(archive_path: &Path, options: RecoveryOptions) -> Result<Self> {
         // Handle Abort strategy - return error if checkpoint exists
-        if options.strategy == RecoveryStrategy::Abort && CheckpointManager::exists(archive_path) {
+        if options.strategy == RecoveryStrategy::Abort && CheckpointManager::exists(archive_path).await {
             return Err(EraError::CheckpointError(
                 "Checkpoint exists and Abort strategy specified. \
                  Use Resume to continue or StartFresh to discard progress."
@@ -409,7 +417,7 @@ impl RecoverableWriter {
         let checkpoint = match options.strategy {
             RecoveryStrategy::StartFresh => {
                 // Delete any existing checkpoint and start fresh
-                if CheckpointManager::exists(archive_path) {
+                if CheckpointManager::exists(archive_path).await {
                     warn!(
                         "Starting fresh, deleting existing checkpoint for {:?}",
                         archive_path.display()
@@ -583,19 +591,19 @@ mod tests {
 
     // ============ RecoverableWriter Tests ============
 
-    #[test]
-    fn test_recoverable_writer_new_fresh() {
+    #[tokio::test]
+    async fn test_recoverable_writer_new_fresh() {
         let temp = TempDir::new().unwrap();
         let archive_path = temp.path().join("test.era");
 
-        let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
+        let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).await.unwrap();
 
         assert!(!writer.should_skip_file(Path::new("/any/file.txt")));
         assert!(writer.get_existing_chunk(&test_hash(1)).is_none());
     }
 
-    #[test]
-    fn test_recoverable_writer_abort_without_checkpoint() {
+    #[tokio::test]
+    async fn test_recoverable_writer_abort_without_checkpoint() {
         let temp = TempDir::new().unwrap();
         let archive_path = temp.path().join("test.era");
 
@@ -604,7 +612,7 @@ mod tests {
             ..Default::default()
         };
         // Abort strategy should return a CheckpointError, not panic
-        let result = RecoverableWriter::new(&archive_path, opts);
+        let result = RecoverableWriter::new(&archive_path, opts).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -613,13 +621,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_recoverable_writer_tracking() {
+    #[tokio::test]
+    async fn test_recoverable_writer_tracking() {
         let temp = TempDir::new().unwrap();
         let archive_path = temp.path().join("test.era");
 
         let mut writer =
-            RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).unwrap();
+            RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).await.unwrap();
 
         // Track progress
         writer

@@ -65,6 +65,7 @@ pub trait BlockIterator {
 
 /// Maximum allowed block size (64 MB) — read-path sanity check (~16x typical block sizes)
 const MAX_BLOCK_SIZE: u32 = 64 * 1024 * 1024;
+const MAX_PROBE_ATTEMPTS: usize = 256;
 
 /// Iterator for standard (non-erasure) blocks
 pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {
@@ -126,7 +127,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             .await
         {
             Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
-            Ok(_) => return None,
+            Ok(bytes) if bytes.is_empty() => return None,
+            Ok(bytes) => {
+                return Some(Err(EraError::IntegrityError(format!(
+                    "Unexpected partial read: expected {} bytes, got {}",
+                    BlockHeader::SIZE,
+                    bytes.len()
+                ))));
+            }
             Err(e) => return Some(Err(e)),
         };
 
@@ -253,11 +261,9 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             return Err(EraError::InvalidFormat("No volume readers provided".into()));
         }
         if volume_readers.len() != volume_indices.len() {
-            return Err(EraError::InvalidFormat(format!(
-                "volume_readers length ({}) != volume_indices length ({})",
-                volume_readers.len(),
-                volume_indices.len()
-            )));
+            return Err(EraError::InvalidFormat(
+                "volume_readers and volume_indices length mismatch".to_string(),
+            ));
         }
 
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
@@ -316,10 +322,12 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
 #[async_trait(?Send)]
 impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'a, R> {
     async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
-        // Find the first available volume to check if there's more data
-        // We need to use the first reader in volume_readers (which is the lowest available volume)
-        // Since each volume has original_len header for each block, we can read from any volume
-        if self.current_offsets[0] >= self.data_ends[0] {
+        if self
+            .current_offsets
+            .iter()
+            .zip(self.data_ends.iter())
+            .any(|(offset, end)| offset >= end)
+        {
             return None;
         }
 
@@ -330,7 +338,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             .await
         {
             Ok(bytes) if bytes.len() == 4 => bytes,
-            Ok(_) => return None,
+            Ok(bytes) if bytes.is_empty() => return None,
+            Ok(bytes) => {
+                return Some(Err(EraError::IntegrityError(format!(
+                    "Unexpected partial read: expected {} bytes, got {}",
+                    4,
+                    bytes.len()
+                ))));
+            }
             Err(e) => return Some(Err(e)),
         };
         let original_len = u32::from_le_bytes([
@@ -447,6 +462,13 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             ))));
         }
 
+        if first_shard_size == 0 {
+            self.stats.blocks_failed += 1;
+            return Some(Err(EraError::InvalidFormat(
+                "first_shard_size is 0 — cannot proceed with RS decode".to_string(),
+            )));
+        }
+
         // Create erasure info for decoding
         let erasure_info = ErasureBlockInfo {
             data_shards: self.data_shards,
@@ -499,9 +521,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
     }
 
     fn has_more(&self) -> bool {
-        // Check the first available volume for more data (at least 4 bytes for next header)
-        // volume_readers[0] is always the first available volume in sorted order
-        self.current_offsets[0] + 4 <= self.data_ends[0]
+        self.current_offsets
+            .iter()
+            .zip(self.data_ends.iter())
+            .all(|(offset, end)| offset + 4 <= *end)
     }
 
     fn stats(&self) -> &BlockIterStats {
@@ -613,7 +636,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             .await
         {
             Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
-            Ok(_) => return None,
+            Ok(bytes) if bytes.is_empty() => return None,
+            Ok(bytes) => {
+                return Some(Err(EraError::IntegrityError(format!(
+                    "Unexpected partial read: expected {} bytes, got {}",
+                    BlockHeader::SIZE,
+                    bytes.len()
+                ))));
+            }
             Err(e) => return Some(Err(e)),
         };
 
@@ -782,11 +812,9 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             return Err(EraError::InvalidFormat("No volume readers provided".into()));
         }
         if volume_readers.len() != volume_indices.len() {
-            return Err(EraError::InvalidFormat(format!(
-                "volume_readers length ({}) != volume_indices length ({})",
-                volume_readers.len(),
-                volume_indices.len()
-            )));
+            return Err(EraError::InvalidFormat(
+                "volume_readers and volume_indices length mismatch".to_string(),
+            ));
         }
 
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
@@ -1091,7 +1119,13 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
         for (i, shard_data) in recovered.into_iter().enumerate().take(data_shards) {
             let block_index = (self.current_stripe_index * data_shards + i) as u32;
-            let build_candidate_lengths = |data: &Vec<u8>| {
+            let build_candidate_lengths = |data: &[u8]| {
+                // Heuristic for recovered data-shard length:
+                // 1) Prefer explicit per-shard lengths (from headers) when available.
+                // 2) Otherwise, reuse observed lengths from other data shards in stripe.
+                // 3) Fall back to trimmed length after removing trailing zero padding,
+                //    assuming RS-recovered shards may retain zeroed tail bytes.
+                // 4) Finally try full shard_size as a conservative fallback.
                 let mut candidate_lengths: Vec<usize> = Vec::new();
                 let mut trimmed_len = data.len();
 
@@ -1122,15 +1156,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             let mut decoded = None;
             let mut last_err = None;
 
-            let mut attempt_decode = |data: &Vec<u8>| -> Option<ChunkVec> {
+            let mut attempt_decode = |data: &[u8]| -> Option<ChunkVec> {
                 let candidate_lengths = build_candidate_lengths(data);
+                let candidate_count = candidate_lengths.len();
                 for original_len in candidate_lengths.iter().copied() {
                     if original_len == 0 || original_len > data.len() {
                         continue;
                     }
 
-                    let mut trimmed = data.clone();
-                    trimmed.truncate(original_len);
+                    let trimmed = &data[..original_len];
 
                     if trimmed.iter().all(|&b| b == 0) {
                         return Some(ChunkVec::new());
@@ -1138,7 +1172,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
                     let encrypted_block = era_common::EncryptedMacroBlock {
                         block_id: BlockId::new(block_index as u64),
-                        data: Bytes::from(trimmed),
+                        data: Bytes::copy_from_slice(trimmed),
                         original_size: original_len as u32,
                         compressed_size: original_len as u32,
                         chunk_count: 0,
@@ -1149,6 +1183,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         Err(e) => last_err = Some(e),
                     }
                 }
+                tracing::warn!(
+                    "No valid candidate length found after scanning {} candidates",
+                    candidate_count
+                );
                 None
             };
 
@@ -1177,21 +1215,39 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
             if decoded.is_none() && data_lengths[i].is_none() && trimmed_len < shard_size {
                 let padding = shard_size.saturating_sub(trimmed_len);
-                let max_attempts = 8192usize;
-                let step = if padding > max_attempts {
-                    (padding / max_attempts).max(1)
+                let step = if padding > MAX_PROBE_ATTEMPTS {
+                    (padding / MAX_PROBE_ATTEMPTS).max(1)
                 } else {
                     1
                 };
 
                 let mut probe_len = shard_size;
+                let mut probe_attempts = 0usize;
+                let mut warned_halfway = false;
                 while probe_len >= trimmed_len {
                     if !candidate_lengths.contains(&probe_len)
                         && probe_len <= shard_data.len()
                         && probe_len > 0
                     {
-                        let mut data = shard_data.clone();
-                        data.truncate(probe_len);
+                        probe_attempts += 1;
+                        if !warned_halfway && probe_attempts > (MAX_PROBE_ATTEMPTS / 2) {
+                            tracing::warn!(
+                                "Virtual striping probing crossed half limit ({} / {}) for block {}",
+                                probe_attempts,
+                                MAX_PROBE_ATTEMPTS,
+                                block_index
+                            );
+                            warned_halfway = true;
+                        }
+                        if probe_attempts > MAX_PROBE_ATTEMPTS {
+                            last_err = Some(EraError::ErasureError(format!(
+                                "Virtual striping probe limit exceeded for block {} ({} > {})",
+                                block_index, probe_attempts, MAX_PROBE_ATTEMPTS
+                            )));
+                            break;
+                        }
+
+                        let data = &shard_data[..probe_len];
 
                         if data.iter().all(|&b| b == 0) {
                             decoded = Some(ChunkVec::new());
@@ -1200,7 +1256,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
                         let encrypted_block = era_common::EncryptedMacroBlock {
                             block_id: BlockId::new(block_index as u64),
-                            data: Bytes::from(data),
+                            data: Bytes::copy_from_slice(data),
                             original_size: probe_len as u32,
                             compressed_size: probe_len as u32,
                             chunk_count: 0,

@@ -36,6 +36,9 @@ const INTERNAL_META_PREFIX: &str = ".era/meta/";
 /// Maximum allowed file size declared in catalog (100 GB) - sanity check
 const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
 
+/// Maximum total decoded bytes accepted during one extraction pass (8 GB)
+const MAX_EXTRACTION_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
+
 const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Options for extraction
@@ -658,8 +661,24 @@ impl ArchiveReader {
             // Determine volume index for each shard
             // We need to map shard_idx -> volume_reader index
 
-            // 1. Identify which shard *this* block is (my_shard_idx)
+            // 1. Identify which shard *this* block is (my_shard_idx).
+            // Heuristic rationale: slot_index tracks the logical data slot. Mapping it
+            // modulo data_shards identifies this block's local shard position so we can
+            // align neighbor metadata (shard_offsets/shard_volumes) around it.
+            if erasure_info.data_shards == 0 {
+                return Err(EraError::InvalidFormat(
+                    "Erasure block has zero data_shards".into(),
+                ));
+            }
             let my_shard_idx = (location.slot_index as usize) % (erasure_info.data_shards as usize);
+            if my_shard_idx >= total_shards {
+                tracing::warn!(
+                    "Computed my_shard_idx={} out of range total_shards={} (slot_index={})",
+                    my_shard_idx,
+                    total_shards,
+                    location.slot_index
+                );
+            }
 
             let get_reader_index = |shard_idx: usize| -> Option<usize> {
                 if shard_idx == my_shard_idx {
@@ -720,8 +739,8 @@ impl ArchiveReader {
                         Ok(shard) => {
                             available_shards.push((shard_idx, shard));
                         }
-                        Err(_e) => {
-                            // println!("Failed to read shard {}: {}", shard_idx, e);
+                        Err(err) => {
+                            tracing::warn!("Shard read error for shard {}: {}", shard_idx, err);
                         }
                     }
                 }
@@ -757,9 +776,7 @@ impl ArchiveReader {
             .await?;
         if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
             if header.length as u64 > MAX_SHARD_SIZE {
-                return Err(EraError::InvalidFormat(
-                    "Shard size exceeds maximum".into(),
-                ));
+                return Err(EraError::InvalidFormat("Shard size exceeds maximum".into()));
             }
             let data = reader
                 .read_raw(
@@ -791,9 +808,35 @@ impl ArchiveReader {
         options: &ExtractOptions,
     ) -> Result<ExtractStats> {
         let mut stats = ExtractStats::default();
+        let mut tracked_output_files: Vec<PathBuf> = Vec::new();
+        let mut cumulative_bytes_extracted: u64 = 0;
 
-        fs::create_dir_all(&options.output_dir)?;
-        let canonical_output_dir = fs::canonicalize(&options.output_dir)?;
+        let output_dir = options.output_dir.clone();
+        if let Err(err) = tokio::task::spawn_blocking(move || fs::create_dir_all(output_dir))
+            .await
+            .map_err(|e| EraError::Other(format!("Failed to join output dir creation task: {}", e)))
+            .and_then(|res| res.map_err(EraError::Io))
+        {
+            return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await;
+        }
+
+        let output_dir = options.output_dir.clone();
+        let canonical_output_dir =
+            match tokio::task::spawn_blocking(move || fs::canonicalize(output_dir))
+                .await
+                .map_err(|e| {
+                    EraError::Other(format!(
+                        "Failed to join output canonicalization task: {}",
+                        e
+                    ))
+                })
+                .and_then(|res| res.map_err(EraError::Io))
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await
+                }
+            };
 
         // Build maps for extraction
         let mut context = ExtractionContext::new();
@@ -810,16 +853,24 @@ impl ArchiveReader {
                 for component in rel.components() {
                     match component {
                         std::path::Component::ParentDir => {
-                            return Err(EraError::Security(format!(
-                                "Path traversal detected: {}",
-                                rel.display()
-                            )));
+                            return Self::fail_extraction_with_cleanup(
+                                EraError::Security(format!(
+                                    "Path traversal detected: {}",
+                                    rel.display()
+                                )),
+                                &tracked_output_files,
+                            )
+                            .await;
                         }
                         std::path::Component::RootDir => {
-                            return Err(EraError::Security(format!(
-                                "Absolute path in archive entry: {}",
-                                rel.display()
-                            )));
+                            return Self::fail_extraction_with_cleanup(
+                                EraError::Security(format!(
+                                    "Absolute path in archive entry: {}",
+                                    rel.display()
+                                )),
+                                &tracked_output_files,
+                            )
+                            .await;
                         }
                         _ => {}
                     }
@@ -832,33 +883,66 @@ impl ArchiveReader {
                 continue;
             }
 
+            tracked_output_files.push(output_path.clone());
+
             if entry.size > MAX_DECLARED_FILE_SIZE {
-                return Err(EraError::CorruptedHeader(format!(
-                    "File '{}' declares unreasonable size: {} bytes",
-                    entry.path.display(),
-                    entry.size
-                )));
+                return Self::fail_extraction_with_cleanup(
+                    EraError::CorruptedHeader(format!(
+                        "File '{}' declares unreasonable size: {} bytes",
+                        entry.path.display(),
+                        entry.size
+                    )),
+                    &tracked_output_files,
+                )
+                .await;
             }
 
             if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent)?;
+                let parent = parent.to_path_buf();
+                if let Err(err) = tokio::task::spawn_blocking(move || fs::create_dir_all(parent))
+                    .await
+                    .map_err(|e| {
+                        EraError::Other(format!("Failed to join parent dir creation task: {}", e))
+                    })
+                    .and_then(|res| res.map_err(EraError::Io))
+                {
+                    return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await;
+                }
             }
-            let canonical_path = std::fs::canonicalize(&output_path).or_else(|_| {
-                let parent = output_path.parent().unwrap_or(Path::new("."));
-                let canonical_parent = std::fs::canonicalize(parent)?;
-                let file_name = output_path.file_name().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Output path has no file name",
-                    )
-                })?;
-                Ok::<PathBuf, std::io::Error>(canonical_parent.join(file_name))
-            })?;
+            let output_path_for_canonical = output_path.clone();
+            let canonical_path = match tokio::task::spawn_blocking(move || {
+                std::fs::canonicalize(&output_path_for_canonical).or_else(|_| {
+                    let parent = output_path_for_canonical.parent().unwrap_or(Path::new("."));
+                    let canonical_parent = std::fs::canonicalize(parent)?;
+                    let file_name = output_path_for_canonical.file_name().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "Output path has no file name",
+                        )
+                    })?;
+                    Ok::<PathBuf, std::io::Error>(canonical_parent.join(file_name))
+                })
+            })
+            .await
+            .map_err(|e| {
+                EraError::Other(format!("Failed to join path canonicalization task: {}", e))
+            })
+            .and_then(|res| res.map_err(EraError::Io))
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await
+                }
+            };
             if !canonical_path.starts_with(&canonical_output_dir) {
-                return Err(EraError::Security(format!(
-                    "Symlink escape detected: {} resolves outside output directory",
-                    output_path.display()
-                )));
+                return Self::fail_extraction_with_cleanup(
+                    EraError::Security(format!(
+                        "Symlink escape detected: {} resolves outside output directory",
+                        output_path.display()
+                    )),
+                    &tracked_output_files,
+                )
+                .await;
             }
 
             if entry.is_chunked() {
@@ -870,9 +954,18 @@ impl ArchiveReader {
                 if is_packed {
                     // Packed chunk: handle like single-chunk file
                     let chunk_ref = &entry.chunks[0];
-                    let packed_info = chunk_ref.packed_info.as_ref().ok_or_else(|| {
-                        EraError::IntegrityError("packed_info missing for packed chunk".into())
-                    })?;
+                    let packed_info = match chunk_ref.packed_info.as_ref() {
+                        Some(info) => info,
+                        None => {
+                            return Self::fail_extraction_with_cleanup(
+                                EraError::IntegrityError(
+                                    "packed_info missing for packed chunk".into(),
+                                ),
+                                &tracked_output_files,
+                            )
+                            .await;
+                        }
+                    };
 
                     context
                         .packed_chunks
@@ -881,8 +974,29 @@ impl ArchiveReader {
                         .push((file_idx, packed_info.file_index, output_path));
                 } else {
                     // Normal multi-chunk file: pre-create file
-                    let file = File::create(&output_path)?;
-                    file.set_len(entry.size)?;
+                    let output_path_for_create = output_path.clone();
+                    let expected_size = entry.size;
+                    let file =
+                        match tokio::task::spawn_blocking(move || -> std::io::Result<File> {
+                            let file = File::create(&output_path_for_create)?;
+                            file.set_len(expected_size)?;
+                            Ok(file)
+                        })
+                        .await
+                        .map_err(|e| {
+                            EraError::Other(format!("Failed to join file creation task: {}", e))
+                        })
+                        .and_then(|res| res.map_err(EraError::Io))
+                        {
+                            Ok(file) => file,
+                            Err(err) => {
+                                return Self::fail_extraction_with_cleanup(
+                                    err,
+                                    &tracked_output_files,
+                                )
+                                .await;
+                            }
+                        };
 
                     context.multi_chunk_files.insert(
                         file_idx,
@@ -919,15 +1033,70 @@ impl ArchiveReader {
             match result {
                 Ok(decoded) => {
                     consecutive_failures = 0;
-                    context.process_chunks(decoded.chunks, &mut stats)?;
+                    let block_bytes = decoded
+                        .chunks
+                        .iter()
+                        .try_fold(0u64, |acc, (_, chunk_data)| {
+                            acc.checked_add(chunk_data.len() as u64)
+                        });
+
+                    let block_bytes = match block_bytes {
+                        Some(v) => v,
+                        None => {
+                            return Self::fail_extraction_with_cleanup(
+                                EraError::Security(
+                                    "Extraction memory budget exceeded: possible decompression bomb"
+                                        .to_string(),
+                                ),
+                                &tracked_output_files,
+                            )
+                            .await;
+                        }
+                    };
+
+                    cumulative_bytes_extracted = match cumulative_bytes_extracted
+                        .checked_add(block_bytes)
+                    {
+                        Some(v) => v,
+                        None => {
+                            return Self::fail_extraction_with_cleanup(
+                                    EraError::Security(
+                                        "Extraction memory budget exceeded: possible decompression bomb"
+                                            .to_string(),
+                                    ),
+                                    &tracked_output_files,
+                                )
+                                .await;
+                        }
+                    };
+
+                    if cumulative_bytes_extracted > MAX_EXTRACTION_MEMORY {
+                        return Self::fail_extraction_with_cleanup(
+                            EraError::Security(
+                                "Extraction memory budget exceeded: possible decompression bomb"
+                                    .to_string(),
+                            ),
+                            &tracked_output_files,
+                        )
+                        .await;
+                    }
+
+                    if let Err(err) = context.process_chunks(decoded.chunks, &mut stats) {
+                        return Self::fail_extraction_with_cleanup(err, &tracked_output_files)
+                            .await;
+                    }
                 }
                 Err(e) => {
                     consecutive_failures += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                        return Err(EraError::Security(format!(
-                            "Aborting: {} consecutive block failures: {}",
-                            consecutive_failures, e
-                        )));
+                        return Self::fail_extraction_with_cleanup(
+                            EraError::Security(format!(
+                                "Aborting: {} consecutive block failures: {}",
+                                consecutive_failures, e
+                            )),
+                            &tracked_output_files,
+                        )
+                        .await;
                     }
                     tracing::warn!(
                         "Block failure ({}/{}): {}",
@@ -945,11 +1114,15 @@ impl ArchiveReader {
         context.log_incomplete_files();
 
         if context.has_pending() {
-            return Err(EraError::ErasureError(
-                "Not enough shards for recovery: extraction incomplete due to \
-                 too many missing or corrupted volumes."
-                    .into(),
-            ));
+            return Self::fail_extraction_with_cleanup(
+                EraError::ErasureError(
+                    "Not enough shards for recovery: extraction incomplete due to \
+                     too many missing or corrupted volumes."
+                        .into(),
+                ),
+                &tracked_output_files,
+            )
+            .await;
         }
 
         info!(
@@ -958,6 +1131,48 @@ impl ArchiveReader {
         );
 
         Ok(stats)
+    }
+
+    async fn cleanup_partial_files(paths: &[PathBuf]) -> Result<()> {
+        let mut unique_paths: Vec<PathBuf> = Vec::new();
+        for path in paths {
+            if !unique_paths.iter().any(|p| p == path) {
+                unique_paths.push(path.clone());
+            }
+        }
+
+        tokio::task::spawn_blocking(move || {
+            for path in unique_paths.into_iter().rev() {
+                if let Err(err) = std::fs::remove_file(&path) {
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(
+                            "Failed to clean up partial extracted file {}: {}",
+                            path.display(),
+                            err
+                        );
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|e| EraError::Other(format!("Failed to join extraction cleanup task: {}", e)))?;
+
+        Ok(())
+    }
+
+    async fn fail_extraction_with_cleanup(
+        err: EraError,
+        paths: &[PathBuf],
+    ) -> Result<ExtractStats> {
+        if !paths.is_empty() {
+            if let Err(cleanup_err) = Self::cleanup_partial_files(paths).await {
+                tracing::warn!(
+                    "Partial extraction cleanup encountered an error: {}",
+                    cleanup_err
+                );
+            }
+        }
+        Err(err)
     }
 
     /// Verify using the provided block iterator

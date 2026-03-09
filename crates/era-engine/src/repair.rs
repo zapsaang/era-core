@@ -24,7 +24,7 @@ use era_storage::LocalStorageBackend;
 use era_volume::{DistributionCalculator, VolumeReader};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -311,7 +311,8 @@ pub async fn repair_archive(
                     &data_lengths,
                     &erasure_config,
                     shard_size,
-                );
+                )
+                .await;
 
                 match repaired {
                     Ok(repaired_shards) => {
@@ -375,7 +376,7 @@ struct ShardRepair {
 }
 
 /// Use Reed-Solomon to reconstruct missing shards
-fn repair_shards_rs(
+async fn repair_shards_rs(
     available_shards: &[(usize, Bytes)],
     corrupted_indices: &[usize],
     data_lengths: &[Option<u32>],
@@ -387,40 +388,56 @@ fn repair_shards_rs(
     let total_shards = data_shards + parity_shards;
 
     let erasure_config = ErasureConfig::new(data_shards, parity_shards)?;
-    let coder = ErasureCoder::new(erasure_config)?;
 
-    let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
-    for (idx, data) in available_shards {
-        shards[*idx] = Some(data.to_vec());
-    }
+    // Prepare data for spawn_blocking
+    let available_shards_vec: Vec<(usize, Vec<u8>)> = available_shards
+        .iter()
+        .map(|(idx, data)| (*idx, data.to_vec()))
+        .collect();
+    let corrupted_indices_vec = corrupted_indices.to_vec();
+    let data_lengths_vec = data_lengths.to_vec();
 
-    // Recover all data shards (padded)
-    let recovered_data = coder.recover_data_shards(&shards, shard_size)?;
+    // Wrap CPU-heavy RS reconstruction in spawn_blocking (V2-PERF-02)
+    let result = tokio::task::spawn_blocking(move || {
+        let coder = ErasureCoder::new(erasure_config)?;
 
-    // Re-encode to get parity shards
-    let all_shards = coder.encode_shards(&recovered_data)?;
-
-    let mut repaired = Vec::new();
-    for &idx in corrupted_indices {
-        if idx >= total_shards {
-            return Err(EraError::ErasureError(format!(
-                "Shard index {} out of range",
-                idx
-            )));
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
+        for (idx, data) in &available_shards_vec {
+            shards[*idx] = Some(data.clone());
         }
 
-        let mut data = all_shards[idx].clone();
-        if idx < data_shards {
-            let original_len = data_lengths.get(idx).and_then(|v| *v).ok_or_else(|| {
-                EraError::ErasureError("Missing original length for data shard".into())
-            })? as usize;
-            data.truncate(original_len);
+        // Recover all data shards (padded)
+        let recovered_data = coder.recover_data_shards(&shards, shard_size)?;
+
+        // Re-encode to get parity shards
+        let all_shards = coder.encode_shards(&recovered_data)?;
+
+        let mut repaired = Vec::new();
+        for &idx in &corrupted_indices_vec {
+            if idx >= total_shards {
+                return Err(EraError::ErasureError(format!(
+                    "Shard index {} out of range",
+                    idx
+                )));
+            }
+
+            let mut data = all_shards[idx].clone();
+            if idx < data_shards {
+                let original_len = data_lengths_vec.get(idx).and_then(|v| *v).ok_or_else(|| {
+                    EraError::ErasureError("Missing original length for data shard".into())
+                })? as usize;
+                data.truncate(original_len);
+            }
+
+            repaired.push((idx, Bytes::from(data)));
         }
 
-        repaired.push((idx, Bytes::from(data)));
-    }
+        Ok(repaired)
+    })
+    .await
+    .map_err(|e| EraError::AsyncError(e.to_string()))?;
 
-    Ok(repaired)
+    result
 }
 
 /// Apply shard repairs to the archive file
@@ -437,14 +454,29 @@ fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
         // rather than pointing to garbage data (V2-SEC-06 fix)
         let header_bytes = header.to_bytes();
         let data_offset = repair.offset + header_bytes.len() as u64;
-        
+
         file.seek(SeekFrom::Start(data_offset))?;
         file.write_all(&repair.data)?;
         file.flush()?;
-        
+
         // Now write the header (which points to the data we just wrote)
         file.seek(SeekFrom::Start(repair.offset))?;
         file.write_all(&header_bytes)?;
+
+        // V2-ROB-10: Post-write CRC validation - re-read and verify written data
+        file.flush()?;
+        file.seek(SeekFrom::Start(data_offset))?;
+
+        let mut read_buffer = vec![0u8; repair.data.len()];
+        file.read_exact(&mut read_buffer)?;
+
+        let read_crc = compute_shard_crc(&Bytes::from(read_buffer.clone()));
+        if read_crc != crc {
+            return Err(EraError::IntegrityError(format!(
+                "Post-write CRC verification failed for repaired shard {} (expected {}, got {})",
+                repair.shard_idx, crc, read_crc
+            )));
+        }
 
         debug!(
             "Repaired shard {} at offset {} ({} bytes)",
@@ -807,7 +839,9 @@ pub async fn repair_archive_matrix(
                     &data_lengths,
                     &erasure_config,
                     shard_size,
-                ) {
+                )
+                .await
+                {
                     Ok(repaired_shards) => {
                         for (shard_idx, shard_data) in repaired_shards {
                             if let Some(&(_, reader_idx, offset)) =

@@ -175,15 +175,13 @@ impl ChunkIndex for RedbChunkIndex {
     }
 
     fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
-        // Insert into lookup map for point queries (in-memory, non-blocking)
-        self.lookup.write().insert(hash, location.clone());
-
-        // Insert into IndexBuilder for volume finalization.
+        // Insert into IndexBuilder for volume finalization FIRST.
         // The builder.insert() call triggers Redb write transactions (disk I/O),
         // so we use run_blocking_io (which calls block_in_place on multi-threaded
         // runtimes) to avoid blocking the Tokio async runtime.
         // If builder has been taken (finalization started), reject the insert
         // to prevent silent data loss in the volume index.
+        // Only if this succeeds do we update the in-memory index.
         run_blocking_io(|| {
             match *self.builder.lock() {
                 Some(ref mut builder) => {
@@ -203,7 +201,13 @@ impl ChunkIndex for RedbChunkIndex {
                 }
             }
             Ok(())
-        })
+        })?;
+
+        // Insert into lookup map for point queries (in-memory, non-blocking)
+        // Only execute this if the persistent write succeeded (after the ? above)
+        self.lookup.write().insert(hash, location);
+
+        Ok(())
     }
 
     fn delete(&self, hash: &ChunkHash) -> EraResult<()> {

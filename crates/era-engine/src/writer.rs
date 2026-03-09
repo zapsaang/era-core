@@ -400,7 +400,10 @@ impl ArchiveWriterBuilder {
             archive_salt = Salt::from_bytes(*loaded_header.salt());
             recipients = loaded_header.recipients().to_vec();
 
-            if matches!(loaded_header.access_policy(), era_volume::AccessPolicy::Threshold(_)) {
+            if matches!(
+                loaded_header.access_policy(),
+                era_volume::AccessPolicy::Threshold(_)
+            ) {
                 return Err(era_common::EraError::InvalidFormat(
                     "Threshold authentication not supported for append mode".into(),
                 ));
@@ -797,7 +800,7 @@ impl ArchiveWriterBuilder {
         let checkpoint_manager = if self.enable_checkpoint {
             let manager = match self.recovery_options.strategy {
                 RecoveryStrategy::StartFresh => {
-                    if CheckpointManager::exists(&self.output_path) {
+                    if CheckpointManager::exists(&self.output_path).await {
                         warn!("Starting fresh, deleting existing checkpoint");
                         let old = CheckpointManager::load_or_create(&self.output_path)?;
                         old.delete()?;
@@ -806,7 +809,7 @@ impl ArchiveWriterBuilder {
                 }
                 RecoveryStrategy::Resume => CheckpointManager::load_or_create(&self.output_path)?,
                 RecoveryStrategy::Abort => {
-                    if CheckpointManager::exists(&self.output_path) {
+                    if CheckpointManager::exists(&self.output_path).await {
                         return Err(era_common::EraError::CheckpointError(
                             "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
                                 .into(),
@@ -1097,7 +1100,10 @@ impl ArchiveWriter {
             let data = tokio::fs::read(disk_path)
                 .await
                 .map_err(era_common::EraError::Io)?;
-            let hash = blake3::hash(&data);
+            let data_clone = data.clone();
+            let hash = tokio::task::spawn_blocking(move || blake3::hash(&data_clone))
+                .await
+                .map_err(|e| EraError::AsyncError(format!("Task join failed: {}", e)))?;
             let chunk_hash = ChunkHash(*hash.as_bytes());
 
             if let Some(entries_to_flush) = self.small_file_packer.push(SmallFileEntry {
@@ -1388,11 +1394,15 @@ impl ArchiveWriter {
 
         // Serialize the packed chunk
         let packed_data = packed.serialize()?;
-        let packed_chunk_size = packed_data.len() as u32;
+        let packed_chunk_size = u32::try_from(packed_data.len())
+            .map_err(|_| EraError::InvalidFormat("Block size exceeds u32::MAX".to_string()))?;
         debug!("Packed data size: {} bytes", packed_data.len());
 
         // Create a UniqueChunk from the packed data
-        let packed_hash = blake3::hash(&packed_data);
+        let packed_data_clone = packed_data.clone();
+        let packed_hash = tokio::task::spawn_blocking(move || blake3::hash(&packed_data_clone))
+            .await
+            .map_err(|e| EraError::AsyncError(format!("Task join failed: {}", e)))?;
         let chunk_hash = ChunkHash(*packed_hash.as_bytes());
         let packed_chunk = UniqueChunk {
             hash: chunk_hash,

@@ -55,6 +55,9 @@ pub struct WritePipeline<B: StorageBackend> {
     index: IndexStage,
     /// Compression configuration
     compression_config: CompressionConfig,
+    /// Cached erasure coder: (data_shards, parity_shards, coder)
+    /// Reused across stripes with matching RS parameters
+    cached_erasure_coder: Option<(usize, usize, ErasureCoder)>,
 }
 
 impl<B: StorageBackend> WritePipeline<B> {
@@ -79,6 +82,7 @@ impl<B: StorageBackend> WritePipeline<B> {
             volume,
             index,
             compression_config,
+            cached_erasure_coder: None,
         }
     }
 
@@ -192,8 +196,22 @@ impl<B: StorageBackend> WritePipeline<B> {
             }
         }
 
-        // Compute parity shards
-        let coder = ErasureCoder::new(ErasureConfig::new(data_shards_count, parity_shards_count)?)?;
+        // Compute parity shards (with cached erasure coder)
+        // Check if cached coder matches current parameters
+        let needs_new_coder = match &self.cached_erasure_coder {
+            Some((cached_data, cached_parity, _)) => {
+                *cached_data != data_shards_count || *cached_parity != parity_shards_count
+            }
+            None => true,
+        };
+
+        if needs_new_coder {
+            let new_coder =
+                ErasureCoder::new(ErasureConfig::new(data_shards_count, parity_shards_count)?)?;
+            self.cached_erasure_coder = Some((data_shards_count, parity_shards_count, new_coder));
+        }
+
+        let coder = &self.cached_erasure_coder.as_ref().unwrap().2;
         let all_shards = coder.encode_shards(&shard_inputs)?;
         let parity_shards = all_shards[data_shards_count..].to_vec();
 

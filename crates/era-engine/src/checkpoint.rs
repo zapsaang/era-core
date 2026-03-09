@@ -125,6 +125,24 @@ impl Checkpoint {
         // succeeds, the unwrap is provably safe and will never panic.
         let checkpoint: Self = archived.deserialize(&mut rkyv::Infallible).unwrap();
 
+        // V2-SEC-09: Post-deserialize bounds validation to prevent memory exhaustion
+        // from maliciously crafted checkpoint data
+        const MAX_CHECKPOINT_ENTRIES: usize = 10_000_000;
+        if checkpoint.written_chunks.len() > MAX_CHECKPOINT_ENTRIES {
+            return Err(EraError::InvalidFormat(format!(
+                "Checkpoint written_chunks exceeds maximum: {} > {}",
+                checkpoint.written_chunks.len(),
+                MAX_CHECKPOINT_ENTRIES
+            )));
+        }
+        if checkpoint.completed_files.len() > MAX_CHECKPOINT_ENTRIES {
+            return Err(EraError::InvalidFormat(format!(
+                "Checkpoint completed_files exceeds maximum: {} > {}",
+                checkpoint.completed_files.len(),
+                MAX_CHECKPOINT_ENTRIES
+            )));
+        }
+
         if checkpoint.version != CHECKPOINT_VERSION {
             return Err(EraError::Deserialization(format!(
                 "Checkpoint version mismatch: expected {}, found {}",
@@ -210,17 +228,7 @@ impl CheckpointManager {
     /// **MIGRATION WARNING:** Old sidecar checkpoints are NOT loaded.
     /// This returns a fresh checkpoint. Full checkpoint recovery requires
     /// `read_checkpoint()` with crypto params (VolumeReader + KeySession).
-    ///
-    /// If a checkpoint exists in the volume footer (detected via `exists()`),
-    /// a warning is logged. The caller should use `read_checkpoint()` for
-    /// full recovery.
     pub fn load_or_create(archive_path: impl AsRef<Path>) -> Result<Self> {
-        if Self::exists(archive_path.as_ref()) {
-            tracing::warn!(
-                "CheckpointManager::load_or_create() - checkpoint exists in volume footer \
-                 but cannot be loaded without crypto context. Use read_checkpoint() for full recovery."
-            );
-        }
         Ok(Self {
             checkpoint: Checkpoint::new(0, 0, 0, 0, 0, HashMap::new()),
             archive_path: archive_path.as_ref().to_path_buf(),
@@ -240,55 +248,59 @@ impl CheckpointManager {
     /// Reads the archive file synchronously and checks if the footer's
     /// `last_checkpoint_offset > 0`. Returns `false` if the file doesn't
     /// exist, is too small, or has no valid footer.
-    pub fn exists(archive_path: impl AsRef<Path>) -> bool {
-        let path = archive_path.as_ref();
-        let metadata = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        let file_len = metadata.len();
-        if file_len < era_volume::FOOTER_SIZE as u64 {
-            return false;
-        }
-        // Try reading the last FOOTER_SIZE bytes (primary footer location)
-        let mut file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-        use std::io::{Read, Seek, SeekFrom};
-        if file
-            .seek(SeekFrom::End(-(era_volume::FOOTER_SIZE as i64)))
-            .is_err()
-        {
-            return false;
-        }
-        let mut buf = [0u8; era_volume::FOOTER_SIZE];
-        if file.read_exact(&mut buf).is_err() {
-            return false;
-        }
-        match era_volume::Footer::from_bytes(&buf) {
-            Ok(footer) => footer.last_checkpoint_offset() > 0,
-            Err(_) => {
-                // Try backup footer at HEADER_SIZE offset
-                if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
-                    return false;
-                }
-                if file
-                    .seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
-                    .is_err()
-                {
-                    return false;
-                }
-                let mut backup_buf = [0u8; era_volume::FOOTER_SIZE];
-                if file.read_exact(&mut backup_buf).is_err() {
-                    return false;
-                }
-                match era_volume::Footer::from_bytes(&backup_buf) {
-                    Ok(footer) => footer.last_checkpoint_offset() > 0,
-                    Err(_) => false,
+    pub async fn exists(archive_path: impl AsRef<Path>) -> bool {
+        let path = archive_path.as_ref().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let metadata = match std::fs::metadata(&path) {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            let file_len = metadata.len();
+            if file_len < era_volume::FOOTER_SIZE as u64 {
+                return false;
+            }
+            // Try reading the last FOOTER_SIZE bytes (primary footer location)
+            let mut file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+            use std::io::{Read, Seek, SeekFrom};
+            if file
+                .seek(SeekFrom::End(-(era_volume::FOOTER_SIZE as i64)))
+                .is_err()
+            {
+                return false;
+            }
+            let mut buf = [0u8; era_volume::FOOTER_SIZE];
+            if file.read_exact(&mut buf).is_err() {
+                return false;
+            }
+            match era_volume::Footer::from_bytes(&buf) {
+                Ok(footer) => footer.last_checkpoint_offset() > 0,
+                Err(_) => {
+                    // Try backup footer at HEADER_SIZE offset
+                    if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
+                        return false;
+                    }
+                    if file
+                        .seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    let mut backup_buf = [0u8; era_volume::FOOTER_SIZE];
+                    if file.read_exact(&mut backup_buf).is_err() {
+                        return false;
+                    }
+                    match era_volume::Footer::from_bytes(&backup_buf) {
+                        Ok(footer) => footer.last_checkpoint_offset() > 0,
+                        Err(_) => false,
+                    }
                 }
             }
-        }
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Get mutable reference to checkpoint state
@@ -543,10 +555,10 @@ pub async fn write_checkpoint<W: StorageWriter>(
 /// * `volume_key` - Volume encryption key
 /// * `nonce_context` - Nonce context for encryption
 /// * `checkpoint_offset` - Physical offset of the checkpoint block
-    /// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to brute-force search (legacy volumes).
-    #[allow(dead_code)] // Will be used by cold recovery path
-    #[allow(clippy::too_many_arguments)]
-    pub async fn read_checkpoint<R: era_storage::StorageReader>(
+/// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to brute-force search (legacy volumes).
+#[allow(dead_code)] // Will be used by cold recovery path
+#[allow(clippy::too_many_arguments)]
+pub async fn read_checkpoint<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
     session: &KeySession,
     volume_key: &VolumeKey,
@@ -759,14 +771,14 @@ mod tests {
         assert_eq!(checkpoint.total_files_processed, 11);
     }
 
-    #[test]
-    fn test_checkpoint_manager_api() {
+    #[tokio::test]
+    async fn test_checkpoint_manager_api() {
         let manager = CheckpointManager::with_hmac_key("/tmp/test.era", [0u8; 32]);
         assert_eq!(manager.checkpoint().version, CHECKPOINT_VERSION);
 
         let manager2 = CheckpointManager::load_or_create("/tmp/test.era").unwrap();
         assert_eq!(manager2.checkpoint().version, CHECKPOINT_VERSION);
 
-        assert!(!CheckpointManager::exists("/tmp/test.era"));
+        assert!(!CheckpointManager::exists("/tmp/test.era").await);
     }
 }

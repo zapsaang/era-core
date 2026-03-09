@@ -133,7 +133,23 @@ impl<B: StorageBackend> VolumeStage<B> {
                 let mut location = writer
                     .write_canonical_block(block, BlockType::Catalog)
                     .await?;
-                // Override slot_index with actual block_id for correct key derivation during read
+                // CRITICAL: Override the physical slot_index with the logical block_id.
+                //
+                // Why this mutation is necessary:
+                // - VolumeWriter.write_canonical_block() returns a BlockLocation with slot_index
+                //   set to the sequential write position (e.g., 1st block written = slot_index 1,
+                //   2nd block written = slot_index 2, etc.)
+                // - For catalog blocks, the reader must derive per-block AEAD keys using the
+                //   logical block sequence number (block_id), NOT the physical write position.
+                // - The AEAD decryption AAD is: archive_id ‖ epoch_id ‖ block_index, where
+                //   block_index comes from the catalog's block_id metadata.
+                // - Without this override, the reader would attempt decryption with an incorrect
+                //   AAD (using the physical write position), causing AEAD authentication to fail
+                //   even though the catalog block is intact and encrypted correctly.
+                //
+                // Impact: This ensures catalog blocks can be successfully decrypted during read,
+                // since both encryption (here) and decryption (in reader.rs) will use the same
+                // block_id for key derivation and AAD binding.
                 location.slot_index = block_id;
 
                 if let Some(backup) = backup_block {
