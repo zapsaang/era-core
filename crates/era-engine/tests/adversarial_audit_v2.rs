@@ -25,7 +25,9 @@ fn v2_sec_01_aead_aad_includes_archive_epoch_block() {
 #[test]
 fn v2_sec_02_auth_mode_uses_zeroizing_and_not_derived_clone() {
     let source = include_str!("../src/writer.rs");
-    let enum_start = source.find("pub enum AuthMode").expect("AuthMode must exist");
+    let enum_start = source
+        .find("pub enum AuthMode")
+        .expect("AuthMode must exist");
     let enum_area = &source[enum_start..enum_start + 500];
     assert!(enum_area.contains("Zeroizing<String>"));
     let derives_before = &source[enum_start.saturating_sub(120)..enum_start];
@@ -54,7 +56,9 @@ fn v2_sec_05_max_shard_size_constant_present() {
 #[test]
 fn v2_sec_06_repair_writes_data_then_flush_then_header() {
     let source = include_str!("../src/repair.rs");
-    let apply_start = source.find("fn apply_repairs").expect("apply_repairs exists");
+    let apply_start = source
+        .find("fn apply_repairs")
+        .expect("apply_repairs exists");
     let area = &source[apply_start..apply_start + 2200.min(source.len() - apply_start)];
     assert!(area.contains("file.write_all(&repair.data)"));
     assert!(area.contains("file.flush()?"));
@@ -201,7 +205,11 @@ fn v2_perf_03_erasure_coder_cached_and_reused() {
 fn v2_perf_04_session_erasure_decode_reduced_clone_count() {
     let source = include_str!("../src/block_iter.rs");
     let clone_count = source.matches(".clone()").count();
-    assert!(clone_count <= 2, "too many clones in block_iter.rs: {}", clone_count);
+    assert!(
+        clone_count <= 2,
+        "too many clones in block_iter.rs: {}",
+        clone_count
+    );
 }
 
 #[test]
@@ -315,7 +323,9 @@ fn v2_qual_02_no_allow_deprecated_for_sync_checkpoint() {
 #[test]
 fn v2_qual_03_session_block_iterator_no_recursion() {
     let source = include_str!("../src/block_iter.rs");
-    let start = source.find("impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator").expect("session impl exists");
+    let start = source
+        .find("impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator")
+        .expect("session impl exists");
     let area = &source[start..start + 500];
     assert!(area.contains("loop {"));
     assert!(!area.contains("self.next_block()"));
@@ -370,7 +380,10 @@ fn v2_qual_10_reader_has_no_println_statements() {
 #[test]
 fn v2_qual_11_reader_error_messages_are_informative() {
     let source = include_str!("../src/reader.rs");
-    assert!(source.contains("Failed to join extraction cleanup task") || source.contains("Path traversal detected"));
+    assert!(
+        source.contains("Failed to join extraction cleanup task")
+            || source.contains("Path traversal detected")
+    );
 }
 
 #[test]

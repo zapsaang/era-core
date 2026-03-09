@@ -80,7 +80,10 @@ async fn read_and_verify_shard(
 
     let shard_len = shard_header.length as usize;
     let shard_data = match reader
-        .read_raw(offset + header_prefix_len as u64 + ShardHeader::SIZE as u64, shard_len)
+        .read_raw(
+            offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
+            shard_len,
+        )
         .await
     {
         Ok(data) => data,
@@ -196,8 +199,7 @@ pub async fn repair_archive(
             let backup_path_clone = backup_path.clone();
             tokio::task::spawn_blocking(move || std::fs::copy(&path_clone, &backup_path_clone))
                 .await
-                .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))?
-                ?;
+                .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))??;
         } else {
             info!("Backup already exists: {}", backup_path.display());
         }
@@ -673,10 +675,11 @@ pub async fn repair_archive_matrix(
                 // Wrap fs::copy in spawn_blocking since it's I/O-heavy (V2-QUAL-07)
                 let vol_path_clone = vol_path.to_path_buf();
                 let backup_path_clone = backup_path.clone();
-                tokio::task::spawn_blocking(move || std::fs::copy(&vol_path_clone, &backup_path_clone))
-                    .await
-                    .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))?
-                    ?;
+                tokio::task::spawn_blocking(move || {
+                    std::fs::copy(&vol_path_clone, &backup_path_clone)
+                })
+                .await
+                .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))??;
             }
         }
     }

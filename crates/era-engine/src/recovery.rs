@@ -408,7 +408,9 @@ impl RecoverableWriter {
     /// Create a new recoverable writer
     pub async fn new(archive_path: &Path, options: RecoveryOptions) -> Result<Self> {
         // Handle Abort strategy - return error if checkpoint exists
-        if options.strategy == RecoveryStrategy::Abort && CheckpointManager::exists(archive_path).await {
+        if options.strategy == RecoveryStrategy::Abort
+            && CheckpointManager::exists(archive_path).await
+        {
             return Err(EraError::CheckpointError(
                 "Checkpoint exists and Abort strategy specified. \
                  Use Resume to continue or StartFresh to discard progress."
@@ -599,7 +601,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let archive_path = temp.path().join("test.era");
 
-        let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).await.unwrap();
+        let writer = RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh())
+            .await
+            .unwrap();
 
         assert!(!writer.should_skip_file(Path::new("/any/file.txt")));
         assert!(writer.get_existing_chunk(&test_hash(1)).is_none());
@@ -629,8 +633,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let archive_path = temp.path().join("test.era");
 
-        let mut writer =
-            RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh()).await.unwrap();
+        let mut writer = RecoverableWriter::new(&archive_path, RecoveryOptions::start_fresh())
+            .await
+            .unwrap();
 
         // Track progress
         writer
