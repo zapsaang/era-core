@@ -17,8 +17,8 @@
 use crate::auth::PasswordSlotParams;
 use bytes::Bytes;
 use era_common::{
-    ArchiveConfig, ArchiveId, BlockLocation, ChunkHash, EraError, ErasureCodeConfig,
-    MatrixDistributionStrategy, Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, ChunkHash, EraError, ErasureCodeConfig, MatrixDistributionStrategy,
+    Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::Nonce;
@@ -342,16 +342,18 @@ impl ArchiveWriterBuilder {
         let mut append_catalog: Option<Catalog> = None;
         let mut key_encapsulation: Option<KeyEncapsulation> = None;
 
-        let mut config = self.config.clone();
+        // Extract Copy fields before moving config to avoid clone
+        let config_erasure = self.config.erasure;
+        let mut config = self.config;
         // Determine erasure settings: explicit builder setting takes precedence over config default
         let enable_erasure = match self.enable_erasure {
             Some(explicit) => explicit, // Explicit .enable_erasure(true/false) call
-            None => self.config.erasure.is_some(), // Fall back to config default
+            None => config_erasure.is_some(), // Fall back to config default
         };
         let erasure_config = if self.enable_erasure == Some(true) {
             // Explicit builder setting takes precedence
             self.erasure_config
-        } else if let Some(cfg) = self.config.erasure {
+        } else if let Some(cfg) = config_erasure {
             // Use config's erasure setting (e.g., default 4+1)
             cfg
         } else {
@@ -777,7 +779,8 @@ impl ArchiveWriterBuilder {
             None
         };
 
-        let file_reader = if let Some(cfg) = chunker_config.clone() {
+        let chunker_max_size = chunker_config.as_ref().map(|cfg| cfg.max_size);
+        let file_reader = if let Some(cfg) = chunker_config {
             FileReader::with_cdc().with_chunker_config(cfg)
         } else {
             FileReader::new()
@@ -785,23 +788,16 @@ impl ArchiveWriterBuilder {
 
         // Set up checkpoint manager if enabled
         let checkpoint_manager = if self.enable_checkpoint {
-            // Derive HMAC key from session for checkpoint integrity
-            // Use HKDF to derive a separate key for checkpoints
-            let hmac_key = session.derive_checkpoint_key()?;
-
             let manager = match self.recovery_options.strategy {
                 RecoveryStrategy::StartFresh => {
-                    // Delete any existing checkpoint
                     if CheckpointManager::exists(&self.output_path) {
                         warn!("Starting fresh, deleting existing checkpoint");
                         let old = CheckpointManager::load_or_create(&self.output_path)?;
                         old.delete()?;
                     }
-                    CheckpointManager::with_hmac_key(&self.output_path, *hmac_key)
+                    CheckpointManager::new(&self.output_path)
                 }
-                RecoveryStrategy::Resume => {
-                    CheckpointManager::load_or_create_with_key(&self.output_path, Some(*hmac_key))?
-                }
+                RecoveryStrategy::Resume => CheckpointManager::load_or_create(&self.output_path)?,
                 RecoveryStrategy::Abort => {
                     if CheckpointManager::exists(&self.output_path) {
                         return Err(era_common::EraError::CheckpointError(
@@ -809,7 +805,7 @@ impl ArchiveWriterBuilder {
                                 .into(),
                         ));
                     }
-                    CheckpointManager::with_hmac_key(&self.output_path, *hmac_key)
+                    CheckpointManager::new(&self.output_path)
                 }
             };
             Some(manager)
@@ -819,16 +815,13 @@ impl ArchiveWriterBuilder {
 
         // Create chunk index (internal memory-based index)
         let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index()?;
-        let mut embedded_index: HashMap<ChunkHash, BlockLocation> = HashMap::new();
 
         // Load existing chunk locations from checkpoint if resuming
         if let Some(ref mgr) = checkpoint_manager {
             if self.recovery_options.strategy == RecoveryStrategy::Resume {
-                // Populate index with checkpoint data
                 chunk_index.start_batch();
                 for (hash, location) in mgr.written_chunks() {
                     chunk_index.put(*hash, location.clone())?;
-                    embedded_index.insert(*hash, location.clone());
                 }
                 chunk_index.commit_batch()?;
                 info!(
@@ -841,10 +834,7 @@ impl ArchiveWriterBuilder {
         let mut target_block_size = if let Some(target) = self.target_block_size {
             target
         } else if enable_cdc && enable_erasure {
-            chunker_config
-                .as_ref()
-                .map(|cfg| cfg.max_size)
-                .unwrap_or(4 * 1024 * 1024)
+            chunker_max_size.unwrap_or(4 * 1024 * 1024)
         } else {
             // Default to 4MB MacroBlocks as per Whitepaper, regardless of CDC.
             // PackingStage will aggregate small CDC chunks into these 4MB blocks.
@@ -887,14 +877,8 @@ impl ArchiveWriterBuilder {
         // Create volume stage wrapping the pool
         let volume = VolumeStage::new(volume_pool);
 
-        // Create index stage with chunk index, embedded index, and checkpoint
+        // Create index stage with chunk index and checkpoint
         let index = IndexStage::new(chunk_index, checkpoint_manager);
-
-        // Populate index with existing embedded_index entries
-        for (hash, location) in embedded_index {
-            // Use put directly to avoid re-recording to checkpoint
-            index.chunk_index().put(hash, location)?;
-        }
 
         // Create write pipeline
         let pipeline = WritePipeline::new(
@@ -1444,9 +1428,9 @@ impl ArchiveWriter {
             // If we just wrote it, we just updated the index.
 
             // Create chunk reference with packed info
-            let file_index = *hash_to_index
-                .get(&entry.hash)
-                .expect("packed file index must exist");
+            let file_index = *hash_to_index.get(&entry.hash).ok_or_else(|| {
+                EraError::IntegrityError("packed file index missing from hash_to_index map".into())
+            })?;
             let chunk_ref = ChunkRef::new_packed(
                 chunk_hash,
                 0, // offset within file (always 0 for single-chunk small files)
@@ -1532,6 +1516,7 @@ impl ArchiveWriter {
         self.pipeline.flush_stripe().await?;
 
         // Sync checkpoint before writing catalog (atomic point)
+        #[allow(deprecated)]
         self.pipeline.sync_checkpoint()?;
         debug!("Checkpoint synced before catalog write");
 
@@ -1542,7 +1527,10 @@ impl ArchiveWriter {
 
         // Create session-based builder for catalog encryption
         let compressor = self.pipeline.create_compressor();
-        let catalog_builder = self.pipeline.encryption().create_block_builder(compressor);
+        let catalog_builder = self
+            .pipeline
+            .encryption()
+            .create_block_builder(compressor)?;
 
         // Pack catalog ONCE to ensure same block_id (and thus same nonce) for all volumes
         // This is critical because the block_id is used to derive the encryption nonce
@@ -1553,7 +1541,10 @@ impl ArchiveWriter {
         let backup_block = if self.pipeline.erasure_enabled() {
             // Create another builder for the backup block (will get next block_id)
             let compressor = self.pipeline.create_compressor();
-            let backup_builder = self.pipeline.encryption().create_block_builder(compressor);
+            let backup_builder = self
+                .pipeline
+                .encryption()
+                .create_block_builder(compressor)?;
             Some(backup_builder.pack_single(catalog_chunk)?)
         } else {
             None
@@ -2211,7 +2202,7 @@ pub mod generic {
 
             // Create session-based builder for this block
             let compressor = self.create_compressor();
-            let block_builder = self.encryption.create_block_builder(compressor);
+            let block_builder = self.encryption.create_block_builder(compressor)?;
 
             let encrypted_block = block_builder.pack_chunks(packed.chunks)?;
             let location = self
@@ -2250,7 +2241,7 @@ pub mod generic {
 
             // Create session-based builder for catalog encryption
             let compressor = self.create_compressor();
-            let catalog_builder = self.encryption.create_block_builder(compressor);
+            let catalog_builder = self.encryption.create_block_builder(compressor)?;
 
             let catalog_block = catalog_builder.pack_single(catalog_chunk)?;
             let catalog_block_id = catalog_block.block_id.sequence() as u32;

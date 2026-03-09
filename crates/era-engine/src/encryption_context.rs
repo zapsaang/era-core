@@ -6,9 +6,14 @@
 //! This module is part of the God Object decomposition effort (Phase 2).
 
 use era_codec::Compressor;
+use era_common::EraError;
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::SessionBlockBuilder;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Maximum block index value — block IDs are stored as u32 in volume
+/// headers and footer fields, so the counter must not exceed u32::MAX.
+const MAX_BLOCK_INDEX: u64 = u32::MAX as u64;
 
 /// Encryption context for archive operations.
 ///
@@ -72,14 +77,14 @@ impl EncryptionContext {
     ///
     /// This is used to ensure each block gets a unique encryption key.
     pub fn next_block_id(&self) -> u64 {
-        self.next_block_id.fetch_add(1, Ordering::SeqCst)
+        self.next_block_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Get the current block count without incrementing.
     ///
     /// Useful for statistics and finalization.
     pub fn blocks_written(&self) -> u64 {
-        self.next_block_id.load(Ordering::SeqCst)
+        self.next_block_id.load(Ordering::Relaxed)
     }
 
     /// Get a reference to the key session.
@@ -102,21 +107,26 @@ impl EncryptionContext {
 
     /// Create a SessionBlockBuilder configured with this context's keys.
     ///
-    /// The builder is initialized with the next block ID from this context.
-    ///
-    /// # Arguments
-    /// * `compressor` - The compressor to use for this block
+    /// Returns an error if the block index would exceed u32::MAX,
+    /// since block IDs are stored as u32 in volume headers/footers.
     pub fn create_block_builder<'a>(
         &'a self,
         compressor: Box<dyn Compressor>,
-    ) -> SessionBlockBuilder<'a> {
-        SessionBlockBuilder::new(
+    ) -> era_common::Result<SessionBlockBuilder<'a>> {
+        let block_id = self.next_block_id();
+        if block_id > MAX_BLOCK_INDEX {
+            return Err(EraError::IntegrityError(format!(
+                "Block index {} exceeds maximum u32 capacity ({})",
+                block_id, MAX_BLOCK_INDEX
+            )));
+        }
+        Ok(SessionBlockBuilder::new(
             &self.session,
             &self.volume_key,
             self.nonce_context,
             compressor,
         )
-        .with_starting_block_id(self.next_block_id())
+        .with_starting_block_id(block_id))
     }
 }
 
