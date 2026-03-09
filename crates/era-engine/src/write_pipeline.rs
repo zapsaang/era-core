@@ -349,14 +349,12 @@ impl<B: StorageBackend> WritePipeline<B> {
 
     /// Sync the checkpoint to stable storage.
     ///
-    /// This should be called at safe points during archiving to enable
-    /// crash recovery.
-    #[deprecated(
-        since = "2.2.0",
-        note = "Use commit_to_volume() for checkpoint persistence"
-    )]
+    /// This should be called at safe points during archiving to enable crash recovery.
+    ///
+    /// For async-first checkpoint persistence with atomic volume writes, use
+    /// `commit_to_volume()` instead. Both methods are valid depending on the
+    /// orchestration context and whether synchronous or asynchronous flushing is needed.
     pub fn sync_checkpoint(&mut self) -> Result<()> {
-        #[allow(deprecated)]
         self.index.sync_checkpoint()
     }
 

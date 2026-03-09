@@ -106,7 +106,10 @@ async fn volume_has_checkpoint(archive_path: &Path) -> bool {
         }
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or_else(|e| {
+        tracing::warn!("volume_has_checkpoint task panicked: {}", e);
+        false
+    })
 }
 
 /// Recovery manager for handling interrupted archive creation

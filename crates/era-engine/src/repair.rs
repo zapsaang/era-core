@@ -50,6 +50,49 @@ async fn preflight_metadata_recovery(path: &Path, password: &str) -> Result<()> 
     reader.preflight_metadata_recovery().await
 }
 
+/// Helper to read and verify a single shard at the given offset
+/// Returns (shard_data, shard_header, corrupted) or an error if I/O fails
+#[allow(dead_code)]
+async fn read_and_verify_shard(
+    reader: &VolumeReader<era_storage::LocalStorageReader>,
+    offset: u64,
+    header_prefix_len: usize,
+) -> Result<Option<(Bytes, ShardHeader, bool)>> {
+    let _prefix_bytes = match reader.read_raw(offset, header_prefix_len).await {
+        Ok(bytes) if bytes.len() == header_prefix_len => bytes,
+        _ => return Ok(None),
+    };
+
+    let header_bytes = match reader
+        .read_raw(offset + header_prefix_len as u64, ShardHeader::SIZE)
+        .await
+    {
+        Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+        _ => return Ok(None),
+    };
+
+    let shard_header = match ShardHeader::from_bytes(&header_bytes) {
+        Some(h) => h,
+        None => {
+            return Ok(None);
+        }
+    };
+
+    let shard_len = shard_header.length as usize;
+    let shard_data = match reader
+        .read_raw(offset + header_prefix_len as u64 + ShardHeader::SIZE as u64, shard_len)
+        .await
+    {
+        Ok(data) => data,
+        Err(_) => {
+            return Ok(None);
+        }
+    };
+
+    let is_corrupted = !shard_header.verify(&shard_data);
+    Ok(Some((shard_data, shard_header, is_corrupted)))
+}
+
 impl RepairStats {
     /// Check if all corrupted shards were repaired
     pub fn fully_repaired(&self) -> bool {
@@ -148,7 +191,13 @@ pub async fn repair_archive(
         let backup_path = path.with_extension("era.bak");
         if !backup_path.exists() {
             info!("Creating backup: {}", backup_path.display());
-            std::fs::copy(path, &backup_path)?;
+            // Wrap fs::copy in spawn_blocking since it's I/O-heavy (V2-QUAL-07)
+            let path_clone = path.to_path_buf();
+            let backup_path_clone = backup_path.clone();
+            tokio::task::spawn_blocking(move || std::fs::copy(&path_clone, &backup_path_clone))
+                .await
+                .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))?
+                ?;
         } else {
             info!("Backup already exists: {}", backup_path.display());
         }
@@ -621,7 +670,13 @@ pub async fn repair_archive_matrix(
             );
             if !backup_path.exists() {
                 info!("Creating backup: {}", backup_path.display());
-                std::fs::copy(vol_path, &backup_path)?;
+                // Wrap fs::copy in spawn_blocking since it's I/O-heavy (V2-QUAL-07)
+                let vol_path_clone = vol_path.to_path_buf();
+                let backup_path_clone = backup_path.clone();
+                tokio::task::spawn_blocking(move || std::fs::copy(&vol_path_clone, &backup_path_clone))
+                    .await
+                    .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))?
+                    ?;
             }
         }
     }
@@ -678,6 +733,8 @@ pub async fn repair_archive_matrix(
         let mut any_shard_read = false;
         let mut stripe_lengths: Option<Vec<u32>> = None;
 
+        // Scan all shards across volumes using matrix distribution
+        // (V2-QUAL-06: Mirrors repair_archive single-volume shard scanning, adapted for per-volume offsets)
         for shard_idx in 0..total_shards {
             let vol_idx = distribution_strategy.calculate_volume(
                 shard_idx,

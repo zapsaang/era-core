@@ -266,6 +266,25 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             ));
         }
 
+        // Validate volume_indices: check bounds and duplicates
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for &idx in volume_indices {
+            if idx >= volume_readers.len() {
+                return Err(EraError::InvalidFormat(format!(
+                    "volume_indices contains out-of-bounds index {} (max: {})",
+                    idx,
+                    volume_readers.len() - 1
+                )));
+            }
+            if !seen.insert(idx) {
+                return Err(EraError::InvalidFormat(format!(
+                    "volume_indices contains duplicate index {}",
+                    idx
+                )));
+            }
+        }
+
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
@@ -625,104 +644,106 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
 #[async_trait(?Send)]
 impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'a, R> {
     async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
-        if self.current_offset >= self.data_end {
-            return None;
-        }
-
-        // Read BlockHeader (16 bytes)
-        let header_bytes = match self
-            .volume_reader
-            .read_raw(self.current_offset, BlockHeader::SIZE)
-            .await
-        {
-            Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
-            Ok(bytes) if bytes.is_empty() => return None,
-            Ok(bytes) => {
-                return Some(Err(EraError::IntegrityError(format!(
-                    "Unexpected partial read: expected {} bytes, got {}",
-                    BlockHeader::SIZE,
-                    bytes.len()
-                ))));
+        loop {
+            if self.current_offset >= self.data_end {
+                return None;
             }
-            Err(e) => return Some(Err(e)),
-        };
 
-        let header = match BlockHeader::from_bytes(&header_bytes) {
-            Some(h) => h,
-            None => {
+            // Read BlockHeader (16 bytes)
+            let header_bytes = match self
+                .volume_reader
+                .read_raw(self.current_offset, BlockHeader::SIZE)
+                .await
+            {
+                Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
+                Ok(bytes) if bytes.is_empty() => return None,
+                Ok(bytes) => {
+                    return Some(Err(EraError::IntegrityError(format!(
+                        "Unexpected partial read: expected {} bytes, got {}",
+                        BlockHeader::SIZE,
+                        bytes.len()
+                    ))));
+                }
+                Err(e) => return Some(Err(e)),
+            };
+
+            let header = match BlockHeader::from_bytes(&header_bytes) {
+                Some(h) => h,
+                None => {
+                    self.stats.blocks_failed += 1;
+                    self.current_offset += BlockHeader::SIZE as u64;
+                    return Some(Err(EraError::CorruptedHeader(format!(
+                        "Invalid BlockHeader at offset {}",
+                        self.current_offset - BlockHeader::SIZE as u64
+                    ))));
+                }
+            };
+
+            let block_size = header.length;
+
+            // Skip non-data blocks (e.g., IndexPage, IndexManifest) — they are
+            // encrypted with different keys and are not part of the data stream.
+            if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
+                self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
+                // Don't increment block_index — index blocks use their own ID space
+                continue;
+            }
+
+            // Validate block size
+            if block_size == 0 {
                 self.stats.blocks_failed += 1;
+                // Advance offset to avoid infinite loop
                 self.current_offset += BlockHeader::SIZE as u64;
                 return Some(Err(EraError::CorruptedHeader(format!(
-                    "Invalid BlockHeader at offset {}",
+                    "Zero-length block at offset {}",
                     self.current_offset - BlockHeader::SIZE as u64
                 ))));
             }
-        };
+            if block_size > MAX_BLOCK_SIZE {
+                self.stats.blocks_failed += 1;
+                // Impossible to know where next block starts, so abort iteration
+                self.current_offset = self.data_end;
+                return Some(Err(EraError::BlockTooLarge {
+                    size: block_size as usize,
+                    max_size: MAX_BLOCK_SIZE as usize,
+                }));
+            }
 
-        let block_size = header.length;
+            let location = BlockLocation::single(
+                self.volume_reader.header().volume_id(),
+                self.block_index,
+                self.current_offset,
+                block_size,
+            );
 
-        // Skip non-data blocks (e.g., IndexPage, IndexManifest) — they are
-        // encrypted with different keys and are not part of the data stream.
-        if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
-            self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
-            // Don't increment block_index — index blocks use their own ID space
-            return self.next_block().await;
-        }
-
-        // Validate block size
-        if block_size == 0 {
-            self.stats.blocks_failed += 1;
-            // Advance offset to avoid infinite loop
-            self.current_offset += BlockHeader::SIZE as u64;
-            return Some(Err(EraError::CorruptedHeader(format!(
-                "Zero-length block at offset {}",
-                self.current_offset - BlockHeader::SIZE as u64
-            ))));
-        }
-        if block_size > MAX_BLOCK_SIZE {
-            self.stats.blocks_failed += 1;
-            // Impossible to know where next block starts, so abort iteration
-            self.current_offset = self.data_end;
-            return Some(Err(EraError::BlockTooLarge {
-                size: block_size as usize,
-                max_size: MAX_BLOCK_SIZE as usize,
-            }));
-        }
-
-        let location = BlockLocation::single(
-            self.volume_reader.header().volume_id(),
-            self.block_index,
-            self.current_offset,
-            block_size,
-        );
-
-        // Read and decrypt block with per-block key derivation
-        let result = match self.volume_reader.read_block(&location).await {
-            Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
-                Ok(chunks) => {
-                    self.stats.blocks_read += 1;
-                    Ok(DecodedBlock {
-                        block_index: self.block_index,
-                        chunks,
-                        corrupted_shards: 0,
-                    })
-                }
+            // Read and decrypt block with per-block key derivation
+            let result = match self.volume_reader.read_block(&location).await {
+                Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
+                    Ok(chunks) => {
+                        self.stats.blocks_read += 1;
+                        Ok(DecodedBlock {
+                            block_index: self.block_index,
+                            chunks,
+                            corrupted_shards: 0,
+                        })
+                    }
+                    Err(e) => {
+                        self.stats.blocks_failed += 1;
+                        Err(e)
+                    }
+                },
                 Err(e) => {
                     self.stats.blocks_failed += 1;
                     Err(e)
                 }
-            },
-            Err(e) => {
-                self.stats.blocks_failed += 1;
-                Err(e)
-            }
-        };
+            };
 
-        // Advance to next block (BlockHeader::SIZE + data)
-        self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
-        self.block_index += 1;
+            // Advance to next block (BlockHeader::SIZE + data)
+            self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
+            self.block_index += 1;
 
-        Some(result)
+            return Some(result);
+        }
     }
 
     fn has_more(&self) -> bool {
@@ -1078,6 +1099,9 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             };
         }
 
+        // Shard data must be even-aligned for RS recovery. If max_len is odd,
+        // pad to the next even boundary to ensure consistent shard sizes across
+        // encoding/decoding operations and to match write-path encoding conventions.
         let shard_size = if max_len.is_multiple_of(2) {
             max_len
         } else {
@@ -1180,7 +1204,9 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
                     match self.unpacker.extract_all_chunks(&encrypted_block) {
                         Ok(chunks) => return Some(chunks),
-                        Err(e) => last_err = Some(e),
+                        Err(e) => {
+                            last_err.get_or_insert(e);
+                        }
                     }
                 }
                 tracing::warn!(
@@ -1240,7 +1266,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                             warned_halfway = true;
                         }
                         if probe_attempts > MAX_PROBE_ATTEMPTS {
-                            last_err = Some(EraError::ErasureError(format!(
+                            last_err.get_or_insert(EraError::ErasureError(format!(
                                 "Virtual striping probe limit exceeded for block {} ({} > {})",
                                 block_index, probe_attempts, MAX_PROBE_ATTEMPTS
                             )));
@@ -1268,7 +1294,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                                 break;
                             }
                             Err(e) => {
-                                last_err = Some(e);
+                                last_err.get_or_insert(e);
                             }
                         }
                     }

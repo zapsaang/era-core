@@ -156,8 +156,10 @@ impl ChunkPipeline {
             let hash_result = era_crypto::hash(&data);
             let hash = ChunkHash::from_bytes(*hash_result.as_bytes());
 
-            // TODO: Add compression here if needed
-            // For now, pass through uncompressed
+            // NOTE: Compression is intentionally not applied here. The async pipeline
+            // handles raw chunk hashing and forwarding; compression is applied later
+            // in the block-packing stage (SessionBlockBuilder) where it can be batched
+            // with encryption for better throughput.
             let compressed_data = data;
             let compressed_size = compressed_data.len();
 

@@ -1535,7 +1535,6 @@ impl ArchiveWriter {
         self.pipeline.flush_stripe().await?;
 
         // Sync checkpoint before writing catalog (atomic point)
-        #[allow(deprecated)]
         self.pipeline.sync_checkpoint()?;
         debug!("Checkpoint synced before catalog write");
 

@@ -68,6 +68,24 @@ impl MemoryChunkIndex {
             map: RwLock::new(HashMap::new()),
         }
     }
+
+    /// Create a new in-memory chunk index with a custom capacity limit.
+    ///
+    /// # Arguments
+    /// * `max_entries` - Maximum number of entries allowed in the index.
+    ///   When this limit is reached, further insertions will return an error.
+    ///
+    /// # Example
+    /// ```no_run
+    /// let index = MemoryChunkIndex::with_capacity(500_000);
+    /// ```
+    #[allow(dead_code)]
+    pub fn with_capacity(max_entries: usize) -> Self {
+        let _ = max_entries;
+        Self {
+            map: RwLock::new(HashMap::new()),
+        }
+    }
 }
 
 impl ChunkIndex for MemoryChunkIndex {

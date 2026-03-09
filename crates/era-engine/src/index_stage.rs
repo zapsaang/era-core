@@ -79,10 +79,10 @@ impl IndexStage {
     /// Sync checkpoint state to stable storage.
     ///
     /// No-op if no checkpoint manager is configured.
-    #[deprecated(
-        since = "2.2.0",
-        note = "Use commit_to_volume() for checkpoint persistence"
-    )]
+    ///
+    /// For async-first checkpoint persistence with atomic volume writes, use
+    /// `commit_to_volume()` instead. Both methods are valid depending on the
+    /// orchestration context and whether synchronous or asynchronous flushing is needed.
     pub fn sync_checkpoint(&mut self) -> Result<()> {
         if let Some(ref mut mgr) = self.checkpoint_manager {
             #[allow(deprecated)]

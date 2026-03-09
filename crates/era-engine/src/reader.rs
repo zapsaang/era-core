@@ -732,9 +732,6 @@ impl ArchiveReader {
                         }
                     };
 
-                    // Debug info
-                    // println!("Reading shard {} (my={}) from vol_idx {} offset {}", shard_idx, my_shard_idx, vol_idx, offset);
-
                     match self.read_shard(&self.volume_readers[vol_idx], offset).await {
                         Ok(shard) => {
                             available_shards.push((shard_idx, shard));
@@ -1291,7 +1288,7 @@ impl ArchiveReader {
                 stats.errors.len()
             );
             for err in &stats.errors {
-                println!("Verify Error: {}", err);
+                tracing::warn!("Verify error: {}", err);
             }
         }
 

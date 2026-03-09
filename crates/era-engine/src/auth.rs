@@ -6,7 +6,12 @@ use era_volume::{RecipientSlot, RecipientType};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use zeroize::Zeroizing;
 
-/// Abstract identity provider for authentication
+/// Abstract identity provider for authentication.
+///
+/// # Security Note
+/// Rate-limiting and brute-force protection are the caller's responsibility.
+/// This trait performs a single unlock attempt per call without any built-in
+/// throttling or lockout mechanism.
 pub trait AuthProvider: Send + Sync {
     /// Attempt to unlock a recipient slot.
     /// Returns the decrypted Master Key if successful.

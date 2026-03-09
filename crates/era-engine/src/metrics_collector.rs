@@ -4,6 +4,7 @@
 //! creation, extraction, and other critical operations.
 
 use std::time::Instant;
+use tracing::debug;
 
 /// Helper struct to measure and record operation timing
 pub struct OperationTimer {
@@ -34,7 +35,12 @@ impl OperationTimer {
             "decryption" => metrics::histogram!("decryption_ms", elapsed_ms),
             "file_read" => metrics::histogram!("file_read_ms", elapsed_ms),
             "file_write" => metrics::histogram!("file_write_ms", elapsed_ms),
-            _ => {} // Unknown operation type, skip recording
+            _ => {
+                debug!(
+                    "Unknown operation '{}', skipping metrics recording",
+                    self.name
+                );
+            }
         }
     }
 

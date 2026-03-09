@@ -70,6 +70,15 @@ impl SmallFilePacker {
     /// or `None` if more files can be buffered.
     pub fn push(&mut self, entry: SmallFileEntry) -> Option<Vec<SmallFileEntry>> {
         let file_size = entry.data.len() as u64;
+
+        // Validate entry meets buffering criteria (V2-QUAL-12)
+        if !self.should_buffer(file_size) {
+            // Entry doesn't meet buffer criteria — return it for immediate processing
+            // by wrapping in a single-entry flush
+            self.buffer.push(entry);
+            return Some(self.take());
+        }
+
         self.buffer.push(entry);
         self.total_size += file_size;
 

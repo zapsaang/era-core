@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum block index value — block IDs are stored as u32 in volume
 /// headers and footer fields, so the counter must not exceed u32::MAX.
+/// Note: u32::MAX (4,294,967,295) is a valid block index, not a sentinel.
+/// If the counter reaches this value, subsequent blocks will fail with
+/// EraError::IntegrityError to prevent overflow.
 const MAX_BLOCK_INDEX: u64 = u32::MAX as u64;
 
 /// Encryption context for archive operations.

@@ -571,6 +571,9 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
     use era_common::BlockId;
 
     // Construct location for the checkpoint block
+    // NOTE: VolumeId::new() creates a default VolumeId (0), which represents the primary volume.
+    // For checkpoint recovery, we default to volume 0 since checkpoints may be stored across
+    // volumes but this location serves only as a metadata marker.
     let location = BlockLocation::single(era_common::VolumeId::new(), 0, checkpoint_offset, 0);
 
     // Read typed block
@@ -664,8 +667,10 @@ pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
             {
                 Ok(checkpoint) => {
                     checkpoints.push(checkpoint);
-                    // TODO: In a full implementation, each checkpoint would store
-                    // a pointer to the previous checkpoint for chain traversal
+                    // NOTE: Checkpoint chain traversal is not yet implemented.
+                    // Each checkpoint is currently independent. When resume-from-checkpoint
+                    // is needed, each checkpoint would store a pointer to the previous
+                    // checkpoint offset for chain traversal.
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -742,7 +747,7 @@ mod tests {
         let checkpoint = Checkpoint::new(0, 1024, 4096, 10, 100, HashMap::new());
         let size = checkpoint.serialized_size().unwrap();
         assert!(size > 0);
-        println!("Checkpoint size: {} bytes", size);
+        tracing::debug!("Checkpoint size: {} bytes", size);
     }
 
     #[test]
