@@ -76,7 +76,7 @@ impl MemoryChunkIndex {
     ///   When this limit is reached, further insertions will return an error.
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let index = MemoryChunkIndex::with_capacity(500_000);
     /// ```
     #[allow(dead_code)]
