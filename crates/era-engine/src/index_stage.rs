@@ -79,8 +79,13 @@ impl IndexStage {
     /// Sync checkpoint state to stable storage.
     ///
     /// No-op if no checkpoint manager is configured.
+    #[deprecated(
+        since = "2.2.0",
+        note = "Use commit_to_volume() for checkpoint persistence"
+    )]
     pub fn sync_checkpoint(&mut self) -> Result<()> {
         if let Some(ref mut mgr) = self.checkpoint_manager {
+            #[allow(deprecated)]
             mgr.sync()?;
         }
         Ok(())
@@ -104,6 +109,7 @@ impl IndexStage {
     }
 
     /// Get a reference to the underlying chunk index.
+    #[allow(dead_code)]
     pub fn chunk_index(&self) -> &Arc<dyn ChunkIndex> {
         &self.chunk_index
     }

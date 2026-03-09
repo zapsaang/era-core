@@ -22,9 +22,7 @@ impl OperationTimer {
 
     /// Record the elapsed time as a histogram metric
     /// Note: The metric name is combined with "_ms" suffix
-    pub fn record(self) {
-        let elapsed_ms = self.start.elapsed().as_secs_f64() * 1000.0;
-
+    fn record_with_elapsed(self, elapsed_ms: f64) {
         // Since metrics macros require static strings, we can only record
         // the value without dynamic operation names. In production,
         // you would use a metrics exporter that supports labels.
@@ -40,10 +38,16 @@ impl OperationTimer {
         }
     }
 
+    /// Record the elapsed time without returning it
+    pub fn record(self) {
+        let elapsed_ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        self.record_with_elapsed(elapsed_ms);
+    }
+
     /// Record the elapsed time and return the duration in milliseconds
     pub fn finish(self) -> f64 {
         let elapsed_ms = self.start.elapsed().as_secs_f64() * 1000.0;
-        self.record();
+        self.record_with_elapsed(elapsed_ms);
         elapsed_ms
     }
 }
