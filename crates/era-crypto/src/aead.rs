@@ -120,11 +120,13 @@ impl Default for AeadCipher {
 pub fn encrypt_with_context(
     key: &DerivedKey,
     nonce_context: &[u8; 16],
+    archive_id: &[u8; 16],
+    epoch_id: u32,
     block_id: BlockId,
     plaintext: &[u8],
 ) -> Result<Bytes> {
     XChaCha20Poly1305Context::from_derived_key(key)?
-        .encrypt_with_context(nonce_context, block_id, plaintext)
+        .encrypt_with_context(nonce_context, archive_id, epoch_id, block_id, plaintext)
         .map(Bytes::from)
 }
 
@@ -132,11 +134,13 @@ pub fn encrypt_with_context(
 pub fn decrypt_with_context(
     key: &DerivedKey,
     nonce_context: &[u8; 16],
+    archive_id: &[u8; 16],
+    epoch_id: u32,
     block_id: BlockId,
     ciphertext: &[u8],
 ) -> Result<Bytes> {
     XChaCha20Poly1305Context::from_derived_key(key)?
-        .decrypt_with_context(nonce_context, block_id, ciphertext)
+        .decrypt_with_context(nonce_context, archive_id, epoch_id, block_id, ciphertext)
         .map(Bytes::from)
 }
 
@@ -147,6 +151,8 @@ mod tests {
 
     /// Test nonce context for consistent testing
     const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
+    const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+    const TEST_EPOCH_ID: u32 = 1;
 
     fn test_key_with_salt(salt_byte: u8) -> DerivedKey {
         derive_key(
@@ -171,10 +177,24 @@ mod tests {
         let block_id = BlockId::new(1);
         let plaintext = b"Hello, ERA encryption!";
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
-        let decrypted =
-            decrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, &ciphertext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+        let decrypted = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &ciphertext,
+        )
+        .unwrap();
 
         assert_eq!(plaintext.as_slice(), decrypted.as_ref());
     }
@@ -185,10 +205,24 @@ mod tests {
         let block_id = BlockId::new(42);
         let plaintext = b"Deterministic test";
 
-        let ciphertext1 =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
-        let ciphertext2 =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
+        let ciphertext1 = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+        let ciphertext2 = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
 
         // Same key, context, block_id, and plaintext should produce same ciphertext
         assert_eq!(ciphertext1, ciphertext2);
@@ -199,10 +233,24 @@ mod tests {
         let key = test_key();
         let plaintext = b"Same plaintext";
 
-        let ciphertext1 =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, BlockId::new(1), plaintext).unwrap();
-        let ciphertext2 =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, BlockId::new(2), plaintext).unwrap();
+        let ciphertext1 = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            BlockId::new(1),
+            plaintext,
+        )
+        .unwrap();
+        let ciphertext2 = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            BlockId::new(2),
+            plaintext,
+        )
+        .unwrap();
 
         // Different block IDs should produce different ciphertext
         assert_ne!(ciphertext1, ciphertext2);
@@ -217,8 +265,24 @@ mod tests {
         let context1 = [1u8; 16];
         let context2 = [2u8; 16];
 
-        let ciphertext1 = encrypt_with_context(&key, &context1, block_id, plaintext).unwrap();
-        let ciphertext2 = encrypt_with_context(&key, &context2, block_id, plaintext).unwrap();
+        let ciphertext1 = encrypt_with_context(
+            &key,
+            &context1,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+        let ciphertext2 = encrypt_with_context(
+            &key,
+            &context2,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
 
         // Different contexts should produce different ciphertext (prevents nonce reuse across archives)
         assert_ne!(ciphertext1, ciphertext2);
@@ -232,9 +296,23 @@ mod tests {
         let block_id = BlockId::new(1);
         let plaintext = b"Secret data";
 
-        let ciphertext =
-            encrypt_with_context(&key1, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
-        let result = decrypt_with_context(&key2, &TEST_NONCE_CONTEXT, block_id, &ciphertext);
+        let ciphertext = encrypt_with_context(
+            &key1,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+        let result = decrypt_with_context(
+            &key2,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &ciphertext,
+        );
 
         assert!(result.is_err());
     }
@@ -248,8 +326,23 @@ mod tests {
         let context1 = [1u8; 16];
         let context2 = [2u8; 16];
 
-        let ciphertext = encrypt_with_context(&key, &context1, block_id, plaintext).unwrap();
-        let result = decrypt_with_context(&key, &context2, block_id, &ciphertext);
+        let ciphertext = encrypt_with_context(
+            &key,
+            &context1,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+        let result = decrypt_with_context(
+            &key,
+            &context2,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &ciphertext,
+        );
 
         // Decryption with wrong context should fail
         assert!(result.is_err());
@@ -261,8 +354,15 @@ mod tests {
         let block_id = BlockId::new(1);
         let plaintext = b"Secret data";
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
 
         // Tamper with the ciphertext by converting to Vec and back
         let mut tampered = ciphertext.to_vec();
@@ -270,7 +370,14 @@ mod tests {
             *byte ^= 0xFF;
         }
 
-        let result = decrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, &tampered);
+        let result = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &tampered,
+        );
 
         // Tampered data should fail AEAD verification
         assert!(result.is_err());
@@ -282,10 +389,24 @@ mod tests {
         let block_id = BlockId::new(1);
         let plaintext = b"";
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
-        let decrypted =
-            decrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, &ciphertext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+        let decrypted = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &ciphertext,
+        )
+        .unwrap();
 
         assert!(decrypted.is_empty());
     }
@@ -296,10 +417,24 @@ mod tests {
         let block_id = BlockId::new(1);
         let plaintext = vec![42u8; 1024 * 1024]; // 1MB
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, &plaintext).unwrap();
-        let decrypted =
-            decrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, &ciphertext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &plaintext,
+        )
+        .unwrap();
+        let decrypted = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &ciphertext,
+        )
+        .unwrap();
 
         assert_eq!(plaintext.as_slice(), decrypted.as_ref());
     }
@@ -310,8 +445,15 @@ mod tests {
         let block_id = BlockId::new(1);
         let plaintext = b"Test data";
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
 
         // Ciphertext should be larger than plaintext (includes 16-byte Poly1305 tag)
         assert_eq!(ciphertext.len(), plaintext.len() + 16);
@@ -322,9 +464,23 @@ mod tests {
         let key = test_key();
         let plaintext = b"Secret data";
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, BlockId::new(1), plaintext).unwrap();
-        let result = decrypt_with_context(&key, &TEST_NONCE_CONTEXT, BlockId::new(2), &ciphertext);
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            BlockId::new(1),
+            plaintext,
+        )
+        .unwrap();
+        let result = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            BlockId::new(2),
+            &ciphertext,
+        );
 
         // Decryption with wrong block_id should fail (nonce mismatch)
         assert!(result.is_err());
@@ -336,13 +492,27 @@ mod tests {
         let block_id = BlockId::new(1);
         let plaintext = b"Secret data that is long enough";
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
 
         // Truncate the ciphertext
         let truncated: Vec<u8> = ciphertext.iter().take(10).copied().collect();
 
-        let result = decrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, &truncated);
+        let result = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &truncated,
+        );
         assert!(result.is_err());
     }
 
@@ -352,10 +522,24 @@ mod tests {
         let block_id = BlockId::new(u64::MAX);
         let plaintext = b"Max block ID test";
 
-        let ciphertext =
-            encrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, plaintext).unwrap();
-        let decrypted =
-            decrypt_with_context(&key, &TEST_NONCE_CONTEXT, block_id, &ciphertext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+        let decrypted = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &ciphertext,
+        )
+        .unwrap();
 
         assert_eq!(plaintext.as_slice(), decrypted.as_ref());
     }

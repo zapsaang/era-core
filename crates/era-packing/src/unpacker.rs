@@ -15,6 +15,8 @@ pub struct MacroBlockUnpacker {
     key: DerivedKey,
     /// Nonce context (must match the one used during encryption)
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
 }
 
 impl MacroBlockUnpacker {
@@ -24,11 +26,19 @@ impl MacroBlockUnpacker {
     /// * `key` - The derived decryption key
     /// * `nonce_context` - The 16-byte context used during encryption (e.g., archive salt)
     /// * `compressor` - The compressor to use for decompression
-    pub fn new(key: DerivedKey, nonce_context: [u8; 16], compressor: Box<dyn Compressor>) -> Self {
+    pub fn new(
+        key: DerivedKey,
+        nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
+        compressor: Box<dyn Compressor>,
+    ) -> Self {
         Self {
             compressor,
             key,
             nonce_context,
+            archive_id,
+            epoch_id,
         }
     }
 
@@ -37,6 +47,8 @@ impl MacroBlockUnpacker {
         let (index, data) = block_codec::decrypt_and_decompress(
             &self.key,
             &self.nonce_context,
+            &self.archive_id,
+            self.epoch_id,
             block.block_id,
             &block.data,
             self.compressor.as_ref(),
@@ -104,12 +116,20 @@ mod tests {
     use era_common::UniqueChunk;
     use era_crypto::{derive_key, KdfParams, Salt};
 
+    const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
+    const TEST_EPOCH_ID: u32 = 1;
+
     #[test]
     fn test_pack_unpack_roundtrip() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder =
-            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -118,7 +138,13 @@ mod tests {
         let encrypted = builder.pack_single(chunk).unwrap();
 
         // Unpack with same nonce context
-        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
+        let unpacker = MacroBlockUnpacker::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            crate::create_compressor(),
+        );
         let unpacked = unpacker.unpack(&encrypted).unwrap();
 
         assert_eq!(unpacked.chunk_count(), 1);
@@ -130,8 +156,13 @@ mod tests {
     fn test_extract_chunk_by_hash() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder =
-            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let data1 = vec![1u8; 256];
         let data2 = vec![2u8; 256];
@@ -145,7 +176,13 @@ mod tests {
 
         let encrypted = builder.pack_chunks(chunks).unwrap();
 
-        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
+        let unpacker = MacroBlockUnpacker::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            crate::create_compressor(),
+        );
 
         // Extract by hash
         let extracted1 = unpacker.extract_chunk(&encrypted, &hash1).unwrap().unwrap();
@@ -164,8 +201,13 @@ mod tests {
     fn test_corrupted_block_detection() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder =
-            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -182,7 +224,13 @@ mod tests {
         }
 
         // Unpack should fail due to authentication failure
-        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
+        let unpacker = MacroBlockUnpacker::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            crate::create_compressor(),
+        );
         let result = unpacker.unpack(&encrypted);
 
         assert!(result.is_err(), "Tampered block should fail decryption");
@@ -192,8 +240,13 @@ mod tests {
     fn test_wrong_key_detection() {
         let key1 = test_key();
         let compressor = crate::create_compressor();
-        let builder =
-            MacroBlockBuilder::new(key1.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key1.try_clone().unwrap(),
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -210,8 +263,13 @@ mod tests {
         };
         let key2 = derive_key(b"wrong_password", &salt2, &params).unwrap();
 
-        let unpacker =
-            MacroBlockUnpacker::new(key2, TEST_NONCE_CONTEXT, crate::create_compressor());
+        let unpacker = MacroBlockUnpacker::new(
+            key2,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            crate::create_compressor(),
+        );
         let result = unpacker.unpack(&encrypted);
 
         assert!(result.is_err(), "Wrong key should fail decryption");
@@ -221,8 +279,13 @@ mod tests {
     fn test_wrong_nonce_context_detection() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder =
-            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -232,7 +295,13 @@ mod tests {
 
         // Try to decrypt with a different nonce context
         let wrong_context = [99u8; 16];
-        let unpacker = MacroBlockUnpacker::new(key, wrong_context, crate::create_compressor());
+        let unpacker = MacroBlockUnpacker::new(
+            key,
+            wrong_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            crate::create_compressor(),
+        );
         let result = unpacker.unpack(&encrypted);
 
         assert!(
@@ -245,8 +314,13 @@ mod tests {
     fn test_truncated_block_detection() {
         let key = test_key();
         let compressor = crate::create_compressor();
-        let builder =
-            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let original_data = vec![42u8; 1024];
         let chunk_hash = era_crypto::hash(&original_data);
@@ -258,7 +332,13 @@ mod tests {
         let truncated = encrypted.data[..encrypted.data.len() / 2].to_vec();
         encrypted.data = Bytes::from(truncated);
 
-        let unpacker = MacroBlockUnpacker::new(key, TEST_NONCE_CONTEXT, crate::create_compressor());
+        let unpacker = MacroBlockUnpacker::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            crate::create_compressor(),
+        );
         let result = unpacker.unpack(&encrypted);
 
         assert!(result.is_err(), "Truncated block should fail");

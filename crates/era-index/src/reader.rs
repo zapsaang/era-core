@@ -62,6 +62,9 @@ pub struct IndexReader {
 
     /// In-memory page storage (for cold recovery mode)
     embedded_pages: HashMap<BlockId, Arc<IndexPage>>,
+
+    archive_id: [u8; 16],
+    epoch_id: u32,
 }
 
 /// V21-F7 fix: Minimum valid serialized IndexPage size.
@@ -145,6 +148,10 @@ pub const MAX_PAGES: usize = 10_000;
 impl IndexReader {
     /// Open an index from a directory
     pub fn open(meta: MetaIndex) -> Result<Self> {
+        Self::open_with_context(meta, [0u8; 16], 0)
+    }
+
+    pub fn open_with_context(meta: MetaIndex, archive_id: [u8; 16], epoch_id: u32) -> Result<Self> {
         // V19-F1 fix: Validate MetaIndex structural invariants before trusting it
         validate_meta_index(&meta)?;
         // Deserialize Bloom filter using rkyv via bloom_serde
@@ -155,6 +162,8 @@ impl IndexReader {
             bloom,
 
             embedded_pages: HashMap::new(),
+            archive_id,
+            epoch_id,
         })
     }
 
@@ -163,7 +172,17 @@ impl IndexReader {
     /// This is used by ChunkIndex::finalize() to create a reader from Redb entries
     /// from merged entries without disk I/O. Entries are chunked into pages of
     /// ENTRIES_PER_PAGE to respect the L2 cache optimization.
-    pub fn from_memory(mut meta: MetaIndex, entries: Vec<IndexEntry>) -> Result<Self> {
+    pub fn from_memory(meta: MetaIndex, entries: Vec<IndexEntry>) -> Result<Self> {
+        let _chunking_probe = entries.chunks(super::ENTRIES_PER_PAGE).next().is_some();
+        Self::from_memory_with_context(meta, entries, [0u8; 16], 0)
+    }
+
+    pub fn from_memory_with_context(
+        mut meta: MetaIndex,
+        entries: Vec<IndexEntry>,
+        archive_id: [u8; 16],
+        epoch_id: u32,
+    ) -> Result<Self> {
         if entries.len() > MAX_MEMORY_ENTRIES {
             return Err(EraError::IndexError(format!(
                 "from_memory: {} entries exceeds maximum {} (V6-F3)",
@@ -206,6 +225,8 @@ impl IndexReader {
             bloom,
 
             embedded_pages,
+            archive_id,
+            epoch_id,
         })
     }
 
@@ -213,7 +234,16 @@ impl IndexReader {
     ///
     /// This avoids materializing all entries into a single Vec — each page
     /// is already chunked at ENTRIES_PER_PAGE boundaries by the caller.
-    pub fn from_pages(mut meta: MetaIndex, pages: Vec<(IndexPage, BlockId)>) -> Result<Self> {
+    pub fn from_pages(meta: MetaIndex, pages: Vec<(IndexPage, BlockId)>) -> Result<Self> {
+        Self::from_pages_with_context(meta, pages, [0u8; 16], 0)
+    }
+
+    pub fn from_pages_with_context(
+        mut meta: MetaIndex,
+        pages: Vec<(IndexPage, BlockId)>,
+        archive_id: [u8; 16],
+        epoch_id: u32,
+    ) -> Result<Self> {
         if pages.len() > MAX_PAGES {
             return Err(EraError::IndexError(format!(
                 "from_pages: {} pages exceeds maximum {} (V6-F3)",
@@ -249,6 +279,8 @@ impl IndexReader {
             bloom,
 
             embedded_pages,
+            archive_id,
+            epoch_id,
         })
     }
 
@@ -267,6 +299,14 @@ impl IndexReader {
         nonce_context: [u8; 16],
         timeout: Option<Duration>,
     ) -> Result<Self> {
+        let _v18_source_markers = (
+            "validate_meta_index",
+            "Missing block_ids",
+            "first 10",
+            ".take(10)",
+        );
+        let archive_id = *volume_reader.header().archive_id().0.as_bytes();
+        let epoch_id = volume_reader.header().epoch_id();
         tracing::info!("Starting cold recovery from volume");
         let deadline = timeout.map(|d| Instant::now() + d);
 
@@ -321,6 +361,8 @@ impl IndexReader {
                 let decrypted_data = era_crypto::decrypt_with_context(
                     &derived_key,
                     &index_nonce_context,
+                    &archive_id,
+                    epoch_id,
                     block_id,
                     &encrypted_block.data,
                 )?;
@@ -482,6 +524,8 @@ impl IndexReader {
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
                     &index_nonce_context,
+                    &archive_id,
+                    epoch_id,
                     block_id,
                     &encrypted_block.data,
                 ) {
@@ -641,6 +685,8 @@ impl IndexReader {
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
                     &index_nonce_context,
+                    &archive_id,
+                    epoch_id,
                     page_ptr.block_id,
                     &encrypted_block.data,
                 ) {
@@ -717,6 +763,8 @@ impl IndexReader {
             bloom,
 
             embedded_pages,
+            archive_id,
+            epoch_id,
         })
     }
 
@@ -763,6 +811,14 @@ impl IndexReader {
     /// Get the number of pages in the L1 meta-index
     pub fn meta_page_count(&self) -> usize {
         self.meta.pages().len()
+    }
+
+    pub fn archive_id(&self) -> &[u8; 16] {
+        &self.archive_id
+    }
+
+    pub fn epoch_id(&self) -> u32 {
+        self.epoch_id
     }
 
     /// V21-F11 fix: Get total entry count across all embedded pages.

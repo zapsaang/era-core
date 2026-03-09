@@ -55,6 +55,9 @@ use tempfile::TempDir;
 // HELPERS
 // ============================================================================
 
+const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+const TEST_EPOCH_ID: u32 = 1;
+
 fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
     let path = dir.join(name);
     if let Some(parent) = path.parent() {
@@ -832,6 +835,8 @@ fn d1_deterministic_nonce_reuse_risk() {
             let ct1 = era_crypto::encrypt_with_context(
                 &bk.to_derived_key().unwrap(),
                 &salt,
+                &TEST_ARCHIVE_ID,
+                TEST_EPOCH_ID,
                 era_common::BlockId::new(1),
                 plaintext,
             )
@@ -839,6 +844,8 @@ fn d1_deterministic_nonce_reuse_risk() {
             let ct2 = era_crypto::encrypt_with_context(
                 &bk.to_derived_key().unwrap(),
                 &salt,
+                &TEST_ARCHIVE_ID,
+                TEST_EPOCH_ID,
                 era_common::BlockId::new(1),
                 plaintext,
             )

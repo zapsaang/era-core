@@ -18,6 +18,8 @@ pub struct MacroBlockBuilder {
     key: DerivedKey,
     /// Nonce context (must be unique per archive, e.g., salt)
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
     /// Next block ID
     next_block_id: AtomicU64,
 }
@@ -33,12 +35,20 @@ impl MacroBlockBuilder {
     /// # Security
     /// The nonce_context MUST be unique per archive to prevent nonce reuse.
     /// Typically, use the archive's salt as the nonce context.
-    pub fn new(key: DerivedKey, nonce_context: [u8; 16], compressor: Box<dyn Compressor>) -> Self {
+    pub fn new(
+        key: DerivedKey,
+        nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
+        compressor: Box<dyn Compressor>,
+    ) -> Self {
         Self {
             target_size: 4 * 1024 * 1024, // 4MB
             compressor,
             key,
             nonce_context,
+            archive_id,
+            epoch_id,
             next_block_id: AtomicU64::new(0),
         }
     }
@@ -99,6 +109,8 @@ impl MacroBlockBuilder {
         let encrypted = era_crypto::encrypt_with_context(
             &self.key,
             &self.nonce_context,
+            &self.archive_id,
+            self.epoch_id,
             block_id,
             &compressed,
         )?;
@@ -137,12 +149,20 @@ mod tests {
     }
 
     const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
+    const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
+    const TEST_EPOCH_ID: u32 = 1;
 
     #[test]
     fn test_pack_single_chunk() {
         let key = test_key();
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key, TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let chunk = UniqueChunk::new(
             Bytes::from(vec![42u8; 1024]),
@@ -159,7 +179,13 @@ mod tests {
     fn test_pack_multiple_chunks() {
         let key = test_key();
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key, TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let chunks = vec![
             UniqueChunk::new(
@@ -184,7 +210,13 @@ mod tests {
     fn test_block_id_increment() {
         let key = test_key();
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key, TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         let chunk1 = UniqueChunk::new(Bytes::from(vec![1u8; 64]), ChunkHash::from_bytes([1u8; 32]));
         let chunk2 = UniqueChunk::new(Bytes::from(vec![2u8; 64]), ChunkHash::from_bytes([2u8; 32]));
@@ -201,7 +233,13 @@ mod tests {
     fn test_empty_chunk() {
         let key = test_key();
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key, TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         // Empty data should still work
         let chunk = UniqueChunk::new(Bytes::from(vec![]), ChunkHash::from_bytes([0u8; 32]));
@@ -214,7 +252,13 @@ mod tests {
     fn test_large_chunk() {
         let key = test_key();
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key, TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         // 1MB chunk
         let data = vec![0u8; 1024 * 1024];
@@ -230,8 +274,14 @@ mod tests {
     fn test_with_target_size() {
         let key = test_key();
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key, TEST_NONCE_CONTEXT, compressor)
-            .with_target_size(1024 * 1024); // 1MB
+        let builder = MacroBlockBuilder::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        )
+        .with_target_size(1024 * 1024); // 1MB
 
         let chunk = UniqueChunk::new(
             Bytes::from(vec![1u8; 100]),
@@ -247,10 +297,22 @@ mod tests {
         let key = test_key();
 
         let compressor1 = Box::new(ZstdCompressor::default());
-        let builder1 = MacroBlockBuilder::new(key.try_clone().unwrap(), [1u8; 16], compressor1);
+        let builder1 = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            [1u8; 16],
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor1,
+        );
 
         let compressor2 = Box::new(ZstdCompressor::default());
-        let builder2 = MacroBlockBuilder::new(key.try_clone().unwrap(), [2u8; 16], compressor2);
+        let builder2 = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            [2u8; 16],
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor2,
+        );
 
         let chunk_data = vec![42u8; 256];
         let chunk1 = UniqueChunk::new(
@@ -270,7 +332,13 @@ mod tests {
     fn test_high_entropy_data() {
         let key = test_key();
         let compressor = Box::new(ZstdCompressor::default());
-        let builder = MacroBlockBuilder::new(key, TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
 
         // Create high-entropy data (hard to compress)
         let mut data = vec![0u8; 4096];

@@ -6,6 +6,9 @@
 use era_crypto::hybrid_kem::{decapsulate, encapsulate, generate_keypair};
 use era_crypto::*;
 
+const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+const TEST_EPOCH_ID: u32 = 1;
+
 // ═══════════════════════════════════════════════════════════════════════
 // V9-C1: panic!() in HybridSecretKey::public_key() — unconditional abort
 // ═══════════════════════════════════════════════════════════════════════
@@ -49,18 +52,39 @@ fn v9_c3a_aead_context_binding_prevents_cross_block_replay() {
     let block_id_2 = era_common::BlockId::new(1);
     let plaintext = b"sensitive data";
 
-    let ciphertext = encrypt_with_context(&key, &nonce_context, block_id, plaintext)
-        .expect("Encryption should succeed");
+    let ciphertext = encrypt_with_context(
+        &key,
+        &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id,
+        plaintext,
+    )
+    .expect("Encryption should succeed");
 
-    let decrypted = decrypt_with_context(&key, &nonce_context, block_id, &ciphertext)
-        .expect("Decryption with correct context should succeed");
+    let decrypted = decrypt_with_context(
+        &key,
+        &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id,
+        &ciphertext,
+    )
+    .expect("Decryption with correct context should succeed");
     assert_eq!(
         &decrypted[..],
         &plaintext[..],
         "Decrypted text must match plaintext"
     );
 
-    let wrong_decrypt = decrypt_with_context(&key, &nonce_context, block_id_2, &ciphertext);
+    let wrong_decrypt = decrypt_with_context(
+        &key,
+        &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id_2,
+        &ciphertext,
+    );
     assert!(
         wrong_decrypt.is_err(),
         "V9-C3a: Decryption with wrong block_id should fail (AAD binding)"
@@ -75,9 +99,24 @@ fn v9_c3b_aead_context_binding_prevents_cross_nonce_replay() {
     let block_id = era_common::BlockId::new(0);
     let plaintext = b"sensitive data";
 
-    let ciphertext = encrypt_with_context(&key, &nonce_context_1, block_id, plaintext).unwrap();
+    let ciphertext = encrypt_with_context(
+        &key,
+        &nonce_context_1,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id,
+        plaintext,
+    )
+    .unwrap();
 
-    let wrong_decrypt = decrypt_with_context(&key, &nonce_context_2, block_id, &ciphertext);
+    let wrong_decrypt = decrypt_with_context(
+        &key,
+        &nonce_context_2,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id,
+        &ciphertext,
+    );
     assert!(
         wrong_decrypt.is_err(),
         "V9-C3b: Decryption with wrong nonce context should fail"
@@ -279,13 +318,28 @@ fn v9_c10a_aead_ciphertext_bit_flip_detected() {
     let block_id = era_common::BlockId::new(0);
     let plaintext = b"detect tampering";
 
-    let ciphertext = encrypt_with_context(&key, &nonce_context, block_id, plaintext).unwrap();
+    let ciphertext = encrypt_with_context(
+        &key,
+        &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id,
+        plaintext,
+    )
+    .unwrap();
 
     let ct_bytes = ciphertext.to_vec();
     if !ct_bytes.is_empty() {
         let mut tampered = ct_bytes;
         tampered[0] ^= 0x01;
-        let result = decrypt_with_context(&key, &nonce_context, block_id, &tampered);
+        let result = decrypt_with_context(
+            &key,
+            &nonce_context,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &tampered,
+        );
         assert!(
             result.is_err(),
             "V9-C10a: Bit-flipped ciphertext must be rejected by AEAD"
@@ -304,8 +358,24 @@ fn v9_c11a_aead_empty_plaintext() {
     let block_id = era_common::BlockId::new(0);
     let plaintext = b"";
 
-    let ciphertext = encrypt_with_context(&key, &nonce_context, block_id, plaintext).unwrap();
-    let decrypted = decrypt_with_context(&key, &nonce_context, block_id, &ciphertext).unwrap();
+    let ciphertext = encrypt_with_context(
+        &key,
+        &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id,
+        plaintext,
+    )
+    .unwrap();
+    let decrypted = decrypt_with_context(
+        &key,
+        &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        block_id,
+        &ciphertext,
+    )
+    .unwrap();
 
     assert_eq!(
         &decrypted[..],

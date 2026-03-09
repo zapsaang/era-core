@@ -26,6 +26,9 @@ use era_crypto::{
     decrypt_with_context, derive_key, encrypt_with_context, DerivedKey, KdfParams, KeySession, Salt,
 };
 
+const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+const TEST_EPOCH_ID: u32 = 1;
+
 /// Fast KDF params for testing (DO NOT use in production)
 fn test_kdf_params() -> KdfParams {
     KdfParams {
@@ -70,6 +73,8 @@ fn test_attack_cross_volume_block_injection() {
     let ciphertext_from_a = encrypt_with_context(
         &block_a_key.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &plaintext,
     )
@@ -83,6 +88,8 @@ fn test_attack_cross_volume_block_injection() {
     let result = decrypt_with_context(
         &block_b_key.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &ciphertext_from_a,
     );
@@ -113,6 +120,8 @@ fn test_attack_block_offset_manipulation() {
     let ciphertext_at_100 = encrypt_with_context(
         &block_key_100.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id_100,
         &plaintext,
     )
@@ -126,6 +135,8 @@ fn test_attack_block_offset_manipulation() {
     let result = decrypt_with_context(
         &block_key_200.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id_200,
         &ciphertext_at_100,
     );
@@ -156,6 +167,8 @@ fn test_attack_nonce_context_tampering() {
     let ciphertext = encrypt_with_context(
         &block_key.to_derived_key().unwrap(),
         &nonce_context_a,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &plaintext,
     )
@@ -166,6 +179,8 @@ fn test_attack_nonce_context_tampering() {
     let result = decrypt_with_context(
         &block_key.to_derived_key().unwrap(),
         &nonce_context_b,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &ciphertext,
     );
@@ -201,6 +216,8 @@ fn test_attack_mixed_volume_and_block_context() {
     let ciphertext_from_a = encrypt_with_context(
         &block_key_a.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &plaintext,
     )
@@ -214,6 +231,8 @@ fn test_attack_mixed_volume_and_block_context() {
     let result = decrypt_with_context(
         &block_key_b.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &ciphertext_from_a,
     );
@@ -250,6 +269,8 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
     let ciphertext = encrypt_with_context(
         &block_key.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &plaintext,
     )
@@ -259,6 +280,8 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
     let decrypted = decrypt_with_context(
         &block_key.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &ciphertext,
     )
@@ -334,6 +357,8 @@ fn test_demonstrate_current_vulnerability() {
     let ciphertext = encrypt_with_context(
         &block_key_a.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &plaintext,
     )
@@ -360,6 +385,8 @@ fn test_demonstrate_current_vulnerability() {
     match decrypt_with_context(
         &block_key_b.to_derived_key().unwrap(),
         &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         block_id,
         &ciphertext,
     ) {

@@ -51,9 +51,10 @@ fn create_test_session() -> (KeySession, era_crypto::VolumeKey, [u8; 16]) {
     (session, volume_key, nonce_context)
 }
 
-fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
-    SuperHeader::new(
-        ArchiveId::new(),
+fn create_test_header(nonce_context: [u8; 16]) -> (SuperHeader, [u8; 16]) {
+    let archive_id = ArchiveId::new();
+    let header = SuperHeader::new(
+        archive_id,
         vec![RecipientSlot::new(
             RecipientType::Argon2idPassword,
             Some([0x12; 8]),
@@ -69,7 +70,9 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
         ),
         AccessPolicy::AnyOfN,
     )
-    .unwrap()
+    .unwrap();
+    let archive_id_bytes = *archive_id.0.as_bytes();
+    (header, archive_id_bytes)
 }
 
 // ============================================================================
@@ -85,7 +88,7 @@ async fn test_embedded_finalize_writes_typed_blocks() {
     let volume_path = Path::new("typed_blocks.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, _) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
@@ -332,7 +335,7 @@ async fn test_no_external_files_after_embedded_finalize() {
     let volume_path = Path::new("no_external.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, _) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
@@ -420,13 +423,13 @@ async fn test_index_page_encryption_roundtrip() {
     let volume_path = Path::new("page_roundtrip.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, archive_id) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
 
     // Insert 200 entries across different blocks
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id, 0).unwrap();
     let mut expected_entries = Vec::new();
     for i in 0..200u64 {
         let entry = IndexEntry::new(
@@ -505,12 +508,12 @@ async fn test_wrong_key_cold_recovery_fails_cleanly() {
     let volume_path = Path::new("wrong_key.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, archive_id) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id, 0).unwrap();
     for i in 0..10u64 {
         builder
             .insert(
@@ -606,13 +609,13 @@ async fn test_large_index_embedded_finalize() {
     let volume_path = Path::new("large_index.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, archive_id) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
 
     let entry_count = 10_000u64;
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id, 0).unwrap();
     for i in 0..entry_count {
         builder
             .insert(
@@ -678,7 +681,7 @@ async fn test_footer_has_index_false_when_no_index() {
     let volume_path = Path::new("no_index.era");
 
     let (_, _, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, _) = create_test_header(nonce_context);
     let writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
@@ -706,13 +709,13 @@ async fn test_multiple_index_writes_uses_last() {
     let volume_path = Path::new("multi_index.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, archive_id) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
 
     // First index write (small)
-    let mut builder1 = IndexBuilder::new_default().unwrap();
+    let mut builder1 = IndexBuilder::new_default_with_context(archive_id, 0).unwrap();
     for i in 0..5u64 {
         builder1
             .insert(
@@ -727,7 +730,7 @@ async fn test_multiple_index_writes_uses_last() {
         .unwrap();
 
     // Second index write (larger, different entries)
-    let mut builder2 = IndexBuilder::new_default().unwrap();
+    let mut builder2 = IndexBuilder::new_default_with_context(archive_id, 0).unwrap();
     for i in 100..120u64 {
         builder2
             .insert(
@@ -826,7 +829,7 @@ async fn test_scan_finds_index_blocks_among_mixed_types() {
     let volume_path = Path::new("mixed_blocks.era");
 
     let (_session, _volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, _) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
@@ -1068,7 +1071,7 @@ async fn test_footer_index_fields_populated_after_full_flow() {
     let volume_path = Path::new("footer_fields.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, _) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
@@ -1124,14 +1127,14 @@ async fn test_multi_page_index_recovery() {
     let volume_path = Path::new("multi_page.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, archive_id) = create_test_header(nonce_context);
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
 
     // ENTRIES_PER_PAGE = 8192, so 20,000 entries should give us 3 pages
     let entry_count = 20_000u64;
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id, 0).unwrap();
     for i in 0..entry_count {
         builder
             .insert(

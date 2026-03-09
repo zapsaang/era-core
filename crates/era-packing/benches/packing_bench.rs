@@ -9,6 +9,8 @@ use era_packing::{MacroBlockBuilder, MacroBlockUnpacker};
 
 /// Test nonce context
 const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
+const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+const TEST_EPOCH_ID: u32 = 1;
 
 /// Create a test key with fast KDF parameters
 fn fast_test_key() -> DerivedKey {
@@ -39,8 +41,13 @@ fn bench_pack_single(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &chunk, |b, chunk| {
             let compressor = Box::new(ZstdCompressor::default());
-            let builder =
-                MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+            let builder = MacroBlockBuilder::new(
+                key.try_clone().unwrap(),
+                TEST_NONCE_CONTEXT,
+                TEST_ARCHIVE_ID,
+                TEST_EPOCH_ID,
+                compressor,
+            );
             b.iter(|| builder.pack_single(black_box(chunk.clone())))
         });
     }
@@ -56,8 +63,13 @@ fn bench_unpack(c: &mut Criterion) {
     for size in [1024, 4096, 16384, 65536, 262144] {
         let chunk = generate_chunk(size);
         let compressor = Box::new(ZstdCompressor::default());
-        let builder =
-            MacroBlockBuilder::new(key.try_clone().unwrap(), TEST_NONCE_CONTEXT, compressor);
+        let builder = MacroBlockBuilder::new(
+            key.try_clone().unwrap(),
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        );
         let encrypted = builder.pack_single(chunk).unwrap();
 
         group.throughput(Throughput::Bytes(size as u64));
@@ -68,6 +80,8 @@ fn bench_unpack(c: &mut Criterion) {
                 let unpacker = MacroBlockUnpacker::new(
                     key.try_clone().unwrap(),
                     TEST_NONCE_CONTEXT,
+                    TEST_ARCHIVE_ID,
+                    TEST_EPOCH_ID,
                     Box::new(ZstdCompressor::default()),
                 );
                 b.iter(|| unpacker.unpack(black_box(encrypted)))
@@ -102,6 +116,8 @@ fn bench_pack_multiple_chunks(c: &mut Criterion) {
                 let builder = MacroBlockBuilder::new(
                     key.try_clone().unwrap(),
                     TEST_NONCE_CONTEXT,
+                    TEST_ARCHIVE_ID,
+                    TEST_EPOCH_ID,
                     compressor,
                 );
                 b.iter(|| builder.pack_chunks(black_box(chunks.clone())))
@@ -127,6 +143,8 @@ fn bench_roundtrip(c: &mut Criterion) {
                 let builder = MacroBlockBuilder::new(
                     key.try_clone().unwrap(),
                     TEST_NONCE_CONTEXT,
+                    TEST_ARCHIVE_ID,
+                    TEST_EPOCH_ID,
                     compressor,
                 );
                 let encrypted = builder.pack_single(chunk.clone()).unwrap();
@@ -134,6 +152,8 @@ fn bench_roundtrip(c: &mut Criterion) {
                 let unpacker = MacroBlockUnpacker::new(
                     key.try_clone().unwrap(),
                     TEST_NONCE_CONTEXT,
+                    TEST_ARCHIVE_ID,
+                    TEST_EPOCH_ID,
                     Box::new(ZstdCompressor::default()),
                 );
                 unpacker.unpack(&encrypted).unwrap()

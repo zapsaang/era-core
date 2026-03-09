@@ -523,10 +523,19 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
         compressor: Box<dyn era_codec::Compressor>,
     ) -> Self {
         let (data_start, data_end) = volume_reader.data_region();
-        let unpacker = SessionBlockUnpacker::new(session, volume_key, nonce_context, compressor);
+        let unpacker = SessionBlockUnpacker::new(
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            compressor,
+        );
         Self {
             volume_reader,
             unpacker,
@@ -538,16 +547,26 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
     }
 
     /// Create with custom end offset (e.g., stop before catalog)
+    #[allow(clippy::too_many_arguments)]
     pub fn with_end_offset(
         volume_reader: &'a VolumeReader<R>,
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
         compressor: Box<dyn era_codec::Compressor>,
         end_offset: u64,
     ) -> Self {
         let (data_start, _) = volume_reader.data_region();
-        let unpacker = SessionBlockUnpacker::new(session, volume_key, nonce_context, compressor);
+        let unpacker = SessionBlockUnpacker::new(
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            compressor,
+        );
         Self {
             volume_reader,
             unpacker,
@@ -703,6 +722,8 @@ pub struct SessionErasureBlockIteratorArgs<'a, R: era_storage::StorageReader> {
     pub session: &'a KeySession,
     pub volume_key: &'a VolumeKey,
     pub nonce_context: [u8; 16],
+    pub archive_id: [u8; 16],
+    pub epoch_id: u32,
     pub compressor: Box<dyn era_codec::Compressor>,
     pub data_shards: u8,
     pub parity_shards: u8,
@@ -729,6 +750,8 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             session,
             volume_key,
             nonce_context,
+            archive_id,
+            epoch_id,
             compressor,
             data_shards,
             parity_shards,
@@ -771,7 +794,14 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             }
         }
 
-        let unpacker = SessionBlockUnpacker::new(session, volume_key, nonce_context, compressor);
+        let unpacker = SessionBlockUnpacker::new(
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            compressor,
+        );
 
         Self {
             volume_readers,

@@ -34,6 +34,9 @@ mod aead_resilience {
         (session, volume_key, nonce_context)
     }
 
+    const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+    const TEST_EPOCH_ID: u32 = 1;
+
     #[test]
     fn test_resilient_unpacker_exists() {
         // Validates that resilient unpacker module compiles and is importable
@@ -51,6 +54,8 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             Box::new(ZstdCompressor::default()),
             ErasureCodeConfig::new(4, 2),
         )
@@ -66,6 +71,8 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             Box::new(ZstdCompressor::default()),
         );
 
@@ -105,6 +112,8 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             Box::new(ZstdCompressor::default()),
             ErasureCodeConfig::new(4, 2),
         )
@@ -128,6 +137,8 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             Box::new(ZstdCompressor::default()),
         );
 
@@ -157,6 +168,8 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             Box::new(ZstdCompressor::default()),
             ErasureCodeConfig::new(4, 2), // Can recover from 2 shard losses max
         )
@@ -178,6 +191,8 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             Box::new(ZstdCompressor::default()),
         );
 

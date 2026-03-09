@@ -64,9 +64,10 @@ fn create_test_session() -> (KeySession, era_crypto::VolumeKey, [u8; 16]) {
     (session, volume_key, nonce_context)
 }
 
-fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
-    SuperHeader::new(
-        ArchiveId::new(),
+fn create_test_header(nonce_context: [u8; 16]) -> (SuperHeader, [u8; 16]) {
+    let archive_id = ArchiveId::new();
+    let header = SuperHeader::new(
+        archive_id,
         vec![RecipientSlot::new(
             RecipientType::Argon2idPassword,
             Some([0x12; 8]),
@@ -82,7 +83,9 @@ fn create_test_header(nonce_context: [u8; 16]) -> SuperHeader {
         ),
         AccessPolicy::AnyOfN,
     )
-    .unwrap()
+    .unwrap();
+    let archive_id_bytes = *archive_id.0.as_bytes();
+    (header, archive_id_bytes)
 }
 
 // ============================================================================
@@ -325,12 +328,13 @@ async fn test_c1_zombie_recovery_garbage_appended_to_volume() {
     let volume_path = Path::new("zombie_recovery.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, archive_id) = create_test_header(nonce_context);
+    let epoch_id = header.epoch_id();
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id, epoch_id).unwrap();
     for i in 0..500u64 {
         builder.insert(make_entry(i)).unwrap();
     }
@@ -397,12 +401,13 @@ async fn test_c2_zombie_recovery_wrong_credentials_fails_cleanly() {
     let volume_path = Path::new("zombie_wrong_key.era");
 
     let (session, volume_key, nonce_context) = create_test_session();
-    let header = create_test_header(nonce_context);
+    let (header, archive_id) = create_test_header(nonce_context);
+    let epoch_id = header.epoch_id();
     let mut writer = VolumeWriter::create(&backend, volume_path, header)
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id, epoch_id).unwrap();
     for i in 0..50u64 {
         builder.insert(make_entry(i)).unwrap();
     }

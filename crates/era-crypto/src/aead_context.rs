@@ -27,14 +27,17 @@ pub trait AeadContext {
     fn encrypt_with_context(
         &self,
         nonce_context: &[u8; 16],
+        archive_id: &[u8; 16],
+        epoch_id: u32,
         block_id: BlockId,
         plaintext: &[u8],
     ) -> Result<Vec<u8>> {
         let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
 
-        // Build AAD: block_id (8 bytes) for cryptographic binding
-        let mut aad = [0u8; 8];
-        aad.copy_from_slice(&block_id.sequence().to_le_bytes());
+        let mut aad = [0u8; 28];
+        aad[0..16].copy_from_slice(archive_id);
+        aad[16..20].copy_from_slice(&epoch_id.to_le_bytes());
+        aad[20..28].copy_from_slice(&block_id.sequence().to_le_bytes());
 
         self.encrypt(&nonce, &aad, plaintext)
     }
@@ -43,14 +46,17 @@ pub trait AeadContext {
     fn decrypt_with_context(
         &self,
         nonce_context: &[u8; 16],
+        archive_id: &[u8; 16],
+        epoch_id: u32,
         block_id: BlockId,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
         let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
 
-        // Build AAD: block_id (8 bytes) - MUST match encryption
-        let mut aad = [0u8; 8];
-        aad.copy_from_slice(&block_id.sequence().to_le_bytes());
+        let mut aad = [0u8; 28];
+        aad[0..16].copy_from_slice(archive_id);
+        aad[16..20].copy_from_slice(&epoch_id.to_le_bytes());
+        aad[20..28].copy_from_slice(&block_id.sequence().to_le_bytes());
 
         self.decrypt(&nonce, &aad, ciphertext)
     }
@@ -217,6 +223,8 @@ mod tests {
         let key = [0x42u8; 32];
         let context = XChaCha20Poly1305Context::new(&key).unwrap();
 
+        let test_archive_id = [0x42u8; 16];
+        let test_epoch_id = 1u32;
         let plaintext = b"secret data";
         let block_id_100 = BlockId::new(100);
         let block_id_200 = BlockId::new(200);
@@ -224,11 +232,23 @@ mod tests {
 
         // Encrypt with block_id 100
         let ciphertext = context
-            .encrypt_with_context(&nonce_context, block_id_100, plaintext)
+            .encrypt_with_context(
+                &nonce_context,
+                &test_archive_id,
+                test_epoch_id,
+                block_id_100,
+                plaintext,
+            )
             .unwrap();
 
         // ATTACK: Try to decrypt with different block_id 200 - should FAIL
-        let result = context.decrypt_with_context(&nonce_context, block_id_200, &ciphertext);
+        let result = context.decrypt_with_context(
+            &nonce_context,
+            &test_archive_id,
+            test_epoch_id,
+            block_id_200,
+            &ciphertext,
+        );
 
         assert!(
             result.is_err(),
@@ -237,7 +257,13 @@ mod tests {
 
         // Legitimate: Decrypt with correct block_id 100 - should SUCCEED
         let decrypted = context
-            .decrypt_with_context(&nonce_context, block_id_100, &ciphertext)
+            .decrypt_with_context(
+                &nonce_context,
+                &test_archive_id,
+                test_epoch_id,
+                block_id_100,
+                &ciphertext,
+            )
             .unwrap();
 
         assert_eq!(decrypted, plaintext);

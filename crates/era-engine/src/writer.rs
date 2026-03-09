@@ -864,6 +864,8 @@ impl ArchiveWriterBuilder {
             session,
             volume_key,
             nonce_context,
+            *header.archive_id().0.as_bytes(),
+            header.epoch_id(),
             next_block_id,
         );
 
@@ -2095,6 +2097,7 @@ pub mod generic {
                 self.access_policy
                     .unwrap_or(era_volume::AccessPolicy::AnyOfN),
             )?;
+            let epoch_id = header.epoch_id();
 
             let volume_writer =
                 VolumeWriter::create(&self.backend, Path::new(&self.filename), header).await?;
@@ -2108,7 +2111,13 @@ pub mod generic {
             let chunk_index = create_chunk_index()?;
 
             // Create encryption context
-            let encryption = EncryptionContext::new(session, volume_key, nonce_context);
+            let encryption = EncryptionContext::new(
+                session,
+                volume_key,
+                nonce_context,
+                *archive_id.0.as_bytes(),
+                epoch_id,
+            );
 
             Ok(GenericArchiveWriter {
                 archive_id,

@@ -413,7 +413,7 @@ mod tests {
         let session = KeySession::new(b"test_password", &salt, &params).unwrap();
         let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let nonce_context = salt.as_bytes()[..16].try_into().unwrap();
-        EncryptionContext::new(session, volume_key, nonce_context)
+        EncryptionContext::new(session, volume_key, nonce_context, [0xAA; 16], 1)
     }
 
     fn create_test_header() -> SuperHeader {

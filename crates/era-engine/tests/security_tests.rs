@@ -12,6 +12,8 @@ use era_crypto::{
 use era_packing::{SessionBlockBuilder, SessionBlockUnpacker};
 
 const TEST_NONCE_CONTEXT: [u8; 16] = [0xAB; 16];
+const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+const TEST_EPOCH_ID: u32 = 1;
 
 fn fast_kdf_params() -> KdfParams {
     KdfParams {
@@ -138,6 +140,8 @@ fn test_session_builder_per_block_keys() {
         &session,
         &vk,
         TEST_NONCE_CONTEXT,
+        TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         Box::new(ZstdCompressor::default()),
     );
 
@@ -158,6 +162,8 @@ fn test_session_builder_per_block_keys() {
         &session,
         &vk,
         TEST_NONCE_CONTEXT,
+        TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         Box::new(ZstdCompressor::default()),
     );
 
@@ -183,6 +189,8 @@ fn test_volume_key_isolation_prevents_cross_decryption() {
         &session,
         &vk0,
         TEST_NONCE_CONTEXT,
+        TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         Box::new(ZstdCompressor::default()),
     );
 
@@ -195,6 +203,8 @@ fn test_volume_key_isolation_prevents_cross_decryption() {
         &session,
         &vk1,
         TEST_NONCE_CONTEXT,
+        TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
         Box::new(ZstdCompressor::default()),
     );
 

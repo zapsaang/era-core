@@ -65,10 +65,19 @@ impl<'a> SessionErasureBlockBuilder<'a> {
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
         compressor: Box<dyn Compressor>,
         erasure_config: ErasureCodeConfig,
     ) -> Result<Self> {
-        let inner = SessionBlockBuilder::new(session, volume_key, nonce_context, compressor);
+        let inner = SessionBlockBuilder::new(
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            compressor,
+        );
 
         let codec_config = ErasureConfig::new(
             erasure_config.data_shards as usize,
@@ -170,10 +179,18 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
         compressor: Box<dyn Compressor>,
     ) -> Self {
-        let inner =
-            crate::SessionBlockUnpacker::new(session, volume_key, nonce_context, compressor);
+        let inner = crate::SessionBlockUnpacker::new(
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            compressor,
+        );
         Self { inner }
     }
 
@@ -373,6 +390,9 @@ mod tests {
     use era_common::ChunkHash;
     use era_crypto::{derive_key, KdfParams, Salt};
 
+    const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
+    const TEST_EPOCH_ID: u32 = 1;
+
     fn test_session() -> (KeySession, Salt) {
         let salt = Salt::generate();
         let params = KdfParams {
@@ -395,6 +415,8 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             compressor,
             config,
         )
@@ -424,6 +446,8 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             compressor,
             config,
         )
@@ -457,6 +481,8 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             compressor1,
             config,
         )
@@ -466,6 +492,8 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             compressor2,
             config,
         )
@@ -497,6 +525,8 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             compressor,
             config,
         )

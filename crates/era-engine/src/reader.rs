@@ -78,6 +78,8 @@ pub struct ArchiveReader {
     volume_key: VolumeKey,
     /// Nonce context (archive salt)
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
     /// Compression configuration
     compression_level: i32,
     /// Compression algorithm type
@@ -323,6 +325,8 @@ impl ArchiveReader {
 
         // Store nonce context
         let nonce_context = *header.salt();
+        let archive_id = *header.archive_id().0.as_bytes();
+        let epoch_id = header.epoch_id();
 
         let compression_level = header.config().compression.level;
         let compression_algorithm = header.config().compression.algorithm;
@@ -333,6 +337,8 @@ impl ArchiveReader {
             session,
             volume_key,
             nonce_context,
+            archive_id,
+            epoch_id,
             compression_level,
             compression_algorithm,
             catalog: None,
@@ -383,6 +389,8 @@ impl ArchiveReader {
         )?;
 
         let nonce_context = *header.salt();
+        let archive_id = *header.archive_id().0.as_bytes();
+        let epoch_id = header.epoch_id();
         let compression_level = header.config().compression.level;
         let compression_algorithm = header.config().compression.algorithm;
 
@@ -392,6 +400,8 @@ impl ArchiveReader {
             session: owned_session,
             volume_key,
             nonce_context,
+            archive_id,
+            epoch_id,
             compression_level,
             compression_algorithm,
             catalog: None,
@@ -450,6 +460,8 @@ impl ArchiveReader {
             &self.session,
             &self.volume_key,
             self.nonce_context,
+            self.archive_id,
+            self.epoch_id,
             compressor,
         )
     }
@@ -461,6 +473,8 @@ impl ArchiveReader {
             &self.session,
             &self.volume_key,
             self.nonce_context,
+            self.archive_id,
+            self.epoch_id,
             compressor,
         )
     }
@@ -1081,6 +1095,8 @@ impl ArchiveReader {
                     session: &self.session,
                     volume_key: &self.volume_key,
                     nonce_context: self.nonce_context,
+                    archive_id: self.archive_id,
+                    epoch_id: self.epoch_id,
                     compressor: self.create_compressor(),
                     data_shards: config.data_shards,
                     parity_shards: config.parity_shards,
@@ -1093,6 +1109,8 @@ impl ArchiveReader {
                 &self.session,
                 &self.volume_key,
                 self.nonce_context,
+                self.archive_id,
+                self.epoch_id,
                 self.create_compressor(),
             ))
         };
@@ -1139,6 +1157,8 @@ impl ArchiveReader {
                     session: &self.session,
                     volume_key: &self.volume_key,
                     nonce_context: self.nonce_context,
+                    archive_id: self.archive_id,
+                    epoch_id: self.epoch_id,
                     compressor: self.create_compressor(),
                     data_shards: config.data_shards,
                     parity_shards: config.parity_shards,
@@ -1151,6 +1171,8 @@ impl ArchiveReader {
                 &self.session,
                 &self.volume_key,
                 self.nonce_context,
+                self.archive_id,
+                self.epoch_id,
                 self.create_compressor(),
             ))
         };

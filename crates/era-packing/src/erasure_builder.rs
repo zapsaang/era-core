@@ -21,10 +21,12 @@ impl ErasureBlockBuilder {
     pub fn new(
         key: DerivedKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
         compressor: Box<dyn era_codec::Compressor>,
         erasure_config: ErasureCodeConfig,
     ) -> Result<Self> {
-        let inner = MacroBlockBuilder::new(key, nonce_context, compressor);
+        let inner = MacroBlockBuilder::new(key, nonce_context, archive_id, epoch_id, compressor);
         let codec_config = ErasureConfig::new(
             erasure_config.data_shards as usize,
             erasure_config.parity_shards as usize,
@@ -100,6 +102,9 @@ mod tests {
     use era_common::ChunkHash;
     use era_crypto::{derive_key, KdfParams, Salt};
 
+    const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
+    const TEST_EPOCH_ID: u32 = 1;
+
     fn test_key() -> DerivedKey {
         let salt = Salt::from_bytes([0u8; 16]);
         let params = KdfParams {
@@ -116,7 +121,15 @@ mod tests {
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
-        let builder = ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
+        let builder = ErasureBlockBuilder::new(
+            key,
+            [0u8; 16],
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+            config,
+        )
+        .unwrap();
 
         let chunk = UniqueChunk::new(
             Bytes::from(vec![42u8; 1024]),
@@ -137,7 +150,15 @@ mod tests {
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
-        let builder = ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
+        let builder = ErasureBlockBuilder::new(
+            key,
+            [0u8; 16],
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+            config,
+        )
+        .unwrap();
 
         let chunks = vec![
             UniqueChunk::new(
@@ -162,7 +183,15 @@ mod tests {
         let compressor = Box::new(ZstdCompressor::default());
         let config = ErasureCodeConfig::new(4, 2);
 
-        let builder = ErasureBlockBuilder::new(key, [0u8; 16], compressor, config).unwrap();
+        let builder = ErasureBlockBuilder::new(
+            key,
+            [0u8; 16],
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+            config,
+        )
+        .unwrap();
 
         let original_data = vec![42u8; 1024];
         let chunk = UniqueChunk::new(Bytes::from(original_data), ChunkHash::from_bytes([1u8; 32]));

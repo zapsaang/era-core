@@ -311,12 +311,16 @@ impl CheckpointManager {
         session: &KeySession,
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
     ) -> Result<u64> {
         write_checkpoint(
             volume_writer,
             session,
             volume_key,
             nonce_context,
+            archive_id,
+            epoch_id,
             &self.checkpoint,
         )
         .await
@@ -466,6 +470,8 @@ pub async fn write_checkpoint<W: StorageWriter>(
     session: &KeySession,
     volume_key: &VolumeKey,
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
     checkpoint: &Checkpoint,
 ) -> Result<u64> {
     use era_common::{BlockId, EncryptedMacroBlock};
@@ -482,6 +488,8 @@ pub async fn write_checkpoint<W: StorageWriter>(
     let encrypted_data = era_crypto::encrypt_with_context(
         &derived_key,
         &nonce_context,
+        &archive_id,
+        epoch_id,
         block_id,
         &checkpoint_bytes,
     )?;
@@ -535,13 +543,16 @@ pub async fn write_checkpoint<W: StorageWriter>(
 /// * `volume_key` - Volume encryption key
 /// * `nonce_context` - Nonce context for encryption
 /// * `checkpoint_offset` - Physical offset of the checkpoint block
-/// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to brute-force search (legacy volumes).
-#[allow(dead_code)] // Will be used by cold recovery path
-pub async fn read_checkpoint<R: era_storage::StorageReader>(
+    /// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to brute-force search (legacy volumes).
+    #[allow(dead_code)] // Will be used by cold recovery path
+    #[allow(clippy::too_many_arguments)]
+    pub async fn read_checkpoint<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
     session: &KeySession,
     volume_key: &VolumeKey,
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
     checkpoint_offset: u64,
     checkpoint_block_id: Option<u32>,
 ) -> Result<Checkpoint> {
@@ -571,6 +582,8 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
         if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
             &derived_key,
             &nonce_context,
+            &archive_id,
+            epoch_id,
             block_id,
             &encrypted_block.data,
         ) {
@@ -596,6 +609,8 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
         if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
             &derived_key,
             &nonce_context,
+            &archive_id,
+            epoch_id,
             block_id,
             &encrypted_block.data,
         ) {
@@ -632,6 +647,8 @@ pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
     session: &KeySession,
     volume_key: &VolumeKey,
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
 ) -> Result<Vec<Checkpoint>> {
     let mut checkpoints = Vec::new();
 
@@ -654,6 +671,8 @@ pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
                 session,
                 volume_key,
                 nonce_context,
+                archive_id,
+                epoch_id,
                 checkpoint_offset,
                 block_id_opt,
             )

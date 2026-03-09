@@ -7,6 +7,9 @@ use era_crypto::{
     hash, verify_password_tag, DerivedKey, KdfParams, KeySession, Salt,
 };
 
+const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+const TEST_EPOCH_ID: u32 = 1;
+
 /// Create a test key with fast KDF parameters (for benchmarking encryption, not KDF)
 fn fast_test_key() -> DerivedKey {
     let salt = Salt::from_bytes([0u8; 16]);
@@ -86,7 +89,16 @@ fn bench_aead_encrypt(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &plaintext, |b, data| {
-            b.iter(|| encrypt_with_context(black_box(&key), &nonce_context, block_id, data))
+            b.iter(|| {
+                encrypt_with_context(
+                    black_box(&key),
+                    &nonce_context,
+                    &TEST_ARCHIVE_ID,
+                    TEST_EPOCH_ID,
+                    block_id,
+                    data,
+                )
+            })
         });
     }
 
@@ -145,12 +157,28 @@ fn bench_aead_decrypt(c: &mut Criterion) {
 
     for size in [64, 256, 1024, 4096, 16384, 65536, 262144] {
         let plaintext: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        let ciphertext = encrypt_with_context(&key, &nonce_context, block_id, &plaintext).unwrap();
+        let ciphertext = encrypt_with_context(
+            &key,
+            &nonce_context,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            block_id,
+            &plaintext,
+        )
+        .unwrap();
 
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &ciphertext, |b, data| {
             b.iter(|| {
-                decrypt_with_context(black_box(&key), &nonce_context, block_id, data).unwrap()
+                decrypt_with_context(
+                    black_box(&key),
+                    &nonce_context,
+                    &TEST_ARCHIVE_ID,
+                    TEST_EPOCH_ID,
+                    block_id,
+                    data,
+                )
+                .unwrap()
             })
         });
     }

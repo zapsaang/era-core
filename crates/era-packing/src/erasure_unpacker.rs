@@ -21,8 +21,14 @@ pub struct ErasureBlockUnpacker {
 
 impl ErasureBlockUnpacker {
     /// Create a new erasure block unpacker
-    pub fn new(key: DerivedKey, nonce_context: [u8; 16], compressor: Box<dyn Compressor>) -> Self {
-        let inner = MacroBlockUnpacker::new(key, nonce_context, compressor);
+    pub fn new(
+        key: DerivedKey,
+        nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
+        compressor: Box<dyn Compressor>,
+    ) -> Self {
+        let inner = MacroBlockUnpacker::new(key, nonce_context, archive_id, epoch_id, compressor);
         Self { inner }
     }
 
@@ -126,17 +132,17 @@ mod tests {
     use era_common::UniqueChunk;
     use era_crypto::{derive_key, KdfParams, Salt};
 
-    fn setup_keys() -> (DerivedKey, [u8; 16]) {
+    fn setup_keys() -> (DerivedKey, [u8; 16], [u8; 16], u32) {
         let salt = Salt::generate();
         let params = KdfParams::default();
         let key = derive_key(b"test_password", &salt, &params).unwrap();
         let nonce_context = *salt.as_bytes();
-        (key, nonce_context)
+        (key, nonce_context, [7u8; 16], 1)
     }
 
     #[test]
     fn test_erasure_roundtrip_no_loss() {
-        let (key, nonce_context) = setup_keys();
+        let (key, nonce_context, archive_id, epoch_id) = setup_keys();
 
         // Create test data
         let test_data = b"Hello, erasure coding world! This is test data.";
@@ -151,6 +157,8 @@ mod tests {
         let builder = ErasureBlockBuilder::new(
             key.try_clone().unwrap(),
             nonce_context,
+            archive_id,
+            epoch_id,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
         )
@@ -159,8 +167,13 @@ mod tests {
         let sharded_block = builder.pack_single(chunk).unwrap();
 
         // Decode with all shards present
-        let unpacker =
-            ErasureBlockUnpacker::new(key, nonce_context, Box::new(ZstdCompressor::new(3)));
+        let unpacker = ErasureBlockUnpacker::new(
+            key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            Box::new(ZstdCompressor::new(3)),
+        );
 
         let shards: Vec<(usize, Bytes)> = sharded_block.shards.into_iter().enumerate().collect();
 
@@ -182,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_erasure_roundtrip_with_loss() {
-        let (key, nonce_context) = setup_keys();
+        let (key, nonce_context, archive_id, epoch_id) = setup_keys();
 
         // Create test data
         let test_data = b"Recovery test data - should survive shard loss!";
@@ -197,6 +210,8 @@ mod tests {
         let builder = ErasureBlockBuilder::new(
             key.try_clone().unwrap(),
             nonce_context,
+            archive_id,
+            epoch_id,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
         )
@@ -222,8 +237,13 @@ mod tests {
         };
 
         // Decode - should recover successfully
-        let unpacker =
-            ErasureBlockUnpacker::new(key, nonce_context, Box::new(ZstdCompressor::new(3)));
+        let unpacker = ErasureBlockUnpacker::new(
+            key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            Box::new(ZstdCompressor::new(3)),
+        );
 
         let chunks = unpacker
             .decode_and_extract_all(shards, &erasure_info, sharded_block.block_id)
@@ -236,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_erasure_insufficient_shards() {
-        let (key, nonce_context) = setup_keys();
+        let (key, nonce_context, archive_id, epoch_id) = setup_keys();
 
         // Create test data
         let test_data = b"This will fail due to too many lost shards";
@@ -251,6 +271,8 @@ mod tests {
         let builder = ErasureBlockBuilder::new(
             key.try_clone().unwrap(),
             nonce_context,
+            archive_id,
+            epoch_id,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
         )
@@ -275,8 +297,13 @@ mod tests {
             original_len: sharded_block.original_len,
         };
 
-        let unpacker =
-            ErasureBlockUnpacker::new(key, nonce_context, Box::new(ZstdCompressor::new(3)));
+        let unpacker = ErasureBlockUnpacker::new(
+            key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            Box::new(ZstdCompressor::new(3)),
+        );
 
         // Should fail due to insufficient shards
         let result = unpacker.decode_and_extract_all(shards, &erasure_info, sharded_block.block_id);

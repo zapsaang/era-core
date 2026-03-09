@@ -48,6 +48,8 @@ pub struct SessionBlockBuilder<'a> {
     compressor: Box<dyn Compressor>,
     /// Nonce context (must be unique per archive, e.g., salt)
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
     /// Next block ID (interior mutability for &self methods)
     next_block_id: Cell<u64>,
 }
@@ -64,6 +66,8 @@ impl<'a> SessionBlockBuilder<'a> {
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
         compressor: Box<dyn Compressor>,
     ) -> Self {
         Self {
@@ -72,6 +76,8 @@ impl<'a> SessionBlockBuilder<'a> {
             target_size: 4 * 1024 * 1024, // 4MB
             compressor,
             nonce_context,
+            archive_id,
+            epoch_id,
             next_block_id: Cell::new(0),
         }
     }
@@ -148,6 +154,8 @@ impl<'a> SessionBlockBuilder<'a> {
         let encrypted = era_crypto::encrypt_with_context(
             &derived_key,
             &self.nonce_context,
+            &self.archive_id,
+            self.epoch_id,
             block_id,
             &compressed,
         )?;
@@ -177,6 +185,8 @@ pub struct SessionBlockUnpacker<'a> {
     compressor: Box<dyn Compressor>,
     /// Nonce context (must match the one used during encryption)
     nonce_context: [u8; 16],
+    archive_id: [u8; 16],
+    epoch_id: u32,
 }
 
 impl<'a> SessionBlockUnpacker<'a> {
@@ -191,6 +201,8 @@ impl<'a> SessionBlockUnpacker<'a> {
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
         compressor: Box<dyn Compressor>,
     ) -> Self {
         Self {
@@ -198,6 +210,8 @@ impl<'a> SessionBlockUnpacker<'a> {
             volume_key,
             compressor,
             nonce_context,
+            archive_id,
+            epoch_id,
         }
     }
 
@@ -215,6 +229,8 @@ impl<'a> SessionBlockUnpacker<'a> {
         let (index, data) = crate::block_codec::decrypt_and_decompress(
             &derived_key,
             &self.nonce_context,
+            &self.archive_id,
+            self.epoch_id,
             block.block_id,
             &block.data,
             self.compressor.as_ref(),
@@ -245,6 +261,9 @@ mod tests {
     use bytes::Bytes;
     use era_common::ChunkHash;
 
+    const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
+    const TEST_EPOCH_ID: u32 = 1;
+
     #[test]
     fn test_session_builder_pack_unpack_roundtrip() {
         let (session, _salt) = test_session();
@@ -254,6 +273,8 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         );
 
@@ -268,6 +289,8 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         );
         let unpacked = unpacker.unpack(&encrypted).unwrap();
@@ -286,6 +309,8 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         );
 
@@ -314,6 +339,8 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         );
 
@@ -327,6 +354,8 @@ mod tests {
             &session,
             &wrong_volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         );
 
@@ -365,6 +394,8 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         );
 
@@ -391,6 +422,8 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         );
         let unpacked = unpacker.unpack(&block).unwrap();
@@ -410,6 +443,8 @@ mod tests {
             &session,
             &volume_key,
             TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
             crate::create_compressor(),
         )
         .with_starting_block_id(100);

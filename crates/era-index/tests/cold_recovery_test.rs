@@ -48,8 +48,9 @@ async fn test_cold_recovery_from_orphaned_volume() {
     let nonce_context = *salt.as_bytes();
 
     // Create volume
+    let archive_id = ArchiveId::new();
     let header = SuperHeader::new(
-        ArchiveId::new(),
+        archive_id,
         vec![era_volume::RecipientSlot::new(
             era_volume::RecipientType::Argon2idPassword,
             Some([0x12; 8]),
@@ -71,7 +72,8 @@ async fn test_cold_recovery_from_orphaned_volume() {
         .unwrap();
 
     // Build index with 1,000 test entries
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let archive_id_bytes = *archive_id.0.as_bytes();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id_bytes, 0).unwrap();
     for i in 0..1_000u64 {
         let entry = IndexEntry::new(
             test_hash(i),
@@ -188,8 +190,9 @@ async fn test_index_embedded_in_volume() {
     let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
     let nonce_context = *salt.as_bytes();
 
+    let archive_id = ArchiveId::new();
     let header = SuperHeader::new(
-        ArchiveId::new(),
+        archive_id,
         vec![era_volume::RecipientSlot::new(
             era_volume::RecipientType::Argon2idPassword,
             Some([0x12; 8]),
@@ -210,7 +213,8 @@ async fn test_index_embedded_in_volume() {
         .await
         .unwrap();
 
-    let mut builder = IndexBuilder::new_default().unwrap();
+    let archive_id_bytes = *archive_id.0.as_bytes();
+    let mut builder = IndexBuilder::new_default_with_context(archive_id_bytes, 0).unwrap();
     for i in 0..100u64 {
         builder
             .insert(

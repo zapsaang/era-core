@@ -52,6 +52,8 @@ pub struct IndexBuilder {
     /// Defaults to DEFAULT_BATCH_SIZE (1000). Callers can override via
     /// `with_batch_size()` for workloads that benefit from larger/smaller batches.
     batch_size: usize,
+    archive_id: [u8; 16],
+    epoch_id: u32,
 }
 
 impl IndexBuilder {
@@ -60,6 +62,10 @@ impl IndexBuilder {
     /// Creates a temporary Redb file for staging entries.
     /// Returns an error if temp file creation or database initialization fails.
     pub fn new(mem_limit: usize) -> Result<Self> {
+        Self::new_with_context(mem_limit, [0u8; 16], 0)
+    }
+
+    pub fn new_with_context(mem_limit: usize, archive_id: [u8; 16], epoch_id: u32) -> Result<Self> {
         let temp_file = tempfile::Builder::new()
             .prefix("era-staging-")
             .suffix(".redb")
@@ -71,22 +77,39 @@ impl IndexBuilder {
             store,
             buffer: Vec::with_capacity(DEFAULT_BATCH_SIZE),
             batch_size: DEFAULT_BATCH_SIZE,
+            archive_id,
+            epoch_id,
         })
     }
 
     /// Create a new IndexBuilder with a specific path for the Redb file.
     pub fn with_path(path: &std::path::Path, mem_limit: usize) -> Result<Self> {
+        Self::with_path_with_context(path, mem_limit, [0u8; 16], 0)
+    }
+
+    pub fn with_path_with_context(
+        path: &std::path::Path,
+        mem_limit: usize,
+        archive_id: [u8; 16],
+        epoch_id: u32,
+    ) -> Result<Self> {
         let store = IndexStore::create(path, bloom_expected_items(mem_limit))?;
         Ok(Self {
             store,
             buffer: Vec::with_capacity(DEFAULT_BATCH_SIZE),
             batch_size: DEFAULT_BATCH_SIZE,
+            archive_id,
+            epoch_id,
         })
     }
 
     /// Create with default memory limit (64MB)
     pub fn new_default() -> Result<Self> {
         Self::new(DEFAULT_MEM_LIMIT)
+    }
+
+    pub fn new_default_with_context(archive_id: [u8; 16], epoch_id: u32) -> Result<Self> {
+        Self::new_with_context(DEFAULT_MEM_LIMIT, archive_id, epoch_id)
     }
 
     /// V21-F8 fix: Set a custom batch size for Redb flush threshold.
@@ -261,6 +284,8 @@ impl IndexBuilder {
                 let encrypted_data = era_crypto::encrypt_with_context(
                     &derived_key,
                     &idx_nonce,
+                    &self.archive_id,
+                    self.epoch_id,
                     block_id,
                     &page_bytes,
                 )?;
@@ -328,6 +353,8 @@ impl IndexBuilder {
         let encrypted_manifest = era_crypto::encrypt_with_context(
             &manifest_derived_key,
             &index_nonce_context,
+            &self.archive_id,
+            self.epoch_id,
             manifest_block_id,
             &meta_bytes,
         )?;

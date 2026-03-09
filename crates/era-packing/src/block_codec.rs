@@ -33,13 +33,21 @@ pub fn create_compressor() -> Box<dyn Compressor> {
 pub fn decrypt_and_decompress(
     key: &DerivedKey,
     nonce_context: &[u8; 16],
+    archive_id: &[u8; 16],
+    epoch_id: u32,
     block_id: BlockId,
     encrypted_data: &[u8],
     compressor: &dyn Compressor,
 ) -> Result<(BlockChunkIndex, Bytes)> {
     // Decrypt
-    let compressed =
-        era_crypto::decrypt_with_context(key, nonce_context, block_id, encrypted_data)?;
+    let compressed = era_crypto::decrypt_with_context(
+        key,
+        nonce_context,
+        archive_id,
+        epoch_id,
+        block_id,
+        encrypted_data,
+    )?;
 
     // Decompress
     let decompressed = compressor.decompress(&compressed)?;

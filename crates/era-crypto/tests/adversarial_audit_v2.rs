@@ -10,6 +10,9 @@
 use era_common::BlockId;
 use era_crypto::{AeadCipher, AeadKey, Nonce};
 
+const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
+const TEST_EPOCH_ID: u32 = 1;
+
 /// FINDING-CRYPTO-1: Deterministic encryption — same inputs = same ciphertext.
 /// This is the convergent encryption property. Verify it holds AND that
 /// different block_ids produce different ciphertext (nonce diversity).
@@ -157,7 +160,15 @@ fn test_context_nonce_derivation_uniqueness() {
 
     let mut seen = std::collections::HashSet::new();
     for i in 0..1_000u64 {
-        let ct = encrypt_with_context(&key, &context, BlockId::new(i), plaintext).unwrap();
+        let ct = encrypt_with_context(
+            &key,
+            &context,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            BlockId::new(i),
+            plaintext,
+        )
+        .unwrap();
         assert!(
             seen.insert(ct.to_vec()),
             "Ciphertext collision at block_id {} implies nonce reuse",
