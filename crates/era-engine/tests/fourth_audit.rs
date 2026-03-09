@@ -546,9 +546,10 @@ fn m1_password_provider_no_zeroize() {
         .expect("PasswordProvider must exist");
     let struct_area = &auth_source[struct_start..struct_start + 300];
 
-    // Check for Zeroize derive, ZeroizeOnDrop derive, or manual Drop impl
+    // Check for Zeroize derive, ZeroizeOnDrop derive, Zeroizing wrapper, or manual Drop impl
     let has_zeroize = struct_area.contains("Zeroize")
         || struct_area.contains("ZeroizeOnDrop")
+        || struct_area.contains("Zeroizing")
         || auth_source.contains("impl Drop for PasswordProvider");
 
     assert!(

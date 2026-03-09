@@ -68,14 +68,24 @@ fn mock_encrypted_vk() -> EncryptedVolumeKey {
 }
 
 fn make_valid_header(policy: AccessPolicy) -> SuperHeader {
+    // V30: Threshold(t) requires at least t recipients to pass validation
+    let recipient_count = match policy {
+        AccessPolicy::Threshold(t) => t.max(1) as usize,
+        _ => 1,
+    };
+    let recipients: Vec<RecipientSlot> = (0..recipient_count)
+        .map(|i| {
+            RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12 + i as u8; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )
+        })
+        .collect();
     SuperHeader::new(
         ArchiveId::new(),
-        vec![RecipientSlot::new(
-            RecipientType::Argon2idPassword,
-            Some([0x12; 8]),
-            vec![0xAB; 16],
-            vec![0xCD; 48],
-        )],
+        recipients,
         ArchiveConfig::default(),
         [0xDE; 16],
         mock_encrypted_vk(),
@@ -561,70 +571,28 @@ fn rv7_volume_sequence_truncation() {
 /// 🚨 RV8: Behavioral — AnyOfN with zero recipients creates unopenable archive
 #[test]
 fn rv8_empty_recipients_accepted() {
-    let header = SuperHeader::new(
+    // V30: SuperHeader::new() now validates that recipients is non-empty
+    // at construction time, so the vulnerability is fixed at the earliest layer.
+    let result = SuperHeader::new(
         ArchiveId::new(),
-        vec![RecipientSlot::new(
-            RecipientType::Argon2idPassword,
-            Some([0x12; 8]),
-            vec![0xAB; 16],
-            vec![0xCD; 48],
-        )], // Changed from vec![] to valid recipient
+        vec![], // zero recipients
         ArchiveConfig::default(),
         [0xAB; 16],
         mock_encrypted_vk(),
         AccessPolicy::AnyOfN,
-    )
-    .unwrap();
-
-    // Serialize roundtrip — currently succeeds
-    let bytes = header.to_bytes().unwrap();
-    let result = SuperHeader::from_bytes(&bytes);
-
-    // If deserialization rejects empty recipients, the fix is in place
-    if result.is_err() {
-        return; // Vulnerability fixed at header layer
-    }
-
-    let restored = result.unwrap();
-    assert_eq!(restored.recipients().len(), 0);
-
-    // This creates an archive that is PERMANENTLY unreadable
-    // The header should either:
-    // 1. Reject zero recipients at construction time, OR
-    // 2. Reject zero recipients at deserialization time, OR
-    // 3. Document that zero recipients is intentionally allowed
-
-    // Check if there's ANY validation of recipient count
-    let source = include_str!("../../era-volume/src/header.rs");
-    let tryfrom_start = source
-        .find("impl TryFrom<proto::SuperHeader> for SuperHeader")
-        .expect("TryFrom must exist");
-    let tryfrom_body = &source[tryfrom_start..tryfrom_start + 1500];
-
-    let validates_recipients = tryfrom_body.contains("recipients.is_empty()")
-        || tryfrom_body.contains("recipients.len()")
-        || tryfrom_body.contains("no recipients");
+    );
 
     assert!(
-        validates_recipients,
-        "🚨 RV8: SuperHeader accepts zero recipients for AnyOfN policy!\n\
-         \n\
-         A header with:\n\
-         - access_policy: AnyOfN\n\
-         - recipients: [] (empty)\n\
-         \n\
-         Creates an archive that is PERMANENTLY unreadable. The reader will\n\
-         iterate over zero slots and always return 'No valid credentials found'.\n\
-         \n\
-         The header layer should reject this at construction or deserialization\n\
-         to fail fast instead of creating unusable archives.\n\
-         \n\
-         FIX: In TryFrom or SuperHeader::new():\n\
-         ```\n\
-         if proto.recipients.is_empty() {{\n\
-             return Err(EraError::CorruptedHeader(\"No recipient slots\".into()));\n\
-         }}\n\
-         ```"
+        result.is_err(),
+        "RV8: SuperHeader::new() should reject empty recipients"
+    );
+
+    // Also verify the fix is in the source code
+    let source = include_str!("../../era-volume/src/header.rs");
+    let has_validation = source.contains("recipients.is_empty()");
+    assert!(
+        has_validation,
+        "RV8: header.rs should contain recipients.is_empty() validation"
     );
 }
 
@@ -635,7 +603,8 @@ fn rv8_empty_recipients_accepted() {
 /// 🚨 RV9: RecipientSlot with empty encrypted_master_key accepted silently
 #[test]
 fn rv9_empty_encrypted_master_key_accepted() {
-    // Create a slot with empty encrypted_master_key
+    // V30: RecipientSlot::validate() now rejects encrypted_master_key < 24 bytes,
+    // and SuperHeader::new() calls validate() on each slot at construction time.
     let slot = RecipientSlot::new(
         RecipientType::Argon2idPassword,
         Some([0x12; 8]),
@@ -643,63 +612,26 @@ fn rv9_empty_encrypted_master_key_accepted() {
         vec![],         // EMPTY encrypted_master_key!
     );
 
-    // Put it in a header — this succeeds
-    let header = SuperHeader::new(
+    let result = SuperHeader::new(
         ArchiveId::new(),
         vec![slot],
         ArchiveConfig::default(),
         [0xDE; 16],
         mock_encrypted_vk(),
         AccessPolicy::AnyOfN,
-    )
-    .unwrap();
-
-    let bytes = header.to_bytes().unwrap();
-    let result = SuperHeader::from_bytes(&bytes);
-
-    // If deserialization rejects short encrypted_master_key, the fix is in place
-    if result.is_err() {
-        return; // Vulnerability fixed — TryFrom rejects short encrypted_master_key
-    }
-
-    let restored = result.unwrap();
-
-    // Verify it roundtripped with empty encrypted_master_key
-    assert!(
-        restored.recipients()[0].encrypted_master_key().is_empty(),
-        "Expected empty encrypted_master_key to survive roundtrip"
     );
 
-    // Check if RecipientSlot validates this
+    assert!(
+        result.is_err(),
+        "RV9: SuperHeader::new() should reject slot with empty encrypted_master_key"
+    );
+
+    // Also verify the validation logic is in the source
     let source = include_str!("../../era-volume/src/header.rs");
-    let from_recipient = source
-        .find("impl TryFrom<proto::RecipientSlot> for RecipientSlot")
-        .or_else(|| source.find("impl From<proto::RecipientSlot> for RecipientSlot"))
-        .expect("RecipientSlot proto conversion must exist");
-    let from_body = &source[from_recipient..from_recipient + 600];
-
-    let validates_emk = from_body.contains("encrypted_master_key.is_empty()")
-        || from_body.contains("encrypted_master_key.len()");
-
+    let validates_emk = source.contains("encrypted_master_key.len() < 24");
     assert!(
         validates_emk,
-        "🚨 RV9: RecipientSlot accepts empty encrypted_master_key!\n\
-         \n\
-         The encrypted_master_key format is [Nonce(24 bytes) | Ciphertext(N bytes)].\n\
-         An empty field means there is NO nonce and NO encrypted key material.\n\
-         \n\
-         The PasswordProvider at auth.rs:55 does:\n\
-         ```\n\
-         let nonce: [u8; 24] = slot.encrypted_master_key[0..24].try_into()?;\n\
-         ```\n\
-         This panics or returns an incorrect error on empty encrypted_master_key.\n\
-         \n\
-         FIX: Validate in RecipientSlot deserialization:\n\
-         ```\n\
-         if proto.encrypted_master_key.len() < 24 {{\n\
-             return Err(EraError::CorruptedHeader(\"encrypted_master_key too short\".into()));\n\
-         }}\n\
-         ```"
+        "RV9: header.rs should validate encrypted_master_key minimum length"
     );
 }
 
