@@ -28,6 +28,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
+
 /// Statistics about the repair operation
 #[derive(Debug, Default)]
 pub struct RepairStats {
@@ -77,6 +79,13 @@ async fn read_and_verify_shard(
             return Ok(None);
         }
     };
+
+    if shard_header.length as u64 > MAX_SHARD_SIZE {
+        return Err(EraError::ErasureError(format!(
+            "Shard length {} exceeds maximum allowed size {}",
+            shard_header.length, MAX_SHARD_SIZE
+        )));
+    }
 
     let shard_len = shard_header.length as usize;
     let shard_data = match reader
@@ -224,7 +233,7 @@ pub async fn repair_archive(
 
     'stripe_loop: while offset < erasure_data_end {
         let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(total_shards);
-        let mut shard_offsets: Vec<u64> = Vec::with_capacity(total_shards);
+        let mut shard_offsets: Vec<Option<u64>> = vec![None; total_shards];
         let mut corrupted_indices: Vec<usize> = Vec::new();
         let mut data_lengths: Vec<Option<u32>> = vec![None; erasure_config.data_shards as usize];
         let mut max_len: usize = 0;
@@ -272,8 +281,15 @@ pub async fn repair_archive(
                 }
             };
 
+            if shard_header.length as u64 > MAX_SHARD_SIZE {
+                return Err(EraError::ErasureError(format!(
+                    "Shard length {} exceeds maximum allowed size {}",
+                    shard_header.length, MAX_SHARD_SIZE
+                )));
+            }
+
             let shard_len = shard_header.length as usize;
-            shard_offsets.push(shard_header_offset);
+            shard_offsets[shard_idx] = Some(shard_header_offset);
 
             if shard_idx < data_lengths.len() {
                 data_lengths[shard_idx] = Some(shard_header.length);
@@ -368,7 +384,7 @@ pub async fn repair_archive(
                 match repaired {
                     Ok(repaired_shards) => {
                         for (shard_idx, shard_data) in repaired_shards {
-                            let shard_offset = shard_offsets.get(shard_idx).copied();
+                            let shard_offset = shard_offsets.get(shard_idx).and_then(|v| *v);
                             if let Some(off) = shard_offset {
                                 repairs.push(ShardRepair {
                                     offset: off,
@@ -802,6 +818,13 @@ pub async fn repair_archive_matrix(
                         continue;
                     }
                 };
+
+                if shard_header.length as u64 > MAX_SHARD_SIZE {
+                    return Err(EraError::ErasureError(format!(
+                        "Shard length {} exceeds maximum allowed size {}",
+                        shard_header.length, MAX_SHARD_SIZE
+                    )));
+                }
 
                 let shard_len = shard_header.length as usize;
                 if shard_idx < data_lengths.len() {

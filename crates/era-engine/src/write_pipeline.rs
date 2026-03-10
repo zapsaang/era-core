@@ -211,7 +211,11 @@ impl<B: StorageBackend> WritePipeline<B> {
             self.cached_erasure_coder = Some((data_shards_count, parity_shards_count, new_coder));
         }
 
-        let coder = &self.cached_erasure_coder.as_ref().unwrap().2;
+        let coder = &self
+            .cached_erasure_coder
+            .as_ref()
+            .ok_or_else(|| era_common::EraError::Other("Erasure coder not initialized".into()))?
+            .2;
         let all_shards = coder.encode_shards(&shard_inputs)?;
         let parity_shards = all_shards[data_shards_count..].to_vec();
 
