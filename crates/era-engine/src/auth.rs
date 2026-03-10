@@ -6,6 +6,11 @@ use era_volume::{RecipientSlot, RecipientType};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use zeroize::Zeroizing;
 
+/// AAD domain separator for password-based Master Key encryption.
+/// Used by all password recipient slots to bind MK encryption to its purpose,
+/// preventing cross-context ciphertext splicing attacks.
+pub const MK_WRAP_AAD_DOMAIN: &[u8] = b"ERA_MK_WRAP_v8.1";
+
 /// Abstract identity provider for authentication.
 ///
 /// # Security Note
@@ -76,10 +81,10 @@ impl AuthProvider for PasswordProvider {
 
         let ctx = XChaCha20Poly1305Context::from_derived_key(&derived_key)?;
 
-        // decrypt returns Result<Vec<u8>>
-        match ctx.decrypt(&nonce, &[], ciphertext) {
+        match ctx.decrypt(&nonce, MK_WRAP_AAD_DOMAIN, ciphertext) {
             Ok(mk) => Ok(Some(mk)),
-            Err(_) => Ok(None), // Failed to decrypt (wrong password)
+            Err(EraError::Decryption(_)) => Ok(None),
+            Err(other) => Err(other),
         }
     }
 }

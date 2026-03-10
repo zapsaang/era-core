@@ -452,7 +452,11 @@ impl ArchiveWriterBuilder {
                                         slot.encrypted_master_key()[0..24].try_into()
                                     {
                                         let ct = &slot.encrypted_master_key()[24..];
-                                        if let Ok(mk) = ctx.decrypt(nonce_arr, &[], ct) {
+                                        if let Ok(mk) = ctx.decrypt(
+                                            nonce_arr,
+                                            crate::auth::MK_WRAP_AAD_DOMAIN,
+                                            ct,
+                                        ) {
                                             if let Ok(mk_arr) = mk.try_into() {
                                                 recovered_mk = Some(mk_arr);
                                                 break;
@@ -570,7 +574,11 @@ impl ArchiveWriterBuilder {
                                 era_crypto::derive_key(password.as_bytes(), &salt, &kdf_params)?;
                             let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
                             let nonce = Nonce::generate();
-                            let encrypted_share = ctx.encrypt(nonce.as_bytes(), &[], share)?;
+                            let encrypted_share = ctx.encrypt(
+                                nonce.as_bytes(),
+                                crate::auth::MK_WRAP_AAD_DOMAIN,
+                                share,
+                            )?;
 
                             let mut combined = Vec::new();
                             combined.extend_from_slice(nonce.as_bytes());
@@ -602,7 +610,11 @@ impl ArchiveWriterBuilder {
 
                         let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
                         let nonce = Nonce::generate();
-                        let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &*master_key)?;
+                        let encrypted_mk = ctx.encrypt(
+                            nonce.as_bytes(),
+                            crate::auth::MK_WRAP_AAD_DOMAIN,
+                            &*master_key,
+                        )?;
 
                         let mut combined = Vec::new();
                         combined.extend_from_slice(nonce.as_bytes());
@@ -2082,8 +2094,8 @@ pub mod generic {
             let archive_salt = era_crypto::Salt::generate();
 
             // Generate Master Key (DEK)
-            let mut master_key = [0u8; 32];
-            OsRng.fill_bytes(&mut master_key);
+            let mut master_key = Zeroizing::new([0u8; 32]);
+            OsRng.fill_bytes(&mut *master_key);
 
             // Password Recipient
             let password = self.password.unwrap_or_else(|| {
@@ -2100,7 +2112,11 @@ pub mod generic {
             let kek = era_crypto::derive_key(password.as_bytes(), &pwd_salt, &kdf_params)?;
             let ctx = XChaCha20Poly1305Context::from_derived_key(&kek)?;
             let nonce = Nonce::generate();
-            let encrypted_mk = ctx.encrypt(nonce.as_bytes(), &[], &master_key)?;
+            let encrypted_mk = ctx.encrypt(
+                nonce.as_bytes(),
+                crate::auth::MK_WRAP_AAD_DOMAIN,
+                &*master_key,
+            )?;
 
             let mut combined = Vec::new();
             combined.extend_from_slice(nonce.as_bytes());

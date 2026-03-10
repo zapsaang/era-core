@@ -77,7 +77,11 @@ fn derive_session_from_header(
         .map_err(|_| era_common::EraError::InvalidKey("Failed to create context".into()))?;
 
     let mk = ctx
-        .decrypt(nonce_array, &[], ciphertext)
+        .decrypt(
+            nonce_array,
+            era_engine::auth::MK_WRAP_AAD_DOMAIN,
+            ciphertext,
+        )
         .map_err(|_| era_common::EraError::InvalidKey("Incorrect password".into()))?;
 
     // 3. Create Session

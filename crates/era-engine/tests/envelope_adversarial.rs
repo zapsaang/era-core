@@ -166,7 +166,9 @@ fn auth_04_any_of_n_correct_logic() {
 
         let mut nonce = [0u8; 24];
         OsRng.fill_bytes(&mut nonce);
-        let encrypted_mk = ctx.encrypt(&nonce, &[], &mk).unwrap();
+        let encrypted_mk = ctx
+            .encrypt(&nonce, era_engine::auth::MK_WRAP_AAD_DOMAIN, &mk)
+            .unwrap();
 
         let mut combined = Vec::new();
         combined.extend_from_slice(&nonce);
@@ -577,7 +579,7 @@ fn doc_generic_writer_mk_fixed_uses_osrng() {
     // Verify the fix is in place
     let source = include_str!("../src/writer.rs");
     assert!(
-        source.contains("OsRng.fill_bytes(&mut master_key)"),
+        source.contains("OsRng.fill_bytes(&mut *master_key)"),
         "Regression: writer.rs should use OsRng for MK"
     );
 }

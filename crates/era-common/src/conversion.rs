@@ -195,8 +195,18 @@ impl TryFrom<proto::ErasureBlockInfo> for ErasureBlockInfo {
     type Error = crate::EraError;
     fn try_from(proto: proto::ErasureBlockInfo) -> Result<Self, Self::Error> {
         Ok(Self {
-            data_shards: proto.data_shards as u8,
-            parity_shards: proto.parity_shards as u8,
+            data_shards: u8::try_from(proto.data_shards).map_err(|_| {
+                crate::EraError::Deserialization(format!(
+                    "ErasureBlockInfo data_shards {} exceeds u8 range",
+                    proto.data_shards
+                ))
+            })?,
+            parity_shards: u8::try_from(proto.parity_shards).map_err(|_| {
+                crate::EraError::Deserialization(format!(
+                    "ErasureBlockInfo parity_shards {} exceeds u8 range",
+                    proto.parity_shards
+                ))
+            })?,
             shard_size: proto.shard_size,
             original_len: proto.original_len,
         })
@@ -246,7 +256,18 @@ impl TryFrom<proto::BlockLocation> for BlockLocation {
             Some(ei) => crate::types::ShardLayout::Erasure {
                 info: ei.try_into()?,
                 shard_offsets: proto.shard_offsets,
-                shard_volumes: proto.shard_volumes.into_iter().map(|v| v as u16).collect(),
+                shard_volumes: proto
+                    .shard_volumes
+                    .into_iter()
+                    .map(|v| {
+                        u16::try_from(v).map_err(|_| {
+                            crate::EraError::Deserialization(format!(
+                                "shard_volume {} exceeds u16 range",
+                                v
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             },
         };
 
@@ -298,7 +319,12 @@ impl TryFrom<proto::BlockChunkIndex> for BlockChunkIndex {
     fn try_from(proto: proto::BlockChunkIndex) -> Result<Self, Self::Error> {
         let entries: Result<Vec<_>, _> = proto.entries.into_iter().map(|e| e.try_into()).collect();
         Ok(Self {
-            count: proto.count as u16,
+            count: u16::try_from(proto.count).map_err(|_| {
+                crate::EraError::Deserialization(format!(
+                    "BlockChunkIndex count {} exceeds u16 range",
+                    proto.count
+                ))
+            })?,
             entries: entries?,
         })
     }
