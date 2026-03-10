@@ -93,15 +93,28 @@ impl EncryptionContext {
     /// Get the next block ID and increment the counter.
     ///
     /// This is used to ensure each block gets a unique encryption key.
-    pub fn next_block_id(&self) -> u64 {
-        self.next_block_id.fetch_add(1, Ordering::Relaxed)
+    pub fn next_block_id(&self) -> era_common::Result<u64> {
+        self.next_block_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current <= MAX_BLOCK_INDEX {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            })
+            .map_err(|current| {
+                EraError::IntegrityError(format!(
+                    "Block index {} exceeds maximum u32 capacity ({})",
+                    current, MAX_BLOCK_INDEX
+                ))
+            })
     }
 
     /// Get the current block count without incrementing.
     ///
     /// Useful for statistics and finalization.
     pub fn blocks_written(&self) -> u64 {
-        self.next_block_id.load(Ordering::Relaxed)
+        self.next_block_id.load(Ordering::Acquire)
     }
 
     /// Get a reference to the key session.
@@ -140,7 +153,7 @@ impl EncryptionContext {
         &'a self,
         compressor: Box<dyn Compressor>,
     ) -> era_common::Result<SessionBlockBuilder<'a>> {
-        let block_id = self.next_block_id();
+        let block_id = self.next_block_id()?;
         if block_id > MAX_BLOCK_INDEX {
             return Err(EraError::IntegrityError(format!(
                 "Block index {} exceeds maximum u32 capacity ({})",
@@ -176,9 +189,9 @@ mod tests {
     #[test]
     fn test_next_block_id_increments() {
         let ctx = create_test_context();
-        assert_eq!(ctx.next_block_id(), 0);
-        assert_eq!(ctx.next_block_id(), 1);
-        assert_eq!(ctx.next_block_id(), 2);
+        assert_eq!(ctx.next_block_id().unwrap(), 0);
+        assert_eq!(ctx.next_block_id().unwrap(), 1);
+        assert_eq!(ctx.next_block_id().unwrap(), 2);
         assert_eq!(ctx.blocks_written(), 3);
     }
 
@@ -198,8 +211,29 @@ mod tests {
             2,
             100,
         );
-        assert_eq!(ctx.next_block_id(), 100);
-        assert_eq!(ctx.next_block_id(), 101);
+        assert_eq!(ctx.next_block_id().unwrap(), 100);
+        assert_eq!(ctx.next_block_id().unwrap(), 101);
+    }
+
+    #[test]
+    fn test_next_block_id_rejects_overflow_after_u32_max() {
+        let salt = Salt::generate();
+        let params = KdfParams::default();
+        let session = KeySession::new(b"test_password", &salt, &params).unwrap();
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
+        let nonce_context = salt.as_bytes()[..16].try_into().unwrap();
+
+        let ctx = EncryptionContext::with_starting_block_id(
+            session,
+            volume_key,
+            nonce_context,
+            [0x33; 16],
+            3,
+            MAX_BLOCK_INDEX,
+        );
+
+        assert_eq!(ctx.next_block_id().unwrap(), MAX_BLOCK_INDEX);
+        assert!(ctx.next_block_id().is_err());
     }
 
     #[test]

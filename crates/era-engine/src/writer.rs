@@ -334,6 +334,23 @@ impl ArchiveWriterBuilder {
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(output_dir);
 
+        let password_to_validate = match &self.auth_mode {
+            AuthMode::Password(password) => Some(password.as_str()),
+            AuthMode::Hybrid { password, .. } => Some(password.as_str()),
+            AuthMode::Certificate(_) => None,
+        };
+        if let Some(password) = password_to_validate {
+            if password.is_empty() {
+                warn!(
+                    "Building archive with empty password; this is allowed for tests but unsafe for production use"
+                );
+            } else if password.trim().is_empty() {
+                return Err(EraError::InvalidConfig(
+                    "Password must not contain only whitespace".into(),
+                ));
+            }
+        }
+
         let mut archive_id = ArchiveId::new();
         // let mut salt = Salt::generate(); // Salt is per-recipient now
 
@@ -1219,7 +1236,9 @@ impl ArchiveWriter {
         }
 
         // Create catalog entry with single chunk
-        let chunk_ref = era_ingest::ChunkRef::new(hash, 0, size as u32);
+        let chunk_len = u32::try_from(size)
+            .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
+        let chunk_ref = era_ingest::ChunkRef::new(hash, 0, chunk_len);
         let entry = FileEntry::file(relative_path, size).with_chunks(vec![chunk_ref]);
         self.catalog.add(entry);
 
@@ -1240,7 +1259,8 @@ impl ArchiveWriter {
         while let Some(res) = stream.next().await {
             let chunk = res?;
             let hash = chunk.hash;
-            let length = chunk.data.len() as u32;
+            let length = u32::try_from(chunk.data.len())
+                .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
 
             total_size += length as u64;
 
@@ -1398,11 +1418,12 @@ impl ArchiveWriter {
             .map_err(|_| EraError::InvalidFormat("Block size exceeds u32::MAX".to_string()))?;
         debug!("Packed data size: {} bytes", packed_data.len());
 
-        // Create a UniqueChunk from the packed data
-        let packed_data_clone = packed_data.clone();
-        let packed_hash = tokio::task::spawn_blocking(move || blake3::hash(&packed_data_clone))
-            .await
-            .map_err(|e| EraError::AsyncError(format!("Task join failed: {}", e)))?;
+        let (packed_hash, packed_data) = tokio::task::spawn_blocking(move || {
+            let hash = blake3::hash(&packed_data);
+            (hash, packed_data)
+        })
+        .await
+        .map_err(|e| EraError::AsyncError(format!("Task join failed: {}", e)))?;
         let chunk_hash = ChunkHash(*packed_hash.as_bytes());
         let packed_chunk = UniqueChunk {
             hash: chunk_hash,
@@ -1486,7 +1507,9 @@ impl ArchiveWriter {
                     self.add_to_pending(chunk).await?;
                 }
 
-                chunk_refs.push(ChunkRef::new(hash, offset, chunk.len() as u32));
+                let chunk_len = u32::try_from(chunk.len())
+                    .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
+                chunk_refs.push(ChunkRef::new(hash, offset, chunk_len));
                 offset += chunk.len() as u64;
             }
 
@@ -1505,7 +1528,9 @@ impl ArchiveWriter {
         }
 
         // Create catalog entry with single chunk
-        let chunk_ref = era_ingest::ChunkRef::new(hash, 0, data.len() as u32);
+        let chunk_len = u32::try_from(data.len())
+            .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
+        let chunk_ref = era_ingest::ChunkRef::new(hash, 0, chunk_len);
         let entry =
             FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(vec![chunk_ref]);
         self.catalog.add(entry);
@@ -2201,7 +2226,9 @@ pub mod generic {
                 self.add_to_pending(chunk).await?;
             }
 
-            let chunk_ref = era_ingest::ChunkRef::new(hash, 0, data.len() as u32);
+            let chunk_len = u32::try_from(data.len())
+                .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
+            let chunk_ref = era_ingest::ChunkRef::new(hash, 0, chunk_len);
             let entry = FileEntry::file(PathBuf::from(name), data.len() as u64)
                 .with_chunks(vec![chunk_ref]);
             self.catalog.add(entry);

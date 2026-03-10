@@ -28,7 +28,7 @@ use era_volume::{Footer, SuperHeader, VolumeReader};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use zeroize::Zeroize;
 
 const INTERNAL_META_PREFIX: &str = ".era/meta/";
@@ -92,6 +92,7 @@ pub struct ArchiveReader {
     catalog: Option<Catalog>,
     /// V2.1 index reader recovered from volume
     index_reader: Option<IndexReader>,
+    embedded_index_recovery_failed: bool,
 }
 
 impl ArchiveReader {
@@ -348,6 +349,7 @@ impl ArchiveReader {
             compression_algorithm,
             catalog: None,
             index_reader: None,
+            embedded_index_recovery_failed: false,
         })
     }
 
@@ -411,6 +413,7 @@ impl ArchiveReader {
             compression_algorithm,
             catalog: None,
             index_reader: None,
+            embedded_index_recovery_failed: false,
         })
     }
 
@@ -486,15 +489,21 @@ impl ArchiveReader {
 
     /// Metadata-first preflight: restore embedded index (if present) and load catalog.
     pub async fn preflight_metadata_recovery(&mut self) -> Result<()> {
-        self.restore_embedded_index().await?;
+        let index_recovered = self.restore_embedded_index().await?;
+        if !index_recovered {
+            warn!("Embedded index recovery failed; continuing in degraded mode");
+        }
         self.load_catalog().await?;
         Ok(())
     }
 
-    async fn restore_embedded_index(&mut self) -> Result<()> {
+    async fn restore_embedded_index(&mut self) -> Result<bool> {
         if self.index_reader.is_some() {
-            return Ok(());
+            self.embedded_index_recovery_failed = false;
+            return Ok(true);
         }
+
+        self.embedded_index_recovery_failed = false;
 
         // Fast path: try V2.1 IndexReader recovery from volume footer
         for reader in &self.volume_readers {
@@ -512,16 +521,18 @@ impl ArchiveReader {
                         Ok(index_reader) => {
                             debug!("V2.1 index recovered from volume footer");
                             self.index_reader = Some(index_reader);
-                            return Ok(());
+                            self.embedded_index_recovery_failed = false;
+                            return Ok(true);
                         }
                         Err(e) => {
-                            debug!(
+                            self.embedded_index_recovery_failed = true;
+                            warn!(
                                 "V2.1 index recovery failed, continuing without index: {}",
                                 e
                             );
                             // Don't fall through to legacy path — the footer's index location
                             // points to V2.1 typed blocks which can't be unpacked as data blocks.
-                            return Ok(());
+                            return Ok(false);
                         }
                     }
                 }
@@ -529,7 +540,11 @@ impl ArchiveReader {
         }
 
         // No footer with index found — nothing to restore
-        Ok(())
+        Ok(true)
+    }
+
+    pub fn embedded_index_recovery_failed(&self) -> bool {
+        self.embedded_index_recovery_failed
     }
 
     /// Get the archive header

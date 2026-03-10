@@ -506,13 +506,16 @@ pub async fn write_checkpoint<W: StorageWriter>(
         &checkpoint_bytes,
     )?;
 
+    let checkpoint_size = u32::try_from(checkpoint_bytes.len())
+        .map_err(|_| EraError::Other("Checkpoint size exceeds u32::MAX".into()))?;
+
     // Create encrypted block
     let encrypted_block = EncryptedMacroBlock {
         block_id,
         data: encrypted_data,
-        original_size: checkpoint_bytes.len() as u32,
-        compressed_size: checkpoint_bytes.len() as u32, // No compression for checkpoints
-        chunk_count: 0,                                 // Metadata block
+        original_size: checkpoint_size,
+        compressed_size: checkpoint_size, // No compression for checkpoints
+        chunk_count: 0,                   // Metadata block
     };
 
     // Write as canonical block
@@ -569,6 +572,14 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
     checkpoint_block_id: Option<u32>,
 ) -> Result<Checkpoint> {
     use era_common::BlockId;
+
+    let (data_region_start, data_region_end) = volume_reader.data_region();
+    if checkpoint_offset < data_region_start || checkpoint_offset >= data_region_end {
+        return Err(EraError::InvalidFormat(format!(
+            "Checkpoint offset {} out of bounds (data region: {}..{})",
+            checkpoint_offset, data_region_start, data_region_end
+        )));
+    }
 
     // Construct location for the checkpoint block
     // NOTE: VolumeId::new() creates a default VolumeId (0), which represents the primary volume.
@@ -643,9 +654,17 @@ pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
     if let Some(footer) = volume_reader.footer() {
         let checkpoint_offset = footer.last_checkpoint_offset();
         let checkpoint_block_id = footer.last_checkpoint_block_id();
+        let (data_region_start, data_region_end) = volume_reader.data_region();
 
         // Only attempt recovery if there's a checkpoint
         if checkpoint_offset > 0 {
+            if checkpoint_offset < data_region_start || checkpoint_offset >= data_region_end {
+                return Err(EraError::InvalidFormat(format!(
+                    "Footer checkpoint offset {} out of bounds (data region: {}..{})",
+                    checkpoint_offset, data_region_start, data_region_end
+                )));
+            }
+
             // Use block_id if available, otherwise fall back to brute-force search
             let block_id_opt = if checkpoint_block_id > 0 {
                 Some(checkpoint_block_id)

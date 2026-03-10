@@ -50,65 +50,74 @@ pub struct RecoveryStatus {
 /// opening a full `VolumeReader` (which parses the 4096-byte header and
 /// allocates reader state). This is the same lightweight pattern used by
 /// `CheckpointManager::exists()`.
-async fn volume_has_checkpoint(archive_path: &Path) -> bool {
+async fn volume_has_checkpoint(archive_path: &Path) -> Result<bool> {
     let path = archive_path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    let footer_has_checkpoint = |footer: &era_volume::Footer| footer.last_checkpoint_offset() > 0;
+    tokio::task::spawn_blocking(move || -> Result<bool> {
         use std::io::{Read, Seek, SeekFrom};
 
-        let metadata = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
+        let metadata = std::fs::metadata(&path).map_err(EraError::Io)?;
         let file_len = metadata.len();
         if file_len < era_volume::FOOTER_SIZE as u64 {
-            return false;
+            return Ok(false);
         }
 
-        let mut file = match std::fs::File::open(&path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
+        let mut file = std::fs::File::open(&path).map_err(EraError::Io)?;
 
         // Read primary footer (last FOOTER_SIZE bytes)
         if file
             .seek(SeekFrom::End(-(era_volume::FOOTER_SIZE as i64)))
             .is_err()
         {
-            return false;
+            return Err(EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "failed to seek to primary footer",
+            )));
         }
         let mut buf = [0u8; era_volume::FOOTER_SIZE];
         if file.read_exact(&mut buf).is_err() {
-            return false;
+            return Err(EraError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to read primary footer",
+            )));
         }
 
         match era_volume::Footer::from_bytes(&buf) {
-            Ok(footer) => footer.last_checkpoint_offset() > 0,
+            Ok(footer) => Ok(footer_has_checkpoint(&footer)),
             Err(_) => {
                 // Try backup footer at HEADER_SIZE offset
                 if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
-                    return false;
+                    return Ok(false);
                 }
                 if file
                     .seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
                     .is_err()
                 {
-                    return false;
+                    return Err(EraError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "failed to seek to backup footer",
+                    )));
                 }
                 let mut backup_buf = [0u8; era_volume::FOOTER_SIZE];
                 if file.read_exact(&mut backup_buf).is_err() {
-                    return false;
+                    return Err(EraError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "failed to read backup footer",
+                    )));
                 }
                 match era_volume::Footer::from_bytes(&backup_buf) {
-                    Ok(footer) => footer.last_checkpoint_offset() > 0,
-                    Err(_) => false,
+                    Ok(footer) => Ok(footer_has_checkpoint(&footer)),
+                    Err(_) => Ok(false),
                 }
             }
         }
     })
     .await
     .unwrap_or_else(|e| {
-        tracing::warn!("volume_has_checkpoint task panicked: {}", e);
-        false
+        Err(EraError::AsyncError(format!(
+            "volume_has_checkpoint task panicked: {}",
+            e
+        )))
     })
 }
 
@@ -135,7 +144,7 @@ impl RecoveryManager {
 
         // V2.2: Check volume footer for checkpoint, not sidecar files
         let checkpoint_exists = if archive_exists {
-            volume_has_checkpoint(archive_path).await
+            volume_has_checkpoint(archive_path).await?
         } else {
             false
         };
@@ -200,7 +209,7 @@ impl RecoveryManager {
     /// **V2.2 Change:** Now checks volume footer instead of sidecar files.
     pub async fn new(archive_path: &Path) -> Result<Self> {
         let checkpoint_manager =
-            if archive_path.exists() && volume_has_checkpoint(archive_path).await {
+            if archive_path.exists() && volume_has_checkpoint(archive_path).await? {
                 // Note: In V2.2, the actual checkpoint data is in the volume
                 // CheckpointManager is kept for API compatibility but doesn't
                 // manage sidecar files anymore

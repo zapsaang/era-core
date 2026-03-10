@@ -341,12 +341,13 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
 #[async_trait(?Send)]
 impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'a, R> {
     async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
-        if self
+        let exhausted_volumes = self
             .current_offsets
             .iter()
             .zip(self.data_ends.iter())
-            .any(|(offset, end)| offset >= end)
-        {
+            .filter(|(offset, end)| *offset >= *end)
+            .count();
+        if exhausted_volumes > self.parity_shards as usize {
             return None;
         }
 
