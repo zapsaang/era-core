@@ -81,9 +81,10 @@ impl MemoryChunkIndex {
     /// ```
     #[allow(dead_code)]
     pub fn with_capacity(max_entries: usize) -> Self {
-        let _ = max_entries;
         Self {
-            map: RwLock::new(HashMap::new()),
+            map: RwLock::new(HashMap::with_capacity(
+                max_entries.min(MAX_MEMORY_INDEX_ENTRIES),
+            )),
         }
     }
 }

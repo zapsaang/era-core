@@ -196,7 +196,7 @@ impl ArchiveReader {
                 continue;
             }
 
-            if !full_path.exists() {
+            if !tokio::fs::try_exists(&full_path).await.unwrap_or(false) {
                 missing_count += 1;
                 if total_volumes > 0 {
                     continue;
@@ -889,7 +889,7 @@ impl ArchiveReader {
                 }
             }
 
-            if output_path.exists() && !options.overwrite {
+            if tokio::fs::try_exists(&output_path).await.unwrap_or(false) && !options.overwrite {
                 debug!("Skipping existing file: {}", output_path.display());
                 stats.skipped += 1;
                 continue;

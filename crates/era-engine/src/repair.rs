@@ -186,9 +186,12 @@ pub async fn repair_archive(
     }
 
     let master_key = master_key.ok_or(EraError::InvalidKey("Incorrect password".into()))?;
-    let mk_array: [u8; 32] = master_key
-        .try_into()
-        .map_err(|_| EraError::InvalidKey("Invalid master key length".into()))?;
+    let mk_array: [u8; 32] = master_key.try_into().map_err(|e: Vec<u8>| {
+        EraError::InvalidKey(format!(
+            "Invalid master key length: expected 32, got {}",
+            e.len()
+        ))
+    })?;
     let _session = KeySession::from_master_key(&mk_array)?;
 
     // Metadata-first preflight: restore embedded LSM and catalog before repair
@@ -669,9 +672,12 @@ pub async fn repair_archive_matrix(
     }
 
     let master_key = master_key.ok_or(EraError::InvalidKey("Incorrect password".into()))?;
-    let mk_array: [u8; 32] = master_key
-        .try_into()
-        .map_err(|_| EraError::InvalidKey("Invalid master key length".into()))?;
+    let mk_array: [u8; 32] = master_key.try_into().map_err(|e: Vec<u8>| {
+        EraError::InvalidKey(format!(
+            "Invalid master key length: expected 32, got {}",
+            e.len()
+        ))
+    })?;
     let _session = KeySession::from_master_key(&mk_array)?;
 
     let _compressor: Box<dyn era_codec::Compressor> =

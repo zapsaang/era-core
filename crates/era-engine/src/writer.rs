@@ -539,8 +539,13 @@ impl ArchiveWriterBuilder {
                 match self.access_policy {
                     era_volume::AccessPolicy::Threshold(t) => {
                         // Collect all passwords
-                        let mut all_passwords = vec![pwd.as_str().to_string()];
-                        all_passwords.extend(self.additional_passwords.iter().cloned());
+                        let mut all_passwords: Vec<zeroize::Zeroizing<String>> =
+                            vec![zeroize::Zeroizing::new(pwd.as_str().to_string())];
+                        all_passwords.extend(
+                            self.additional_passwords
+                                .iter()
+                                .map(|p| zeroize::Zeroizing::new(p.clone())),
+                        );
                         let n = all_passwords.len();
 
                         if (n as u32) < t {
@@ -2081,7 +2086,10 @@ pub mod generic {
             OsRng.fill_bytes(&mut master_key);
 
             // Password Recipient
-            let password = self.password.unwrap_or_default();
+            let password = self.password.unwrap_or_else(|| {
+                tracing::warn!("GenericArchiveWriter: no password provided, using empty password");
+                String::new()
+            });
             let pwd_salt = era_crypto::Salt::generate();
             let kdf_params = KdfParams {
                 memory_cost: self.config.encryption.kdf_memory_cost,

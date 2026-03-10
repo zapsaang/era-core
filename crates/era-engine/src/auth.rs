@@ -108,11 +108,13 @@ impl AuthProvider for CertificateProvider {
             }
         }
 
-        let ephemeral_public: [u8; 32] = slot
-            .params()
-            .to_vec()
-            .try_into()
-            .map_err(|_| EraError::InvalidKey("Invalid ephemeral public".into()))?;
+        let ephemeral_public: [u8; 32] =
+            slot.params().to_vec().try_into().map_err(|e: Vec<u8>| {
+                EraError::InvalidKey(format!(
+                    "Invalid ephemeral public: expected 32 bytes, got {}",
+                    e.len()
+                ))
+            })?;
 
         let encapsulation = KeyEncapsulation {
             ephemeral_public,

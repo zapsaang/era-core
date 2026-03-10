@@ -216,3 +216,130 @@ mod medium_perf_rob {
         );
     }
 }
+
+mod low_severity {
+    #[test]
+    fn test_v3_sec_05_threshold_passwords_use_zeroizing() {
+        let source = include_str!("../src/writer.rs");
+
+        assert!(
+            source.contains("let mut all_passwords: Vec<zeroize::Zeroizing<String>>"),
+            "threshold password collection must be typed as Vec<Zeroizing<String>>"
+        );
+        assert!(
+            source.contains("zeroize::Zeroizing::new(pwd.as_str().to_string())")
+                && source.contains(".map(|p| zeroize::Zeroizing::new(p.clone()))"),
+            "primary and additional threshold passwords must be wrapped in Zeroizing"
+        );
+    }
+
+    #[test]
+    fn test_v3_qual_01_generic_writer_warns_on_empty_password() {
+        let source = include_str!("../src/writer.rs");
+
+        assert!(
+            source.contains("self.password.unwrap_or_else(||")
+                && source
+                    .contains("GenericArchiveWriter: no password provided, using empty password"),
+            "GenericArchiveWriter builder must warn on missing password fallback"
+        );
+        assert!(
+            !source.contains("let password = self.password.unwrap_or_default();"),
+            "GenericArchiveWriter builder must not silently use unwrap_or_default for password"
+        );
+    }
+
+    #[test]
+    fn test_v3_perf_02_reader_uses_async_path_exists() {
+        let source = include_str!("../src/reader.rs");
+
+        let count = source.matches("tokio::fs::try_exists(&").count();
+        assert!(
+            count >= 2,
+            "reader must use async tokio::fs::try_exists at both discovery and extraction checks"
+        );
+        assert!(
+            source.contains("tokio::fs::try_exists(&full_path).await.unwrap_or(false)")
+                && source.contains("tokio::fs::try_exists(&output_path).await.unwrap_or(false)"),
+            "reader must use async try_exists for full_path and output_path"
+        );
+    }
+
+    #[test]
+    fn test_v3_qual_02_repair_preserves_map_err_context() {
+        let source = include_str!("../src/repair.rs");
+
+        let contextual_count = source
+            .matches("Invalid master key length: expected 32, got {}")
+            .count();
+        assert!(
+            contextual_count >= 2,
+            "repair must preserve master key length context in both map_err sites"
+        );
+        assert!(
+            source.contains("map_err(|e: Vec<u8>|"),
+            "repair map_err should capture conversion error payload for context"
+        );
+    }
+
+    #[test]
+    fn test_v3_qual_03_checkpoint_no_infallible_unwrap() {
+        let source = include_str!("../src/checkpoint.rs");
+
+        assert!(
+            source.contains("match archived.deserialize(&mut rkyv::Infallible)")
+                && source.contains("Err(infallible) => match infallible {}"),
+            "checkpoint deserialization must match exhaustively on Infallible"
+        );
+        assert!(
+            !source.contains("archived.deserialize(&mut rkyv::Infallible).unwrap()"),
+            "checkpoint deserialization must not unwrap Infallible result"
+        );
+    }
+
+    #[test]
+    fn test_v3_qual_04_auth_preserves_map_err_context() {
+        let source = include_str!("../src/auth.rs");
+
+        assert!(
+            source.contains("Invalid ephemeral public: expected 32 bytes, got {}")
+                && source.contains("map_err(|e: Vec<u8>|"),
+            "auth provider must include invalid ephemeral public length context"
+        );
+        assert!(
+            !source
+                .contains("map_err(|_| EraError::InvalidKey(\"Invalid ephemeral public\".into()))"),
+            "auth provider must not drop try_into error context"
+        );
+    }
+
+    #[test]
+    fn test_v3_rob_06_volume_stage_safe_block_id_cast() {
+        let source = include_str!("../src/volume_stage.rs");
+
+        assert!(
+            source.contains("let block_id = u32::try_from(block.block_id.sequence())")
+                && source.contains("Block sequence ID exceeds u32::MAX"),
+            "volume_stage must use checked conversion for block_id sequence"
+        );
+        assert!(
+            !source.contains("let block_id = block.block_id.sequence() as u32;"),
+            "volume_stage must not use unchecked as u32 cast for block_id"
+        );
+    }
+
+    #[test]
+    fn test_v3_qual_05_chunk_index_uses_capacity_parameter() {
+        let source = include_str!("../src/chunk_index.rs");
+
+        assert!(
+            source.contains("HashMap::with_capacity(")
+                && source.contains("max_entries.min(MAX_MEMORY_INDEX_ENTRIES)"),
+            "MemoryChunkIndex::with_capacity must use max_entries with upper bound"
+        );
+        assert!(
+            !source.contains("let _ = max_entries;"),
+            "MemoryChunkIndex::with_capacity must not ignore max_entries parameter"
+        );
+    }
+}

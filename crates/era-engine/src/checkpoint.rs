@@ -123,7 +123,10 @@ impl Checkpoint {
         // SAFETY: rkyv::Infallible is an uninhabited type (like core::convert::Infallible) — it
         // cannot be constructed, so deserialize() cannot produce an error. After check_archived_root
         // succeeds, the unwrap is provably safe and will never panic.
-        let checkpoint: Self = archived.deserialize(&mut rkyv::Infallible).unwrap();
+        let checkpoint: Self = match archived.deserialize(&mut rkyv::Infallible) {
+            Ok(v) => v,
+            Err(infallible) => match infallible {},
+        };
 
         // V2-SEC-09: Post-deserialize bounds validation to prevent memory exhaustion
         // from maliciously crafted checkpoint data

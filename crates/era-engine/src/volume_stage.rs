@@ -6,7 +6,7 @@
 //! This module is part of the God Object decomposition effort (Phase 2).
 
 use era_common::{
-    BlockLocation, BlockType, EncryptedMacroBlock, MatrixShardEntry, Result, VolumeId,
+    BlockLocation, BlockType, EncryptedMacroBlock, EraError, MatrixShardEntry, Result, VolumeId,
 };
 use era_storage::StorageBackend;
 use era_volume::{VolumePool, VolumePoolStats, VolumeWriter};
@@ -126,7 +126,8 @@ impl<B: StorageBackend> VolumeStage<B> {
     ) -> Result<Vec<(u64, u32, u32)>> {
         let volume_count = self.pool.volume_count();
         let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
-        let block_id = block.block_id.sequence() as u32;
+        let block_id = u32::try_from(block.block_id.sequence())
+            .map_err(|_| EraError::Other("Block sequence ID exceeds u32::MAX".into()))?;
 
         for slot in 0..volume_count {
             if let Some(writer) = self.pool.get_writer_mut(slot) {
