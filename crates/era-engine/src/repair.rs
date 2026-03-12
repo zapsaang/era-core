@@ -718,9 +718,9 @@ pub async fn repair_archive_matrix(
     );
 
     if volume_count < 2 {
-        // Fall back to single-volume repair
-        info!("Single volume detected, using legacy repair");
-        return repair_archive(path, password, options).await;
+        return Err(EraError::ErasureError(
+            "Matrix-distributed archive has insufficient surviving volumes for repair".into(),
+        ));
     }
 
     // Verify erasure coding is enabled

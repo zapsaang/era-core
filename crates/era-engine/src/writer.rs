@@ -122,6 +122,7 @@ pub struct ArchiveWriterBuilder {
     enable_checkpoint: bool,
     /// Recovery options when checkpoint is enabled
     recovery_options: RecoveryOptions,
+    recovery_options_explicit: bool,
     /// Enable erasure coding for redundancy (None = use config default)
     enable_erasure: Option<bool>,
     /// Erasure coding configuration
@@ -153,6 +154,7 @@ impl ArchiveWriterBuilder {
             chunker_config: None,
             enable_checkpoint: false,
             recovery_options: RecoveryOptions::default(),
+            recovery_options_explicit: false,
             enable_erasure: None,
             erasure_config: ErasureCodeConfig::default(),
             volume_count: 1,
@@ -240,6 +242,7 @@ impl ArchiveWriterBuilder {
     /// Set recovery options for checkpoint behavior
     pub fn recovery_options(mut self, options: RecoveryOptions) -> Self {
         self.recovery_options = options;
+        self.recovery_options_explicit = true;
         self.enable_checkpoint = true;
         self
     }
@@ -329,6 +332,7 @@ impl ArchiveWriterBuilder {
     /// Build the archive writer
     pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
+        let output_preexisted = self.output_path.exists();
         // Create storage backend
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(output_dir);
@@ -672,13 +676,25 @@ impl ArchiveWriterBuilder {
         // Zeroize master key from stack
         master_key.zeroize();
 
-        // Generate random Volume Key and wrap it with IK derived from MK
-        let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
-        let encrypted_volume_key = era_volume::EncryptedVolumeKey::new(
-            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
-            wrapped_vk.nonce,
-            wrapped_vk.ciphertext,
-        );
+        let (volume_key, encrypted_volume_key) = if self.append_existing {
+            let append = append_header.as_ref().ok_or_else(|| {
+                era_common::EraError::CorruptedHeader("Missing append header".into())
+            })?;
+            let existing_vk = session.unwrap_volume_key(
+                append.encrypted_volume_key().nonce(),
+                append.encrypted_volume_key().ciphertext(),
+            )?;
+            (existing_vk, append.encrypted_volume_key().clone())
+        } else {
+            // Generate random Volume Key and wrap it with IK derived from MK
+            let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
+            let encrypted_volume_key = era_volume::EncryptedVolumeKey::new(
+                era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+                wrapped_vk.nonce,
+                wrapped_vk.ciphertext,
+            );
+            (volume_key, encrypted_volume_key)
+        };
 
         // Store nonce context (salt) for block encryption
         let nonce_context = *archive_salt.as_bytes();
@@ -790,19 +806,30 @@ impl ArchiveWriterBuilder {
             catalog = reader.load_catalog().await?.clone();
         }
 
+        let active_header = if self.append_existing {
+            append_header.clone().unwrap_or_else(|| header.clone())
+        } else {
+            header.clone()
+        };
+
         let volume_pool = if self.append_existing {
             if enable_erasure {
                 return Err(era_common::EraError::InvalidFormat(
                     "Append mode is not supported for erasure-coded archives".into(),
                 ));
             }
-            let header = append_header.clone().unwrap_or_else(|| header.clone());
             let footer = append_footer
                 .as_ref()
                 .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
-            VolumePool::open_append_single(backend.clone(), pool_config, header, footer).await?
+            VolumePool::open_append_single(
+                backend.clone(),
+                pool_config,
+                active_header.clone(),
+                footer,
+            )
+            .await?
         } else {
-            VolumePool::create(backend.clone(), pool_config, header.clone()).await?
+            VolumePool::create(backend.clone(), pool_config, active_header.clone()).await?
         };
 
         info!(
@@ -831,18 +858,48 @@ impl ArchiveWriterBuilder {
 
         // Set up checkpoint manager if enabled
         let checkpoint_manager = if self.enable_checkpoint {
-            let manager = match self.recovery_options.strategy {
+            let checkpoint_exists = CheckpointManager::exists(&self.output_path).await?;
+            let effective_strategy = if self.recovery_options_explicit {
+                self.recovery_options.strategy
+            } else if checkpoint_exists {
+                RecoveryStrategy::Resume
+            } else {
+                RecoveryStrategy::StartFresh
+            };
+
+            let manager = match effective_strategy {
                 RecoveryStrategy::StartFresh => {
-                    if CheckpointManager::exists(&self.output_path).await? {
+                    if checkpoint_exists {
                         warn!("Starting fresh, deleting existing checkpoint");
                         let old = CheckpointManager::load_or_create(&self.output_path)?;
                         old.delete()?;
                     }
                     CheckpointManager::new(&self.output_path)
                 }
-                RecoveryStrategy::Resume => CheckpointManager::load_or_create(&self.output_path)?,
+                RecoveryStrategy::Resume => {
+                    if !checkpoint_exists {
+                        if !output_preexisted {
+                            CheckpointManager::new(&self.output_path)
+                        } else {
+                            return Err(era_common::EraError::CheckpointError(
+                                "Resume requested but no prior checkpoint exists. Use StartFresh to begin a new archive."
+                                    .into(),
+                            ));
+                        }
+                    } else {
+                        CheckpointManager::load_from_durable_checkpoint(
+                            &self.output_path,
+                            &session,
+                            &volume_key,
+                            *header.salt(),
+                            *header.archive_id().0.as_bytes(),
+                            header.epoch_id(),
+                        )
+                        .await?
+                    }
+                }
                 RecoveryStrategy::Abort => {
-                    if CheckpointManager::exists(&self.output_path).await? {
+                    if checkpoint_exists {
                         return Err(era_common::EraError::CheckpointError(
                              "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
                                  .into(),
@@ -861,7 +918,13 @@ impl ArchiveWriterBuilder {
 
         // Load existing chunk locations from checkpoint if resuming
         if let Some(ref mgr) = checkpoint_manager {
-            if self.recovery_options.strategy == RecoveryStrategy::Resume {
+            let should_restore_checkpoint_state = if self.recovery_options_explicit {
+                self.recovery_options.strategy == RecoveryStrategy::Resume
+            } else {
+                self.enable_checkpoint && CheckpointManager::exists(&self.output_path).await?
+            };
+
+            if should_restore_checkpoint_state {
                 chunk_index.start_batch();
                 for (hash, location) in mgr.written_chunks() {
                     chunk_index.put(*hash, location.clone())?;
@@ -907,8 +970,8 @@ impl ArchiveWriterBuilder {
             session,
             volume_key,
             nonce_context,
-            *header.archive_id().0.as_bytes(),
-            header.epoch_id(),
+            *active_header.archive_id().0.as_bytes(),
+            active_header.epoch_id(),
             next_block_id,
         );
 
@@ -1603,40 +1666,11 @@ impl ArchiveWriter {
             None
         };
 
-        // Matrix distribution mode: write catalog to each volume in the pool
-        let volume_count = self.pipeline.volume().pool().volume_count();
-        let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::new();
-
-        for slot in 0..volume_count {
-            if let Some(writer) = self.pipeline.volume_mut().pool_mut().get_writer_mut(slot) {
-                let mut location = writer
-                    .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)
-                    .await?;
-                // Override slot_index with actual block_id for correct key derivation during read
-                location.slot_index = catalog_block_id;
-
-                if let Some(ref backup) = backup_block {
-                    let _backup_location = writer
-                        .write_canonical_block(backup, era_common::BlockType::Catalog)
-                        .await?;
-                    debug!(
-                        "Volume {}: Catalog written with backup at offset {}",
-                        slot, location.physical_offset
-                    );
-                } else {
-                    debug!(
-                        "Volume {}: Catalog written at offset {}",
-                        slot, location.physical_offset
-                    );
-                }
-
-                catalog_locations.push((
-                    location.physical_offset,
-                    location.encrypted_size,
-                    catalog_block_id,
-                ));
-            }
-        }
+        let catalog_locations = self
+            .pipeline
+            .volume_mut()
+            .write_catalog_to_all(&catalog_block, backup_block.as_ref())
+            .await?;
 
         debug!(
             "Catalog (block_id={}) written to {} volumes for full redundancy",
