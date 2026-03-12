@@ -659,21 +659,9 @@ pub async fn write_checkpoint<W: StorageWriter>(
     volume_writer
         .set_last_checkpoint_with_block_id(location.physical_offset, checkpoint_block_id)?;
 
-    // CRITICAL: Atomically commit the checkpoint to disk
-    // This persists the footer (primary + backup) so that if power is lost after this point,
-    // the checkpoint can be recovered. Without this call, the checkpoint data would be written
-    // but the footer wouldn't point to it, making recovery impossible.
-    if let Err(err) = volume_writer
+    volume_writer
         .commit_checkpoint(location.physical_offset)
-        .await
-    {
-        match &err {
-            EraError::InvalidConfig(msg) if msg.contains("max_size required for volumes") => {
-                volume_writer.sync_data().await?;
-            }
-            _ => return Err(err),
-        }
-    }
+        .await?;
 
     tracing::info!(
         "Checkpoint committed: {} chunks, {} files at offset {} (block_id={})",

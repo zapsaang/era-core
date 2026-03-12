@@ -267,17 +267,10 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             ));
         }
 
-        // Validate volume_indices: check bounds and duplicates
+        // Validate volume_indices as original archive sequence numbers.
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         for &idx in volume_indices {
-            if idx >= volume_readers.len() {
-                return Err(EraError::InvalidFormat(format!(
-                    "volume_indices contains out-of-bounds index {} (max: {})",
-                    idx,
-                    volume_readers.len() - 1
-                )));
-            }
             if !seen.insert(idx) {
                 return Err(EraError::InvalidFormat(format!(
                     "volume_indices contains duplicate index {}",
@@ -1359,6 +1352,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 #[cfg(test)]
 mod tests {
     use super::*;
+    use era_codec::NoCompressor;
+    use era_crypto::DerivedKey;
+    use era_storage::LocalStorageBackend;
+    use era_volume::{
+        AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType,
+        SuperHeader, VolumeReader, VolumeWriter,
+    };
+    use std::path::Path;
+    use tempfile::TempDir;
 
     #[test]
     fn test_block_iter_stats_default() {
@@ -1366,5 +1368,95 @@ mod tests {
         assert_eq!(stats.blocks_read, 0);
         assert_eq!(stats.blocks_failed, 0);
         assert_eq!(stats.corrupted_shards, 0);
+    }
+
+    fn test_header(sequence: u16, total_volumes: u16) -> SuperHeader {
+        let mut header = SuperHeader::new(
+            era_common::ArchiveId::new(),
+            vec![RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
+            era_common::ArchiveConfig::default(),
+            [0u8; 16],
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
+            AccessPolicy::AnyOfN,
+        )
+        .unwrap();
+        header.set_volume_sequence(sequence);
+        header.set_total_volumes(total_volumes);
+        header
+    }
+
+    async fn create_empty_volume_reader(
+        temp_dir: &TempDir,
+        file_name: &str,
+        sequence: u16,
+        total_volumes: u16,
+    ) -> VolumeReader<era_storage::LocalStorageReader> {
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let writer = VolumeWriter::create(
+            &backend,
+            Path::new(file_name),
+            test_header(sequence, total_volumes),
+        )
+        .await
+        .unwrap();
+        writer.finalize().await.unwrap();
+        VolumeReader::open(&backend, Path::new(file_name))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_erasure_iterator_accepts_sparse_original_indices() {
+        let temp_dir = TempDir::new().unwrap();
+        let volume_readers = vec![
+            create_empty_volume_reader(&temp_dir, "sparse.era", 0, 3).await,
+            create_empty_volume_reader(&temp_dir, "sparse.era.002", 2, 3).await,
+        ];
+        let unpacker = ErasureBlockUnpacker::new(
+            DerivedKey::from_bytes([0x44; 32]).unwrap(),
+            [0x11; 16],
+            [0x22; 16],
+            1,
+            Box::new(NoCompressor),
+        );
+
+        let iter = ErasureBlockIterator::new(&volume_readers, &[0, 2], &unpacker, 2, 1).unwrap();
+
+        assert_eq!(iter.original_volume_count, 3);
+        assert_eq!(iter.vol_index_map, vec![Some(0), None, Some(1)]);
+    }
+
+    #[tokio::test]
+    async fn test_erasure_iterator_rejects_duplicate_original_indices() {
+        let temp_dir = TempDir::new().unwrap();
+        let volume_readers = vec![
+            create_empty_volume_reader(&temp_dir, "dup.era", 0, 2).await,
+            create_empty_volume_reader(&temp_dir, "dup.era.001", 1, 2).await,
+        ];
+        let unpacker = ErasureBlockUnpacker::new(
+            DerivedKey::from_bytes([0x55; 32]).unwrap(),
+            [0x33; 16],
+            [0x44; 16],
+            1,
+            Box::new(NoCompressor),
+        );
+
+        let err = ErasureBlockIterator::new(&volume_readers, &[0, 0], &unpacker, 2, 1)
+            .err()
+            .expect("duplicate indices must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate index 0"),
+            "expected duplicate-index rejection, got: {msg}"
+        );
     }
 }

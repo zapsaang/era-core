@@ -74,7 +74,13 @@ async fn test_v5_state_02_resume_requires_persisted_checkpoint() {
     writer.add_bytes("b.txt", b"resume").await.unwrap();
     writer.finalize().await.unwrap();
 
-    let resumed = RecoverableWriter::new(&archive, RecoveryOptions::resume()).await;
+    let resumed = ArchiveWriterBuilder::new(&archive)
+        .password("v5-state-02")
+        .enable_checkpoint(true)
+        .recovery_options(RecoveryOptions::resume())
+        .enable_erasure(false)
+        .build()
+        .await;
     assert!(resumed.is_err());
 }
 
@@ -117,10 +123,16 @@ async fn test_v5_state_03_resume_rejects_corrupted_durable_checkpoint() {
     file.seek(SeekFrom::Start(checkpoint_offset)).unwrap();
     file.write_all(&[0xFF; 8]).unwrap();
 
-    let resumed = RecoverableWriter::new(&archive, RecoveryOptions::resume()).await;
+    let resumed = ArchiveWriterBuilder::new(&archive)
+        .password("v5-state-03")
+        .enable_checkpoint(true)
+        .recovery_options(RecoveryOptions::resume())
+        .enable_erasure(false)
+        .build()
+        .await;
     assert!(
         resumed.is_err(),
-        "resume must reject corrupted durable checkpoint provenance"
+        "public resume path must reject corrupted durable checkpoint provenance"
     );
 }
 
@@ -163,10 +175,16 @@ async fn test_v5_state_04_start_fresh_discards_prior_checkpoint_provenance() {
         "start-fresh must clear durable checkpoint provenance"
     );
 
-    let resume_after_fresh = RecoverableWriter::new(&archive, RecoveryOptions::resume()).await;
+    let resume_after_fresh = ArchiveWriterBuilder::new(&archive)
+        .password("v5-state-04")
+        .enable_checkpoint(true)
+        .recovery_options(RecoveryOptions::resume())
+        .enable_erasure(false)
+        .build()
+        .await;
     assert!(
         resume_after_fresh.is_err(),
-        "resume should fail after start-fresh cleared checkpoint provenance"
+        "public resume path should fail after start-fresh cleared checkpoint provenance"
     );
 }
 

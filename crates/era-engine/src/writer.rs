@@ -332,7 +332,7 @@ impl ArchiveWriterBuilder {
     /// Build the archive writer
     pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
-        let output_preexisted = self.output_path.exists();
+        let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;
         // Create storage backend
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(output_dir);
@@ -391,7 +391,7 @@ impl ArchiveWriterBuilder {
         let mut recipients = Vec::new();
         let mut skip_auth_setup = false;
 
-        if self.append_existing && self.output_path.exists() {
+        if self.append_existing && tokio::fs::try_exists(&self.output_path).await? {
             // 1. Locate existing volume (Volume 0) to get Valid DNA
             let base_filename = self
                 .output_path

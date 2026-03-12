@@ -3,7 +3,7 @@ use era_common::{ArchiveConfig, ArchiveId, BlockId, EncryptedMacroBlock, Erasure
 use era_engine::{
     repair_archive, ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryOptions, RepairOptions,
 };
-use era_storage::LocalStorageBackend;
+use era_storage::{LocalStorageBackend, StorageBackend, StorageReader};
 use era_volume::{
     AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType, SuperHeader,
     VolumePool, VolumePoolConfig,
@@ -89,6 +89,55 @@ async fn test_public_finalize_persists_authoritative_checkpoint_before_catalog()
     assert!(
         footer.last_checkpoint_offset() < footer.catalog_offset(),
         "durable checkpoint must be committed before catalog"
+    );
+}
+
+#[tokio::test]
+async fn test_public_checkpoint_commit_persists_footer_before_finalize() {
+    let temp = TempDir::new().unwrap();
+    let archive = temp.path().join("checkpoint_before_finalize.era");
+
+    let mut writer = ArchiveWriter::builder(&archive)
+        .password("checkpoint-public")
+        .enable_checkpoint(true)
+        .enable_erasure(false)
+        .build()
+        .await
+        .unwrap();
+
+    writer
+        .add_bytes("payload.txt", b"checkpoint-live")
+        .await
+        .unwrap();
+
+    let raw_reader = LocalStorageBackend::new(temp.path())
+        .open_read(Path::new("checkpoint_before_finalize.era"))
+        .await
+        .unwrap();
+    let backup_footer = raw_reader
+        .read_at(era_volume::HEADER_SIZE as u64, era_volume::FOOTER_SIZE)
+        .await
+        .unwrap();
+    assert!(
+        era_volume::Footer::from_bytes(&backup_footer).is_err(),
+        "before finalize, reserved footer gap should not already contain a committed checkpoint"
+    );
+
+    writer.finalize().await.unwrap();
+
+    let raw_reader = LocalStorageBackend::new(temp.path())
+        .open_read(Path::new("checkpoint_before_finalize.era"))
+        .await
+        .unwrap();
+    let backup_footer = raw_reader
+        .read_at(era_volume::HEADER_SIZE as u64, era_volume::FOOTER_SIZE)
+        .await
+        .unwrap();
+    let footer = era_volume::Footer::from_bytes(&backup_footer).unwrap();
+
+    assert!(
+        footer.last_checkpoint_offset() > 0,
+        "checkpoint commit must persist a recoverable footer into the reserved gap"
     );
 }
 

@@ -152,6 +152,7 @@ mod medium_perf_rob {
     #[test]
     fn test_v3_rob_02_recovery_volume_has_checkpoint_returns_result() {
         let source = include_str!("../src/recovery.rs");
+        let normalized = source.split_whitespace().collect::<String>();
 
         assert!(
             source.contains("async fn volume_has_checkpoint(archive_path: &Path) -> Result<bool>"),
@@ -159,8 +160,8 @@ mod medium_perf_rob {
         );
         assert!(
             source.contains("volume_has_checkpoint(archive_path).await?")
-                && source.contains(
-                    "archive_path.exists() && volume_has_checkpoint(archive_path).await?"
+                && normalized.contains(
+                    "tokio::fs::try_exists(archive_path).await?&&volume_has_checkpoint(archive_path).await?"
                 ),
             "all recovery callers must propagate volume_has_checkpoint errors"
         );
@@ -262,6 +263,39 @@ mod low_severity {
             source.contains("tokio::fs::try_exists(&full_path).await.unwrap_or(false)")
                 && source.contains("tokio::fs::try_exists(&output_path).await.unwrap_or(false)"),
             "reader must use async try_exists for full_path and output_path"
+        );
+    }
+
+    #[test]
+    fn test_v3_perf_03_writer_uses_async_path_exists() {
+        let source = include_str!("../src/writer.rs");
+
+        let count = source
+            .matches("tokio::fs::try_exists(&self.output_path).await?")
+            .count();
+        assert!(
+            count >= 2,
+            "writer must use async tokio::fs::try_exists for preexisting and append checks"
+        );
+        assert!(
+            !source.contains("self.output_path.exists()"),
+            "writer must not use blocking Path::exists() in async build flow"
+        );
+    }
+
+    #[test]
+    fn test_v3_perf_04_recovery_uses_async_path_exists() {
+        let source = include_str!("../src/recovery.rs");
+
+        let count = source.matches("tokio::fs::try_exists(").count();
+        assert!(
+            count >= 3,
+            "recovery must use async try_exists for analyze/new/truncate checks"
+        );
+        assert!(
+            !source.contains("archive_path.exists()")
+                && !source.contains("self.archive_path.exists()"),
+            "recovery must not use blocking Path::exists() in async functions"
         );
     }
 

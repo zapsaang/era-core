@@ -274,10 +274,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Commit a checkpoint by updating the footer atomically
     ///
-    /// max_size is required for proper backup header/footer layout
+    /// Fixed-size volumes update both footer locations. Growable volumes persist
+    /// checkpoint state via the reserved backup footer gap until finalization writes
+    /// the terminal primary footer.
     ///
     /// # Errors
-    /// Returns `InvalidConfig` if `max_size` has not been set on this writer.
     /// Returns `InvalidConfig` if the checkpoint offset exceeds the current write position.
     /// Returns `CorruptedFooter` if the footer cannot be serialized.
     /// Returns I/O errors from padding, syncing, or writing footers to the backend.
@@ -301,56 +302,59 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// If cancelled between footer writes and `sync()`: footers buffered but not persistent —
     /// old footer still valid on disk, new footer lost.
     pub async fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
-        let max_size = self.max_size.ok_or_else(|| {
-            era_common::EraError::InvalidConfig("max_size required for volumes".into())
-        })?;
-
-        // Fixed Size Mode: Update footer at fixed location
-
-        // 1. Ensure padding (leave space for backup header + footer at end)
-        let pad_target = max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED);
-        self.pad_to_size(pad_target).await?;
-
-        // 2. CRITICAL: Sync padding data to disk BEFORE updating footer
-        //    Uses fdatasync for efficiency (metadata sync not required here)
-        //    This prevents "garbage tail" on power loss - the padding zeros
-        //    must be physically on disk before we update the footer pointer.
-        self.writer.sync_data().await?;
-
-        // 3. Update state
         self.set_last_checkpoint(checkpoint_offset)?;
 
-        // 4. Calculate backup header offset (where backup header will be written on finalize)
-        let backup_header_offset = pad_target;
+        if let Some(max_size) = self.max_size {
+            let pad_target = max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED);
+            self.pad_to_size(pad_target).await?;
+            self.writer.sync_data().await?;
 
-        // 5. Construct footer with backup_header_offset
-        let footer = crate::Footer::with_catalog(
-            self.position,
-            self.block_count,
-            self.sequence,
-            self.last_catalog_offset,
-            self.last_catalog_size,
-            self.last_catalog_block_id,
-            self.last_checkpoint_offset,
-            self.last_checkpoint_block_id,
-            self.last_index_offset,
-            self.last_index_size,
-            self.last_index_block_id,
-            backup_header_offset,
-        );
+            let backup_header_offset = pad_target;
+            let footer = crate::Footer::with_catalog(
+                self.position,
+                self.block_count,
+                self.sequence,
+                self.last_catalog_offset,
+                self.last_catalog_size,
+                self.last_catalog_block_id,
+                self.last_checkpoint_offset,
+                self.last_checkpoint_block_id,
+                self.last_index_offset,
+                self.last_index_size,
+                self.last_index_block_id,
+                backup_header_offset,
+            );
 
-        let footer_bytes = footer.to_bytes()?;
+            let footer_bytes = footer.to_bytes()?;
+            let footer_offset = backup_header_offset + HEADER_SIZE as u64;
+            self.writer.write_at(footer_offset, &footer_bytes).await?;
+            self.writer
+                .write_at(HEADER_SIZE as u64, &footer_bytes)
+                .await?;
+        } else {
+            self.writer.sync_data().await?;
 
-        // 6. Write primary footer at end (after backup header position)
-        let footer_offset = backup_header_offset + HEADER_SIZE as u64;
-        self.writer.write_at(footer_offset, &footer_bytes).await?;
+            let footer = crate::Footer::with_catalog(
+                self.position,
+                self.block_count,
+                self.sequence,
+                self.last_catalog_offset,
+                self.last_catalog_size,
+                self.last_catalog_block_id,
+                self.last_checkpoint_offset,
+                self.last_checkpoint_block_id,
+                self.last_index_offset,
+                self.last_index_size,
+                self.last_index_block_id,
+                0,
+            );
 
-        // 7. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
-        self.writer
-            .write_at(HEADER_SIZE as u64, &footer_bytes)
-            .await?;
+            let footer_bytes = footer.to_bytes()?;
+            self.writer
+                .write_at(HEADER_SIZE as u64, &footer_bytes)
+                .await?;
+        }
 
-        // 8. Final sync to ensure footer is persisted
         self.writer.sync().await?;
 
         debug_assert!(

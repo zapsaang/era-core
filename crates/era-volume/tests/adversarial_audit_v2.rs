@@ -9,7 +9,7 @@
 
 use bytes::Bytes;
 use era_common::{ArchiveConfig, ArchiveId, BlockId, BlockType, EncryptedMacroBlock};
-use era_storage::LocalStorageBackend;
+use era_storage::{LocalStorageBackend, StorageBackend, StorageReader};
 use era_volume::{
     AccessPolicy, EncryptedVolumeKey, Footer, KeyWrapAlgorithm, RecipientSlot, RecipientType,
     SuperHeader, VolumeReader, VolumeWriter, FOOTER_SIZE,
@@ -109,9 +109,9 @@ fn test_footer_future_version_rejected() {
     );
 }
 
-/// FINDING-VOL-5: commit_checkpoint without set_max_size must return Err, not panic.
+/// FINDING-VOL-5: commit_checkpoint without fixed-size padding must not panic.
 #[tokio::test]
-async fn test_commit_checkpoint_without_max_size_returns_error() {
+async fn test_commit_checkpoint_without_max_size_persists_backup_footer() {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
 
@@ -126,12 +126,16 @@ async fn test_commit_checkpoint_without_max_size_returns_error() {
         .await
         .unwrap();
 
-    // commit_checkpoint without set_max_size should return Err, not panic
-    let result = writer.commit_checkpoint(0).await;
-    assert!(
-        result.is_err(),
-        "commit_checkpoint without max_size must return Err, not panic"
-    );
+    writer.commit_checkpoint(0).await.unwrap();
+
+    let raw_reader = backend.open_read(Path::new("test.era")).await.unwrap();
+    let backup_footer = raw_reader
+        .read_at(era_volume::HEADER_SIZE as u64, era_volume::FOOTER_SIZE)
+        .await
+        .unwrap();
+    let footer = era_volume::Footer::from_bytes(&backup_footer).unwrap();
+
+    assert_eq!(footer.last_checkpoint_offset(), 0);
 
     // Cleanup: finalize without max_size (append mode)
     writer.finalize().await.unwrap();

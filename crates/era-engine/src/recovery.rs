@@ -177,7 +177,7 @@ impl RecoveryManager {
     /// instead of looking for sidecar files. Populates `bytes_written` from
     /// the footer's `data_end_offset` when a checkpoint exists.
     pub async fn analyze(archive_path: &Path) -> Result<RecoveryStatus> {
-        let archive_exists = archive_path.exists();
+        let archive_exists = tokio::fs::try_exists(archive_path).await?;
 
         // V2.2: Check volume footer for checkpoint, not sidecar files
         let checkpoint_exists = if archive_exists {
@@ -245,15 +245,16 @@ impl RecoveryManager {
     ///
     /// **V2.2 Change:** Now checks volume footer instead of sidecar files.
     pub async fn new(archive_path: &Path) -> Result<Self> {
-        let checkpoint_manager =
-            if archive_path.exists() && volume_has_checkpoint(archive_path).await? {
-                // Note: In V2.2, the actual checkpoint data is in the volume
-                // CheckpointManager is kept for API compatibility but doesn't
-                // manage sidecar files anymore
-                Some(CheckpointManager::new(archive_path))
-            } else {
-                None
-            };
+        let checkpoint_manager = if tokio::fs::try_exists(archive_path).await?
+            && volume_has_checkpoint(archive_path).await?
+        {
+            // Note: In V2.2, the actual checkpoint data is in the volume
+            // CheckpointManager is kept for API compatibility but doesn't
+            // manage sidecar files anymore
+            Some(CheckpointManager::new(archive_path))
+        } else {
+            None
+        };
 
         Ok(Self {
             archive_path: archive_path.to_path_buf(),
@@ -349,7 +350,7 @@ impl RecoveryManager {
         &self,
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<u64> {
-        if !self.archive_path.exists() {
+        if !tokio::fs::try_exists(&self.archive_path).await? {
             return Err(EraError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Archive not found: {:?}", self.archive_path),
@@ -504,7 +505,7 @@ impl std::fmt::Debug for RecoverableWriter {
 }
 
 impl RecoverableWriter {
-    /// Create a new recoverable writer
+    /// Create a recoverable writer for in-memory checkpoint tracking only.
     pub async fn new(archive_path: &Path, options: RecoveryOptions) -> Result<Self> {
         // Handle Abort strategy - return error if checkpoint exists
         if options.strategy == RecoveryStrategy::Abort
@@ -532,25 +533,12 @@ impl RecoverableWriter {
                 CheckpointManager::new(archive_path)
             }
             RecoveryStrategy::Resume => {
-                // Use existing checkpoint or error if none exists
-                let manager = CheckpointManager::load_or_create(archive_path)?;
-                if manager.checkpoint().completed_files.is_empty()
-                    && manager.checkpoint().written_chunks.is_empty()
-                {
-                    // No prior checkpoint data — Resume was requested but nothing to resume from
-                    return Err(EraError::CheckpointError(
-                        "Resume requested but no prior checkpoint exists. \
-                         Use StartFresh to begin a new archive."
-                            .into(),
-                    ));
-                } else {
-                    info!(
-                        "Resuming from checkpoint: {} files completed, {} chunks written",
-                        manager.checkpoint().completed_files.len(),
-                        manager.checkpoint().written_chunks.len()
-                    );
-                }
-                manager
+                return Err(EraError::CheckpointError(
+                    "RecoverableWriter does not support durable resume. \
+                     Use ArchiveWriterBuilder with recovery_options(RecoveryOptions::resume()) \
+                     to load an in-volume checkpoint."
+                        .into(),
+                ));
             }
             RecoveryStrategy::Abort => {
                 return Err(EraError::CheckpointError(
@@ -729,6 +717,27 @@ mod tests {
         assert!(
             matches!(err, era_common::EraError::CheckpointError(_)),
             "Expected CheckpointError, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recoverable_writer_resume_is_explicitly_unsupported() {
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join("test.era");
+
+        let err = RecoverableWriter::new(&archive_path, RecoveryOptions::resume())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, era_common::EraError::CheckpointError(_)),
+            "Expected CheckpointError, got: {err:?}"
+        );
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not support durable resume") && msg.contains("ArchiveWriterBuilder"),
+            "resume error should direct callers to the supported durable path, got: {msg}"
         );
     }
 
