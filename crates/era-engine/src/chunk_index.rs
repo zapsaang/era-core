@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use era_common::{BlockId, BlockLocation, ChunkHash, Result as EraResult};
 use era_index::{IndexBuilder, IndexEntry};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 /// Maximum number of entries allowed in `MemoryChunkIndex` to prevent unbounded memory growth.
 const MAX_MEMORY_INDEX_ENTRIES: usize = 1_000_000;
@@ -58,6 +58,7 @@ pub(crate) trait ChunkIndex: Send + Sync {
 #[allow(dead_code)]
 pub(crate) struct MemoryChunkIndex {
     map: RwLock<HashMap<ChunkHash, BlockLocation>>,
+    max_entries: usize,
 }
 
 impl MemoryChunkIndex {
@@ -66,6 +67,7 @@ impl MemoryChunkIndex {
     pub fn new() -> Self {
         Self {
             map: RwLock::new(HashMap::new()),
+            max_entries: MAX_MEMORY_INDEX_ENTRIES,
         }
     }
 
@@ -81,10 +83,10 @@ impl MemoryChunkIndex {
     /// ```
     #[allow(dead_code)]
     pub fn with_capacity(max_entries: usize) -> Self {
+        let capped = max_entries.min(MAX_MEMORY_INDEX_ENTRIES);
         Self {
-            map: RwLock::new(HashMap::with_capacity(
-                max_entries.min(MAX_MEMORY_INDEX_ENTRIES),
-            )),
+            map: RwLock::new(HashMap::with_capacity(capped)),
+            max_entries: capped,
         }
     }
 }
@@ -100,10 +102,10 @@ impl ChunkIndex for MemoryChunkIndex {
 
     fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
         let mut map = self.map.write();
-        if map.len() >= MAX_MEMORY_INDEX_ENTRIES {
+        if !map.contains_key(&hash) && map.len() >= self.max_entries {
             return Err(era_common::EraError::IntegrityError(format!(
                 "MemoryChunkIndex capacity exceeded: max {} entries",
-                MAX_MEMORY_INDEX_ENTRIES
+                self.max_entries
             )));
         }
         map.insert(hash, location);
@@ -143,16 +145,25 @@ impl ChunkIndex for MemoryChunkIndex {
 /// finalized into typed index blocks written to the volume.
 pub(crate) struct RedbChunkIndex {
     /// IndexBuilder accumulates entries for volume-embedded finalization.
-    builder: Mutex<Option<IndexBuilder>>,
+    builder_state: Mutex<BuilderState>,
+    builder_cv: Condvar,
     /// Fast point-lookup map for dedup during the write session.
     lookup: RwLock<HashMap<ChunkHash, BlockLocation>>,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum BuilderState {
+    Ready(IndexBuilder),
+    Busy,
+    Taken,
 }
 
 impl RedbChunkIndex {
     /// Create a new Redb-backed chunk index.
     pub fn new() -> EraResult<Self> {
         Ok(Self {
-            builder: Mutex::new(Some(IndexBuilder::new_default()?)),
+            builder_state: Mutex::new(BuilderState::Ready(IndexBuilder::new_default()?)),
+            builder_cv: Condvar::new(),
             lookup: RwLock::new(HashMap::new()),
         })
     }
@@ -161,7 +172,20 @@ impl RedbChunkIndex {
     ///
     /// Returns `None` if the builder was already taken.
     pub fn take_builder(&self) -> Option<IndexBuilder> {
-        self.builder.lock().take()
+        let mut state = self.builder_state.lock();
+        loop {
+            match std::mem::replace(&mut *state, BuilderState::Taken) {
+                BuilderState::Ready(builder) => return Some(builder),
+                BuilderState::Busy => {
+                    *state = BuilderState::Busy;
+                    self.builder_cv.wait(&mut state);
+                }
+                BuilderState::Taken => {
+                    *state = BuilderState::Taken;
+                    return None;
+                }
+            }
+        }
     }
 }
 
@@ -195,32 +219,47 @@ impl ChunkIndex for RedbChunkIndex {
 
     fn put(&self, hash: ChunkHash, location: BlockLocation) -> EraResult<()> {
         // Insert into IndexBuilder for volume finalization FIRST.
-        // The builder.insert() call triggers Redb write transactions (disk I/O),
-        // so we use run_blocking_io (which calls block_in_place on multi-threaded
-        // runtimes) to avoid blocking the Tokio async runtime.
-        // If builder has been taken (finalization started), reject the insert
-        // to prevent silent data loss in the volume index.
-        // Only if this succeeds do we update the in-memory index.
-        run_blocking_io(|| {
-            match *self.builder.lock() {
-                Some(ref mut builder) => {
-                    let entry = IndexEntry::new(
-                        hash,
-                        location.volume_id,
-                        BlockId::new(location.slot_index as u64),
-                        0, // offset within block (not tracked at this level)
-                        location.encrypted_size,
-                    );
-                    builder.insert(entry?)?;
-                }
-                None => {
-                    return Err(era_common::EraError::InvalidConfig(
-                        "Cannot insert after builder taken — finalization already started".into(),
-                    ));
+        let mut builder = {
+            let mut state = self.builder_state.lock();
+            loop {
+                match std::mem::replace(&mut *state, BuilderState::Taken) {
+                    BuilderState::Ready(builder) => {
+                        *state = BuilderState::Busy;
+                        break builder;
+                    }
+                    BuilderState::Busy => {
+                        *state = BuilderState::Busy;
+                        self.builder_cv.wait(&mut state);
+                    }
+                    BuilderState::Taken => {
+                        *state = BuilderState::Taken;
+                        return Err(era_common::EraError::InvalidConfig(
+                            "Cannot insert after builder taken — finalization already started"
+                                .into(),
+                        ));
+                    }
                 }
             }
-            Ok(())
-        })?;
+        };
+
+        let insert_result = run_blocking_io(|| {
+            let entry = IndexEntry::new(
+                hash,
+                location.volume_id,
+                BlockId::new(location.slot_index as u64),
+                0, // offset within block (not tracked at this level)
+                location.encrypted_size,
+            );
+            builder.insert(entry?)
+        });
+
+        {
+            let mut state = self.builder_state.lock();
+            *state = BuilderState::Ready(builder);
+            self.builder_cv.notify_all();
+        }
+
+        insert_result?;
 
         // Insert into lookup map for point queries (in-memory, non-blocking)
         // Only execute this if the persistent write succeeded (after the ? above)
@@ -255,6 +294,7 @@ impl ChunkIndex for RedbChunkIndex {
 }
 
 /// Create a chunk index backed by Redb (default for production).
+#[allow(dead_code)]
 pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
     Ok(Arc::new(RedbChunkIndex::new()?))
 }
@@ -306,5 +346,20 @@ mod tests {
         assert!(index.take_builder().is_some());
         // Second take returns None
         assert!(index.take_builder().is_none());
+    }
+
+    #[test]
+    fn test_lsm_put_fails_after_take_builder() {
+        let index = RedbChunkIndex::new().unwrap();
+        assert!(index.take_builder().is_some());
+
+        let hash = ChunkHash::from_bytes([3u8; 32]);
+        let location = create_test_location(2);
+        let err = index.put(hash, location).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot insert after builder taken"),
+            "unexpected error: {err}"
+        );
     }
 }

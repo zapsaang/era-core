@@ -13,8 +13,10 @@ use crate::block_iter::{
     BlockIterator, SessionBlockIterator, SessionErasureBlockIterator,
     SessionErasureBlockIteratorArgs,
 };
+use crate::chunk_processor::{
+    enforce_output_containment, ExtractionContext, MultiChunkState, VerificationContext,
+};
 pub use crate::chunk_processor::{ExtractStats, VerifyStats};
-use crate::chunk_processor::{ExtractionContext, MultiChunkState, VerificationContext};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result, ShardLayout};
@@ -852,6 +854,7 @@ impl ArchiveReader {
 
         // Build maps for extraction
         let mut context = ExtractionContext::new();
+        context.set_canonical_output_dir(canonical_output_dir.clone());
 
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
             if is_internal_entry(entry) {
@@ -909,54 +912,6 @@ impl ArchiveReader {
                 .await;
             }
 
-            if let Some(parent) = output_path.parent() {
-                let parent = parent.to_path_buf();
-                if let Err(err) = tokio::task::spawn_blocking(move || fs::create_dir_all(parent))
-                    .await
-                    .map_err(|e| {
-                        EraError::Other(format!("Failed to join parent dir creation task: {}", e))
-                    })
-                    .and_then(|res| res.map_err(EraError::Io))
-                {
-                    return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await;
-                }
-            }
-            let output_path_for_canonical = output_path.clone();
-            let canonical_path = match tokio::task::spawn_blocking(move || {
-                std::fs::canonicalize(&output_path_for_canonical).or_else(|_| {
-                    let parent = output_path_for_canonical.parent().unwrap_or(Path::new("."));
-                    let canonical_parent = std::fs::canonicalize(parent)?;
-                    let file_name = output_path_for_canonical.file_name().ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "Output path has no file name",
-                        )
-                    })?;
-                    Ok::<PathBuf, std::io::Error>(canonical_parent.join(file_name))
-                })
-            })
-            .await
-            .map_err(|e| {
-                EraError::Other(format!("Failed to join path canonicalization task: {}", e))
-            })
-            .and_then(|res| res.map_err(EraError::Io))
-            {
-                Ok(path) => path,
-                Err(err) => {
-                    return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await
-                }
-            };
-            if !canonical_path.starts_with(&canonical_output_dir) {
-                return Self::fail_extraction_with_cleanup(
-                    EraError::Security(format!(
-                        "Symlink escape detected: {} resolves outside output directory",
-                        output_path.display()
-                    )),
-                    &tracked_output_files,
-                )
-                .await;
-            }
-
             if entry.is_chunked() {
                 let chunk_count = entry.chunks.len();
 
@@ -988,8 +943,14 @@ impl ArchiveReader {
                     // Normal multi-chunk file: pre-create file
                     let output_path_for_create = output_path.clone();
                     let expected_size = entry.size;
+                    let canonical_output_dir_for_create = canonical_output_dir.clone();
                     let file =
                         match tokio::task::spawn_blocking(move || -> std::io::Result<File> {
+                            enforce_output_containment(
+                                &output_path_for_create,
+                                &canonical_output_dir_for_create,
+                            )
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
                             let file = File::create(&output_path_for_create)?;
                             file.set_len(expected_size)?;
                             Ok(file)

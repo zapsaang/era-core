@@ -125,6 +125,11 @@ impl<B: StorageBackend> VolumeStage<B> {
         backup_block: Option<&EncryptedMacroBlock>,
     ) -> Result<Vec<(u64, u32, u32)>> {
         let volume_count = self.pool.volume_count();
+        if volume_count == 0 {
+            return Err(EraError::Other(
+                "No writable volumes available for catalog fanout".into(),
+            ));
+        }
         let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
         let block_id = u32::try_from(block.block_id.sequence())
             .map_err(|_| EraError::Other("Block sequence ID exceeds u32::MAX".into()))?;
@@ -164,6 +169,10 @@ impl<B: StorageBackend> VolumeStage<B> {
                     location.encrypted_size,
                     block_id,
                 ));
+            } else {
+                return Err(EraError::Other(format!(
+                    "Missing catalog writer slot {slot} while writing catalog fanout"
+                )));
             }
         }
 

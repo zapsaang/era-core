@@ -4,7 +4,10 @@
 //! to Argon2 password-based key derivation.
 
 use era_common::ArchiveConfig;
+use era_common::EraError;
+use era_engine::auth::{AuthProvider, CertificateProvider};
 use era_engine::{ArchiveReader, ArchiveWriterBuilder, EraKeyPair};
+use era_volume::{RecipientSlot, RecipientType};
 use std::fs;
 use tempfile::TempDir;
 
@@ -215,6 +218,55 @@ async fn test_wrong_keypair_rejected() {
         "Error should indicate keypair mismatch or no creds: {}",
         err_msg
     );
+}
+
+#[test]
+fn test_certificate_provider_wrong_key_decapsulation_returns_none() {
+    let correct_keypair = EraKeyPair::generate().unwrap();
+    let wrong_keypair = EraKeyPair::generate().unwrap();
+    let provider = CertificateProvider::new(wrong_keypair);
+
+    let encapsulation =
+        EraKeyPair::encapsulate_for(&correct_keypair.certificate(), &[0x55; 32]).unwrap();
+    let slot = RecipientSlot::new(
+        RecipientType::X25519PubKey,
+        None,
+        encapsulation.ephemeral_public.to_vec(),
+        encapsulation.encrypted_master_key,
+    );
+
+    let unlocked = provider.try_unlock(&slot).unwrap();
+    assert!(
+        unlocked.is_none(),
+        "wrong-key decapsulation should short-circuit to Ok(None)"
+    );
+}
+
+#[test]
+fn test_certificate_provider_malformed_params_error_is_not_swallowed() {
+    let keypair = EraKeyPair::generate().unwrap();
+    let provider = CertificateProvider::new(keypair.clone());
+
+    let mut slot_kid = [0u8; 8];
+    slot_kid.copy_from_slice(&keypair.key_id()[..8]);
+
+    let slot = RecipientSlot::new(
+        RecipientType::X25519PubKey,
+        Some(slot_kid),
+        vec![0xAA; 31],
+        vec![0xBB; 48],
+    );
+
+    let result = provider.try_unlock(&slot);
+    match result {
+        Err(EraError::InvalidKey(msg)) => {
+            assert!(msg.contains("Invalid ephemeral public"));
+        }
+        other => panic!(
+            "expected InvalidKey for malformed slot params, got: {:?}",
+            other
+        ),
+    }
 }
 
 /// Test that certificate mode is significantly faster than password mode.

@@ -65,6 +65,7 @@ pub trait BlockIterator {
 
 /// Maximum allowed block size (64 MB) — read-path sanity check (~16x typical block sizes)
 const MAX_BLOCK_SIZE: u32 = 64 * 1024 * 1024;
+const MAX_SHARD_SIZE: u32 = 256 * 1024 * 1024;
 const MAX_PROBE_ATTEMPTS: usize = 256;
 
 /// Iterator for standard (non-erasure) blocks
@@ -438,6 +439,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             self.current_offsets[reader_idx] += ShardHeader::SIZE as u64;
 
             let shard_len = shard_header.length as usize;
+            if shard_header.length > MAX_SHARD_SIZE {
+                self.stats.blocks_failed += 1;
+                return Some(Err(EraError::InvalidFormat(
+                    "Shard size exceeds maximum".into(),
+                )));
+            }
 
             if first_shard_size == 0 {
                 first_shard_size = shard_header.length;
@@ -1029,6 +1036,11 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 };
 
                 let shard_len = shard_header.length as usize;
+                if shard_header.length > MAX_SHARD_SIZE {
+                    return Some(Err(EraError::InvalidFormat(
+                        "Shard size exceeds maximum".into(),
+                    )));
+                }
                 if let Some(slot) = data_lengths.get_mut(shard_idx) {
                     *slot = Some(shard_header.length);
                 }

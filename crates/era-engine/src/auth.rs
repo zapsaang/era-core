@@ -4,6 +4,7 @@ use era_crypto::{AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_crypto::{KdfParams, Salt};
 use era_volume::{RecipientSlot, RecipientType};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 /// AAD domain separator for password-based Master Key encryption.
@@ -108,7 +109,7 @@ impl AuthProvider for CertificateProvider {
         // Optional optimization: Check key_id
         if let Some(slot_kid) = slot.key_id() {
             let my_kid = self.keypair.key_id();
-            if my_kid.len() >= 8 && *slot_kid != my_kid[..8] {
+            if my_kid.len() >= 8 && !bool::from(slot_kid.as_ref().ct_eq(&my_kid[..8])) {
                 return Ok(None);
             }
         }
@@ -128,7 +129,8 @@ impl AuthProvider for CertificateProvider {
 
         match self.keypair.decapsulate(&encapsulation) {
             Ok(dk) => Ok(Some(dk.as_bytes().to_vec())),
-            Err(_) => Ok(None),
+            Err(EraError::Decryption(_)) => Ok(None),
+            Err(other) => Err(other),
         }
     }
 }

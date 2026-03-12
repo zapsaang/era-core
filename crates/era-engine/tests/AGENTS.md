@@ -1,17 +1,19 @@
 # Engine Integration Tests
 
-39 test files, ~833 tests total. Includes 219 adversarial security audit tests across 6 suites.
+39 test files in the era-engine integration/audit surface. This crate includes 279+ adversarial security audit tests across historical and V5 suites. Workspace-wide March 2026 verification recorded 2049 passed, 0 failed, 18 ignored.
 
 ## Audit Suites
 
 | File | Tests | Focus |
 |------|-------|-------|
 | `competitor_audit.rs` | 44 | Core crypto, nonce safety, AEAD correctness |
-| `ruthless_audit_tests.rs` | 14 | Edge cases, adversarial inputs (mostly ignored) |
 | `second_audit.rs` | 42 | Key wrapping, Shamir secret sharing, multi-party access |
 | `third_audit.rs` | 43 | Memory zeroization (M1-M3), TryFrom bounds, source patterns |
 | `fourth_audit.rs` | 46 | Context-bound AAD, path traversal, allocation limits, VK resilience |
-| `adversarial_audit_v9.rs` | — | E2E adversarial: splicing, corruption, policy downgrade |
+| `adversarial_audit_v5.rs` | 22 | State machine integrity, resume provenance, path containment checks |
+| `adversarial_audit_v3.rs` | 20 | V3 specific adversarial coverage (all fixed) |
+| `adversarial_audit_v9.rs` | 9 | End-to-end adversarial scenarios: splicing, corruption |
+| `adversarial_audit_v2.rs` | 53 | Skeptical baseline verification (all fixed) |
 
 ## Resilience Tests
 
@@ -35,7 +37,7 @@
 ```bash
 cargo test -p era-engine                                    # all engine tests
 cargo test -p era-engine --test fourth_audit                 # specific audit
-cargo test -p era-engine --test adversarial_audit_v9 v9_e1a  # specific test case
+cargo test -p era-engine --test adversarial_audit_v5         # V5 audit suite
 ```
 
 ## Test Pattern

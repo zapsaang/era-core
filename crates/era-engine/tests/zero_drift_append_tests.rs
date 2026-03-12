@@ -19,7 +19,7 @@ fn write_repeating_file(path: &std::path::Path, total_size: u64) {
 }
 
 #[tokio::test]
-#[ignore = "Depends on Index Persistence (WIP). See CLAUDE.md phase 2."]
+#[ignore = "Blocked on append-mode index persistence integration behavior (see era-index index_persistence_audit integration gap notes)."]
 async fn test_zero_drift_append_dedup() {
     let temp_dir = TempDir::new().unwrap();
     let data_path = temp_dir.path().join("data.bin");

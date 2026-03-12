@@ -40,7 +40,6 @@ use tracing::{debug, info, warn};
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-const INTERNAL_CHECKPOINT_NAME: &str = ".era/meta/checkpoint.bin";
 const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
 use crate::checkpoint::CheckpointManager;
@@ -834,7 +833,7 @@ impl ArchiveWriterBuilder {
         let checkpoint_manager = if self.enable_checkpoint {
             let manager = match self.recovery_options.strategy {
                 RecoveryStrategy::StartFresh => {
-                    if CheckpointManager::exists(&self.output_path).await {
+                    if CheckpointManager::exists(&self.output_path).await? {
                         warn!("Starting fresh, deleting existing checkpoint");
                         let old = CheckpointManager::load_or_create(&self.output_path)?;
                         old.delete()?;
@@ -843,11 +842,11 @@ impl ArchiveWriterBuilder {
                 }
                 RecoveryStrategy::Resume => CheckpointManager::load_or_create(&self.output_path)?,
                 RecoveryStrategy::Abort => {
-                    if CheckpointManager::exists(&self.output_path).await {
+                    if CheckpointManager::exists(&self.output_path).await? {
                         return Err(era_common::EraError::CheckpointError(
-                            "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
-                                .into(),
-                        ));
+                             "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
+                                 .into(),
+                         ));
                     }
                     CheckpointManager::new(&self.output_path)
                 }
@@ -915,7 +914,7 @@ impl ArchiveWriterBuilder {
 
         // Create erasure stage (enabled or disabled based on config)
         let erasure = if enable_erasure {
-            ErasureStage::new(Some(erasure_config))
+            ErasureStage::new(Some(erasure_config))?
         } else {
             ErasureStage::disabled()
         };
@@ -1219,18 +1218,13 @@ impl ArchiveWriter {
         // Pre-allocate catalog entries
         self.catalog.reserve(paths.len());
 
-        // Process each file
         for path in paths {
             let relative_path = path
                 .file_name()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| path.to_path_buf());
 
-            if self.enable_cdc {
-                self.add_file_chunked(path, relative_path).await?;
-            } else {
-                self.add_file_single(path, relative_path).await?;
-            }
+            self.add_file_with_path(path, &relative_path).await?;
         }
 
         debug!("Batch of {} files processed", paths.len());
@@ -1508,7 +1502,7 @@ impl ArchiveWriter {
 
     /// Add a file from memory
     pub async fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        info!("Adding in-memory file: {} ({} bytes)", name, data.len());
+        debug!("Adding in-memory file: {} ({} bytes)", name, data.len());
 
         let target_block_size = self.packing.target_block_size();
 
@@ -1576,9 +1570,8 @@ impl ArchiveWriter {
         self.flush_pending().await?;
         self.pipeline.flush_stripe().await?;
 
-        // Sync checkpoint before writing catalog (atomic point)
-        self.pipeline.sync_checkpoint()?;
-        debug!("Checkpoint synced before catalog write");
+        self.pipeline.commit_durable_checkpoint().await?;
+        debug!("Durable checkpoint committed before catalog write");
 
         // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
@@ -1746,9 +1739,10 @@ impl ArchiveWriter {
     }
 
     async fn write_internal_metadata(&mut self) -> Result<()> {
-        if let Some(mgr) = self.pipeline.index().checkpoint_manager() {
-            let data = mgr.snapshot_bytes()?;
-            self.add_bytes(INTERNAL_CHECKPOINT_NAME, &data).await?;
+        if self.pipeline.index().checkpoint_manager().is_some() {
+            debug!(
+                "Skipping legacy internal checkpoint metadata file; durable checkpoint typed block is authoritative"
+            );
         }
 
         Ok(())
@@ -2241,7 +2235,7 @@ pub mod generic {
 
         /// Add a file from memory
         pub async fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
-            info!("Adding in-memory file: {} ({} bytes)", name, data.len());
+            debug!("Adding in-memory file: {} ({} bytes)", name, data.len());
 
             let hash = era_crypto::hash(data);
 

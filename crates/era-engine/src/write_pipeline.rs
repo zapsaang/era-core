@@ -9,7 +9,7 @@
 use era_codec::{Compressor, ErasureCoder, ErasureConfig, NoCompressor, ZstdCompressor};
 use era_common::{
     BlockLocation, BlockType, ChunkHash, CompressionAlgorithm, CompressionConfig,
-    EncryptedMacroBlock, ErasureBlockInfo, Result, UniqueChunk,
+    EncryptedMacroBlock, EraError, ErasureBlockInfo, Result, UniqueChunk,
 };
 use era_packing::{BlockMeta, Stripe};
 use era_storage::StorageBackend;
@@ -358,8 +358,39 @@ impl<B: StorageBackend> WritePipeline<B> {
     /// For async-first checkpoint persistence with atomic volume writes, use
     /// `commit_to_volume()` instead. Both methods are valid depending on the
     /// orchestration context and whether synchronous or asynchronous flushing is needed.
+    #[allow(dead_code)]
     pub fn sync_checkpoint(&mut self) -> Result<()> {
         self.index.sync_checkpoint()
+    }
+
+    pub async fn commit_durable_checkpoint(&mut self) -> Result<()> {
+        let Some(mgr) = self.index.checkpoint_manager_mut() else {
+            return Ok(());
+        };
+
+        let Some(writer) = self.volume.get_writer_mut(0) else {
+            return Err(EraError::InvalidConfig(
+                "No primary volume writer available for checkpoint commit".into(),
+            ));
+        };
+
+        let session = self.encryption.session();
+        let volume_key = self.encryption.volume_key();
+        let nonce_context = self.encryption.nonce_context();
+        let archive_id = self.encryption.archive_id();
+        let epoch_id = self.encryption.epoch_id();
+
+        mgr.commit_to_volume(
+            writer,
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// Get the number of blocks written (from encryption context).
@@ -536,7 +567,7 @@ mod tests {
         let pool = VolumePool::create(backend, config, header).await.unwrap();
 
         let encryption = create_test_encryption();
-        let erasure = ErasureStage::new(Some(erasure_config));
+        let erasure = ErasureStage::new(Some(erasure_config)).unwrap();
         let volume = VolumeStage::new(pool);
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();

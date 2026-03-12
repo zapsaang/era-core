@@ -42,11 +42,22 @@ impl PackingStage {
     /// * `k_factor` - Number of bins to maintain (higher = better packing, more memory)
     /// * `target_block_size` - Target size for each packed block
     /// * `flush_threshold_percent` - Percentage (1-100) at which to flush bins
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if flush_threshold_percent is not in range 1-100.
     pub fn new(
         k_factor: usize,
         target_block_size: usize,
         flush_threshold_percent: usize,
     ) -> era_common::Result<Self> {
+        // Local validation at engine boundary
+        if flush_threshold_percent == 0 || flush_threshold_percent > 100 {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "flush_threshold_percent must be in range 1-100, got {}",
+                flush_threshold_percent
+            )));
+        }
+
         Ok(Self {
             staging_pool: StagingPool::new(k_factor, target_block_size)?
                 .with_flush_threshold(flush_threshold_percent),
@@ -169,5 +180,36 @@ mod tests {
         // Oversized chunk should be returned immediately
         let result = stage.push(make_chunk(200));
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_invalid_config_zero_flush_threshold() {
+        let result = PackingStage::new(4, 4 * 1024 * 1024, 0);
+        assert!(result.is_err());
+        if let Err(era_common::EraError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("flush_threshold_percent"));
+        } else {
+            panic!("Expected InvalidConfig error");
+        }
+    }
+
+    #[test]
+    fn test_invalid_config_flush_threshold_exceeds_100() {
+        let result = PackingStage::new(4, 4 * 1024 * 1024, 101);
+        assert!(result.is_err());
+        if let Err(era_common::EraError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("flush_threshold_percent"));
+        } else {
+            panic!("Expected InvalidConfig error");
+        }
+    }
+
+    #[test]
+    fn test_valid_config_flush_threshold_at_boundaries() {
+        let result1 = PackingStage::new(4, 4 * 1024 * 1024, 1);
+        assert!(result1.is_ok());
+
+        let result100 = PackingStage::new(4, 4 * 1024 * 1024, 100);
+        assert!(result100.is_ok());
     }
 }

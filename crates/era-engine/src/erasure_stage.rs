@@ -38,12 +38,40 @@ impl ErasureStage {
     ///
     /// If `config` is `Some`, erasure coding is enabled and blocks will be buffered.
     /// If `config` is `None`, erasure coding is disabled and this stage is a no-op.
-    pub fn new(config: Option<ErasureCodeConfig>) -> Self {
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if config validation fails (data_shards or parity_shards is 0, or total > 255).
+    pub fn new(config: Option<ErasureCodeConfig>) -> Result<Self> {
+        if let Some(cfg) = config {
+            Self::validate_config(&cfg)?;
+        }
         let stripe_buffer = config.map(StripeBuffer::new);
-        Self {
+        Ok(Self {
             stripe_buffer,
             config,
+        })
+    }
+
+    /// Validate erasure coding configuration at the engine boundary.
+    fn validate_config(config: &ErasureCodeConfig) -> Result<()> {
+        if config.data_shards == 0 {
+            return Err(era_common::EraError::InvalidConfig(
+                "data_shards must be greater than 0".to_string(),
+            ));
         }
+        if config.parity_shards == 0 {
+            return Err(era_common::EraError::InvalidConfig(
+                "parity_shards must be greater than 0".to_string(),
+            ));
+        }
+        let total = (config.data_shards as usize) + (config.parity_shards as usize);
+        if total > 255 {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "total shards ({}) exceeds maximum (255)",
+                total
+            )));
+        }
+        Ok(())
     }
 
     /// Create a disabled erasure stage (no erasure coding).
@@ -133,7 +161,7 @@ mod tests {
             data_shards: 4,
             parity_shards: 1,
         };
-        let stage = ErasureStage::new(Some(config));
+        let stage = ErasureStage::new(Some(config)).unwrap();
         assert!(stage.is_enabled());
         assert!(stage.config().is_some());
         assert_eq!(stage.config().unwrap().data_shards, 4);
@@ -147,7 +175,7 @@ mod tests {
             data_shards: 4,
             parity_shards: 1,
         };
-        let mut stage = ErasureStage::new(Some(config));
+        let mut stage = ErasureStage::new(Some(config)).unwrap();
 
         // Flushing empty buffer should return None
         let result = stage.flush().unwrap();
@@ -172,5 +200,47 @@ mod tests {
         // Should error when erasure coding is disabled
         let result = stage.buffer_block(block, meta);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_config_zero_data_shards() {
+        let config = ErasureCodeConfig {
+            data_shards: 0,
+            parity_shards: 2,
+        };
+        let result = ErasureStage::new(Some(config));
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let e: &era_common::EraError = &e;
+            assert!(e.to_string().contains("data_shards"));
+        }
+    }
+
+    #[test]
+    fn test_invalid_config_zero_parity_shards() {
+        let config = ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 0,
+        };
+        let result = ErasureStage::new(Some(config));
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let e: &era_common::EraError = &e;
+            assert!(e.to_string().contains("parity_shards"));
+        }
+    }
+
+    #[test]
+    fn test_invalid_config_total_shards_exceed_max() {
+        let config = ErasureCodeConfig {
+            data_shards: 200,
+            parity_shards: 100,
+        };
+        let result = ErasureStage::new(Some(config));
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let e: &era_common::EraError = &e;
+            assert!(e.to_string().contains("exceeds maximum"));
+        }
     }
 }

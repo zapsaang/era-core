@@ -104,8 +104,8 @@ fn v2_sec_12_redb_put_persistent_before_memory() {
         .find("impl ChunkIndex for RedbChunkIndex")
         .expect("RedbChunkIndex impl exists");
     let area = &source[impl_start..];
-    assert!(area.contains("builder.insert(entry?)?;"));
-    assert!(area.contains("Only if this succeeds do we update the in-memory index"));
+    assert!(area.contains("builder.insert(entry?)"));
+    assert!(area.contains("insert_result?;"));
     assert!(area.contains("self.lookup.write().insert(hash, location);"));
 }
 
@@ -267,7 +267,7 @@ fn v2_rob_07_truncate_to_checkpoint_uses_spawn_blocking() {
     let fn_start = source
         .find("pub async fn truncate_to_checkpoint")
         .expect("truncate_to_checkpoint exists");
-    let area = &source[fn_start..fn_start + 1400.min(source.len() - fn_start)];
+    let area = &source[fn_start..fn_start + 2600.min(source.len() - fn_start)];
     assert!(area.contains("spawn_blocking"));
 }
 
@@ -276,7 +276,7 @@ async fn v2_rob_08_checkpoint_exists_is_async_behavior() {
     let temp_dir = TempDir::new().expect("temp dir");
     let missing = temp_dir.path().join("missing.era");
     let exists = CheckpointManager::exists(&missing).await;
-    assert!(!exists);
+    assert!(!exists.unwrap());
 }
 
 #[test]

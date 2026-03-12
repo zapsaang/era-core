@@ -386,6 +386,7 @@ impl ErasureCoder {
         }
 
         // Decode missing shards
+        // Decode missing shards
         let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(
             self.config.data_shards,
             self.config.parity_shards,

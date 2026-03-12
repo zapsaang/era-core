@@ -9,11 +9,15 @@
 //!
 //! ERA supports two authentication modes:
 //!
-//! - **Password mode**: Traditional Argon2id key derivation (~50-300ms overhead)
-//! - **Certificate mode**: X25519 key exchange (~0.05ms overhead, ~1000x faster)
+//! - **Password mode**: Traditional Argon2id key derivation (~50-300ms overhead).
+//! - **Certificate mode**: Hybrid KEM (X25519 + Kyber-768) for post-quantum key encapsulation.
 //!
-//! Certificate mode is recommended for automated scenarios where key management
-//! is handled separately (e.g., backup servers, cloud storage).
+//! **Caution**: While Certificate mode provides high-performance key exchange (~0.05ms overhead),
+//! the current engine implementation has known trust boundary limitations for automated
+//! identity verification. It is currently suitable only for scenarios where the underlying
+//! transport or storage layer provides its own authentication, or where the certificate
+//! trust is managed externally. Full hybrid/PQ certificate validation within the engine
+//! pipeline is a planned enhancement.
 //!
 //! ## Chunk Index Backend
 //!

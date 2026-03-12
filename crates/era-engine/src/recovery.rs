@@ -14,10 +14,47 @@ use era_common::{BlockLocation, ChunkHash, EraError, Result};
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::task::spawn_blocking;
 use tracing::{debug, info, warn};
 
 use crate::checkpoint::{Checkpoint, CheckpointManager, InProgressFile};
+
+#[cfg(test)]
+mod cancel_test_hook {
+    use std::sync::{mpsc, Mutex, OnceLock};
+
+    pub(super) struct Hook {
+        pub entered_tx: mpsc::Sender<()>,
+        pub proceed_rx: mpsc::Receiver<()>,
+    }
+
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+
+    pub(super) fn install(hook: Hook) {
+        let lock = HOOK.get_or_init(|| Mutex::new(None));
+        *lock.lock().expect("hook mutex poisoned") = Some(hook);
+    }
+
+    pub(super) fn clear() {
+        if let Some(lock) = HOOK.get() {
+            *lock.lock().expect("hook mutex poisoned") = None;
+        }
+    }
+
+    pub(super) fn checkpoint() {
+        if let Some(lock) = HOOK.get() {
+            let guard = lock.lock().expect("hook mutex poisoned");
+            if let Some(hook) = guard.as_ref() {
+                let _ = hook.entered_tx.send(());
+                let _ = hook.proceed_rx.recv();
+            }
+        }
+    }
+}
 
 /// Result of analyzing a potential recovery situation
 #[derive(Debug, Clone)]
@@ -304,11 +341,25 @@ impl RecoveryManager {
     ///
     /// Returns the new file size, or an error if the archive has no valid footer.
     pub async fn truncate_to_checkpoint(&self) -> Result<u64> {
+        self.truncate_to_checkpoint_with_cancel_flag(Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    async fn truncate_to_checkpoint_with_cancel_flag(
+        &self,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<u64> {
         if !self.archive_path.exists() {
             return Err(EraError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Archive not found: {:?}", self.archive_path),
             )));
+        }
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(EraError::Other(
+                "Operation cancelled during truncate_to_checkpoint".into(),
+            ));
         }
 
         let data_end = Self::read_footer_data_end(&self.archive_path).await?;
@@ -318,15 +369,14 @@ impl RecoveryManager {
             ));
         }
 
-        let archive_path = self.archive_path.clone();
-        spawn_blocking(move || {
-            let file = std::fs::File::options().write(true).open(&archive_path)?;
-            file.set_len(data_end)?;
-            file.sync_all()?;
-            Ok::<(), EraError>(())
-        })
-        .await
-        .map_err(|e| EraError::Other(format!("spawn_blocking join error: {}", e)))??;
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(EraError::Other(
+                "Operation cancelled during truncate_to_checkpoint".into(),
+            ));
+        }
+
+        self.truncate_file_with_cancel_flag(data_end, cancel_flag)
+            .await?;
 
         info!(
             "Truncated {:?} to {} bytes (data_end_offset from footer)",
@@ -334,6 +384,46 @@ impl RecoveryManager {
         );
 
         Ok(data_end)
+    }
+
+    async fn truncate_file_with_cancel_flag(
+        &self,
+        data_end: u64,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<()> {
+        let archive_path = self.archive_path.clone();
+        let cancel_flag_clone = Arc::clone(&cancel_flag);
+        spawn_blocking(move || {
+            #[cfg(test)]
+            cancel_test_hook::checkpoint();
+
+            if cancel_flag_clone.load(Ordering::Relaxed) {
+                return Err(EraError::Other(
+                    "Operation cancelled during truncate_to_checkpoint".into(),
+                ));
+            }
+            let file = std::fs::File::options().write(true).open(&archive_path)?;
+
+            if cancel_flag_clone.load(Ordering::Relaxed) {
+                return Err(EraError::Other(
+                    "Operation cancelled during truncate_to_checkpoint".into(),
+                ));
+            }
+
+            file.set_len(data_end)?;
+
+            if cancel_flag_clone.load(Ordering::Relaxed) {
+                return Err(EraError::Other(
+                    "Operation cancelled during truncate_to_checkpoint".into(),
+                ));
+            }
+
+            file.sync_all()?;
+            Ok::<(), EraError>(())
+        })
+        .await
+        .map_err(|e| EraError::Other(format!("spawn_blocking join error: {}", e)))??;
+        Ok(())
     }
 }
 
@@ -418,7 +508,7 @@ impl RecoverableWriter {
     pub async fn new(archive_path: &Path, options: RecoveryOptions) -> Result<Self> {
         // Handle Abort strategy - return error if checkpoint exists
         if options.strategy == RecoveryStrategy::Abort
-            && CheckpointManager::exists(archive_path).await
+            && CheckpointManager::exists(archive_path).await?
         {
             return Err(EraError::CheckpointError(
                 "Checkpoint exists and Abort strategy specified. \
@@ -431,7 +521,7 @@ impl RecoverableWriter {
         let checkpoint = match options.strategy {
             RecoveryStrategy::StartFresh => {
                 // Delete any existing checkpoint and start fresh
-                if CheckpointManager::exists(archive_path).await {
+                if CheckpointManager::exists(archive_path).await? {
                     warn!(
                         "Starting fresh, deleting existing checkpoint for {:?}",
                         archive_path.display()
@@ -548,6 +638,11 @@ impl RecoverableWriter {
 mod tests {
     use super::*;
     use era_common::VolumeId;
+    use std::sync::mpsc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use tempfile::TempDir;
 
     fn test_hash(byte: u8) -> ChunkHash {
@@ -671,5 +766,81 @@ mod tests {
 
         // V2.2: Checkpoint is no longer a sidecar file, so this check is no longer valid
         // assert!(!CheckpointManager::exists(&archive_path));
+    }
+
+    #[tokio::test]
+    async fn test_truncate_to_checkpoint_respects_pre_cancellation() {
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join("cancel_truncate.era");
+        std::fs::write(&archive_path, vec![0u8; 1024]).unwrap();
+
+        let manager = RecoveryManager::new(&archive_path).await.unwrap();
+        let cancelled = Arc::new(AtomicBool::new(true));
+
+        let result = manager
+            .truncate_to_checkpoint_with_cancel_flag(Arc::clone(&cancelled))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "cancelled truncate must return explicit error"
+        );
+        let msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            msg.contains("cancel"),
+            "expected cancellation error message, got: {msg}"
+        );
+        assert!(
+            cancelled.load(Ordering::Relaxed),
+            "test cancellation flag should remain set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_truncate_to_checkpoint_respects_inflight_cancellation() {
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join("cancel_truncate_inflight.era");
+        std::fs::write(&archive_path, vec![0u8; 4096]).unwrap();
+
+        let manager = RecoveryManager::new(&archive_path).await.unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (proceed_tx, proceed_rx) = mpsc::channel();
+        cancel_test_hook::install(cancel_test_hook::Hook {
+            entered_tx,
+            proceed_rx,
+        });
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_for_task = Arc::clone(&cancelled);
+        let task = tokio::spawn(async move {
+            manager
+                .truncate_file_with_cancel_flag(1024, cancel_for_task)
+                .await
+        });
+
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(std::time::Duration::from_secs(2))
+        })
+        .await
+        .expect("join while waiting for blocking truncate hook")
+        .expect("spawn_blocking truncate closure should enter before cancellation");
+        cancelled.store(true, Ordering::Relaxed);
+        proceed_tx
+            .send(())
+            .expect("should release blocking truncate hook");
+
+        let result = task.await.expect("join should succeed");
+        cancel_test_hook::clear();
+
+        assert!(
+            result.is_err(),
+            "in-flight cancelled truncate must return explicit error"
+        );
+        let msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            msg.contains("cancel"),
+            "expected cancellation error message, got: {msg}"
+        );
     }
 }

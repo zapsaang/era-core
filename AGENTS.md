@@ -6,7 +6,7 @@
 
 ## OVERVIEW
 
-Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption (MK→IK→VK), FastCDC chunking, Reed-Solomon erasure coding, Shamir's Secret Sharing for T-of-N access control. Hybrid KEM (X25519 + Kyber-768) for post-quantum key encapsulation.
+Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption (MK→IK→VK), FastCDC chunking, Reed-Solomon erasure coding, Shamir's Secret Sharing for T-of-N access control. Hybrid KEM (X25519 + Kyber-768) is implemented in the codebase, while current certificate archives remain X25519-based.
 
 ## STRUCTURE
 
@@ -79,7 +79,7 @@ MK (OsRng 32B) → HKDF → IK (memory-only, never persisted)
 ```
 
 - **Password mode**: Argon2id → MK
-- **Certificate mode**: Hybrid KEM (X25519 + Kyber-768) → MK
+- **Certificate mode**: X25519 → MK (current archive path); hybrid KEM for certificates remains deferred
 - **Threshold mode**: Shamir split MK into N shares, T required to reconstruct
 - **Key rotation**: Re-wrap VK with new IK. Data untouched.
 - **Context binding**: All AEAD binds `archive_id ‖ epoch_id ‖ block_index` as AAD
@@ -128,7 +128,7 @@ cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 
 ## NOTES
 
-- 833 tests, 219 adversarial security audit tests across 6 suites
+- March 2026 workspace verification: 2049 passed, 0 failed, 18 ignored; 279+ adversarial security audit tests across historical and V5 suites, plus 30 index persistence audit tests
 - 3 fuzz targets: 65M+ combined runs, 0 crashes
 - 12 Criterion benchmark files across 7 crates
 - Edition 2021, resolver v2, MSRV 1.92+

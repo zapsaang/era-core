@@ -27,7 +27,7 @@ Read:  volumes → CRC verify → RS decode → AEAD decrypt → decompress → 
 
 - `spawn_blocking` for all CPU-heavy work (compression, crypto, RS)
 - Checkpoint-based crash recovery (resume interrupted writes)
-- Multi-auth: password (Argon2id), certificate (hybrid KEM), threshold (Shamir)
+- Multi-auth: password (Argon2id), certificate (X25519), threshold (Shamir)
 - Volume pool with automatic rotation at size limits
 - Matrix shard distribution across multiple volumes
 

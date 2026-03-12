@@ -26,9 +26,57 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tracing::{debug, info, warn};
 
 const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
+
+fn cancellation_error(context: &str) -> EraError {
+    EraError::Other(format!("Operation cancelled during {context}"))
+}
+
+fn check_cancelled(cancel_flag: &Arc<AtomicBool>, context: &str) -> Result<()> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(cancellation_error(context));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cancel_test_hook {
+    use std::sync::{mpsc, Mutex, OnceLock};
+
+    pub(super) struct Hook {
+        pub entered_tx: mpsc::Sender<()>,
+        pub proceed_rx: mpsc::Receiver<()>,
+    }
+
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+
+    pub(super) fn install(hook: Hook) {
+        let lock = HOOK.get_or_init(|| Mutex::new(None));
+        *lock.lock().expect("hook mutex poisoned") = Some(hook);
+    }
+
+    pub(super) fn clear() {
+        if let Some(lock) = HOOK.get() {
+            *lock.lock().expect("hook mutex poisoned") = None;
+        }
+    }
+
+    pub(super) fn checkpoint() {
+        if let Some(lock) = HOOK.get() {
+            let guard = lock.lock().expect("hook mutex poisoned");
+            if let Some(hook) = guard.as_ref() {
+                let _ = hook.entered_tx.send(());
+                let _ = hook.proceed_rx.recv();
+            }
+        }
+    }
+}
 
 /// Statistics about the repair operation
 #[derive(Debug, Default)]
@@ -147,6 +195,7 @@ pub async fn repair_archive(
     password: &str,
     options: RepairOptions,
 ) -> Result<RepairStats> {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
     info!("Starting archive repair: {}", path.display());
 
     // Open archive for reading first
@@ -206,12 +255,14 @@ pub async fn repair_archive(
         let backup_path = path.with_extension("era.bak");
         if !backup_path.exists() {
             info!("Creating backup: {}", backup_path.display());
+            check_cancelled(&cancel_flag, "repair backup copy")?;
             // Wrap fs::copy in spawn_blocking since it's I/O-heavy (V2-QUAL-07)
             let path_clone = path.to_path_buf();
             let backup_path_clone = backup_path.clone();
             tokio::task::spawn_blocking(move || std::fs::copy(&path_clone, &backup_path_clone))
                 .await
                 .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))??;
+            check_cancelled(&cancel_flag, "repair backup copy")?;
         } else {
             info!("Backup already exists: {}", backup_path.display());
         }
@@ -381,6 +432,7 @@ pub async fn repair_archive(
                     &data_lengths,
                     &erasure_config,
                     shard_size,
+                    Arc::clone(&cancel_flag),
                 )
                 .await;
 
@@ -452,7 +504,9 @@ async fn repair_shards_rs(
     data_lengths: &[Option<u32>],
     config: &ErasureCodeConfig,
     shard_size: usize,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<Vec<(usize, Bytes)>> {
+    check_cancelled(&cancel_flag, "Reed-Solomon shard reconstruction")?;
     let data_shards = config.data_shards as usize;
     let parity_shards = config.parity_shards as usize;
     let total_shards = data_shards + parity_shards;
@@ -466,24 +520,46 @@ async fn repair_shards_rs(
         .collect();
     let corrupted_indices_vec = corrupted_indices.to_vec();
     let data_lengths_vec = data_lengths.to_vec();
+    let cancel_flag_clone = Arc::clone(&cancel_flag);
 
     // Wrap CPU-heavy RS reconstruction in spawn_blocking (V2-PERF-02)
     let result = tokio::task::spawn_blocking(move || {
+        if cancel_flag_clone.load(Ordering::Relaxed) {
+            return Err(cancellation_error("Reed-Solomon shard reconstruction"));
+        }
+
+        #[cfg(test)]
+        cancel_test_hook::checkpoint();
+
+        if cancel_flag_clone.load(Ordering::Relaxed) {
+            return Err(cancellation_error("Reed-Solomon shard reconstruction"));
+        }
+
         let coder = ErasureCoder::new(erasure_config)?;
 
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
         for (idx, data) in &available_shards_vec {
+            if cancel_flag_clone.load(Ordering::Relaxed) {
+                return Err(cancellation_error("Reed-Solomon shard reconstruction"));
+            }
             shards[*idx] = Some(data.clone());
         }
 
         // Recover all data shards (padded)
         let recovered_data = coder.recover_data_shards(&shards, shard_size)?;
 
+        if cancel_flag_clone.load(Ordering::Relaxed) {
+            return Err(cancellation_error("Reed-Solomon shard reconstruction"));
+        }
+
         // Re-encode to get parity shards
         let all_shards = coder.encode_shards(&recovered_data)?;
 
         let mut repaired = Vec::new();
         for &idx in &corrupted_indices_vec {
+            if cancel_flag_clone.load(Ordering::Relaxed) {
+                return Err(cancellation_error("Reed-Solomon shard reconstruction"));
+            }
             if idx >= total_shards {
                 return Err(EraError::ErasureError(format!(
                     "Shard index {} out of range",
@@ -578,6 +654,7 @@ pub async fn repair_archive_matrix(
     password: &str,
     options: RepairOptions,
 ) -> Result<RepairStats> {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
     info!(
         "Starting matrix-distributed archive repair: {}",
         path.display()
@@ -694,6 +771,7 @@ pub async fn repair_archive_matrix(
             );
             if !backup_path.exists() {
                 info!("Creating backup: {}", backup_path.display());
+                check_cancelled(&cancel_flag, "matrix repair backup copy")?;
                 // Wrap fs::copy in spawn_blocking since it's I/O-heavy (V2-QUAL-07)
                 let vol_path_clone = vol_path.to_path_buf();
                 let backup_path_clone = backup_path.clone();
@@ -702,6 +780,7 @@ pub async fn repair_archive_matrix(
                 })
                 .await
                 .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))??;
+                check_cancelled(&cancel_flag, "matrix repair backup copy")?;
             }
         }
     }
@@ -928,6 +1007,7 @@ pub async fn repair_archive_matrix(
                     &data_lengths,
                     &erasure_config,
                     shard_size,
+                    Arc::clone(&cancel_flag),
                 )
                 .await
                 {
@@ -998,6 +1078,82 @@ pub async fn repair_archive_matrix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_repair_shards_rs_respects_cancellation() {
+        let cancel_flag = Arc::new(AtomicBool::new(true));
+        let result = repair_shards_rs(
+            &[],
+            &[],
+            &[],
+            &ErasureCodeConfig::new(2, 1),
+            16,
+            cancel_flag,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "cancelled repair must return explicit error"
+        );
+        let msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            msg.contains("cancel"),
+            "expected cancellation error message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repair_shards_rs_respects_inflight_cancellation() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (proceed_tx, proceed_rx) = mpsc::channel();
+        cancel_test_hook::install(cancel_test_hook::Hook {
+            entered_tx,
+            proceed_rx,
+        });
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_for_task = Arc::clone(&cancel_flag);
+        let task = tokio::spawn(async move {
+            repair_shards_rs(
+                &[
+                    (0, Bytes::from(vec![1u8; 8])),
+                    (1, Bytes::from(vec![2u8; 8])),
+                ],
+                &[2],
+                &[Some(8), Some(8)],
+                &ErasureCodeConfig::new(2, 1),
+                8,
+                cancel_for_task,
+            )
+            .await
+        });
+
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(std::time::Duration::from_secs(2))
+        })
+        .await
+        .expect("join while waiting for blocking hook")
+        .expect("spawn_blocking closure should enter before cancellation");
+        cancel_flag.store(true, Ordering::Relaxed);
+        proceed_tx
+            .send(())
+            .expect("should release blocking closure hook");
+
+        let result = task.await.expect("join should succeed");
+        cancel_test_hook::clear();
+
+        assert!(
+            result.is_err(),
+            "in-flight cancelled repair must return explicit error"
+        );
+        let msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            msg.contains("cancel"),
+            "expected cancellation error message, got: {msg}"
+        );
+    }
 
     #[test]
     fn test_repair_stats_fully_repaired() {

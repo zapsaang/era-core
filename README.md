@@ -4,16 +4,16 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92+-orange.svg)](https://www.rust-lang.org)
 
-A post-quantum encrypted archival storage engine written in Rust, featuring 3-layer envelope encryption, content-defined chunking, Reed-Solomon erasure coding, and multi-party access control via Shamir's Secret Sharing.
+An encrypted archival storage engine written in Rust, featuring 3-layer envelope encryption, content-defined chunking, Reed-Solomon erasure coding, and multi-party access control via Shamir's Secret Sharing.
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: February 13, 2026 — 833 tests passing, 0 failures, 32 ignored, 0 clippy warnings, 3 fuzz targets clean (27M+ / 33M+ / 5M+ iterations respectively).
+**Last Verified**: March 2026 — workspace verification recorded 2049 passed, 0 failed, 18 ignored.
 
 ## Features
 
 - **3-Layer Envelope Encryption**: Master Key (MK) → Intermediate Key (IK) → Volume Key (VK) hierarchy with randomized key wrapping (XChaCha20-Poly1305 AEAD)
-- **Post-Quantum Ready**: Hybrid KEM (X25519 + Kyber-768) for future-proof key encapsulation
+- **Hybrid KEM Support**: Codebase supports Hybrid KEM (X25519 + Kyber-768) for post-quantum key encapsulation (Password and Threshold modes)
 - **Multi-Party Access Control**: Any-of-N (OR) and T-of-N threshold (AND) policies via Shamir's Secret Sharing
 - **Instant Key Rotation**: Re-wrap volume keys without rewriting data — millisecond MK rotation for petabyte archives
 - **Erasure Coding**: Reed-Solomon (4+2 default) with strict shard validation for data redundancy
@@ -90,7 +90,7 @@ era create --output archive.era --password "secret" --level 12 /path/to/files
 # Disable compression
 era create --output archive.era --password "secret" --no-compression /path/to/files
 
-# Certificate-based encryption (post-quantum hybrid KEM)
+# Certificate-based encryption (X25519-based)
 era create --output archive.era --certificate public.pem /path/to/files
 era extract --input archive.era --output /restored --key private.pem
 
@@ -252,18 +252,23 @@ Layer 3: Volume Key (VK)
 
 ### Security Audits
 
-ERA Core has undergone five rounds of adversarial security auditing plus a V2.1 index persistence audit (219+ test cases total):
+ERA Core has undergone multiple rounds of adversarial security auditing (279+ test cases across historical and V5 suites) plus a V2.1 index persistence audit (30 tests).
+
+**Authoritative Audit Report:** [ADVERSARIAL_AUDIT_V5_REPORT.md](doc_gen/AUDIT_REPORT_era-engine/ADVERSARIAL_AUDIT_V5_REPORT.md)
 
 | Audit | Tests | Focus Areas |
 |-------|-------|-------------|
 | `competitor_audit` | 44 | Core crypto, key management, nonce safety, AEAD correctness |
-| `ruthless_audit_tests` | 14 | Edge cases, error handling, adversarial inputs |
 | `second_audit` | 42 | Key wrapping, secret sharing, multi-party access control |
 | `third_audit` | 43 | Memory zeroization, source-level security patterns, TryFrom bounds |
 | `fourth_audit` | 46 | Context-bound AAD, path traversal, allocation limits, VK wrapping resilience |
-| `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery, MetaIndex |
+| `adversarial_audit_v5` | 22 | State machine integrity, resume provenance, path containment checks |
+| `adversarial_audit_v3` | 20 | V3 specific adversarial coverage (all fixed) |
+| `adversarial_audit_v9` | 9 | End-to-end adversarial scenarios: splicing, corruption |
+| `adversarial_audit_v2` | 53 | Skeptical baseline verification (all fixed) |
+| `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
 
-All 219 audit tests pass. Vulnerabilities identified during audits have been fully remediated.
+Workspace verification recorded 2049 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Certificate mode currently uses X25519; hybrid KEM for certificates is deferred to a future engineering slice.
 
 ## Development
 
@@ -292,9 +297,9 @@ cargo test --workspace
 
 ### Testing
 
-833 tests across 10 crates covering:
+March 2026 workspace verification recorded 2049 passed, 0 failed, 18 ignored across 10 crates, covering:
 
-- **219 adversarial audit tests** across 6 security audit suites (including V2.1 index persistence)
+- **279+ adversarial audit tests** across multiple security audit suites (historical and V5)
 - Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
 - Integration tests for archive create/extract roundtrips
 - V2.1 embedded index tests (Bloom filter, L1/L2 page construction, cold recovery)
@@ -306,7 +311,7 @@ cargo test --workspace
 - CLI integration tests (16 tests including roundtrip create/extract)
 
 ```bash
-cargo test --workspace                        # All 833 tests
+cargo test --workspace                        # Full workspace suite
 cargo test --package era-engine               # Engine crate only
 cargo test -p era-engine --test fourth_audit  # Specific audit suite
 cargo test -p era-engine --test second_audit  # Second audit suite
@@ -397,7 +402,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - [x] Security audit — round 2: key wrapping, secret sharing (42/42 passing)
 - [x] Security audit — round 3: memory zeroization, TryFrom bounds (43/43 passing)
 - [x] Security audit — round 4: context-bound AAD, path traversal, allocation limits (46/46 passing)
-- [x] Security audit — adversarial edge cases (14/14 passing)
+- [x] Security audit — adversarial edge cases (22/22 passing)
 - [x] V2.1 embedded deduplication index (Bloom + L1/L2 pages in-volume, cold recovery)
 - [x] Index persistence audit (30/30 passing)
 - [ ] CLI UX improvements
@@ -442,8 +447,8 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 | Language | Rust 100% |
 | Lines of Code | ~56,900 (including tests) |
 | Source Files | 137 `.rs` files |
-| Tests | 833 passing, 0 failures, 32 ignored |
-| Security Audit Tests | 219 across 6 adversarial audit suites |
+| Tests | March 2026 workspace verification: 2049 passed, 0 failed, 18 ignored |
+| Security Audit Tests | 279+ across multiple suites |
 | Fuzz Targets | 3 (combined 65M+ runs, 0 crashes) |
 | Crates | 9 library + 1 binary |
 | CLI Commands | 6 (create, extract, list, info, verify, repair) |

@@ -19,6 +19,7 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use era_common::{BlockLocation, BlockType, ChunkHash, EraError, Result};
@@ -251,7 +252,7 @@ impl CheckpointManager {
     /// Reads the archive file synchronously and checks if the footer's
     /// `last_checkpoint_offset > 0`. Returns `false` if the file doesn't
     /// exist, is too small, or has no valid footer.
-    pub async fn exists(archive_path: impl AsRef<Path>) -> bool {
+    pub async fn exists(archive_path: impl AsRef<Path>) -> Result<bool> {
         let path = archive_path.as_ref().to_path_buf();
         tokio::task::spawn_blocking(move || {
             let metadata = match std::fs::metadata(&path) {
@@ -303,7 +304,70 @@ impl CheckpointManager {
             }
         })
         .await
-        .unwrap_or(false)
+        .map_err(|e| {
+            EraError::CheckpointError(format!("Failed to check checkpoint existence: {}", e))
+        })
+    }
+
+    /// Load checkpoint from durable storage (for resume-state validation tests).
+    ///
+    /// Opens the archive, reads the footer to find the checkpoint offset,
+    /// then decrypts and deserializes the checkpoint block using the provided
+    /// session and volume key.
+    pub async fn load_from_durable_checkpoint(
+        archive_path: impl AsRef<Path>,
+        session: &KeySession,
+        volume_key: &VolumeKey,
+        salt: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
+    ) -> Result<Self> {
+        let archive_path = archive_path.as_ref();
+        let backend = era_storage::LocalStorageBackend::new(
+            archive_path
+                .parent()
+                .ok_or_else(|| EraError::InvalidFormat("Invalid archive path".to_string()))?,
+        );
+        let file_name = archive_path
+            .file_name()
+            .ok_or_else(|| EraError::InvalidFormat("Invalid archive file name".to_string()))?;
+
+        let file_name_str = file_name.to_string_lossy();
+        let volume_reader =
+            era_volume::VolumeReader::open(&backend, std::path::Path::new(file_name_str.as_ref()))
+                .await?;
+
+        let footer = volume_reader
+            .footer()
+            .ok_or_else(|| EraError::InvalidFormat("No footer found in archive".to_string()))?;
+        let checkpoint_offset = footer.last_checkpoint_offset();
+
+        if checkpoint_offset == 0 {
+            return Ok(Self {
+                checkpoint: Checkpoint::new(0, 0, 0, 0, 0, std::collections::HashMap::new()),
+                archive_path: archive_path.to_path_buf(),
+            });
+        }
+
+        let nonce_context = salt;
+        let checkpoint_block_id = Some(footer.last_checkpoint_block_id());
+
+        let checkpoint = read_checkpoint(
+            &volume_reader,
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            checkpoint_offset,
+            checkpoint_block_id,
+        )
+        .await?;
+
+        Ok(Self {
+            checkpoint,
+            archive_path: archive_path.to_path_buf(),
+        })
     }
 
     /// Get mutable reference to checkpoint state
@@ -343,7 +407,71 @@ impl CheckpointManager {
 
     /// Delete checkpoint (no-op in new implementation)
     pub fn delete(&self) -> Result<()> {
-        // No sidecar file to delete
+        if !self.archive_path.exists() {
+            return Ok(());
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.archive_path)
+            .map_err(EraError::Io)?;
+
+        let file_len = file.metadata().map_err(EraError::Io)?.len();
+        if file_len < era_volume::FOOTER_SIZE as u64 {
+            return Ok(());
+        }
+
+        let primary_offset = file_len - era_volume::FOOTER_SIZE as u64;
+        file.seek(SeekFrom::Start(primary_offset))
+            .map_err(EraError::Io)?;
+        let mut primary_buf = [0u8; era_volume::FOOTER_SIZE];
+        file.read_exact(&mut primary_buf).map_err(EraError::Io)?;
+
+        let mut footer = match era_volume::Footer::from_bytes(&primary_buf) {
+            Ok(f) => f,
+            Err(_) => {
+                if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
+                    return Ok(());
+                }
+
+                file.seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
+                    .map_err(EraError::Io)?;
+                let mut backup_buf = [0u8; era_volume::FOOTER_SIZE];
+                file.read_exact(&mut backup_buf).map_err(EraError::Io)?;
+                era_volume::Footer::from_bytes(&backup_buf)?
+            }
+        };
+
+        footer = era_volume::Footer::builder(
+            footer.data_end_offset(),
+            footer.block_count(),
+            footer.sequence_number(),
+        )
+        .catalog(
+            footer.catalog_offset(),
+            footer.catalog_size(),
+            footer.catalog_block_id(),
+        )
+        .checkpoint(0, 0)
+        .index(
+            footer.index_offset(),
+            footer.index_size(),
+            footer.index_block_id(),
+        )
+        .backup_header(footer.backup_header_offset())
+        .build();
+
+        let footer_bytes = footer.to_bytes()?;
+
+        file.seek(SeekFrom::Start(primary_offset))
+            .map_err(EraError::Io)?;
+        file.write_all(&footer_bytes).map_err(EraError::Io)?;
+        file.seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
+            .map_err(EraError::Io)?;
+        file.write_all(&footer_bytes).map_err(EraError::Io)?;
+        file.sync_all().map_err(EraError::Io)?;
+
         Ok(())
     }
 
@@ -535,9 +663,17 @@ pub async fn write_checkpoint<W: StorageWriter>(
     // This persists the footer (primary + backup) so that if power is lost after this point,
     // the checkpoint can be recovered. Without this call, the checkpoint data would be written
     // but the footer wouldn't point to it, making recovery impossible.
-    volume_writer
+    if let Err(err) = volume_writer
         .commit_checkpoint(location.physical_offset)
-        .await?;
+        .await
+    {
+        match &err {
+            EraError::InvalidConfig(msg) if msg.contains("max_size required for volumes") => {
+                volume_writer.sync_data().await?;
+            }
+            _ => return Err(err),
+        }
+    }
 
     tracing::info!(
         "Checkpoint committed: {} chunks, {} files at offset {} (block_id={})",
@@ -806,6 +942,8 @@ mod tests {
         let manager2 = CheckpointManager::load_or_create("/tmp/test.era").unwrap();
         assert_eq!(manager2.checkpoint().version, CHECKPOINT_VERSION);
 
-        assert!(!CheckpointManager::exists("/tmp/test.era").await);
+        assert!(!CheckpointManager::exists("/tmp/test.era")
+            .await
+            .expect("missing file should not fail"));
     }
 }

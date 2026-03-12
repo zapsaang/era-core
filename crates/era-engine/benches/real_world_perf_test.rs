@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo bench --bench real_world_perf_test
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_crypto::{AeadContext, KdfParams, KeySession, Salt, XChaCha20Poly1305Context};
 use era_engine::{auth::PasswordSlotParams, ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
 use era_volume::{RecipientType, SuperHeader};
@@ -284,6 +284,27 @@ fn bench_hkdf_subkey_derivation(c: &mut Criterion) {
             black_box(_bk);
         });
     });
+
+    let mut artifact_group = c.benchmark_group("hkdf_block_key_artifact_validation");
+    artifact_group.throughput(Throughput::Elements(100));
+    artifact_group.bench_function("block_key_derivation_batched_100_normalized", |b| {
+        let nonce_context = [0u8; 16];
+        let mut batch_start = 0u64;
+        b.iter(|| {
+            for offset in 0..100u64 {
+                let _bk = session
+                    .derive_block_key(
+                        &volume_key,
+                        batch_start.wrapping_add(offset),
+                        &nonce_context,
+                    )
+                    .unwrap();
+                black_box(_bk);
+            }
+            batch_start = batch_start.wrapping_add(100);
+        });
+    });
+    artifact_group.finish();
 
     // Compare: derive 1000 block keys vs 1000 KDF calls
     c.bench_function("hkdf_1000_block_keys", |b| {

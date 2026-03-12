@@ -72,8 +72,14 @@ impl IndexStage {
     ///
     /// This updates both the dedup lookup index and the `IndexBuilder`
     /// (if backed by `RedbChunkIndex`).
-    pub fn record_location(&self, hash: ChunkHash, location: BlockLocation) -> Result<()> {
-        self.chunk_index.put(hash, location)
+    pub fn record_location(&mut self, hash: ChunkHash, location: BlockLocation) -> Result<()> {
+        self.chunk_index.put(hash, location.clone())?;
+
+        if let Some(ref mut mgr) = self.checkpoint_manager {
+            mgr.record_chunk(hash, location)?;
+        }
+
+        Ok(())
     }
 
     /// Sync checkpoint state to stable storage.
@@ -83,6 +89,7 @@ impl IndexStage {
     /// For async-first checkpoint persistence with atomic volume writes, use
     /// `commit_to_volume()` instead. Both methods are valid depending on the
     /// orchestration context and whether synchronous or asynchronous flushing is needed.
+    #[allow(dead_code)]
     pub fn sync_checkpoint(&mut self) -> Result<()> {
         if let Some(ref mut mgr) = self.checkpoint_manager {
             #[allow(deprecated)]
@@ -106,6 +113,11 @@ impl IndexStage {
     /// Get a reference to the checkpoint manager, if configured.
     pub fn checkpoint_manager(&self) -> Option<&CheckpointManager> {
         self.checkpoint_manager.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn checkpoint_manager_mut(&mut self) -> Option<&mut CheckpointManager> {
+        self.checkpoint_manager.as_mut()
     }
 
     /// Get a reference to the underlying chunk index.

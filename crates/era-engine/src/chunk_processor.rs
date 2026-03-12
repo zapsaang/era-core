@@ -9,12 +9,12 @@
 #![allow(dead_code)]
 
 use bytes::Bytes;
-use era_common::{ChunkHash, ChunkVec, Result};
+use era_common::{ChunkHash, ChunkVec, EraError, Result};
 use era_packing::unpack_file;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::debug;
 
 /// State for tracking multi-chunk file extraction
@@ -45,6 +45,8 @@ pub struct ExtractionContext {
     pub chunk_to_files: HashMap<ChunkHash, Vec<(usize, usize, u64)>>,
     /// Packed chunk mapping: hash -> list of (file_idx, file_index_in_pack, output_path)
     pub packed_chunks: HashMap<ChunkHash, Vec<(usize, usize, PathBuf)>>,
+    /// Canonical output directory for path containment checking
+    pub canonical_output_dir: Option<PathBuf>,
 }
 
 impl ExtractionContext {
@@ -55,7 +57,20 @@ impl ExtractionContext {
             multi_chunk_files: HashMap::new(),
             chunk_to_files: HashMap::new(),
             packed_chunks: HashMap::new(),
+            canonical_output_dir: None,
         }
+    }
+
+    /// Set the canonical output directory for path containment checking
+    pub fn set_canonical_output_dir(&mut self, path: PathBuf) {
+        self.canonical_output_dir = Some(path);
+    }
+
+    fn ensure_contained_output_target(&self, output_path: &Path) -> Result<()> {
+        let canonical_output_dir = self.canonical_output_dir.as_ref().ok_or_else(|| {
+            EraError::Security("Canonical output directory not initialized".into())
+        })?;
+        enforce_output_containment(output_path, canonical_output_dir)
     }
 
     /// Check if there are any pending extractions
@@ -80,10 +95,7 @@ impl ExtractionContext {
                     // Unpack the specific file from the packed chunk
                     let file_data = unpack_file(&data, file_index_in_pack)?;
 
-                    // Create parent directories
-                    if let Some(parent) = output_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
+                    self.ensure_contained_output_target(&output_path)?;
 
                     // Write file
                     let mut file = File::create(&output_path)?;
@@ -98,10 +110,7 @@ impl ExtractionContext {
             // Handle single-chunk files
             if let Some(entries) = self.single_chunk_pending.remove(&hash) {
                 for (_file_idx, output_path) in entries {
-                    // Create parent directories
-                    if let Some(parent) = output_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
+                    self.ensure_contained_output_target(&output_path)?;
 
                     // Write file directly
                     let mut file = File::create(&output_path)?;
@@ -117,6 +126,15 @@ impl ExtractionContext {
             if let Some(file_refs) = self.chunk_to_files.remove(&hash) {
                 for (file_idx, chunk_idx, chunk_offset) in file_refs {
                     if let Some(state) = self.multi_chunk_files.get_mut(&file_idx) {
+                        if chunk_idx >= state.chunks_written.len() {
+                            return Err(EraError::InvalidFormat(format!(
+                                "Chunk index out of bounds for {}: index {} >= {}",
+                                state.output_path.display(),
+                                chunk_idx,
+                                state.chunks_written.len()
+                            )));
+                        }
+
                         // Bounds validation: ensure chunk write stays within expected file size
                         if chunk_offset + data.len() as u64 > state.expected_size {
                             return Err(era_common::EraError::InvalidFormat(
@@ -166,6 +184,63 @@ impl ExtractionContext {
             }
         }
     }
+}
+
+pub(crate) fn enforce_output_containment(
+    output_path: &Path,
+    canonical_output_dir: &Path,
+) -> Result<()> {
+    let parent = output_path.parent().ok_or_else(|| {
+        EraError::Security(format!(
+            "Output path has no parent directory: {}",
+            output_path.display()
+        ))
+    })?;
+
+    let file_name = output_path.file_name().ok_or_else(|| {
+        EraError::Security(format!(
+            "Output path has no file name: {}",
+            output_path.display()
+        ))
+    })?;
+
+    let mut existing_ancestor = parent;
+    while !existing_ancestor.exists() {
+        existing_ancestor = existing_ancestor.parent().ok_or_else(|| {
+            EraError::Security(format!(
+                "Unable to resolve existing ancestor for output path: {}",
+                output_path.display()
+            ))
+        })?;
+    }
+
+    let canonical_ancestor = fs::canonicalize(existing_ancestor)?;
+    if !canonical_ancestor.starts_with(canonical_output_dir) {
+        return Err(EraError::Security(format!(
+            "Symlink escape detected: {} resolves outside output directory",
+            output_path.display()
+        )));
+    }
+
+    fs::create_dir_all(parent)?;
+
+    let canonical_parent = fs::canonicalize(parent)?;
+    if !canonical_parent.starts_with(canonical_output_dir) {
+        return Err(EraError::Security(format!(
+            "Symlink escape detected: {} resolves outside output directory",
+            output_path.display()
+        )));
+    }
+
+    let canonical_target = canonical_parent.join(file_name);
+    if !canonical_target.starts_with(canonical_output_dir) {
+        return Err(EraError::Security(format!(
+            "Extraction target outside output directory: {}",
+            output_path.display()
+        )));
+    }
+
+    Ok(())
 }
 
 impl Default for ExtractionContext {
