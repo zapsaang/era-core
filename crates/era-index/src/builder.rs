@@ -233,6 +233,24 @@ impl IndexBuilder {
         volume_key: &VolumeKey,
         nonce_context: [u8; 16],
     ) -> Result<(super::MetaIndex, era_common::BlockLocation)> {
+        self.finalize_with_starting_block_id(
+            volume_writer,
+            session,
+            volume_key,
+            nonce_context,
+            u64::from(volume_writer.block_count()),
+        )
+        .await
+    }
+
+    pub async fn finalize_with_starting_block_id<W: StorageWriter>(
+        &mut self,
+        volume_writer: &mut era_volume::VolumeWriter<W>,
+        session: &KeySession,
+        volume_key: &VolumeKey,
+        nonce_context: [u8; 16],
+        starting_block_id: u64,
+    ) -> Result<(super::MetaIndex, era_common::BlockLocation)> {
         use era_common::BlockId;
 
         // V19-F7: Note on spawn_blocking for finalize().
@@ -268,7 +286,7 @@ impl IndexBuilder {
         let estimated_pages = (self.store.entry_count() / crate::ENTRIES_PER_PAGE).max(1);
         let mut encrypted_blocks: Vec<(EncryptedMacroBlock, ChunkHash, ChunkHash, BlockId)> =
             Vec::with_capacity(estimated_pages);
-        let mut block_id_counter = 0u64;
+        let mut block_id_counter = starting_block_id;
         {
             let idx_nonce = index_nonce_context;
             self.store.for_each_sorted_page(|page, _page_block_id| {
@@ -378,9 +396,16 @@ impl IndexBuilder {
         };
 
         // Write MetaIndex as IndexManifest block
-        let manifest_location = volume_writer
+        let mut manifest_location = volume_writer
             .write_canonical_block(&manifest_encrypted_block, BlockType::IndexManifest)
             .await?;
+        manifest_location.slot_index =
+            u32::try_from(manifest_block_id.sequence()).map_err(|_| {
+                EraError::IndexError(format!(
+                    "manifest block_id {} exceeds u32::MAX",
+                    manifest_block_id.sequence()
+                ))
+            })?;
 
         Ok((meta, manifest_location))
     }

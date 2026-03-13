@@ -10,8 +10,12 @@ Shared types, error handling, and protobuf definitions. Bottom of the dependency
 | `error.rs` | `EraError` enum (30+ variants), `Result<T>` alias |
 | `config.rs` | Configuration types (archive, erasure, compression) |
 | `conversion.rs` | Type conversions, `TryFrom` for untrusted input |
-| `types/` | Shared type definitions (IDs, metadata, protobuf wrappers) |
-| `types/ids.rs` | ArchiveId, EpochId — UUID-based, rkyv zero-copy (1 unsafe block) |
+| `serde.rs` | Safe protobuf serialization helpers with deserialization size limits |
+| `types/mod.rs` | `types/` facade. Re-exports block, chunk, ID, and matrix type groups. |
+| `types/block.rs` | MacroBlock, encrypted block, shard layout, and block-header-oriented shared types. |
+| `types/chunk.rs` | `ChunkVec`, raw/unique chunk, and stack-optimized chunk container definitions. |
+| `types/ids.rs` | ArchiveId, VolumeId, EpochId, and UUID/rkyv-backed identifier types. |
+| `types/matrix.rs` | Matrix distribution config, strategy, and shard-location metadata shared across engine/volume code. |
 
 ## PROTOBUF
 

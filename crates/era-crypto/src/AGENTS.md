@@ -6,16 +6,20 @@ Security primitives — all cryptographic operations and secure memory for the 3
 
 | File | Lines | Purpose |
 |------|-------|---------|
+| `lib.rs` | — | Crate facade. Re-exports AEAD, KDF, certificate, secure-memory, timestamp, and key-session entrypoints. |
 | `key_session.rs` | 662 | 3-layer envelope (MK→IK→VK→BK). HKDF derivation, VK wrap/unwrap, per-block key derivation, Shamir split/reconstruct. |
 | `certificate.rs` | 816 | Hybrid KEM (X25519 + Kyber-768). PEM I/O, key encapsulation/decapsulation, timestamp validation. |
 | `hybrid_kem.rs` | — | X25519 + Kyber-768 combined KEM. ECDH + Kyber → HKDF → AEAD key. |
 | `aead.rs` | — | XChaCha20-Poly1305 encrypt/decrypt. Fresh 24-byte nonce per operation via OsRng. |
 | `aead_context.rs` | — | Context-bound AEAD cipher. Binds archive_id ‖ epoch_id ‖ block_index as AAD. |
 | `kdf.rs` | — | Argon2id password → MK derivation. Configurable memory/time cost. |
+| `hash.rs` | — | Blake3 hashing helpers for chunks, readers, and incremental hashing flows. |
 | `hkdf_utils.rs` | — | Unified HKDF-SHA256 key derivation. Domain-separated info strings per layer. |
+| `key.rs` | — | Secure derived-key wrapper built on `SecureBuffer<32>`. mlock, zeroize, and redacted debug behavior live here. |
 | `secure_memory.rs` | — | `SecureBuffer<N>`: mlock + Zeroize on Drop. Core dump prevention (prctl/ptrace). |
 | `pem_support.rs` | — | PEM parsing utilities. WARNING: unencrypted export for testing only. |
 | `security_check.rs` | — | Runtime security environment checks (zeroize allocator, memory locking). |
+| `timestamp.rs` | — | OffsetDateTime-based timestamp type, validation, and migration helpers for legacy Unix timestamp fields. |
 
 ## KEY LIFECYCLE
 
@@ -39,9 +43,6 @@ MK (32B, OsRng) → HKDF(info="ERA_KeyWrap_v1") → IK (memory-only)
 
 ## SECURITY RULES
 
-- NEVER use `thread_rng` — ALWAYS `OsRng`
-- NEVER log key material at ANY level — Debug prints `[REDACTED]`
-- NEVER reuse nonces — fresh 24-byte random per encryption
 - NEVER skip AEAD tag verification
 - NEVER persist IK to disk — derive from MK at runtime
 - All key material in `SecureBuffer<N>` with Zeroize on Drop

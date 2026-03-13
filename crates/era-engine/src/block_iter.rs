@@ -25,6 +25,8 @@ use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker
 use era_volume::{DistributionCalculator, VolumeReader};
 use std::collections::VecDeque;
 
+use crate::source_block_snapshot::SourceDataBlockSnapshot;
+
 /// Result of reading and decoding a block
 #[derive(Debug)]
 pub struct DecodedBlock {
@@ -36,6 +38,7 @@ pub struct DecodedBlock {
     pub chunks: ChunkVec,
     /// Number of corrupted shards (erasure mode only)
     pub corrupted_shards: usize,
+    pub source_snapshot: Option<SourceDataBlockSnapshot>,
 }
 
 /// Statistics about block iteration
@@ -189,6 +192,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
                         block_index: self.block_index,
                         chunks,
                         corrupted_shards: 0,
+                        source_snapshot: None,
                     })
                 }
                 Err(e) => {
@@ -520,6 +524,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
                     block_index: self.block_index,
                     chunks,
                     corrupted_shards: corrupted_count,
+                    source_snapshot: None,
                 })
             }
             Err(e) => {
@@ -726,6 +731,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
                             block_index: self.block_index,
                             chunks,
                             corrupted_shards: 0,
+                            source_snapshot: None,
                         })
                     }
                     Err(e) => {
@@ -1080,14 +1086,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             }
         }
 
-        if let Some(lengths) = stripe_lengths {
+        if let Some(ref lengths) = stripe_lengths {
             if let Some(stripe_max) = lengths.iter().copied().max() {
                 if stripe_max as usize > max_len {
                     max_len = stripe_max as usize;
                 }
             }
 
-            for (idx, len) in lengths.into_iter().enumerate().take(data_shards) {
+            for (idx, len) in lengths.iter().copied().enumerate().take(data_shards) {
                 if data_lengths[idx].is_none() && len > 0 {
                     data_lengths[idx] = Some(len);
                 }
@@ -1149,6 +1155,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
         for (i, shard_data) in recovered.into_iter().enumerate().take(data_shards) {
             let block_index = (self.current_stripe_index * data_shards + i) as u32;
+            let snapshot_stripe_lengths = stripe_lengths.as_deref().unwrap_or_default();
             let build_candidate_lengths = |data: &[u8]| {
                 // Heuristic for recovered data-shard length:
                 // 1) Prefer explicit per-shard lengths (from headers) when available.
@@ -1184,6 +1191,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             };
 
             let mut decoded = None;
+            let mut source_snapshot: Option<SourceDataBlockSnapshot> = None;
             let mut last_err = None;
 
             let mut attempt_decode = |data: &[u8]| -> Option<ChunkVec> {
@@ -1208,8 +1216,21 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         chunk_count: 0,
                     };
 
+                    let snapshot_candidate = SourceDataBlockSnapshot {
+                        block_id: BlockId::new(block_index as u64),
+                        encrypted_bytes: encrypted_block.data.to_vec(),
+                        stripe_ordinal: self.current_stripe_index as u64,
+                        member_position_in_stripe: i as u16,
+                        stripe_lengths: snapshot_stripe_lengths.to_vec(),
+                        data_shards: self.data_shards,
+                        parity_shards: self.parity_shards,
+                    };
+
                     match self.unpacker.extract_all_chunks(&encrypted_block) {
-                        Ok(chunks) => return Some(chunks),
+                        Ok(chunks) => {
+                            source_snapshot = Some(snapshot_candidate);
+                            return Some(chunks);
+                        }
                         Err(e) => {
                             last_err.get_or_insert(e);
                         }
@@ -1294,9 +1315,20 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                             chunk_count: 0,
                         };
 
+                        let snapshot_candidate = SourceDataBlockSnapshot {
+                            block_id: BlockId::new(block_index as u64),
+                            encrypted_bytes: encrypted_block.data.to_vec(),
+                            stripe_ordinal: self.current_stripe_index as u64,
+                            member_position_in_stripe: i as u16,
+                            stripe_lengths: snapshot_stripe_lengths.to_vec(),
+                            data_shards: self.data_shards,
+                            parity_shards: self.parity_shards,
+                        };
+
                         match self.unpacker.extract_all_chunks(&encrypted_block) {
                             Ok(chunks) => {
                                 decoded = Some(chunks);
+                                source_snapshot = Some(snapshot_candidate);
                                 break;
                             }
                             Err(e) => {
@@ -1319,6 +1351,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         block_index,
                         chunks,
                         corrupted_shards: crc_failed_count,
+                        source_snapshot,
                     }));
                 }
                 None => {

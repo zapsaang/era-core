@@ -43,7 +43,7 @@ use zeroize::Zeroizing;
 const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
 use crate::checkpoint::CheckpointManager;
-use crate::chunk_index::{create_chunk_index, ChunkIndex};
+use crate::chunk_index::{create_chunk_index_with_context, ChunkIndex};
 use crate::encryption_context::EncryptionContext;
 use crate::erasure_stage::ErasureStage;
 use crate::index_stage::IndexStage;
@@ -914,7 +914,10 @@ impl ArchiveWriterBuilder {
         };
 
         // Create chunk index (internal memory-based index)
-        let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index()?;
+        let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index_with_context(
+            *active_header.archive_id().0.as_bytes(),
+            active_header.epoch_id(),
+        )?;
 
         // Load existing chunk locations from checkpoint if resuming
         if let Some(ref mgr) = checkpoint_manager {
@@ -1686,10 +1689,17 @@ impl ArchiveWriter {
             let session = self.pipeline.encryption().session().try_clone()?;
             let volume_key = self.pipeline.encryption().volume_key().try_clone()?;
             let nonce_context = self.pipeline.encryption().nonce_context();
+            let index_start_block_id = self.pipeline.blocks_written();
 
             if let Some(writer) = self.pipeline.volume_mut().get_writer_mut(0) {
                 match builder
-                    .finalize(writer, &session, &volume_key, nonce_context)
+                    .finalize_with_starting_block_id(
+                        writer,
+                        &session,
+                        &volume_key,
+                        nonce_context,
+                        index_start_block_id,
+                    )
                     .await
                 {
                     Ok((_meta_index, manifest_location)) => {
@@ -2201,7 +2211,7 @@ pub mod generic {
             // Store compression config for creating compressors on demand
             let compression_config = self.config.compression.clone();
 
-            let chunk_index = create_chunk_index()?;
+            let chunk_index = create_chunk_index_with_context(*archive_id.0.as_bytes(), epoch_id)?;
 
             // Create encryption context
             let encryption = EncryptionContext::new(

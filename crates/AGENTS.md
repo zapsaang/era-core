@@ -1,6 +1,6 @@
 # Crate Architecture and Navigation
 
-9 library crates forming a strict L0-L4 pipeline. Each layer only depends on layers below it.
+9 library crates + 1 compact bundle crate forming a strict L0-L4 pipeline. Each layer only depends on layers below it.
 
 ## Crate Map
 
@@ -14,6 +14,7 @@
 ### Transformation (L2)
 - **era-codec**: `Compressor` trait (Zstd/LZ4/NoCompressor) + Reed-Solomon erasure coding.
 - **era-volume**: Volume format v8.1. SuperHeader (4096B), Footer (128B), VolumeReader/Writer, MultiVolume, VolumePool.
+- **era-compact**: Compact read-only bundle format (.erac). CompactBundleWriter/Reader, RS striping, multi-volume distribution. Sole consumer: era-engine.
 
 ### Logic (L3)
 - **era-packing**: k-Bounded Best-Fit MacroBlock packing. StagingPool, resilient AEAD with 4-tier corruption detection.
@@ -26,7 +27,8 @@
 ## Actual Dependency Graph
 
 ```
-era-engine → era-{common,crypto,codec,storage,volume,packing,ingest,index}
+era-engine → era-{common,crypto,codec,storage,volume,packing,ingest,index,compact}
+era-compact → era-{common,codec,volume}
 era-index  → era-{common,crypto,codec,storage,volume}  # needs VolumeWriter for in-volume persistence
 era-packing → era-{common,crypto,codec}
 era-ingest → era-{common,crypto,codec}
@@ -54,11 +56,4 @@ era-crypto → era-common
 - Pipeline: `era-engine/src/writer.rs` (async orchestration)
 - Erasure: `era-codec/src/erasure.rs`
 
-## Development Rules
-
-- Dependencies flow DOWN only. L4 → L3 → L2 → L1 → L0.
-- `era_common::EraError` for all public Result types.
-- `OsRng` only — `thread_rng()` forbidden.
-- Zeroize all sensitive material on drop.
-- `spawn_blocking` for CPU-heavy work (compression, crypto).
-- Keep crate interfaces small — `pub use` facade in each `lib.rs`.
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

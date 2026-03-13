@@ -17,6 +17,7 @@ use crate::chunk_processor::{
     enforce_output_containment, ExtractionContext, MultiChunkState, VerificationContext,
 };
 pub use crate::chunk_processor::{ExtractStats, VerifyStats};
+use crate::source_block_snapshot::SourceDataBlockSnapshot;
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result, ShardLayout};
@@ -27,7 +28,7 @@ use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{Footer, SuperHeader, VolumeReader};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
@@ -545,8 +546,185 @@ impl ArchiveReader {
         Ok(true)
     }
 
+    pub async fn ensure_embedded_index_recovered(&mut self) -> Result<()> {
+        if self.index_reader.is_some() {
+            self.embedded_index_recovery_failed = false;
+            return Ok(());
+        }
+
+        let mut last_err: Option<EraError> = None;
+        for reader in &self.volume_readers {
+            match IndexReader::recover_from_volume(
+                reader,
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                None,
+            )
+            .await
+            {
+                Ok(index_reader) => {
+                    self.index_reader = Some(index_reader);
+                    self.embedded_index_recovery_failed = false;
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        self.embedded_index_recovery_failed = true;
+        Err(last_err.unwrap_or_else(|| {
+            EraError::IntegrityError("embedded index unavailable after recovery attempts".into())
+        }))
+    }
+
     pub fn embedded_index_recovery_failed(&self) -> bool {
         self.embedded_index_recovery_failed
+    }
+
+    pub fn index_reader(&self) -> Option<&IndexReader> {
+        self.index_reader.as_ref()
+    }
+
+    pub fn has_embedded_index(&self) -> bool {
+        self.index_reader.is_some()
+    }
+
+    pub fn catalog(&self) -> Option<&Catalog> {
+        self.catalog.as_ref()
+    }
+
+    pub fn live_catalog_chunk_hashes(&self) -> Result<Vec<ChunkHash>> {
+        let catalog = self
+            .catalog
+            .as_ref()
+            .ok_or_else(|| EraError::IntegrityError("catalog unavailable".into()))?;
+        let mut seen: HashSet<ChunkHash> = HashSet::new();
+        for entry in &catalog.entries {
+            if is_internal_entry(entry) {
+                continue;
+            }
+            for chunk in &entry.chunks {
+                seen.insert(chunk.hash);
+            }
+        }
+        Ok(seen.into_iter().collect())
+    }
+
+    pub async fn live_data_block_ids_from_hashes_via_iterator(
+        &self,
+        live_hashes: &[ChunkHash],
+    ) -> Result<Vec<BlockId>> {
+        let lookup: HashSet<ChunkHash> = live_hashes.iter().copied().collect();
+        let mut out: Vec<BlockId> = Vec::new();
+
+        let erasure_config = self.volume_readers[0].header().config().erasure;
+        let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
+            let dist_strategy = self.volume_readers[0]
+                .header()
+                .config()
+                .distribution
+                .strategy;
+            Box::new(SessionErasureBlockIterator::new(
+                SessionErasureBlockIteratorArgs {
+                    volume_readers: &self.volume_readers,
+                    volume_indices: &self.volume_indices,
+                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
+                    session: &self.session,
+                    volume_key: &self.volume_key,
+                    nonce_context: self.nonce_context,
+                    archive_id: self.archive_id,
+                    epoch_id: self.epoch_id,
+                    compressor: self.create_compressor(),
+                    data_shards: config.data_shards,
+                    parity_shards: config.parity_shards,
+                    distribution_strategy: dist_strategy,
+                },
+            ))
+        } else {
+            Box::new(SessionBlockIterator::new(
+                &self.volume_readers[0],
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                self.archive_id,
+                self.epoch_id,
+                self.create_compressor(),
+            ))
+        };
+
+        while let Some(result) = iter.next_block().await {
+            let decoded = result?;
+            if decoded.chunks.iter().any(|(h, _)| lookup.contains(h)) {
+                out.push(BlockId::new(decoded.block_index as u64));
+            }
+        }
+
+        out.sort_by_key(|b| b.sequence());
+        out.dedup_by_key(|b| b.sequence());
+        Ok(out)
+    }
+
+    pub async fn source_snapshots_for_block_ids(
+        &self,
+        block_ids: &[BlockId],
+    ) -> Result<Vec<SourceDataBlockSnapshot>> {
+        let keep: HashSet<BlockId> = block_ids.iter().copied().collect();
+        let erasure_config = self.volume_readers[0].header().config().erasure;
+        let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
+            let dist_strategy = self.volume_readers[0]
+                .header()
+                .config()
+                .distribution
+                .strategy;
+            Box::new(SessionErasureBlockIterator::new(
+                SessionErasureBlockIteratorArgs {
+                    volume_readers: &self.volume_readers,
+                    volume_indices: &self.volume_indices,
+                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
+                    session: &self.session,
+                    volume_key: &self.volume_key,
+                    nonce_context: self.nonce_context,
+                    archive_id: self.archive_id,
+                    epoch_id: self.epoch_id,
+                    compressor: self.create_compressor(),
+                    data_shards: config.data_shards,
+                    parity_shards: config.parity_shards,
+                    distribution_strategy: dist_strategy,
+                },
+            ))
+        } else {
+            Box::new(SessionBlockIterator::new(
+                &self.volume_readers[0],
+                &self.session,
+                &self.volume_key,
+                self.nonce_context,
+                self.archive_id,
+                self.epoch_id,
+                self.create_compressor(),
+            ))
+        };
+
+        let mut out = Vec::new();
+        while let Some(result) = iter.next_block().await {
+            let decoded = result?;
+            let block_id = BlockId::new(decoded.block_index as u64);
+            if !keep.contains(&block_id) {
+                continue;
+            }
+            let snapshot = decoded.source_snapshot.ok_or_else(|| {
+                EraError::IntegrityError(format!(
+                    "source snapshot unavailable for live block {}",
+                    block_id.sequence()
+                ))
+            })?;
+            out.push(snapshot);
+        }
+
+        out.sort_by_key(|snapshot| snapshot.block_id.sequence());
+        Ok(out)
     }
 
     /// Get the archive header
@@ -557,6 +735,38 @@ impl ArchiveReader {
     /// Get the primary volume footer (if available)
     pub fn primary_footer(&self) -> Option<&Footer> {
         self.volume_readers.first().and_then(|r| r.footer())
+    }
+
+    pub fn volume_indices(&self) -> &[usize] {
+        &self.volume_indices
+    }
+
+    pub fn nonce_context(&self) -> [u8; 16] {
+        self.nonce_context
+    }
+
+    pub fn archive_id_bytes(&self) -> [u8; 16] {
+        self.archive_id
+    }
+
+    pub fn epoch_id(&self) -> u32 {
+        self.epoch_id
+    }
+
+    pub fn session(&self) -> &KeySession {
+        &self.session
+    }
+
+    pub fn volume_key(&self) -> &VolumeKey {
+        &self.volume_key
+    }
+
+    pub fn compression_algorithm(&self) -> era_common::CompressionAlgorithm {
+        self.compression_algorithm
+    }
+
+    pub fn compression_level(&self) -> i32 {
+        self.compression_level
     }
 
     /// Load the catalog from any available volume

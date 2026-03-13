@@ -158,6 +158,73 @@ message Footer {
   uint64 backup_header_offset = 15;
 }
 
+enum CompactRegionKind {
+  COMPACT_REGION_KIND_STRIPED_DATA = 0;
+  COMPACT_REGION_KIND_REPLICATED_TYPED_BLOCK = 1;
+}
+
+message CompactDirectoryEntry {
+  uint64 block_id = 1;
+  uint32 block_type = 2;
+  CompactRegionKind region_kind = 3;
+  uint64 offset = 4;
+  uint64 span = 5;
+  uint32 stripe_ordinal = 6;
+}
+
+message CompactShardRecordHeader {
+  uint32 record_version = 1;
+  uint64 block_id = 2;
+  uint32 stripe_ordinal = 3;
+  uint32 shard_index = 4;
+  uint32 data_shards = 5;
+  uint32 parity_shards = 6;
+  uint32 encrypted_len = 7;
+  uint32 shard_len = 8;
+  uint32 shard_crc = 9;
+}
+
+message CompactVolumeFooter {
+  bytes magic = 1;
+  uint32 version = 2;
+  uint64 data_region_end = 3;
+  uint64 meta_region_offset = 4;
+  uint64 directory_offset = 5;
+  uint32 directory_size = 6;
+  uint32 directory_count = 7;
+  uint64 catalog_offset = 8;
+  uint32 catalog_size = 9;
+  uint64 catalog_block_id = 10;
+  uint64 index_offset = 11;
+  uint32 index_size = 12;
+  uint64 index_block_id = 13;
+  bytes header_hash = 14;
+  bytes directory_hash = 15;
+  uint32 footer_checksum = 16;
+}
+
+message CompactSuperHeader {
+  bytes magic = 1;
+  uint32 version = 2;
+  bytes compact_set_id = 3;
+  bytes archive_id = 4;
+  bytes volume_id = 5;
+  uint32 volume_sequence = 6;
+  uint32 total_compact_volumes = 7;
+  uint32 source_format = 8;
+  uint32 source_version = 9;
+  uint32 source_volume_count = 10;
+  ArchiveConfig config = 11;
+  repeated RecipientSlot recipients = 12;
+  AccessPolicy access_policy = 13;
+  uint32 threshold = 14;
+  bytes salt = 15;
+  uint32 epoch_id = 16;
+  EncryptedVolumeKey encrypted_volume_key = 17;
+  uint64 distribution_strategy = 18;
+  uint64 reserved_flags = 19;
+}
+
 message ChunkRef {
   ChunkHash hash = 1;
   uint64 offset = 2;

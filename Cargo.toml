@@ -2,6 +2,7 @@
 resolver = "2"
 exclude = ["fuzz"]
 members = [
+    "crates/era-compact",
     "crates/era-common",
     "crates/era-crypto",
     "crates/era-codec",
@@ -32,6 +33,7 @@ era-packing = { path = "crates/era-packing" }
 era-ingest = { path = "crates/era-ingest" }
 era-index = { path = "crates/era-index" }
 era-engine = { path = "crates/era-engine" }
+era-compact = { path = "crates/era-compact" }
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }

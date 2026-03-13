@@ -19,7 +19,10 @@
 //! - Bloom filter MUST survive serialization roundtrip with identical false-positive behavior
 //! - Malicious payloads MUST NOT cause panics or unbounded allocations
 
-use era_common::{ArchiveConfig, ArchiveId, BlockId, BlockType, ChunkHash, VolumeId};
+use bytes::Bytes;
+use era_common::{
+    ArchiveConfig, ArchiveId, BlockId, BlockType, ChunkHash, EncryptedMacroBlock, VolumeId,
+};
 use era_crypto::{KeySession, Salt};
 use era_index::{IndexBuilder, IndexEntry, IndexReader, MetaIndex};
 use era_storage::LocalStorageBackend;
@@ -153,6 +156,75 @@ async fn test_embedded_finalize_writes_typed_blocks() {
     );
     assert_eq!(footer.index_offset(), manifest_location.physical_offset);
     assert_eq!(footer.index_size(), manifest_location.encrypted_size);
+}
+
+#[tokio::test]
+async fn test_cold_recovery_succeeds_with_nonzero_index_block_ids() {
+    let temp_dir = TempDir::new().unwrap();
+    let backend = LocalStorageBackend::new(temp_dir.path());
+    let volume_path = Path::new("nonzero_index_block_ids.era");
+
+    let (session, volume_key, nonce_context) = create_test_session();
+    let (header, archive_id) = create_test_header(nonce_context);
+    let epoch_id = header.epoch_id();
+    let mut writer = VolumeWriter::create(&backend, volume_path, header)
+        .await
+        .unwrap();
+
+    let existing_data_block = EncryptedMacroBlock {
+        block_id: BlockId::new(0),
+        data: Bytes::from(vec![0xA5; 128]),
+        original_size: 128,
+        compressed_size: 128,
+        chunk_count: 1,
+    };
+    writer
+        .write_canonical_block(&existing_data_block, BlockType::Data)
+        .await
+        .unwrap();
+
+    let mut builder = IndexBuilder::new_default_with_context(archive_id, epoch_id).unwrap();
+    for i in 0..50u64 {
+        builder
+            .insert(
+                IndexEntry::new(test_hash(i), VolumeId::new(), BlockId::new(i / 10), 0, 1024)
+                    .expect("valid entry"),
+            )
+            .unwrap();
+    }
+
+    let (_meta, manifest_location) = builder
+        .finalize(&mut writer, &session, &volume_key, nonce_context)
+        .await
+        .unwrap();
+
+    assert!(
+        manifest_location.slot_index > 0,
+        "regression requires index manifest block_id to be non-zero"
+    );
+
+    let _ = writer
+        .finalize_with_catalog(
+            0,
+            0,
+            0,
+            manifest_location.physical_offset,
+            manifest_location.encrypted_size,
+            manifest_location.slot_index,
+        )
+        .await
+        .unwrap();
+
+    let reader = VolumeReader::open(&backend, volume_path).await.unwrap();
+    let recovered =
+        IndexReader::recover_from_volume(&reader, &session, &volume_key, nonce_context, None)
+            .await
+            .expect("cold recovery must work with non-zero index block ids");
+
+    for i in 0..50u64 {
+        let result = recovered.lookup(&test_hash(i)).unwrap();
+        assert!(result.is_some(), "entry {} must be recoverable", i);
+    }
 }
 
 /// Verify MetaIndex serialization roundtrip via rkyv preserves all data.

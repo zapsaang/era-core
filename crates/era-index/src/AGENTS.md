@@ -6,14 +6,13 @@ V2.1 embedded deduplication index. L3 — depends on era-storage and era-volume 
 
 | File | Purpose |
 |------|---------|
-| `lib.rs` | Re-exports |
-| `lsm_tree.rs` | LsmTree — main index structure (insert, lookup, merge) |
+| `lib.rs` | Crate facade and public re-exports for builder / reader / schema types. |
+| `chunk_index.rs` | Redb-backed index orchestrator. Coordinates build/finalize/lookup flows across `IndexBuilder` and `IndexReader`. |
 | `builder.rs` | IndexBuilder — constructs index from chunk hashes |
 | `reader.rs` | IndexReader — queries index for dedup decisions |
 | `store.rs` | Storage layer — persists index as encrypted blocks in-volume |
 | `bloom_serde.rs` | Bloom filter serialization (rkyv zero-copy) |
 | `schema.rs` | Database schema (Redb 2.1 ACID B-tree) |
-| `error.rs` | Index-specific errors |
 
 ## ARCHITECTURE
 

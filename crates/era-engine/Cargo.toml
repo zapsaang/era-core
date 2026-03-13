@@ -18,6 +18,7 @@ era-volume = { workspace = true }
 era-packing = { workspace = true }
 era-ingest = { workspace = true }
 era-index = { workspace = true }
+era-compact = { workspace = true }
 futures = "0.3"
 async-trait = { workspace = true }
 
@@ -43,6 +44,7 @@ metrics = { workspace = true }
 rkyv = { workspace = true }
 sharks = { workspace = true }
 zeroize = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

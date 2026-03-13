@@ -160,9 +160,16 @@ enum BuilderState {
 
 impl RedbChunkIndex {
     /// Create a new Redb-backed chunk index.
+    #[allow(dead_code)]
     pub fn new() -> EraResult<Self> {
+        Self::new_with_context([0u8; 16], 0)
+    }
+
+    pub fn new_with_context(archive_id: [u8; 16], epoch_id: u32) -> EraResult<Self> {
         Ok(Self {
-            builder_state: Mutex::new(BuilderState::Ready(IndexBuilder::new_default()?)),
+            builder_state: Mutex::new(BuilderState::Ready(IndexBuilder::new_default_with_context(
+                archive_id, epoch_id,
+            )?)),
             builder_cv: Condvar::new(),
             lookup: RwLock::new(HashMap::new()),
         })
@@ -296,7 +303,16 @@ impl ChunkIndex for RedbChunkIndex {
 /// Create a chunk index backed by Redb (default for production).
 #[allow(dead_code)]
 pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
-    Ok(Arc::new(RedbChunkIndex::new()?))
+    create_chunk_index_with_context([0u8; 16], 0)
+}
+
+pub(crate) fn create_chunk_index_with_context(
+    archive_id: [u8; 16],
+    epoch_id: u32,
+) -> EraResult<Arc<dyn ChunkIndex>> {
+    Ok(Arc::new(RedbChunkIndex::new_with_context(
+        archive_id, epoch_id,
+    )?))
 }
 
 #[cfg(test)]
