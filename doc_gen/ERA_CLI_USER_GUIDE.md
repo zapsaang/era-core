@@ -1,53 +1,36 @@
 # ERA CLI User Guide
 
-## What era-cli is
+## What is era-cli
 
-`era-cli` is the command-line interface for ERA, an encrypted archival tool that can:
+`era-cli` is the command-line interface for ERA, an encrypted archival tool built for long-term storage. It handles:
 
-- create archives from files and directories,
-- extract archives,
-- list contents,
-- show archive metadata,
-- verify archive integrity,
-- attempt repair or recovery.
+- creating archives from files and directories,
+- extracting archives,
+- listing contents,
+- showing archive metadata,
+- verifying archive integrity,
+- repairing damaged archives,
+- repacking archives with new parameters.
 
-The current CLI exposes these commands:
+The CLI exposes seven subcommands:
 
-```bash
+```
 era create
 era extract
 era list
 era info
 era verify
 era repair
+era repack
 ```
 
-Global help:
+Global flags:
 
-```bash
+```
 era --help
 era --version
+era -v <command> ...    # verbose logging (most commands)
 ```
-
-Global verbose logging:
-
-```bash
-era --verbose <command> ...
-```
-
-## Important reality check before you start
-
-This project is still **pre-alpha**. The CLI works, but some behaviors are still rough or inconsistent.
-
-A few things to know up front:
-
-- Password-based workflows are the most consistently supported.
-- `extract` and `list` support certificate/private-key access.
-- `info`, `verify`, and `repair` are currently **password-only** in the CLI.
-- Erasure coding is **enabled by default** for normal archive creation unless your config disables it.
-- Matrix distribution is effectively always `RotatingOffset` in the current CLI.
-- Config files must be complete enough to deserialize as `ArchiveConfig`; a partial TOML file can fail to parse.
-- `list --long` shows a chunk hash column, **not a full-file digest**.
 
 ## Installation
 
@@ -63,15 +46,17 @@ Or run without installing:
 cargo run --manifest-path bins/era-cli/Cargo.toml -- --help
 ```
 
+---
+
 # 1. Quick Start
 
-## Create an archive with a password
+## Create an archive
 
 ```bash
 era create --output archive.era --password "your-secret" /path/to/files
 ```
 
-If you omit `--password`, the CLI will prompt you and ask for confirmation.
+Omit `--password` and the CLI prompts you interactively with confirmation.
 
 ## Extract an archive
 
@@ -79,157 +64,164 @@ If you omit `--password`, the CLI will prompt you and ask for confirmation.
 era extract --input archive.era --output ./restored --password "your-secret"
 ```
 
-## List archive contents
+## List contents
 
 ```bash
 era list archive.era --password "your-secret"
 ```
 
-## Show archive metadata
+## Show metadata
 
 ```bash
 era info archive.era --password "your-secret"
 ```
 
-## Verify archive integrity
+## Verify integrity
 
 ```bash
 era verify archive.era --password "your-secret"
 ```
 
-## Analyze or repair an archive
+## Repair a damaged archive
 
 ```bash
 era repair archive.era --password "your-secret"
 ```
 
-# 2. Command Overview
+## Repack with new parameters
+
+```bash
+era repack --input archive.era --output repacked.era --password "your-secret" --compact
+```
+
+---
+
+# 2. Commands
 
 ## `era create`
 
 Creates a new archive from one or more files or directories.
 
-### Basic syntax
+### Syntax
 
-```bash
+```
 era create [OPTIONS] --output <OUTPUT> <INPUT>...
 ```
 
-### Common examples
+### Examples
 
-Create from one file:
+Single file:
 
 ```bash
 era create --output docs.era --password "secret" ./report.pdf
 ```
 
-Create from a directory recursively:
+Directory (recursive):
 
 ```bash
 era create --output backup.era --password "secret" ./my-folder
 ```
 
-Create from multiple inputs:
+Multiple inputs:
 
 ```bash
 era create --output bundle.era --password "secret" ./photos ./notes.txt ./archive
 ```
 
-### What happens with directories
-
-Directories are walked recursively. Stored paths are relative to the input base, so extracting a directory input recreates its directory structure.
-
-For example, if you archive:
+High compression preset:
 
 ```bash
-era create -o archive.era --password "secret" ./source
+era create --output archive.era --password "secret" --compact ./data
 ```
 
-and `./source` contains:
+Certificate mode (key-based access, no password needed):
 
-```text
+```bash
+era create --output secure.era --certificate public.pem ./data
+```
+
+### Directory behavior
+
+Directories are walked recursively. Stored paths are relative to the input base, so extracting recreates the original structure.
+
+If you archive `./source` containing:
+
+```
 source/file1.txt
 source/subdir/file2.txt
 ```
 
-then extraction recreates:
+extraction recreates:
 
-```text
+```
 source/file1.txt
 source/subdir/file2.txt
 ```
 
 inside the output directory.
 
-### Key options
+### All flags
 
-#### Output path
+| Flag | Description |
+|------|-------------|
+| `-o, --output <OUTPUT>` | Output archive path (required) |
+| `-p, --password <PASSWORD>` | Encryption password (prompted if omitted) |
+| `-c, --certificate <CERTIFICATE>` | Public key PEM for certificate mode |
+| `-C, --config <CONFIG>` | TOML config file path |
+| `-l, --level <LEVEL>` | Compression level 1-22 (default: 3) |
+| `--no-compression` | Disable compression (store mode) |
+| `-e, --erasure <ERASURE>` | Erasure coding as `data:parity` (default: `4:2`) |
+| `--volumes <VOLUMES>` | Number of volumes to distribute shards across |
+| `--max-volume-size <BYTES>` | Max bytes per volume (e.g., `4294967296` for 4 GB) |
+| `--compact` | High compression preset (Zstd-19, 16 MB blocks, k=32) |
+| `-v, --verbose` | Verbose logging |
 
-```bash
--o, --output <OUTPUT>
+Geek parameters (advanced tuning):
+
+| Flag | Description |
+|------|-------------|
+| `--cdc-min <BYTES>` | CDC minimum chunk size |
+| `--cdc-avg <BYTES>` | CDC average chunk size |
+| `--cdc-max <BYTES>` | CDC maximum chunk size |
+| `--packing-k <K>` | Packing k-factor (buffer slots) |
+| `--flush-threshold <PCT>` | Packing flush threshold 0-100 |
+| `--block-target-size <BYTES>` | Target block size |
+
+### Typical create output
+
+```
+ INFO Erasure coding: disabled by CLI
+ INFO Created VolumePool with 1 volumes (Strategy: RotatingOffset)
+ INFO Creating archive: /tmp/guide_demo.era
+ INFO Adding file: era_guide_demo/subdir/nested.txt
+ INFO Adding file: era_guide_demo/report.txt
+ INFO Adding file: era_guide_demo/hello.txt
+ INFO Finalizing archive...
+ INFO Packing 3 small files (49 bytes total)
+ INFO Packed 3 files successfully
+ INFO VolumePool finalized: 1 volumes, 267 total bytes, 1 blocks
+ INFO Archive finalized: 3 files, 49 bytes, 2 blocks
+ INFO
+ INFO Archive created successfully!
+ INFO   Archive ID: ff09eb11-25d4-4179-bf55-c7ffa304ff1e
+ INFO   Files:      3
+ INFO   Total size: 49 B
+ INFO   Blocks:     2
 ```
 
-Required.
-
-#### Password
-
-```bash
--p, --password <PASSWORD>
-```
-
-Optional. If omitted, you are prompted interactively.
-
-#### Config file
-
-```bash
--C, --config <CONFIG>
-```
-
-Loads a TOML config file.
-
-Actual precedence is:
-
-1. CLI flags
-2. config file
-3. built-in defaults
-
-#### Certificate mode
-
-```bash
--c, --certificate <CERTIFICATE>
-```
-
-Uses a public certificate / public key PEM file for certificate-based archive access.
-
-Example:
-
-```bash
-era create --output secure.era --certificate public.pem ./data
-```
-
-### Important caveat: certificate mode today
-
-In the current CLI, if you provide `--certificate` and do **not** provide `--password`, the create path does **not** do the normal interactive password confirmation flow. Internally it uses an empty password string unless one is explicitly passed.
-
-So if you want password + certificate behavior, pass the password explicitly:
-
-```bash
-era create --output secure.era --certificate public.pem --password "secret" ./data
-```
-
-If you want pure certificate-style usage, the current CLI allows that, but this behavior is not polished yet.
+---
 
 ## `era extract`
 
 Extracts all files from an archive.
 
-### Basic syntax
+### Syntax
 
-```bash
+```
 era extract [OPTIONS] --input <INPUT>
 ```
 
-### Common examples
+### Examples
 
 Password mode:
 
@@ -249,68 +241,39 @@ Overwrite existing files:
 era extract --input archive.era --output ./restored --password "secret" --force
 ```
 
-### Key options
+### All flags
 
-#### Input archive
+| Flag | Description |
+|------|-------------|
+| `-i, --input <INPUT>` | Input archive path (required) |
+| `-o, --output <OUTPUT>` | Output directory (default: `.`) |
+| `-p, --password <PASSWORD>` | Decryption password (prompted if omitted) |
+| `-k, --key <KEY>` | Private key PEM for certificate mode |
+| `-f, --force` | Overwrite existing files |
+| `-v, --verbose` | Verbose logging |
 
-```bash
--i, --input <INPUT>
+### Typical extract output
+
+```
+ INFO Extraction complete in 1 second!
+ INFO   Extracted: 3 files
+ INFO   Skipped:   0 files
+ INFO   Written:   49 B
 ```
 
-Required.
-
-#### Output directory
-
-```bash
--o, --output <OUTPUT>
-```
-
-Optional. Defaults to the current directory.
-
-#### Password
-
-```bash
--p, --password <PASSWORD>
-```
-
-If omitted, the CLI prompts:
-
-```text
-Enter decryption password:
-```
-
-#### Private key for certificate mode
-
-```bash
--k, --key <KEY>
-```
-
-Loads a PEM private key and opens the archive using keypair-based access.
-
-Supported private-key input formats currently come from the PEM loader in `era-crypto`, including:
-
-- PKCS#8 private key
-- OpenSSH private key
-
-#### Force overwrite
-
-```bash
--f, --force
-```
-
-Overwrites existing files on extraction.
+---
 
 ## `era list`
 
 Lists files stored in an archive.
 
-### Basic syntax
+### Syntax
 
-```bash
+```
 era list [OPTIONS] <ARCHIVE>
 ```
 
-### Common examples
+### Examples
 
 Short listing:
 
@@ -318,349 +281,501 @@ Short listing:
 era list archive.era --password "secret"
 ```
 
-Long listing:
+Long listing with sizes and chunk IDs:
 
 ```bash
 era list archive.era --password "secret" --long
 ```
 
-List using private key:
+Using a private key:
 
 ```bash
 era list archive.era --key private.pem
 ```
 
+### All flags
+
+| Flag | Description |
+|------|-------------|
+| `-p, --password <PASSWORD>` | Decryption password (prompted if omitted) |
+| `-k, --key <KEY>` | Private key PEM for certificate mode |
+| `-l, --long` | Show detailed information |
+| `-v, --verbose` | Verbose logging |
+
+### Short listing output
+
+```
+ INFO era_guide_demo/subdir/nested.txt
+ INFO era_guide_demo/report.txt
+ INFO era_guide_demo/hello.txt
+ INFO
+ INFO Total: 3 files (49 B total)
+```
+
 ### Long listing output
 
-`--long` prints columns like:
+```
+ INFO SIZE         CHUNK_ID             PATH
+ INFO ------------------------------------------------------------
+ INFO 12 B 4f3d3d8acff6c0c1     era_guide_demo/subdir/nested.txt
+ INFO 25 B 4f3d3d8acff6c0c1     era_guide_demo/report.txt
+ INFO 12 B 4f3d3d8acff6c0c1     era_guide_demo/hello.txt
+ INFO
+ INFO Total: 3 files (49 B total)
+```
 
-- size,
-- hash,
-- path.
+The `CHUNK_ID` column shows the first chunk identifier associated with each file entry. It is not a whole-file digest. Small files packed together may share the same `CHUNK_ID`, which is expected behavior.
 
-Important: the current `HASH` column is derived from the **first chunk** associated with the file entry, not a canonical whole-file digest. Different files can therefore show the same value, especially in small-file packing cases.
-
-So treat `list --long` as an inspection aid, not as a cryptographic manifest of file hashes.
+---
 
 ## `era info`
 
-Shows archive metadata and selected configuration values.
+Shows archive metadata and configuration.
 
-### Basic syntax
+### Syntax
 
-```bash
+```
 era info [OPTIONS] <ARCHIVE>
 ```
 
-### Example
+### Examples
 
 ```bash
 era info archive.era --password "secret"
+era info archive.era --key private.pem
 ```
 
-### What it shows
+### All flags
 
-Current output includes:
+| Flag | Description |
+|------|-------------|
+| `-p, --password <PASSWORD>` | Decryption password (prompted if omitted) |
+| `-k, --key <KEY>` | Private key PEM for certificate mode |
+| `-v, --verbose` | Enable verbose logging |
 
-- Archive ID
-- Volume ID
-- Volume sequence
-- ERA version
-- Max volume size
-- Compression level
-- KDF memory cost
-- KDF time cost
-- Total file count
-- Total content size
+### Typical output
 
-### Important caveat
+```
+ INFO ERA Archive Information
+ INFO =======================
+ INFO
+ INFO Archive ID:      ff09eb11-25d4-4179-bf55-c7ffa304ff1e
+ INFO Volume ID:       cab433a6-3089-4db1-a6b3-235e7623e1bd
+ INFO Volume Sequence: 0
+ INFO ERA Version:     8.1
+ INFO
+ INFO Configuration:
+ INFO   Max Volume Size:    1.00 GiB
+ INFO   Compression Level:  3
+ INFO   KDF Memory Cost:    65536 KB
+ INFO   KDF Time Cost:      3
+ INFO
+ INFO Contents:
+ INFO   Total Files:  3
+ INFO   Total Size:   49 B
+```
 
-`era info` currently supports **password mode only** in the CLI. It does **not** expose a `--key` option.
+---
 
 ## `era verify`
 
-Verifies archive integrity.
+Verifies archive integrity by checking all blocks and files.
 
-### Basic syntax
+### Syntax
 
-```bash
+```
 era verify [OPTIONS] <ARCHIVE>
 ```
 
-### Example
+### Examples
 
 ```bash
 era verify archive.era --password "secret"
-```
-
-Verbose mode:
-
-```bash
+era verify archive.era --key private.pem
 era verify archive.era --password "secret" --verbose
 ```
 
-or:
+### All flags
 
-```bash
-era verify -v archive.era --password "secret"
+| Flag | Description |
+|------|-------------|
+| `-p, --password <PASSWORD>` | Decryption password (prompted if omitted) |
+| `-k, --key <KEY>` | Private key PEM for certificate mode |
+| `--verbose` | Show detailed error information |
+
+Note: `verify` uses `--verbose` (long form only). The global `-v` flag is separate and controls log verbosity at the top level.
+
+### Typical output
+
+```
+ INFO Verification Results
+ INFO ====================
+ INFO
+ INFO Blocks verified:    2
+ INFO Blocks failed:      0
+ INFO Files verified:     3
+ INFO Files incomplete:   0
+ INFO Bytes verified:     461 B
+ INFO Time taken:         1 second
+ INFO
+ INFO Archive integrity verified successfully!
 ```
 
-### What it checks
+If verification fails, the command exits non-zero and prints a summary. With `--verbose`, it includes detailed error messages per failed block.
 
-The verify path reports:
-
-- blocks verified,
-- blocks failed,
-- files verified,
-- incomplete files,
-- bytes verified,
-- elapsed time.
-
-If verification succeeds, it exits successfully.
-
-If verification fails, it exits non-zero and prints a summary. With `--verbose`, it prints detailed error messages.
-
-### Important nuance about `-v`
-
-On `verify`, `-v` is effectively tied into verbose behavior for that command. In practice, it also causes debug-style logging because there is a global verbose flag and a command-local verbose field sharing the same short flag. From a user perspective, this means:
-
-- `era verify -v ...` gives you more detail,
-- and you may also see lower-level debug logging.
-
-That is how the current CLI behaves.
+---
 
 ## `era repair`
 
-Analyzes an archive and, where possible, attempts recovery or repair.
+Analyzes an archive and attempts recovery where possible.
 
-### Basic syntax
+### Syntax
 
-```bash
+```
 era repair [OPTIONS] <ARCHIVE>
 ```
 
-### Example
+### Examples
 
-Analyze only:
+Analyze only (dry run):
 
 ```bash
 era repair archive.era --password "secret"
 ```
 
-Apply repair actions or discard an interrupted-create checkpoint:
+Apply repairs or discard an interrupted-create checkpoint:
 
 ```bash
 era repair archive.era --password "secret" --force
 ```
 
-### What `repair` actually does today
+### All flags
 
-`repair` handles two different situations:
+| Flag | Description |
+|------|-------------|
+| `-p, --password <PASSWORD>` | Decryption password (prompted if omitted) |
+| `-k, --key <KEY>` | Private key PEM for certificate mode |
+| `-f, --force` | Apply repairs or discard checkpoint |
+| `--verbose` | Show detailed information |
 
-#### A. Interrupted archive creation
+Note: like `verify`, `repair` uses `--verbose` (long form only).
 
-If the CLI finds a recovery checkpoint from an incomplete `create` operation:
+### What repair does
 
-- without `--force`, it tells you to rerun the original `era create` command so creation can resume,
-- with `--force`, it discards the checkpoint so you can start fresh.
+Repair handles two situations:
 
-So `--force` here does **not** mean “blindly fix everything”; it can also mean “throw away the saved resume state”.
+**Interrupted archive creation.** If a recovery checkpoint exists from an incomplete `create` run:
 
-#### B. Existing but damaged archive
+- without `--force`: shows recovery info and suggests resuming the original `era create` command,
+- with `--force`: discards the checkpoint so you can start fresh.
 
-If the archive exists and looks complete, `repair` runs verification first.
+**Damaged archive.** If the archive exists and looks complete, repair runs verification first:
 
-- If the archive is intact, it reports that no repair is needed.
-- If there are errors and the archive used erasure coding, it attempts Reed–Solomon based repair logic.
-- If you do **not** pass `--force`, repair runs in an effective dry-run mode.
-- If you **do** pass `--force`, it can apply repairs.
+- if the archive is intact, it reports no repair is needed,
+- if there are errors and the archive used erasure coding, it attempts Reed-Solomon repair,
+- without `--force`: dry-run mode,
+- with `--force`: applies repairs.
 
-If the archive was created **without** erasure coding, repair options are limited, and the CLI will suggest extracting what is still recoverable.
+Archives created without erasure coding have limited repair options.
 
-### Multi-volume detection
+### Typical output (healthy archive)
 
-The repair flow tries to detect multi-volume archives heuristically. This is not a polished archive-discovery UX yet, so document it as best-effort, not magic.
+```
+ INFO Recovery Analysis
+ INFO =================
+ INFO
+ INFO Checkpoint exists:  No
+ INFO Archive exists:     Yes
+ INFO Recovery needed:    No
+ INFO Completed files:    0
+ INFO In-progress file:   None
+ INFO Chunks written:     0
+ INFO Bytes written:      0
+ INFO
+ INFO Archive appears complete. Running verification...
+ INFO ...
+ INFO Archive is intact. No repair needed.
+```
 
-# 3. Compression, Erasure Coding, and Volumes
+---
 
-## Compression
+## `era repack`
 
-### Set compression level
+Extracts an archive and re-creates it with new parameters. Useful for changing compression, erasure settings, or applying the compact preset to an existing archive.
+
+### Syntax
+
+```
+era repack [OPTIONS] --input <INPUT> --output <OUTPUT>
+```
+
+### Examples
+
+Repack with compact preset:
+
+```bash
+era repack --input old.era --output new.era --password "secret" --compact
+```
+
+Repack with custom settings:
+
+```bash
+era repack --input old.era --output new.era --password "secret" \
+    --level 19 --erasure "6:3"
+```
+
+Repack without compression:
+
+```bash
+era repack --input old.era --output new.era --password "secret" --no-compression
+```
+
+### All flags
+
+| Flag | Description |
+|------|-------------|
+| `-i, --input <INPUT>` | Input archive path (required) |
+| `-o, --output <OUTPUT>` | Output archive path (required) |
+| `-p, --password <PASSWORD>` | Decryption password (prompted if omitted) |
+| `-k, --key <KEY>` | Private key PEM for certificate mode |
+| `--compact` | High compression preset (Zstd-19, 16 MB blocks, k=32) |
+| `-l, --level <LEVEL>` | Compression level 1-22 |
+| `--no-compression` | Disable compression |
+| `-e, --erasure <ERASURE>` | Erasure coding as `data:parity` |
+| `-v, --verbose` | Verbose logging |
+
+Geek parameters (same as `create`):
+
+| Flag | Description |
+|------|-------------|
+| `--cdc-min <BYTES>` | CDC minimum chunk size |
+| `--cdc-avg <BYTES>` | CDC average chunk size |
+| `--cdc-max <BYTES>` | CDC maximum chunk size |
+| `--packing-k <K>` | Packing k-factor |
+| `--flush-threshold <PCT>` | Packing flush threshold 0-100 |
+| `--block-target-size <BYTES>` | Target block size |
+
+### Typical output
+
+```
+ INFO Repacking archive: source.era -> repacked.era
+ INFO extracting source archive to temp dir
+ INFO ...
+ INFO Repack complete in 6 seconds!
+ INFO   Files repacked: 3
+ INFO   Extracted size:  49 B
+ INFO   Repacked size:  49 B
+ INFO   Blocks written: 2
+```
+
+---
+
+# 3. Compression
+
+ERA uses Zstd compression by default.
+
+## Set compression level
 
 ```bash
 era create --output archive.era --password "secret" --level 12 ./data
 ```
 
-Rules enforced by the CLI:
+Valid range: `1` to `22`. Higher levels compress more but take longer.
 
-- valid range is `0..22`
-- `0` means no compression
-
-### Disable compression completely
+## Disable compression
 
 ```bash
 era create --output archive.era --password "secret" --no-compression ./data
 ```
 
-Equivalent to:
+Equivalent to `--level 0`. Use this for already-compressed content (video, images, zip files) where compression would waste CPU without saving space.
+
+## Compact preset
 
 ```bash
-era create --output archive.era --password "secret" --level 0 ./data
+era create --output archive.era --password "secret" --compact ./data
 ```
 
-## Erasure coding
+The `--compact` preset applies Zstd level 19, 16 MB blocks, and k=32 packing. It produces smaller archives at the cost of slower write speed. The CLI confirms the preset on startup:
 
-### Use custom erasure settings
+```
+ INFO Using compact preset (Zstd-19, 16MB blocks, k=32)
+```
+
+`--compact` is also available on `repack`.
+
+## Defaults
+
+| Setting | Default |
+|---------|---------|
+| Algorithm | Zstd |
+| Level | 3 |
+
+---
+
+# 4. Erasure Coding
+
+Erasure coding splits each block into data and parity shards using Reed-Solomon. If some shards are lost or corrupted, the block can be reconstructed from the remaining ones.
+
+## Default behavior
+
+Erasure coding is **on by default** with a `4:2` configuration (4 data shards, 2 parity shards). This means:
+
+- archives produce 6 volume files by default,
+- up to 2 shards per block can be lost and the data is still recoverable.
+
+A small archive with default settings produces:
+
+```
+archive.era        (main volume)
+archive.era.001
+archive.era.002
+archive.era.003
+archive.era.004
+archive.era.005
+```
+
+This is expected. Keep all volume files together.
+
+## Custom erasure settings
 
 ```bash
 era create --output archive.era --password "secret" --erasure 6:3 ./data
 ```
 
-Current CLI rules:
+Format: `data:parity`. Both values must be at least `1`. Total shards cannot exceed `255`.
 
-- format must be `data:parity`
-- both values must be at least `1`
-- total shards must not exceed `255`
+With `6:3`, you get 9 volume files and can tolerate losing any 3.
 
-### Disable erasure coding
+## Disable erasure coding
 
 ```bash
 era create --output archive.era --password "secret" --erasure none ./data
 ```
 
-### Default behavior
+Not recommended for important data. Without erasure coding, a single corrupted block cannot be recovered.
 
-If you do not specify erasure settings and do not override them via config, the CLI currently starts from secure defaults equivalent to:
+## Volume count
 
-- data shards: `4`
-- parity shards: `2`
-
-That means normal archive creation may produce a multi-volume archive by default.
-
-In a real run, creating a tiny directory with default settings produced:
-
-- `demo.era`
-- `demo.era.001`
-- `demo.era.002`
-- `demo.era.003`
-- `demo.era.004`
-- `demo.era.005`
-
-So even small archives can fan out into multiple volume files when erasure coding is enabled.
-
-## Volumes
-
-### Set a maximum volume size
-
-```bash
-era create --output archive.era --password "secret" --max-volume-size 4294967296 ./data
-```
-
-### Set explicit volume count
+When erasure coding is enabled, the volume count must be at least equal to the total shard count. For `4:2`, that means at least 6 volumes.
 
 ```bash
 era create --output archive.era --password "secret" --erasure 4:2 --volumes 6 ./data
 ```
 
-If erasure coding is enabled, the CLI enforces:
-
-```text
-volume count >= total shards
-```
-
-So for `4:2`, `--volumes` must be at least `6`.
-
-## Matrix distribution
-
-The CLI exposes:
+You can also set a maximum size per volume:
 
 ```bash
---matrix-distribution <true|false>
+era create --output archive.era --password "secret" --max-volume-size 4294967296 ./data
 ```
 
-But the current implementation effectively forces the `RotatingOffset` strategy regardless. Passing `false` is deprecated and does not restore some alternate strategy.
+When a volume hits the size limit, a new one is created automatically.
 
-For customers, the practical guidance is:
+## Erasure coding with create output
 
-- you can treat matrix distribution as on/standardized in current builds,
-- do not rely on this flag for meaningful strategy switching yet.
+```
+ INFO Erasure coding:   4:2 (50% overhead, can recover 2 lost shards/block)
+ INFO Using 6 volumes (will tolerate up to 2 volume failures)
+ INFO Created VolumePool with 6 volumes (Strategy: RotatingOffset)
+ ...
+ INFO Archive created successfully!
+ INFO   Archive ID: 74e38521-b2cc-494c-8ff9-12fbb7438a58
+ INFO   Files:      3
+ INFO   Total size: 49 B
+ INFO   Blocks:     6
+```
 
-# 4. Advanced “Geek Parameters”
+---
 
-These are available on `create`:
+# 5. Certificate Mode
+
+Certificate mode lets you create archives that can only be opened with a private key, without needing to share a password.
+
+## Generate a keypair
+
+Use `era-keygen` to generate a keypair and certificate:
 
 ```bash
---cdc-min <CDC_MIN>
---cdc-avg <CDC_AVG>
---cdc-max <CDC_MAX>
---packing-k <PACKING_K>
+era-keygen --output-dir ./keys
 ```
 
-Example:
+This produces `public.pem` and `private.pem`.
+
+## Create a certificate-based archive
 
 ```bash
-era create \
-  --output archive.era \
-  --password "secret" \
-  --cdc-min 16384 \
-  --cdc-avg 65536 \
-  --cdc-max 262144 \
-  --packing-k 8 \
-  ./data
+era create --output secure.era --certificate public.pem ./data
 ```
 
-Current validation rules:
+When you provide `--certificate` without `--password`, the CLI generates a random 32-byte password automatically. The archive is only decryptable with the matching private key.
 
-- all CDC sizes must be greater than `0`
-- they must satisfy:
+## Hybrid mode (password + certificate)
 
-```text
-min <= avg <= max
+```bash
+era create --output secure.era --certificate public.pem --password "secret" ./data
 ```
 
-If not, the CLI fails before archive creation.
+In hybrid mode, either the password or the private key can decrypt the archive.
 
-These options are useful for advanced tuning, but they are not beginner settings.
+## Open a certificate-based archive
 
-# 5. Config File Usage
+All read commands support `--key`:
 
-## How config precedence works
+```bash
+era extract --input secure.era --output ./restored --key private.pem
+era list secure.era --key private.pem
+era info secure.era --key private.pem
+era verify secure.era --key private.pem
+era repair secure.era --key private.pem
+```
 
-Actual precedence is:
+## Supported PEM formats
 
-1. CLI flags
-2. config file
-3. built-in defaults
+Private keys:
+- PKCS#8
+- OpenSSH
 
-So you can define a base config and override parts of it from the command line.
+Public input:
+- SubjectPublicKeyInfo (SPKI)
+- X.509 certificates
 
-## Important caveat: partial configs can fail
+Note: encrypted PKCS#8 private keys are not yet supported.
 
-The current CLI deserializes the TOML directly into the full `ArchiveConfig` structure. That means a partial config file like:
+---
+
+# 6. Config Files
+
+Config files let you define archive parameters in TOML and reuse them across runs.
+
+## Precedence
+
+```
+CLI flags > config file > built-in defaults
+```
+
+You can define a base config and override individual settings from the command line.
+
+## Using a config file
+
+```bash
+era create -C ./config.toml --output archive.era --password "secret" ./data
+```
+
+## Partial configs work
+
+All config sections use `#[serde(default)]`, so you can write a sparse override file. A config with only a compression section is valid:
 
 ```toml
 [compression]
 level = 9
 ```
 
-can fail because required sibling fields are missing.
-
-For example, a config with `[compression]` but no `algorithm` failed with:
-
-```text
-missing field `algorithm`
-```
-
-So for now, treat config files as **full structured configs**, not sparse overrides.
-
-## Minimal working config example
-
-This is a minimal config that worked in testing:
+## Full config example
 
 ```toml
 [compression]
 algorithm = "Zstd"
-level = 3
+level = 9
 
 [encryption]
 algorithm = "XChaCha20Poly1305"
@@ -669,39 +784,6 @@ kdf_time_cost = 3
 
 [volume]
 max_size = 1073741824
-enable_padding = true
-naming_template = "{archive_id}.vol{seq:03}.era"
-
-[block]
-target_size = 4194304
-```
-
-Use it like this:
-
-```bash
-era create \
-  -C ./config.toml \
-  --output archive.era \
-  --password "secret" \
-  ./data
-```
-
-## Fuller config example
-
-If you want to define chunking, packing, erasure, and distribution explicitly too:
-
-```toml
-[compression]
-algorithm = "Zstd"
-level = 9
-
-[encryption]
-algorithm = "XChaCha20Poly1305"
-kdf_memory_cost = 65536
-kdf_time_cost = 3
-
-[volume]
-max_size = 1048576
 enable_padding = true
 naming_template = "{archive_id}.vol{seq:03}.era"
 
@@ -729,151 +811,105 @@ min_volumes = 3
 target_volumes = 6
 ```
 
-# 6. Password and Key Handling
+## Built-in defaults
 
-## Password workflows
+| Setting | Default |
+|---------|---------|
+| Compression | Zstd level 3 |
+| Encryption | XChaCha20-Poly1305 |
+| KDF memory cost | 65536 KB |
+| KDF time cost | 3 |
+| Max volume size | 1 GiB |
+| Block target size | 4 MiB |
+| Erasure coding | 4:2 |
+| CDC min | 4096 bytes |
+| CDC avg | 65536 bytes |
+| CDC max | 262144 bytes |
+| Packing k-factor | 8 |
+| Packing flush threshold | 95% |
 
-### Create
+---
 
-- If `--password` is supplied: no interactive confirmation
-- If `--password` is omitted: interactive prompt with confirmation
+# 7. Password Handling
 
-### Extract / List / Info / Verify / Repair
+## Interactive prompts
 
-- If `--password` is supplied: non-interactive
-- If omitted: interactive password prompt
+If you omit `--password` on any command, the CLI prompts you:
 
-This makes scripting easy, but it also means a typo in a scripted `create --password ...` is not caught by confirmation.
+- on `create`: prompts and asks for confirmation,
+- on all other commands: prompts once.
 
-## Certificate / key workflows
+## Scripting
 
-### Create with a public certificate
+Pass `--password` explicitly to skip prompts:
 
 ```bash
-era create --output archive.era --certificate public.pem ./data
+era create --output archive.era --password "secret" ./data
+era verify archive.era --password "secret"
 ```
 
-### Extract with a private key
+## Wrong password
+
+If you provide the wrong password, the CLI fails with:
+
+```
+Error: Failed to open archive
+
+Caused by:
+    Invalid key: No valid credentials found
+```
+
+---
+
+# 8. Geek Parameters
+
+These are available on `create` and `repack` for advanced tuning of the internal pipeline. Most users should leave them at defaults.
+
+## Content-Defined Chunking (CDC)
+
+CDC splits files into variable-size chunks based on content. The three size parameters control the chunk size distribution:
 
 ```bash
-era extract --input archive.era --output ./restored --key private.pem
+era create \
+  --output archive.era \
+  --password "secret" \
+  --cdc-min 16384 \
+  --cdc-avg 65536 \
+  --cdc-max 262144 \
+  ./data
 ```
 
-### List with a private key
+Validation rules:
+
+- all values must be greater than `0`,
+- must satisfy `min <= avg <= max`.
+
+## Packing
+
+Small files are packed together into MacroBlocks to avoid wasting space on tiny chunks. The packing parameters control buffer behavior:
 
 ```bash
-era list archive.era --key private.pem
+era create \
+  --output archive.era \
+  --password "secret" \
+  --packing-k 16 \
+  --flush-threshold 90 \
+  ./data
 ```
 
-### Current limitations
+## Block target size
 
-- `info` does not support `--key`
-- `verify` does not support `--key`
-- `repair` does not support `--key`
+Controls the target size for encrypted blocks:
 
-So if you are building a customer workflow around certificate-based archives, call out that only some read paths currently expose key-based access in the CLI.
+```bash
+era create --output archive.era --password "secret" --block-target-size 16777216 ./data
+```
 
-## Supported PEM/key input formats
+The compact preset sets this to 16 MB automatically.
 
-Based on the current PEM loader, the CLI supports loading:
+---
 
-Private keys:
-- PKCS#8
-- OpenSSH
-
-Public input:
-- SubjectPublicKeyInfo (SPKI)
-- X.509 certificates
-
-One more important caveat: encrypted PKCS#8 private keys are **not yet supported** by the loader.
-
-# 7. What Output Looks Like
-
-## Create
-
-A successful `create` run prints summary information such as:
-
-- archive ID
-- file count
-- total size
-- block count
-
-With `--verbose`, you also see internal progress and debug logs, such as:
-
-- small-file buffering,
-- durable checkpoint commit,
-- catalog write,
-- embedded index finalization.
-
-## Extract
-
-Reports:
-
-- extracted file count
-- skipped file count
-- total bytes written
-
-## Verify
-
-Reports:
-
-- verified blocks
-- failed blocks
-- verified files
-- incomplete files
-- bytes verified
-- time taken
-
-## Repair
-
-Reports recovery analysis first, including:
-
-- whether checkpoint exists,
-- whether archive exists,
-- whether recovery is needed,
-- in-progress file info,
-- bytes/chunks written.
-
-Then it either:
-
-- says no repair is needed,
-- suggests resume behavior,
-- simulates repair,
-- or applies repair when `--force` is used.
-
-# 8. Known Rough Edges You Should Tell Customers About
-
-These are worth documenting explicitly.
-
-## 1. `list --long` hash is not a full file hash
-
-It is a chunk-derived display value, not a canonical whole-file digest.
-
-## 2. `info`, `verify`, and `repair` are password-only in the CLI
-
-Even though key-based access exists in some read paths, those commands do not expose it yet.
-
-## 3. Config files are not sparse patches
-
-A partial TOML file may fail to parse because the CLI currently expects enough fields to deserialize the full config structure.
-
-## 4. Certificate mode on create is not polished
-
-If you use `--certificate` without `--password`, the create path skips the normal password confirmation flow and internally uses an empty password string.
-
-## 5. `--matrix-distribution=false` does not really disable strategy use
-
-The CLI still forces `RotatingOffset`.
-
-## 6. Small archives may still produce multiple volume files
-
-That is normal when erasure coding is enabled.
-
-## 7. Verify on a healthy archive can still log degraded-mode warnings
-
-In a real demo run, verification succeeded but logged embedded-index recovery warnings and continued successfully. Customers should treat those as implementation details unless the command exits non-zero.
-
-# 9. Recommended Customer Workflows
+# 9. Recommended Workflows
 
 ## Simple password-based backup
 
@@ -884,10 +920,10 @@ era list backup.era --password "secret"
 era extract --input backup.era --output ./restore-test --password "secret"
 ```
 
-## Space-saving archive with stronger compression
+## Space-saving archive
 
 ```bash
-era create --output archive.era --password "secret" --level 12 ./data
+era create --output archive.era --password "secret" --compact ./data
 ```
 
 ## Fast archive without compression
@@ -896,7 +932,7 @@ era create --output archive.era --password "secret" --level 12 ./data
 era create --output archive.era --password "secret" --no-compression ./data
 ```
 
-## Redundant archive with explicit erasure settings
+## Redundant archive with stronger erasure settings
 
 ```bash
 era create --output archive.era --password "secret" --erasure 6:3 --volumes 9 ./data
@@ -908,73 +944,74 @@ era create --output archive.era --password "secret" --erasure 6:3 --volumes 9 ./
 era create -C ./config.toml --output archive.era --password "secret" ./data
 ```
 
-## Certificate-based extraction
+## Certificate-based archive (no shared password)
 
 ```bash
-era extract --input archive.era --output ./restored --key private.pem
+# Create
+era create --output secure.era --certificate public.pem ./data
+
+# Extract
+era extract --input secure.era --output ./restored --key private.pem
+
+# Verify
+era verify secure.era --key private.pem
 ```
 
-## Safe repair analysis first, then apply
+## Upgrade an existing archive to compact
+
+```bash
+era repack --input old.era --output compact.era --password "secret" --compact
+```
+
+## Safe repair: analyze first, then apply
 
 ```bash
 era repair archive.era --password "secret"
 era repair archive.era --password "secret" --force
 ```
+
+---
 
 # 10. Troubleshooting
 
-## “Compression level must be between 0 and 22”
+## "Compression level must be between 0 and 22"
 
-Use a value in that range, or use:
+Use a value in that range, or use `--no-compression`.
 
-```bash
---no-compression
-```
+## "Invalid erasure format"
 
-## “Invalid erasure format”
+Use `--erasure 4:2`, not `4,2` or `4`.
 
-Use:
+## "Volume count must be >= total shards"
 
-```bash
---erasure 4:2
-```
-
-not something like `4,2` or `4`.
-
-## “Volume count must be >= total shards”
-
-If you use:
-
-```bash
---erasure 4:2
-```
-
-then volume count must be at least:
-
-```text
-6
-```
+With `--erasure 4:2`, volume count must be at least `6`. Either omit `--volumes` (the CLI sets it automatically) or pass `--volumes 6` or higher.
 
 ## Config file parse failure
 
-Your TOML is probably too incomplete. Start from a full working template rather than a partial override.
+Check that your TOML section names and field names are correct. Partial configs are fine, but field names must match exactly.
 
 ## Wrong password or wrong private key
 
-The CLI will fail to open, verify, or extract. That is expected behavior.
+The CLI fails to open the archive. That is expected. Double-check your credentials and try again.
 
 ## Interrupted archive creation
 
-Run:
+Run repair to inspect recovery state:
 
 ```bash
 era repair archive.era --password "secret"
 ```
 
-to inspect recovery state.
-
-If you want to discard saved resume state and start over:
+To discard the saved resume state and start over:
 
 ```bash
 era repair archive.era --password "secret" --force
 ```
+
+## Multiple volume files
+
+If your archive produced `archive.era`, `archive.era.001`, etc., that is normal when erasure coding is enabled. Keep all volume files in the same directory. ERA finds them automatically.
+
+## "Not enough shards for recovery"
+
+Too many volume files are missing or corrupted. With `4:2` erasure coding, you can lose up to 2 volumes. Try `era repair` first. If more than 2 volumes are gone, the data cannot be recovered.

@@ -6,6 +6,7 @@ use crate::{ErasureCodeConfig, MatrixDistributionConfig};
 
 /// Main archive configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ArchiveConfig {
     /// Compression configuration
     pub compression: CompressionConfig,
@@ -16,16 +17,13 @@ pub struct ArchiveConfig {
     /// Block configuration
     pub block: BlockConfig,
     /// Chunking configuration (CDC)
-    #[serde(default)]
     pub chunking: ChunkingConfig,
     /// Packing configuration (k-Bounded Best-Fit)
-    #[serde(default)]
     pub packing: PackingConfig,
     /// Erasure coding configuration (None = disabled)
     /// Default: 4 data shards + 2 parity shards per whitepaper specification
     pub erasure: Option<ErasureCodeConfig>,
     /// Matrix distribution configuration
-    #[serde(default)]
     pub distribution: MatrixDistributionConfig,
 }
 
@@ -87,6 +85,7 @@ pub enum CompressionAlgorithm {
 
 /// Compression configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CompressionConfig {
     /// Algorithm to use
     pub algorithm: CompressionAlgorithm,
@@ -115,6 +114,7 @@ pub enum EncryptionAlgorithm {
 
 /// Encryption configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EncryptionConfig {
     /// Algorithm to use
     pub algorithm: EncryptionAlgorithm,
@@ -136,6 +136,7 @@ impl Default for EncryptionConfig {
 
 /// Volume configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VolumeConfig {
     /// Maximum volume size in bytes (default: 1GB)
     pub max_size: u64,
@@ -157,6 +158,7 @@ impl Default for VolumeConfig {
 
 /// Block configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BlockConfig {
     /// Target block size in bytes (default: 4MB)
     pub target_size: usize,
@@ -172,6 +174,7 @@ impl Default for BlockConfig {
 
 /// Chunking configuration for FastCDC
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChunkingConfig {
     /// Minimum chunk size in bytes
     pub min_size: usize,
@@ -180,10 +183,8 @@ pub struct ChunkingConfig {
     /// Maximum chunk size in bytes
     pub max_size: usize,
     /// FastCDC normalization level (v2020)
-    #[serde(default)]
     pub normalization_level: NormalizationLevel,
     /// Rolling hash seed for FastCDC (v2020)
-    #[serde(default)]
     pub rolling_hash_seed: u64,
 }
 
@@ -211,6 +212,7 @@ impl Default for ChunkingConfig {
 
 /// Packing configuration for k-Bounded Best-Fit
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PackingConfig {
     /// Number of active bins (k-factor)
     /// Higher k = better packing efficiency, higher memory usage

@@ -126,8 +126,8 @@ mod medium_severity {
             "embedded index recovery failure must be logged at warn level"
         );
         assert!(
-            source.contains("let index_recovered = self.restore_embedded_index().await?;")
-                && source.contains("if !index_recovered")
+            source.contains("let _index_recovered = self.restore_embedded_index().await?;")
+                && source.contains("if self.embedded_index_recovery_failed")
                 && source.contains("Embedded index recovery failed; continuing in degraded mode"),
             "preflight path must observe and surface degraded recovery status"
         );

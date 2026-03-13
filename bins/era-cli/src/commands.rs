@@ -7,13 +7,15 @@ use era_common::{
     MatrixDistributionStrategy,
 };
 use era_engine::{
-    repair_archive, repair_archive_matrix, repack_archive, repack_archive_with_keypair,
+    repack_archive, repack_archive_with_keypair, repair_archive, repair_archive_matrix,
     ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager, RepairOptions,
 };
 use indicatif::{HumanBytes, HumanDuration, ProgressBar, ProgressStyle};
+use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info, warn};
+use zeroize::Zeroize;
 
 /// Get password from user with a professional prompt
 ///
@@ -88,7 +90,10 @@ struct ConfigOverrides<'a> {
     block_target_size: Option<usize>,
 }
 
-fn apply_config_overrides(config: &mut ArchiveConfig, overrides: ConfigOverrides<'_>) -> Result<()> {
+fn apply_config_overrides(
+    config: &mut ArchiveConfig,
+    overrides: ConfigOverrides<'_>,
+) -> Result<()> {
     if overrides.no_compression {
         config.compression.algorithm = CompressionAlgorithm::None;
         config.compression.level = 0;
@@ -164,7 +169,6 @@ pub struct CreateArgs<'a> {
     pub erasure: Option<&'a str>,
     pub volume_count: Option<usize>,
     pub max_volume_size: Option<u64>,
-    pub matrix_distribution: Option<bool>,
     pub cdc_min: Option<usize>,
     pub cdc_avg: Option<usize>,
     pub cdc_max: Option<usize>,
@@ -187,7 +191,6 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         erasure,
         volume_count,
         max_volume_size,
-        matrix_distribution,
         cdc_min,
         cdc_avg,
         cdc_max,
@@ -219,27 +222,24 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         }
     };
 
-    apply_config_overrides(&mut config, ConfigOverrides {
-        compression_level,
-        no_compression,
-        erasure,
-        cdc_min,
-        cdc_avg,
-        cdc_max,
-        packing_k,
-        flush_threshold,
-        block_target_size,
-    })?;
+    apply_config_overrides(
+        &mut config,
+        ConfigOverrides {
+            compression_level,
+            no_compression,
+            erasure,
+            cdc_min,
+            cdc_avg,
+            cdc_max,
+            packing_k,
+            flush_threshold,
+            block_target_size,
+        },
+    )?;
 
     // Volume & Distribution
     if let Some(val) = max_volume_size {
         config.volume.max_size = val;
-    }
-    // Always use RotatingOffset strategy
-    if let Some(false) = matrix_distribution {
-        eprintln!(
-            "Warning: --matrix-distribution=false is deprecated. Using RotatingOffset strategy."
-        );
     }
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
@@ -269,9 +269,18 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     };
 
     // Get password with confirmation (only if not using certificate mode)
-    // Note: Hybrid mode is not yet fully supported via CLI arguments, prioritizing pure Certificate mode
     let password = if certificate.is_some() {
-        password.map(|p| p.to_string()).unwrap_or_default()
+        if let Some(p) = password {
+            info!("Hybrid mode: certificate + password");
+            p.to_string()
+        } else {
+            let mut random_pw = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut random_pw);
+            let pw = hex::encode(random_pw);
+            random_pw.zeroize();
+            info!("Certificate-only mode: archive will be decryptable only with the private key");
+            pw
+        }
     } else {
         get_password_with_confirmation(password)?
     };
@@ -457,7 +466,7 @@ pub async fn list(
         .context("Failed to read catalog")?;
 
     if long_format {
-        info!("{:<12} {:<20} PATH", "SIZE", "HASH");
+        info!("{:<12} {:<20} PATH", "SIZE", "CHUNK_ID");
         info!("{}", "-".repeat(60));
         for entry in &files {
             let hash_str = entry
@@ -489,14 +498,21 @@ pub async fn list(
 }
 
 /// Show information about an ERA archive
-pub async fn info(archive: &Path, password: Option<&str>) -> Result<()> {
-    let password = get_password(password, "Enter decryption password: ")?;
+pub async fn info(archive: &Path, password: Option<&str>, key_path: Option<&Path>) -> Result<()> {
+    let mut reader = if let Some(kp_path) = key_path {
+        info!("Loading private key: {}", kp_path.display());
+        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
+            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
+        ArchiveReader::open_with_keypair(archive, &keypair)
+            .await
+            .context("Failed to open archive with key")?
+    } else {
+        let password = get_password(password, "Enter decryption password: ")?;
+        ArchiveReader::open(archive, &password)
+            .await
+            .context("Failed to open archive")?
+    };
 
-    let mut reader = ArchiveReader::open(archive, &password)
-        .await
-        .context("Failed to open archive")?;
-
-    // Clone header info before mutable borrow
     let header = reader.header().clone();
     let catalog = reader
         .load_catalog()
@@ -544,15 +560,28 @@ pub async fn info(archive: &Path, password: Option<&str>) -> Result<()> {
 }
 
 /// Verify integrity of an ERA archive
-pub async fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Result<()> {
-    let password = get_password(password, "Enter decryption password: ")?;
-
+pub async fn verify(
+    archive: &Path,
+    password: Option<&str>,
+    key_path: Option<&Path>,
+    verbose: bool,
+) -> Result<()> {
     info!("Verifying archive: {}", archive.display());
     info!("");
 
-    let mut reader = ArchiveReader::open(archive, &password)
-        .await
-        .context("Failed to open archive")?;
+    let mut reader = if let Some(kp_path) = key_path {
+        info!("Loading private key: {}", kp_path.display());
+        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
+            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
+        ArchiveReader::open_with_keypair(archive, &keypair)
+            .await
+            .context("Failed to open archive with key")?
+    } else {
+        let password = get_password(password, "Enter decryption password: ")?;
+        ArchiveReader::open(archive, &password)
+            .await
+            .context("Failed to open archive")?
+    };
 
     let start_time = Instant::now();
     let pb = ProgressBar::new_spinner();
@@ -611,11 +640,10 @@ pub async fn verify(archive: &Path, password: Option<&str>, verbose: bool) -> Re
 pub async fn repair(
     archive: &Path,
     password: Option<&str>,
+    key_path: Option<&Path>,
     force: bool,
     verbose: bool,
 ) -> Result<()> {
-    let password = get_password(password, "Enter decryption password: ")?;
-
     info!("Analyzing archive: {}", archive.display());
     info!("");
 
@@ -662,13 +690,22 @@ pub async fn repair(
     }
 
     if !status.recovery_needed {
-        // Archive exists, let's verify it
         info!("Archive appears complete. Running verification...");
         info!("");
 
-        let mut reader = ArchiveReader::open(archive, &password)
-            .await
-            .context("Failed to open archive")?;
+        let mut reader = if let Some(kp_path) = key_path {
+            info!("Loading private key: {}", kp_path.display());
+            let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
+                .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
+            ArchiveReader::open_with_keypair(archive, &keypair)
+                .await
+                .context("Failed to open archive with key")?
+        } else {
+            let password = get_password(password, "Enter decryption password: ")?;
+            ArchiveReader::open(archive, &password)
+                .await
+                .context("Failed to open archive")?
+        };
 
         // Check if erasure coding is enabled
         let header = reader.header();
@@ -706,9 +743,14 @@ pub async fn repair(
             }
         }
 
-        // Attempt actual repair for erasure-coded archives
         info!("");
         if erasure_enabled {
+            if key_path.is_some() {
+                anyhow::bail!(
+                    "Reed-Solomon repair requires password mode. Re-run with --password instead of --key."
+                );
+            }
+            let password = get_password(password, "Enter decryption password: ")?;
             info!("Attempting repair using Reed-Solomon erasure coding...");
             info!("");
 
@@ -870,19 +912,26 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
         }
     };
 
-    apply_config_overrides(&mut config, ConfigOverrides {
-        compression_level,
-        no_compression,
-        erasure,
-        cdc_min,
-        cdc_avg,
-        cdc_max,
-        packing_k,
-        flush_threshold,
-        block_target_size,
-    })?;
+    apply_config_overrides(
+        &mut config,
+        ConfigOverrides {
+            compression_level,
+            no_compression,
+            erasure,
+            cdc_min,
+            cdc_avg,
+            cdc_max,
+            packing_k,
+            flush_threshold,
+            block_target_size,
+        },
+    )?;
 
-    info!("Repacking archive: {} -> {}", input.display(), output.display());
+    info!(
+        "Repacking archive: {} -> {}",
+        input.display(),
+        output.display()
+    );
 
     let start_time = Instant::now();
 
@@ -908,7 +957,10 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
     );
     info!("  Files repacked: {}", stats.files_repacked);
     info!("  Extracted size:  {}", HumanBytes(stats.extracted_bytes));
-    info!("  Repacked size:  {}", HumanBytes(stats.repacked_total_size));
+    info!(
+        "  Repacked size:  {}",
+        HumanBytes(stats.repacked_total_size)
+    );
     info!("  Blocks written: {}", stats.blocks_written);
 
     Ok(())

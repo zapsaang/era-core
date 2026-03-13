@@ -18,7 +18,7 @@ fn test_help_output() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("ERA archive system"))
+        .stdout(predicate::str::contains("Encrypted Redundant Archiver"))
         .stdout(predicate::str::contains("create"))
         .stdout(predicate::str::contains("extract"))
         .stdout(predicate::str::contains("list"));
@@ -50,7 +50,7 @@ fn test_extract_subcommand_help() {
         .args(["extract", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Extract files"))
+        .stdout(predicate::str::contains("Extract all files"))
         .stdout(predicate::str::contains("--input"))
         .stdout(predicate::str::contains("--output"));
 }
@@ -61,7 +61,7 @@ fn test_list_subcommand_help() {
         .args(["list", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("List contents"))
+        .stdout(predicate::str::contains("List files stored"))
         .stdout(predicate::str::contains("--password"));
 }
 
@@ -285,7 +285,7 @@ fn test_verify_subcommand_help() {
         .args(["verify", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Verify integrity"))
+        .stdout(predicate::str::contains("Verify archive integrity"))
         .stdout(predicate::str::contains("--password"))
         .stdout(predicate::str::contains("--verbose"));
 }

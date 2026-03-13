@@ -37,8 +37,8 @@ pub mod metrics_collector;
 mod packing_stage;
 mod reader;
 mod recovery;
-mod repair;
 mod repack;
+mod repair;
 mod small_file_packer;
 mod volume_stage;
 mod write_pipeline;
@@ -58,7 +58,7 @@ pub use reader::{ArchiveReader, ExtractOptions, ExtractStats, VerifyStats};
 pub use recovery::{
     RecoverableWriter, RecoveryManager, RecoveryOptions, RecoveryStatus, RecoveryStrategy,
 };
-pub use repair::{repair_archive, repair_archive_matrix, RepairOptions, RepairStats};
 pub use repack::{repack_archive, repack_archive_with_keypair, RepackStats};
+pub use repair::{repair_archive, repair_archive_matrix, RepairOptions, RepairStats};
 pub use writer::generic::{GenericArchiveWriter, GenericArchiveWriterBuilder};
 pub use writer::{ArchiveWriter, ArchiveWriterBuilder, AuthMode};

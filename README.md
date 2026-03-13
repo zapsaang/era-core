@@ -101,10 +101,6 @@ era extract --input archive.era --output /restored --key private.pem
 era create --output archive.era --password "secret" \
     --max-volume-size 4294967296 /path/to/large/files
 
-# Matrix shard distribution across multiple volumes
-era create --output archive.era --password "secret" \
-    --volumes 4 --matrix-distribution /path/to/files
-
 # Custom CDC parameters and packing
 era create --output archive.era --password "secret" \
     --cdc-min 16384 --cdc-avg 65536 --cdc-max 262144 \

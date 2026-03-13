@@ -23,7 +23,18 @@ use tracing::Level;
 
 #[derive(Parser)]
 #[command(name = "era")]
-#[command(author, version, about, long_about = None)]
+#[command(author, version)]
+#[command(about = "ERA — Encrypted Redundant Archiver")]
+#[command(long_about = "ERA — Encrypted Redundant Archiver\n\n\
+    Create, extract, and manage encrypted archives with built-in redundancy.\n\
+    Features XChaCha20-Poly1305 encryption, Zstd compression, Reed-Solomon\n\
+    erasure coding, and certificate-based access control.")]
+#[command(after_help = "\x1b[1mQuick Start:\x1b[0m\n  \
+    era create -o backup.era ./my-files          Create an archive (prompts for password)\n  \
+    era extract -i backup.era -o ./restored      Extract an archive\n  \
+    era list backup.era                           List archive contents\n  \
+    era verify backup.era                         Verify archive integrity\n\n  \
+    Use 'era <command> --help' for detailed usage of each command.")]
 #[command(propagate_version = true)]
 struct Cli {
     /// Enable verbose logging
@@ -37,6 +48,21 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Create a new ERA archive
+    #[command(
+        long_about = "Create a new ERA archive from one or more files or directories.\n\n\
+        Directories are walked recursively. By default, archives use Zstd level 3\n\
+        compression and 4:2 Reed-Solomon erasure coding for redundancy.\n\n\
+        Provide --password on the command line or omit it to be prompted interactively.\n\
+        Use --certificate for key-based access without sharing a password."
+    )]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
+        era create -o backup.era ./my-files\n  \
+        era create -o backup.era -p secret ./docs ./photos\n  \
+        era create -o backup.era --compact ./data\n  \
+        era create -o backup.era --certificate public.pem ./data\n  \
+        era create -o backup.era --erasure 6:3 --volumes 9 ./data\n  \
+        era create -o backup.era -C config.toml ./data\n  \
+        era create -o backup.era --no-compression ./videos")]
     Create {
         /// Input file(s) to archive
         #[arg(required = true)]
@@ -76,7 +102,6 @@ enum Commands {
         erasure: Option<String>,
 
         /// Number of volumes to distribute shards across (default: total shards)
-        /// Use with --matrix-distribution for optimal fault tolerance
         #[arg(long)]
         volumes: Option<usize>,
 
@@ -84,12 +109,6 @@ enum Commands {
         /// When exceeded, new volumes are created automatically
         #[arg(long)]
         max_volume_size: Option<u64>,
-
-        /// Enable true matrix distribution of erasure shards across volumes
-        /// This ensures each volume contains different shards for better fault tolerance
-        /// Defaults to TRUE if erasure is enabled.
-        #[arg(long)]
-        matrix_distribution: Option<bool>,
 
         // --- GEEK PARAMETERS ---
         /// [Geek] CDC minimum chunk size (bytes)
@@ -116,12 +135,22 @@ enum Commands {
         #[arg(long, help_heading = "Geek Parameters")]
         block_target_size: Option<usize>,
 
-        /// Use compact preset (high compression, slower writes)
+        /// Use compact preset: Zstd-19, 16 MB blocks, k=32 (high compression, slower writes)
         #[arg(long)]
         compact: bool,
     },
 
     /// Extract files from an ERA archive
+    #[command(
+        long_about = "Extract all files from an ERA archive to a directory.\n\n\
+        By default, files are extracted to the current directory. Use --output to\n\
+        specify a different location. Existing files are skipped unless --force is set."
+    )]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
+        era extract -i backup.era -o ./restored\n  \
+        era extract -i backup.era -o ./restored -p secret\n  \
+        era extract -i backup.era -o ./restored --key private.pem\n  \
+        era extract -i backup.era -o ./restored --force")]
     Extract {
         /// Input archive path
         #[arg(short, long)]
@@ -145,6 +174,12 @@ enum Commands {
     },
 
     /// List contents of an ERA archive
+    #[command(long_about = "List files stored in an ERA archive.\n\n\
+        Shows file paths by default. Use --long for sizes and chunk IDs.")]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
+        era list backup.era\n  \
+        era list backup.era -p secret --long\n  \
+        era list backup.era --key private.pem")]
     List {
         /// Archive path
         archive: PathBuf,
@@ -157,12 +192,20 @@ enum Commands {
         #[arg(short = 'k', long)]
         key: Option<PathBuf>,
 
-        /// Show detailed information
+        /// Show sizes and chunk IDs for each file
         #[arg(short, long)]
         long: bool,
     },
 
     /// Show information about an ERA archive
+    #[command(
+        long_about = "Display archive metadata including archive ID, volume info,\n\
+        configuration parameters, and content summary."
+    )]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
+        era info backup.era\n  \
+        era info backup.era -p secret\n  \
+        era info backup.era --key private.pem")]
     Info {
         /// Archive path
         archive: PathBuf,
@@ -170,9 +213,23 @@ enum Commands {
         /// Encryption password (will prompt if not provided)
         #[arg(short, long)]
         password: Option<String>,
+
+        /// Private key file for certificate mode (PEM format)
+        #[arg(short = 'k', long)]
+        key: Option<PathBuf>,
     },
 
     /// Verify integrity of an ERA archive
+    #[command(
+        long_about = "Verify archive integrity by checking all blocks and files.\n\n\
+        Exits with code 0 if the archive is intact, non-zero otherwise.\n\
+        Use --verbose for detailed per-block error information."
+    )]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
+        era verify backup.era\n  \
+        era verify backup.era -p secret\n  \
+        era verify backup.era --key private.pem\n  \
+        era verify backup.era --verbose")]
     Verify {
         /// Archive path
         archive: PathBuf,
@@ -181,12 +238,27 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
 
+        /// Private key file for certificate mode (PEM format)
+        #[arg(short = 'k', long)]
+        key: Option<PathBuf>,
+
         /// Show detailed error information
-        #[arg(short, long)]
+        #[arg(long)]
         verbose: bool,
     },
 
     /// Repair or recover a damaged/incomplete ERA archive
+    #[command(
+        long_about = "Analyze an archive and attempt recovery where possible.\n\n\
+        Without --force, runs in dry-run mode (analysis only).\n\
+        With --force, applies Reed-Solomon repairs or discards an interrupted-create checkpoint.\n\n\
+        Archives created with erasure coding can recover from corrupted shards.\n\
+        Archives without erasure coding have limited repair options."
+    )]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
+        era repair backup.era                     Analyze only (dry run)\n  \
+        era repair backup.era --force             Apply repairs\n  \
+        era repair backup.era --key private.pem   Certificate mode")]
     Repair {
         /// Archive path
         archive: PathBuf,
@@ -195,16 +267,29 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Force action (discard checkpoint for interrupted creation)
+        /// Private key file for certificate mode (PEM format)
+        #[arg(short = 'k', long)]
+        key: Option<PathBuf>,
+
+        /// Apply repairs or discard an interrupted-create checkpoint
         #[arg(short = 'f', long)]
         force: bool,
 
-        /// Show detailed information
-        #[arg(short, long)]
+        /// Show detailed repair/recovery information
+        #[arg(long)]
         verbose: bool,
     },
 
-    /// Re-archive with new parameters (extract then re-create)
+    /// Repack an archive with new parameters
+    #[command(
+        long_about = "Extract an archive and re-create it with new parameters.\n\n\
+        Useful for changing compression level, erasure coding settings, or applying\n\
+        the --compact preset to an existing archive. The original archive is not modified."
+    )]
+    #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
+        era repack -i old.era -o new.era -p secret --compact\n  \
+        era repack -i old.era -o new.era -p secret --level 19 --erasure 6:3\n  \
+        era repack -i old.era -o new.era --key private.pem --no-compression")]
     Repack {
         /// Input archive path
         #[arg(short, long)]
@@ -222,7 +307,7 @@ enum Commands {
         #[arg(short = 'k', long)]
         key: Option<PathBuf>,
 
-        /// Use compact preset (high compression, slower writes)
+        /// Use compact preset: Zstd-19, 16 MB blocks, k=32 (high compression, slower writes)
         #[arg(long)]
         compact: bool,
 
@@ -230,7 +315,7 @@ enum Commands {
         #[arg(short = 'l', long)]
         level: Option<i32>,
 
-        /// Disable compression entirely
+        /// Disable compression entirely (Store mode)
         #[arg(long, conflicts_with = "level")]
         no_compression: bool,
 
@@ -303,7 +388,6 @@ async fn main() -> anyhow::Result<()> {
             erasure,
             volumes,
             max_volume_size,
-            matrix_distribution,
             cdc_min,
             cdc_avg,
             cdc_max,
@@ -323,7 +407,6 @@ async fn main() -> anyhow::Result<()> {
                 erasure: erasure.as_deref(),
                 volume_count: volumes,
                 max_volume_size,
-                matrix_distribution,
                 cdc_min,
                 cdc_avg,
                 cdc_max,
@@ -350,20 +433,35 @@ async fn main() -> anyhow::Result<()> {
             long,
         } => commands::list(&archive, password.as_deref(), key.as_deref(), long).await,
 
-        Commands::Info { archive, password } => commands::info(&archive, password.as_deref()).await,
+        Commands::Info {
+            archive,
+            password,
+            key,
+        } => commands::info(&archive, password.as_deref(), key.as_deref()).await,
 
         Commands::Verify {
             archive,
             password,
+            key,
             verbose,
-        } => commands::verify(&archive, password.as_deref(), verbose).await,
+        } => commands::verify(&archive, password.as_deref(), key.as_deref(), verbose).await,
 
         Commands::Repair {
             archive,
             password,
+            key,
             force,
             verbose,
-        } => commands::repair(&archive, password.as_deref(), force, verbose).await,
+        } => {
+            commands::repair(
+                &archive,
+                password.as_deref(),
+                key.as_deref(),
+                force,
+                verbose,
+            )
+            .await
+        }
 
         Commands::Repack {
             input,

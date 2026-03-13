@@ -1,6 +1,6 @@
 [package]
 name = "era-cli"
-description = "Command-line interface for ERA archive system"
+description = "ERA — Encrypted Redundant Archiver CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -23,6 +23,9 @@ indicatif = "0.17"
 walkdir = "2.5.0"
 toml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rand = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"

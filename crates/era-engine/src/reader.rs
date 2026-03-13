@@ -491,8 +491,10 @@ impl ArchiveReader {
 
     /// Metadata-first preflight: restore embedded index (if present) and load catalog.
     pub async fn preflight_metadata_recovery(&mut self) -> Result<()> {
-        let index_recovered = self.restore_embedded_index().await?;
-        if !index_recovered {
+        let _index_recovered = self.restore_embedded_index().await?;
+        // Only warn when an index was present but recovery actually failed,
+        // not when no embedded index exists (normal for older archives).
+        if self.embedded_index_recovery_failed {
             warn!("Embedded index recovery failed; continuing in degraded mode");
         }
         self.load_catalog().await?;
