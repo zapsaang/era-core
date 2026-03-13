@@ -107,6 +107,18 @@ enum Commands {
         /// [Geek] Packing k-factor (buffer slots)
         #[arg(long, help_heading = "Geek Parameters")]
         packing_k: Option<usize>,
+
+        /// [Geek] Packing flush threshold percentage (0-100)
+        #[arg(long, help_heading = "Geek Parameters")]
+        flush_threshold: Option<usize>,
+
+        /// [Geek] Target block size in bytes
+        #[arg(long, help_heading = "Geek Parameters")]
+        block_target_size: Option<usize>,
+
+        /// Use compact preset (high compression, slower writes)
+        #[arg(long)]
+        compact: bool,
     },
 
     /// Extract files from an ERA archive
@@ -191,6 +203,65 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Re-archive with new parameters (extract then re-create)
+    Repack {
+        /// Input archive path
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output archive path
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Encryption password (will prompt if not provided)
+        #[arg(short, long)]
+        password: Option<String>,
+
+        /// Private key file for certificate mode (PEM format)
+        #[arg(short = 'k', long)]
+        key: Option<PathBuf>,
+
+        /// Use compact preset (high compression, slower writes)
+        #[arg(long)]
+        compact: bool,
+
+        /// Compression level (1-22, default: 3)
+        #[arg(short = 'l', long)]
+        level: Option<i32>,
+
+        /// Disable compression entirely
+        #[arg(long, conflicts_with = "level")]
+        no_compression: bool,
+
+        /// Erasure coding (format: data:parity, e.g., "4:2")
+        #[arg(short = 'e', long)]
+        erasure: Option<String>,
+
+        /// [Geek] CDC minimum chunk size (bytes)
+        #[arg(long, help_heading = "Geek Parameters")]
+        cdc_min: Option<usize>,
+
+        /// [Geek] CDC average chunk size (bytes)
+        #[arg(long, help_heading = "Geek Parameters")]
+        cdc_avg: Option<usize>,
+
+        /// [Geek] CDC maximum chunk size (bytes)
+        #[arg(long, help_heading = "Geek Parameters")]
+        cdc_max: Option<usize>,
+
+        /// [Geek] Packing k-factor (buffer slots)
+        #[arg(long, help_heading = "Geek Parameters")]
+        packing_k: Option<usize>,
+
+        /// [Geek] Packing flush threshold percentage (0-100)
+        #[arg(long, help_heading = "Geek Parameters")]
+        flush_threshold: Option<usize>,
+
+        /// [Geek] Target block size in bytes
+        #[arg(long, help_heading = "Geek Parameters")]
+        block_target_size: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -237,6 +308,9 @@ async fn main() -> anyhow::Result<()> {
             cdc_avg,
             cdc_max,
             packing_k,
+            flush_threshold,
+            block_target_size,
+            compact,
         } => {
             commands::create(commands::CreateArgs {
                 inputs: &input,
@@ -254,6 +328,9 @@ async fn main() -> anyhow::Result<()> {
                 cdc_avg,
                 cdc_max,
                 packing_k,
+                flush_threshold,
+                block_target_size,
+                compact,
             })
             .await
         }
@@ -287,5 +364,40 @@ async fn main() -> anyhow::Result<()> {
             force,
             verbose,
         } => commands::repair(&archive, password.as_deref(), force, verbose).await,
+
+        Commands::Repack {
+            input,
+            output,
+            password,
+            key,
+            compact,
+            level,
+            no_compression,
+            erasure,
+            cdc_min,
+            cdc_avg,
+            cdc_max,
+            packing_k,
+            flush_threshold,
+            block_target_size,
+        } => {
+            commands::repack(commands::RepackArgs {
+                input: &input,
+                output: &output,
+                password: password.as_deref(),
+                key_path: key.as_deref(),
+                compact,
+                compression_level: level,
+                no_compression,
+                erasure: erasure.as_deref(),
+                cdc_min,
+                cdc_avg,
+                cdc_max,
+                packing_k,
+                flush_threshold,
+                block_target_size,
+            })
+            .await
+        }
     }
 }

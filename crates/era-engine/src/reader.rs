@@ -17,7 +17,6 @@ use crate::chunk_processor::{
     enforce_output_containment, ExtractionContext, MultiChunkState, VerificationContext,
 };
 pub use crate::chunk_processor::{ExtractStats, VerifyStats};
-use crate::source_block_snapshot::SourceDataBlockSnapshot;
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result, ShardLayout};
@@ -664,66 +663,6 @@ impl ArchiveReader {
 
         out.sort_by_key(|b| b.sequence());
         out.dedup_by_key(|b| b.sequence());
-        Ok(out)
-    }
-
-    pub async fn source_snapshots_for_block_ids(
-        &self,
-        block_ids: &[BlockId],
-    ) -> Result<Vec<SourceDataBlockSnapshot>> {
-        let keep: HashSet<BlockId> = block_ids.iter().copied().collect();
-        let erasure_config = self.volume_readers[0].header().config().erasure;
-        let mut iter: Box<dyn BlockIterator> = if let Some(config) = erasure_config {
-            let dist_strategy = self.volume_readers[0]
-                .header()
-                .config()
-                .distribution
-                .strategy;
-            Box::new(SessionErasureBlockIterator::new(
-                SessionErasureBlockIteratorArgs {
-                    volume_readers: &self.volume_readers,
-                    volume_indices: &self.volume_indices,
-                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
-                    session: &self.session,
-                    volume_key: &self.volume_key,
-                    nonce_context: self.nonce_context,
-                    archive_id: self.archive_id,
-                    epoch_id: self.epoch_id,
-                    compressor: self.create_compressor(),
-                    data_shards: config.data_shards,
-                    parity_shards: config.parity_shards,
-                    distribution_strategy: dist_strategy,
-                },
-            ))
-        } else {
-            Box::new(SessionBlockIterator::new(
-                &self.volume_readers[0],
-                &self.session,
-                &self.volume_key,
-                self.nonce_context,
-                self.archive_id,
-                self.epoch_id,
-                self.create_compressor(),
-            ))
-        };
-
-        let mut out = Vec::new();
-        while let Some(result) = iter.next_block().await {
-            let decoded = result?;
-            let block_id = BlockId::new(decoded.block_index as u64);
-            if !keep.contains(&block_id) {
-                continue;
-            }
-            let snapshot = decoded.source_snapshot.ok_or_else(|| {
-                EraError::IntegrityError(format!(
-                    "source snapshot unavailable for live block {}",
-                    block_id.sequence()
-                ))
-            })?;
-            out.push(snapshot);
-        }
-
-        out.sort_by_key(|snapshot| snapshot.block_id.sequence());
         Ok(out)
     }
 

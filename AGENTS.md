@@ -44,7 +44,7 @@ cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 
 ## NOTES
 
-- Workspace shape: 9 library crates, 1 CLI binary, separate `fuzz/` workspace
+- Workspace shape: 8 library crates, 1 CLI binary, separate `fuzz/` workspace
 - Dependency flow is downward only; `crates/AGENTS.md` is the authoritative crate map
 - Current archive unlock path remains X25519-based even though hybrid KEM support exists in the codebase
 - March 2026 verification: 2049 passed, 0 failed, 18 ignored

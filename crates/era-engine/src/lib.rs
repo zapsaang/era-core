@@ -30,9 +30,6 @@ mod block_iter;
 mod checkpoint;
 pub(crate) mod chunk_index;
 pub(crate) mod chunk_processor;
-pub mod compact_compactor;
-pub mod compact_reader;
-pub mod compact_writer;
 mod encryption_context;
 mod erasure_stage;
 mod index_stage;
@@ -41,8 +38,8 @@ mod packing_stage;
 mod reader;
 mod recovery;
 mod repair;
+mod repack;
 mod small_file_packer;
-pub mod source_block_snapshot;
 mod volume_stage;
 mod write_pipeline;
 mod writer;
@@ -56,13 +53,12 @@ pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_V
 // Re-export KeySession for convenient access
 pub use era_crypto::KeySession;
 // Re-export certificate types for convenient access
-pub use compact_reader::{CompactArchiveReader, CompactExtractStats};
-pub use compact_writer::{compact_archive, CompactStats};
 pub use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 pub use reader::{ArchiveReader, ExtractOptions, ExtractStats, VerifyStats};
 pub use recovery::{
     RecoverableWriter, RecoveryManager, RecoveryOptions, RecoveryStatus, RecoveryStrategy,
 };
 pub use repair::{repair_archive, repair_archive_matrix, RepairOptions, RepairStats};
+pub use repack::{repack_archive, repack_archive_with_keypair, RepackStats};
 pub use writer::generic::{GenericArchiveWriter, GenericArchiveWriterBuilder};
 pub use writer::{ArchiveWriter, ArchiveWriterBuilder, AuthMode};

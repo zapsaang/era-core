@@ -76,6 +76,9 @@ era verify archive.era --password "your-secret"
 
 # Repair a damaged archive
 era repair archive.era --password "your-secret"
+
+# Repack an archive with new parameters
+era repack --input archive.era --output repacked.era --password "your-secret" --compact
 ```
 
 ### Advanced Usage
@@ -115,6 +118,16 @@ era verify archive.era --password "your-secret" --verbose
 
 # Long listing format
 era list archive.era --password "your-secret" --long
+
+# Compact mode (high compression preset: Zstd-19, 16MB blocks, k=32)
+era create --output archive.era --password "secret" --compact /path/to/files
+
+# Repack an existing archive with new parameters
+era repack --input old.era --output new.era --password "secret" --compact
+
+# Repack with custom settings
+era repack --input old.era --output new.era --password "secret" \
+    --level 19 --erasure "6:3" --block-target-size 16777216
 ```
 
 ## Architecture
@@ -449,9 +462,9 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 | Source Files | 137 `.rs` files |
 | Tests | March 2026 workspace verification: 2049 passed, 0 failed, 18 ignored |
 | Security Audit Tests | 279+ across multiple suites |
-| Fuzz Targets | 3 (combined 65M+ runs, 0 crashes) |
-| Crates | 9 library + 1 binary |
-| CLI Commands | 6 (create, extract, list, info, verify, repair) |
+| Fuzz Targets | 5 (combined 65M+ runs, 0 crashes) |
+| Crates | 8 library + 1 binary |
+| CLI Commands | 7 (create, extract, list, info, verify, repair, repack) |
 | Edition | 2021, resolver v2 |
 | Build Profile | LTO + codegen-units=1 + opt-level=3 (release) |
 

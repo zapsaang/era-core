@@ -48,6 +48,31 @@ impl Default for ArchiveConfig {
     }
 }
 
+impl ArchiveConfig {
+    pub fn compact_preset() -> Self {
+        Self {
+            compression: CompressionConfig {
+                algorithm: CompressionAlgorithm::Zstd,
+                level: 19,
+            },
+            block: BlockConfig {
+                target_size: 16 * 1024 * 1024,
+            },
+            packing: PackingConfig {
+                k_factor: 32,
+                flush_threshold: 99,
+            },
+            chunking: ChunkingConfig {
+                min_size: 16 * 1024,
+                avg_size: 256 * 1024,
+                max_size: 1024 * 1024,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 /// Compression algorithm selection
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompressionAlgorithm {

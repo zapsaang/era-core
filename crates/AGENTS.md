@@ -1,6 +1,6 @@
 # Crate Architecture and Navigation
 
-9 library crates + 1 compact bundle crate forming a strict L0-L4 pipeline. Each layer only depends on layers below it.
+8 library crates forming a strict L0-L4 pipeline. Each layer only depends on layers below it.
 
 ## Crate Map
 
@@ -14,7 +14,6 @@
 ### Transformation (L2)
 - **era-codec**: `Compressor` trait (Zstd/LZ4/NoCompressor) + Reed-Solomon erasure coding.
 - **era-volume**: Volume format v8.1. SuperHeader (4096B), Footer (128B), VolumeReader/Writer, MultiVolume, VolumePool.
-- **era-compact**: Compact read-only bundle format (.erac). CompactBundleWriter/Reader, RS striping, multi-volume distribution. Sole consumer: era-engine.
 
 ### Logic (L3)
 - **era-packing**: k-Bounded Best-Fit MacroBlock packing. StagingPool, resilient AEAD with 4-tier corruption detection.
@@ -22,13 +21,12 @@
 - **era-index**: V2.1 embedded dedup index. Redb 2.1 ACID B-tree, Bloom filters, L1/L2 tiered pages, cold recovery.
 
 ### Orchestration (L4)
-- **era-engine**: Async pipeline. ArchiveWriter, ArchiveReader, RecoveryManager, repair, 4 BlockIterator variants.
+- **era-engine**: Async pipeline. ArchiveWriter, ArchiveReader, RecoveryManager, repair, repack, 4 BlockIterator variants.
 
 ## Actual Dependency Graph
 
 ```
-era-engine → era-{common,crypto,codec,storage,volume,packing,ingest,index,compact}
-era-compact → era-{common,codec,volume}
+era-engine → era-{common,crypto,codec,storage,volume,packing,ingest,index}
 era-index  → era-{common,crypto,codec,storage,volume}  # needs VolumeWriter for in-volume persistence
 era-packing → era-{common,crypto,codec}
 era-ingest → era-{common,crypto,codec}

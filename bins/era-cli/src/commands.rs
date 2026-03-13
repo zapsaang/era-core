@@ -7,8 +7,8 @@ use era_common::{
     MatrixDistributionStrategy,
 };
 use era_engine::{
-    repair_archive, repair_archive_matrix, ArchiveReader, ArchiveWriter, ExtractOptions,
-    RecoveryManager, RepairOptions,
+    repair_archive, repair_archive_matrix, repack_archive, repack_archive_with_keypair,
+    ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager, RepairOptions,
 };
 use indicatif::{HumanBytes, HumanDuration, ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
@@ -76,6 +76,82 @@ fn parse_erasure_config(s: &str) -> Result<ErasureCodeConfig> {
     })
 }
 
+struct ConfigOverrides<'a> {
+    compression_level: Option<i32>,
+    no_compression: bool,
+    erasure: Option<&'a str>,
+    cdc_min: Option<usize>,
+    cdc_avg: Option<usize>,
+    cdc_max: Option<usize>,
+    packing_k: Option<usize>,
+    flush_threshold: Option<usize>,
+    block_target_size: Option<usize>,
+}
+
+fn apply_config_overrides(config: &mut ArchiveConfig, overrides: ConfigOverrides<'_>) -> Result<()> {
+    if overrides.no_compression {
+        config.compression.algorithm = CompressionAlgorithm::None;
+        config.compression.level = 0;
+        info!("Compression: disabled (Store mode)");
+    } else if let Some(level) = overrides.compression_level {
+        if !(0..=22).contains(&level) {
+            anyhow::bail!("Compression level must be between 0 and 22");
+        }
+        if level == 0 {
+            config.compression.algorithm = CompressionAlgorithm::None;
+            config.compression.level = 0;
+            info!("Compression: disabled (Store mode)");
+        } else {
+            config.compression.level = level;
+        }
+    }
+
+    if let Some(erasure_str) = overrides.erasure {
+        if erasure_str.eq_ignore_ascii_case("none") {
+            config.erasure = None;
+            info!("Erasure coding: disabled by CLI");
+        } else {
+            config.erasure = Some(parse_erasure_config(erasure_str)?);
+        }
+    }
+
+    if let Some(val) = overrides.cdc_min {
+        config.chunking.min_size = val;
+    }
+    if let Some(val) = overrides.cdc_avg {
+        config.chunking.avg_size = val;
+    }
+    if let Some(val) = overrides.cdc_max {
+        config.chunking.max_size = val;
+    }
+    if let Some(val) = overrides.packing_k {
+        config.packing.k_factor = val;
+    }
+    if let Some(val) = overrides.flush_threshold {
+        config.packing.flush_threshold = val;
+    }
+    if let Some(val) = overrides.block_target_size {
+        config.block.target_size = val;
+    }
+
+    let min_size = config.chunking.min_size;
+    let avg_size = config.chunking.avg_size;
+    let max_size = config.chunking.max_size;
+    if min_size == 0 || avg_size == 0 || max_size == 0 {
+        anyhow::bail!("CDC sizes must be > 0");
+    }
+    if min_size > avg_size || avg_size > max_size {
+        anyhow::bail!(
+            "CDC sizes must satisfy min <= avg <= max (got {}, {}, {})",
+            min_size,
+            avg_size,
+            max_size
+        );
+    }
+
+    Ok(())
+}
+
 /// Parameters for creating a new ERA archive
 pub struct CreateArgs<'a> {
     pub inputs: &'a [std::path::PathBuf],
@@ -93,6 +169,9 @@ pub struct CreateArgs<'a> {
     pub cdc_avg: Option<usize>,
     pub cdc_max: Option<usize>,
     pub packing_k: Option<usize>,
+    pub flush_threshold: Option<usize>,
+    pub block_target_size: Option<usize>,
+    pub compact: bool,
 }
 
 /// Create a new ERA archive
@@ -113,17 +192,20 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         cdc_avg,
         cdc_max,
         packing_k,
+        flush_threshold,
+        block_target_size,
+        compact,
     } = args;
-    // 1. Load Configuration
-    // Priority: CLI > Config File > Defaults (Secure)
     let mut config = if let Some(path) = config_path {
         info!("Loading configuration from: {}", path.display());
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
         toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?
+    } else if compact {
+        info!("Using compact preset (Zstd-19, 16MB blocks, k=32)");
+        ArchiveConfig::compact_preset()
     } else {
-        // Apply "Secure Defaults" when starting from scratch
         ArchiveConfig {
             erasure: Some(ErasureCodeConfig {
                 data_shards: 4,
@@ -137,49 +219,17 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         }
     };
 
-    // 2. Apply CLI Overrides
-
-    // Compression
-    if no_compression {
-        config.compression.algorithm = CompressionAlgorithm::None;
-        config.compression.level = 0;
-        info!("Compression: disabled (Store mode)");
-    } else if let Some(level) = compression_level {
-        if !(0..=22).contains(&level) {
-            anyhow::bail!("Compression level must be between 0 and 22");
-        }
-        if level == 0 {
-            config.compression.algorithm = CompressionAlgorithm::None;
-            config.compression.level = 0;
-            info!("Compression: disabled (Store mode)");
-        } else {
-            config.compression.level = level;
-        }
-    }
-
-    // Erasure Coding
-    if let Some(erasure_str) = erasure {
-        if erasure_str.eq_ignore_ascii_case("none") {
-            config.erasure = None;
-            info!("Erasure coding: disabled by CLI");
-        } else {
-            config.erasure = Some(parse_erasure_config(erasure_str)?);
-        }
-    }
-
-    // Geek Parameters
-    if let Some(val) = cdc_min {
-        config.chunking.min_size = val;
-    }
-    if let Some(val) = cdc_avg {
-        config.chunking.avg_size = val;
-    }
-    if let Some(val) = cdc_max {
-        config.chunking.max_size = val;
-    }
-    if let Some(val) = packing_k {
-        config.packing.k_factor = val;
-    }
+    apply_config_overrides(&mut config, ConfigOverrides {
+        compression_level,
+        no_compression,
+        erasure,
+        cdc_min,
+        cdc_avg,
+        cdc_max,
+        packing_k,
+        flush_threshold,
+        block_target_size,
+    })?;
 
     // Volume & Distribution
     if let Some(val) = max_volume_size {
@@ -192,22 +242,6 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         );
     }
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
-
-    // Validate CDC bounds
-    let min_size = config.chunking.min_size;
-    let avg_size = config.chunking.avg_size;
-    let max_size = config.chunking.max_size;
-    if min_size == 0 || avg_size == 0 || max_size == 0 {
-        anyhow::bail!("CDC sizes must be > 0");
-    }
-    if min_size > avg_size || avg_size > max_size {
-        anyhow::bail!(
-            "CDC sizes must satisfy min <= avg <= max (got {}, {}, {})",
-            min_size,
-            avg_size,
-            max_size
-        );
-    }
 
     // Validate erasure + volume count combinations
     if let Some(ec) = &config.erasure {
@@ -777,6 +811,105 @@ pub async fn repair(
     manager.cleanup().context("Failed to clean up checkpoint")?;
 
     info!("✅ Checkpoint discarded. You can now create a new archive.");
+
+    Ok(())
+}
+
+/// Parameters for repacking an ERA archive with new settings
+pub struct RepackArgs<'a> {
+    pub input: &'a Path,
+    pub output: &'a Path,
+    pub password: Option<&'a str>,
+    pub key_path: Option<&'a Path>,
+    pub compact: bool,
+    pub compression_level: Option<i32>,
+    pub no_compression: bool,
+    pub erasure: Option<&'a str>,
+    pub cdc_min: Option<usize>,
+    pub cdc_avg: Option<usize>,
+    pub cdc_max: Option<usize>,
+    pub packing_k: Option<usize>,
+    pub flush_threshold: Option<usize>,
+    pub block_target_size: Option<usize>,
+}
+
+/// Repack an ERA archive with new parameters
+pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
+    let RepackArgs {
+        input,
+        output,
+        password,
+        key_path,
+        compact,
+        compression_level,
+        no_compression,
+        erasure,
+        cdc_min,
+        cdc_avg,
+        cdc_max,
+        packing_k,
+        flush_threshold,
+        block_target_size,
+    } = args;
+
+    // 1. Build base config
+    let mut config = if compact {
+        info!("Using compact preset (Zstd-19, 16MB blocks, k=32)");
+        ArchiveConfig::compact_preset()
+    } else {
+        ArchiveConfig {
+            erasure: Some(ErasureCodeConfig {
+                data_shards: 4,
+                parity_shards: 2,
+            }),
+            distribution: MatrixDistributionConfig {
+                strategy: MatrixDistributionStrategy::RotatingOffset,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    };
+
+    apply_config_overrides(&mut config, ConfigOverrides {
+        compression_level,
+        no_compression,
+        erasure,
+        cdc_min,
+        cdc_avg,
+        cdc_max,
+        packing_k,
+        flush_threshold,
+        block_target_size,
+    })?;
+
+    info!("Repacking archive: {} -> {}", input.display(), output.display());
+
+    let start_time = Instant::now();
+
+    // 3. Dispatch to engine based on auth mode
+    let stats = if let Some(kp_path) = key_path {
+        info!("Loading private key: {}", kp_path.display());
+        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
+            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
+        repack_archive_with_keypair(input, output, &keypair, config)
+            .await
+            .context("Failed to repack archive with keypair")?
+    } else {
+        let password = get_password_with_confirmation(password)?;
+        repack_archive(input, output, &password, config)
+            .await
+            .context("Failed to repack archive")?
+    };
+
+    info!("");
+    info!(
+        "✓ Repack complete in {}!",
+        HumanDuration(start_time.elapsed())
+    );
+    info!("  Files repacked: {}", stats.files_repacked);
+    info!("  Extracted size:  {}", HumanBytes(stats.extracted_bytes));
+    info!("  Repacked size:  {}", HumanBytes(stats.repacked_total_size));
+    info!("  Blocks written: {}", stats.blocks_written);
 
     Ok(())
 }

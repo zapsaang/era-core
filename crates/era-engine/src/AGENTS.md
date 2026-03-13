@@ -1,17 +1,18 @@
 # Engine Source
 
-Orchestration layer for archive create/extract/verify/repair. This file owns the source-tree map; crate-wide rules stay in parent docs.
+Orchestration layer for archive create/extract/verify/repair/repack. This file owns the source-tree map; crate-wide rules stay in parent docs.
 
 ## FILES
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `lib.rs` | 62 | Crate facade. Re-exports archive APIs, iterators, checkpoint types, recovery, and repair entrypoints. |
+| `lib.rs` | 62 | Crate facade. Re-exports archive APIs, iterators, checkpoint types, recovery, repair, and repack entrypoints. |
 | `writer.rs` | 2348 | Archive creation. MK generation, auth modes, VK wrapping, CDC→pack→encode→encrypt→volume. Append + create state machine. |
 | `reader.rs` | 1540 | Archive extraction. Multi-volume discovery, VK unwrap, per-block HKDF key derivation, chunk reassembly. |
 | `block_iter.rs` | 1174 | 4 iterator types (Standard/Erasure × Basic/Session). Virtual Striping with 8192 length probes. |
 | `repair.rs` | 889 | RS-based shard recovery. Scans volumes for CRC failures, reconstructs via Reed-Solomon. |
 | `checkpoint.rs` | 770 | WAL-based binary checkpoints. V2.2+ stores as typed blocks in-volume. rkyv + HMAC integrity. |
+| `repack.rs` | 103 | Extract-to-tempdir then re-create with new config. Password and keypair auth modes. |
 | `async_pipeline.rs` | — | Public chunk-pipeline plumbing and pipeline config types. |
 | `auth.rs` | — | Auth provider abstraction and password / certificate helpers used by writer and reader paths. |
 | `chunk_index.rs` | — | Engine-side dedup index abstraction. Wraps memory-backed and Redb-backed chunk lookup/record flows. |
