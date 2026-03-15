@@ -33,7 +33,7 @@ use era_volume::{
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -1020,6 +1020,7 @@ impl ArchiveWriterBuilder {
                 SmallFilePacker::disabled()
             },
             pipeline,
+            pending_hashes: HashSet::new(),
         })
     }
 }
@@ -1070,6 +1071,8 @@ pub struct ArchiveWriter {
     // Write pipeline (handles encryption, erasure, volume, index)
     /// Coordinates the flow: chunks → encryption → erasure → volume → index
     pipeline: WritePipeline<LocalStorageBackend>,
+
+    pending_hashes: HashSet<ChunkHash>,
 }
 
 /// Recursively collect file paths using async I/O.
@@ -1107,6 +1110,10 @@ impl ArchiveWriter {
     /// Create a new builder
     pub fn builder(output_path: impl Into<PathBuf>) -> ArchiveWriterBuilder {
         ArchiveWriterBuilder::new(output_path)
+    }
+
+    fn contains_or_pending(&self, hash: &ChunkHash) -> Result<bool> {
+        Ok(self.pipeline.contains(hash)? || self.pending_hashes.contains(hash))
     }
 
     /// Get the archive ID
@@ -1307,7 +1314,7 @@ impl ArchiveWriter {
         debug!("File size: {} bytes, hash: {}", size, hash);
 
         // Check for dedup: skip if we already have this chunk
-        if !self.pipeline.contains(&hash)? {
+        if !self.contains_or_pending(&hash)? {
             // Add to pending batch
             self.add_to_pending(chunk).await?;
         }
@@ -1342,7 +1349,7 @@ impl ArchiveWriter {
             total_size += length as u64;
 
             // Dedup check
-            if !self.pipeline.contains(&hash)? {
+            if !self.contains_or_pending(&hash)? {
                 self.add_to_pending(chunk).await?;
             }
 
@@ -1387,6 +1394,7 @@ impl ArchiveWriter {
     /// This method intelligently places chunks into bins for optimal packing.
     /// The staging pool will automatically flush bins when they reach 95% capacity.
     async fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
+        self.pending_hashes.insert(chunk.hash);
         // Implementation Reform: k-Bounded Best-Fit is MANDATORY for all modes.
         // We use the packing stage to aggregate small CDC chunks into 4MB MacroBlocks.
         // This is critical for L3 Smart Packing.
@@ -1513,10 +1521,10 @@ impl ArchiveWriter {
         small_file_hashes.sort_by_key(|hash| hash.0);
 
         // Pre-validation: reuse existing packed chunk when possible
-        if self.pipeline.contains(&chunk_hash)? {
+        if self.contains_or_pending(&chunk_hash)? {
             if let Some(existing_location) = self.pipeline.get_location(&chunk_hash)? {
                 for hash in &small_file_hashes {
-                    if !self.pipeline.contains(hash)? {
+                    if !self.contains_or_pending(hash)? {
                         self.pipeline
                             .record_location(*hash, existing_location.clone())?;
                     }
@@ -1579,7 +1587,7 @@ impl ArchiveWriter {
             for chunk in data.chunks(target_block_size) {
                 let hash = era_crypto::hash(chunk);
 
-                if !self.pipeline.contains(&hash)? {
+                if !self.contains_or_pending(&hash)? {
                     let chunk = UniqueChunk::new(Bytes::copy_from_slice(chunk), hash);
                     self.add_to_pending(chunk).await?;
                 }
@@ -1599,7 +1607,7 @@ impl ArchiveWriter {
         let hash = era_crypto::hash(data);
 
         // Dedup check
-        if !self.pipeline.contains(&hash)? {
+        if !self.contains_or_pending(&hash)? {
             let chunk = UniqueChunk::new(Bytes::copy_from_slice(data), hash);
             self.add_to_pending(chunk).await?;
         }
@@ -2234,6 +2242,7 @@ pub mod generic {
                     4 * 1024 * 1024,
                     self.config.packing.flush_threshold,
                 )?,
+                pending_hashes: HashSet::new(),
             })
         }
     }
@@ -2256,12 +2265,18 @@ pub mod generic {
         chunk_index: Arc<dyn ChunkIndex>,
         /// Packing stage for k-Bounded Best-Fit bin packing
         packing: PackingStage,
+
+        pending_hashes: HashSet<ChunkHash>,
     }
 
     impl<W: StorageWriter> GenericArchiveWriter<W> {
         /// Get the archive ID
         pub fn archive_id(&self) -> ArchiveId {
             self.archive_id
+        }
+
+        fn contains_or_pending(&self, hash: &ChunkHash) -> Result<bool> {
+            Ok(self.chunk_index.contains(hash)? || self.pending_hashes.contains(hash))
         }
 
         /// Create a fresh compressor based on configuration.
@@ -2283,7 +2298,7 @@ pub mod generic {
 
             let hash = era_crypto::hash(data);
 
-            if !self.chunk_index.contains(&hash)? {
+            if !self.contains_or_pending(&hash)? {
                 let chunk = UniqueChunk::new(Bytes::copy_from_slice(data), hash);
                 self.add_to_pending(chunk).await?;
             }
@@ -2300,6 +2315,7 @@ pub mod generic {
 
         /// Add chunk to packing stage using k-Bounded Best-Fit
         async fn add_to_pending(&mut self, chunk: UniqueChunk) -> Result<()> {
+            self.pending_hashes.insert(chunk.hash);
             // Use k-Bounded Best-Fit packing stage for optimal packing
             // The stage automatically handles oversized chunks and bin selection
             if let Some(packed) = self.packing.push(chunk) {

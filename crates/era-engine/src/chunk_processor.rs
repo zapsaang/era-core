@@ -337,6 +337,14 @@ impl VerificationContext {
 
             if found == expected {
                 stats.files_verified += 1;
+            } else if found > expected {
+                stats.files_verified += 1;
+                stats.warnings.push(format!(
+                    "File '{}': found {} chunks but expected {} (possible dedup leak)",
+                    get_file_path(file_idx),
+                    found,
+                    expected
+                ));
             } else {
                 stats.files_incomplete += 1;
                 stats.errors.push(format!(
