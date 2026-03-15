@@ -539,19 +539,31 @@ impl<R: StorageReader> VolumeReader<R> {
                         }
                     }
 
-                    // If we get here, this wasn't a valid typed block
-                    // Could be legacy format (ShardHeader) - skip 8 bytes
+                    // ShardHeader has no magic/version — ANY 8 bytes parse as valid.
+                    // CRC verification is mandatory to avoid wild jumps over IndexPage blocks.
                     if let Ok(shard_header_bytes) =
                         self.reader.read_at(current_offset, ShardHeader::SIZE).await
                     {
                         if let Some(shard_header) = ShardHeader::from_bytes(&shard_header_bytes) {
-                            // SECURITY: Validate shard length too
-                            if (shard_header.length as usize) <= MAX_SHARD_SIZE {
-                                // Valid shard header - skip it
-                                current_offset +=
-                                    ShardHeader::SIZE as u64 + shard_header.length as u64;
-                                consecutive_misses = 0;
-                                continue;
+                            let shard_len = shard_header.length as u64;
+                            if (shard_len as usize) <= MAX_SHARD_SIZE
+                                && current_offset + ShardHeader::SIZE as u64 + shard_len
+                                    <= end_offset
+                            {
+                                if let Ok(shard_data) = self
+                                    .reader
+                                    .read_at(
+                                        current_offset + ShardHeader::SIZE as u64,
+                                        shard_len as usize,
+                                    )
+                                    .await
+                                {
+                                    if shard_header.verify(&shard_data) {
+                                        current_offset += ShardHeader::SIZE as u64 + shard_len;
+                                        consecutive_misses = 0;
+                                        continue;
+                                    }
+                                }
                             }
                         }
                     }
