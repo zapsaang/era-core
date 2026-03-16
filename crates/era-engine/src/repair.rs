@@ -15,7 +15,7 @@
 //! - Single-volume: All shards in a single volume using `shard_idx % volume_count`
 //! - Matrix: Shards distributed using `(shard_idx + block_sequence) % volume_count`
 
-use crate::reader::ArchiveReader;
+use crate::reader::{ArchiveHealthStatus, ArchiveReader};
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{compute_shard_crc, EraError, ErasureCodeConfig, Result, ShardHeader};
@@ -43,6 +43,48 @@ fn check_cancelled(cancel_flag: &Arc<AtomicBool>, context: &str) -> Result<()> {
         return Err(cancellation_error(context));
     }
     Ok(())
+}
+
+fn classify_repair_archive_health(
+    expected_volumes: usize,
+    found_volumes: usize,
+    missing_indices: Vec<usize>,
+    unrecoverable_blocks: u64,
+    minimum_required_volumes: usize,
+) -> ArchiveHealthStatus {
+    if found_volumes < minimum_required_volumes {
+        return ArchiveHealthStatus::Incomplete {
+            expected_volumes,
+            found_volumes,
+            missing_indices,
+            reason: format!(
+                "only {} volume(s) found; need at least {} for full logical verification/repair",
+                found_volumes, minimum_required_volumes
+            ),
+        };
+    }
+
+    if unrecoverable_blocks > 0 {
+        return ArchiveHealthStatus::Incomplete {
+            expected_volumes,
+            found_volumes,
+            missing_indices,
+            reason: format!(
+                "{} unrecoverable block(s) prevent full logical verification/repair",
+                unrecoverable_blocks
+            ),
+        };
+    }
+
+    if !missing_indices.is_empty() {
+        return ArchiveHealthStatus::Degraded {
+            expected_volumes,
+            found_volumes,
+            missing_indices,
+        };
+    }
+
+    ArchiveHealthStatus::Healthy
 }
 
 #[cfg(test)]
@@ -93,6 +135,7 @@ pub struct RepairStats {
     pub unrecoverable_blocks: u64,
     /// Detailed error messages for unrecoverable blocks
     pub errors: Vec<String>,
+    pub archive_health: ArchiveHealthStatus,
 }
 
 async fn preflight_metadata_recovery(path: &Path, password: &str) -> Result<()> {
@@ -154,9 +197,23 @@ async fn read_and_verify_shard(
 }
 
 impl RepairStats {
+    pub fn is_healthy(&self) -> bool {
+        self.archive_health.is_healthy()
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.archive_health.is_degraded()
+    }
+
+    pub fn is_incomplete(&self) -> bool {
+        self.archive_health.is_incomplete()
+    }
+
     /// Check if all corrupted shards were repaired
     pub fn fully_repaired(&self) -> bool {
-        self.unrecoverable_blocks == 0 && self.corrupted_shards_found == self.shards_repaired
+        self.is_healthy()
+            && self.unrecoverable_blocks == 0
+            && self.corrupted_shards_found == self.shards_repaired
     }
 }
 
@@ -476,6 +533,15 @@ pub async fn repair_archive(
         info!("Dry run: would have repaired {} shards", repairs.len());
     }
 
+    let expected_volumes = usize::from(header.total_volumes().max(1));
+    stats.archive_health = classify_repair_archive_health(
+        expected_volumes,
+        1,
+        Vec::new(),
+        stats.unrecoverable_blocks,
+        1,
+    );
+
     info!(
         "Repair complete: {} blocks scanned, {} corrupted, {} shards repaired, {} unrecoverable",
         stats.blocks_scanned,
@@ -677,34 +743,57 @@ pub async fn repair_archive_matrix(
     let archive_id = first_reader.header().archive_id();
     let header = first_reader.header().clone();
     let total_volumes = first_reader.header().total_volumes();
+    let first_sequence = first_reader.header().volume_sequence();
 
-    volume_sequences.push(0);
+    let base_name = {
+        let base_str = volume_filename.to_string_lossy();
+        if base_str.ends_with(".era") {
+            base_str.to_string()
+        } else {
+            let owned = base_str.to_string();
+            if let Some(idx) = owned.rfind(".era.") {
+                owned[..idx + 4].to_string()
+            } else {
+                owned
+            }
+        }
+    };
+
+    volume_sequences.push(first_sequence);
     volume_paths.push(path.to_path_buf());
     volume_readers.push(first_reader);
 
     // Find additional volumes - continue even if some are missing
-    let base_path = path.with_extension("");
     let mut consecutive_missing = 0;
     let max_gap = 5; // Allow up to 5 consecutive missing volumes before giving up
 
-    for seq in 1..total_volumes.max(100) {
-        let ext = format!("era.{:03}", seq);
-        let next_path = base_path.with_extension(&ext);
-        let next_filename = next_path.file_name().unwrap_or_default();
+    for seq in 0..usize::from(total_volumes.max(100)) {
+        if seq == usize::from(first_sequence) {
+            continue;
+        }
+
+        let relative_path = if seq == 0 {
+            PathBuf::from(&base_name)
+        } else {
+            PathBuf::from(format!("{base_name}.{seq:03}"))
+        };
+        let next_path = parent_dir.join(&relative_path);
+        let next_filename = relative_path.file_name().unwrap_or_default();
 
         match VolumeReader::open(&backend, Path::new(next_filename)).await {
             Ok(reader) => {
                 if reader.header().archive_id() != archive_id {
                     break;
                 }
-                volume_sequences.push(seq);
+                let discovered_seq = reader.header().volume_sequence();
+                volume_sequences.push(discovered_seq);
                 volume_paths.push(next_path);
                 volume_readers.push(reader);
                 consecutive_missing = 0;
             }
             Err(_) => {
                 consecutive_missing += 1;
-                if consecutive_missing > max_gap && seq >= total_volumes {
+                if consecutive_missing > max_gap && seq >= usize::from(total_volumes) {
                     break;
                 }
             }
@@ -712,10 +801,21 @@ pub async fn repair_archive_matrix(
     }
 
     let volume_count = volume_readers.len();
+    let expected_volumes = usize::from(total_volumes.max(1));
+    let missing_volume_indices: Vec<usize> = (0..expected_volumes)
+        .filter(|idx| !volume_sequences.iter().any(|seq| usize::from(*seq) == *idx))
+        .collect();
     info!(
         "Found {} volumes for matrix-distributed archive (expected {})",
         volume_count, total_volumes
     );
+
+    if !missing_volume_indices.is_empty() {
+        warn!(
+            "Matrix repair opened {} of {} expected volumes; missing sequences {:?}",
+            volume_count, expected_volumes, missing_volume_indices
+        );
+    }
 
     if volume_count < 2 {
         return Err(EraError::ErasureError(
@@ -785,7 +885,16 @@ pub async fn repair_archive_matrix(
         }
     }
 
-    let mut stats = RepairStats::default();
+    let mut stats = RepairStats {
+        archive_health: classify_repair_archive_health(
+            expected_volumes,
+            volume_count,
+            missing_volume_indices.clone(),
+            0,
+            erasure_config.data_shards as usize,
+        ),
+        ..Default::default()
+    };
     let mut all_repairs: HashMap<usize, Vec<ShardRepair>> = HashMap::new(); // volume_idx -> repairs
 
     // Scan blocks using matrix distribution pattern
@@ -1071,6 +1180,14 @@ pub async fn repair_archive_matrix(
             all_repairs.len()
         );
     }
+
+    stats.archive_health = classify_repair_archive_health(
+        expected_volumes,
+        volume_count,
+        missing_volume_indices,
+        stats.unrecoverable_blocks,
+        erasure_config.data_shards as usize,
+    );
 
     info!(
         "Matrix repair complete: {} blocks, {} corrupted, {} repaired, {} unrecoverable",

@@ -54,7 +54,7 @@ pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_V
 pub use era_crypto::KeySession;
 // Re-export certificate types for convenient access
 pub use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
-pub use reader::{ArchiveReader, ExtractOptions, ExtractStats, VerifyStats};
+pub use reader::{ArchiveHealthStatus, ArchiveReader, ExtractOptions, ExtractStats, VerifyStats};
 pub use recovery::{
     RecoverableWriter, RecoveryManager, RecoveryOptions, RecoveryStatus, RecoveryStrategy,
 };

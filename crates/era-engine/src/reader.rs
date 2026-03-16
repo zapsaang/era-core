@@ -16,7 +16,7 @@ use crate::block_iter::{
 use crate::chunk_processor::{
     enforce_output_containment, ExtractionContext, MultiChunkState, VerificationContext,
 };
-pub use crate::chunk_processor::{ExtractStats, VerifyStats};
+pub use crate::chunk_processor::{ArchiveHealthStatus, ExtractStats, VerifyStats};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
 use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result, ShardLayout};
@@ -79,6 +79,8 @@ pub struct ArchiveReader {
     /// Indices of each volume in the original multi-volume sequence
     /// e.g., [0, 2] means we have volume 0 and volume 2 (volume 1 is missing)
     volume_indices: Vec<usize>,
+    expected_volume_count: usize,
+    missing_volume_indices: Vec<usize>,
     /// Key session for per-block key derivation (mlock-protected)
     session: KeySession,
     /// Pre-derived volume key for volume 0
@@ -95,6 +97,13 @@ pub struct ArchiveReader {
     /// V2.1 index reader recovered from volume
     index_reader: Option<IndexReader>,
     embedded_index_recovery_failed: bool,
+}
+
+struct DiscoveredVolumes {
+    volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>>,
+    volume_indices: Vec<usize>,
+    expected_volume_count: usize,
+    missing_volume_indices: Vec<usize>,
 }
 
 impl ArchiveReader {
@@ -126,12 +135,7 @@ impl ArchiveReader {
     }
 
     /// Discover and open all volumes belonging to the same archive.
-    async fn discover_volumes(
-        path: &Path,
-    ) -> Result<(
-        Vec<VolumeReader<era_storage::LocalStorageReader>>,
-        Vec<usize>,
-    )> {
+    async fn discover_volumes(path: &Path) -> Result<DiscoveredVolumes> {
         let parent_dir = path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(parent_dir);
         let base_filename = path.file_name().unwrap_or_default();
@@ -257,7 +261,31 @@ impl ArchiveReader {
             },
         );
 
-        Ok((volume_readers, volume_indices))
+        let expected_volume_count = total_volumes;
+        let missing_volume_indices = if expected_volume_count > 0 {
+            let present: HashSet<usize> = volume_indices.iter().copied().collect();
+            (0..expected_volume_count)
+                .filter(|seq| !present.contains(seq))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if !missing_volume_indices.is_empty() {
+            warn!(
+                "Missing expected volumes at sequences {:?} (found {} of {})",
+                missing_volume_indices,
+                volume_readers.len(),
+                expected_volume_count
+            );
+        }
+
+        Ok(DiscoveredVolumes {
+            volume_readers,
+            volume_indices,
+            expected_volume_count,
+            missing_volume_indices,
+        })
     }
 
     pub async fn open_with_providers(
@@ -266,10 +294,10 @@ impl ArchiveReader {
     ) -> Result<Self> {
         info!("Opening archive: {}", path.display());
 
-        let (volume_readers, volume_indices) = Self::discover_volumes(path).await?;
+        let discovered = Self::discover_volumes(path).await?;
 
         // Use first available reader for key derivation (all volumes share same crypto params)
-        let volume_reader = &volume_readers[0];
+        let volume_reader = &discovered.volume_readers[0];
         let header = volume_reader.header();
 
         let mk_array: [u8; 32] = match header.access_policy() {
@@ -340,8 +368,10 @@ impl ArchiveReader {
         let compression_algorithm = header.config().compression.algorithm;
 
         Ok(Self {
-            volume_readers,
-            volume_indices,
+            volume_readers: discovered.volume_readers,
+            volume_indices: discovered.volume_indices,
+            expected_volume_count: discovered.expected_volume_count,
+            missing_volume_indices: discovered.missing_volume_indices,
             session,
             volume_key,
             nonce_context,
@@ -380,9 +410,9 @@ impl ArchiveReader {
     pub async fn open_with_session(path: &Path, session: &KeySession) -> Result<Self> {
         info!("Opening archive with key session: {}", path.display());
 
-        let (volume_readers, volume_indices) = Self::discover_volumes(path).await?;
+        let discovered = Self::discover_volumes(path).await?;
 
-        let volume_reader = &volume_readers[0];
+        let volume_reader = &discovered.volume_readers[0];
         let header = volume_reader.header();
 
         if let era_volume::AccessPolicy::Threshold(t) = header.access_policy() {
@@ -404,8 +434,10 @@ impl ArchiveReader {
         let compression_algorithm = header.config().compression.algorithm;
 
         Ok(Self {
-            volume_readers,
-            volume_indices,
+            volume_readers: discovered.volume_readers,
+            volume_indices: discovered.volume_indices,
+            expected_volume_count: discovered.expected_volume_count,
+            missing_volume_indices: discovered.missing_volume_indices,
             session: owned_session,
             volume_key,
             nonce_context,
@@ -682,6 +714,14 @@ impl ArchiveReader {
         &self.volume_indices
     }
 
+    pub fn expected_volume_count(&self) -> usize {
+        self.expected_volume_count
+    }
+
+    pub fn missing_volume_indices(&self) -> &[usize] {
+        &self.missing_volume_indices
+    }
+
     pub fn nonce_context(&self) -> [u8; 16] {
         self.nonce_context
     }
@@ -692,6 +732,91 @@ impl ArchiveReader {
 
     pub fn epoch_id(&self) -> u32 {
         self.epoch_id
+    }
+
+    fn classify_archive_health(&self, stats: &VerifyStats) -> ArchiveHealthStatus {
+        let expected_volumes = self.expected_volume_count.max(self.volume_indices.len());
+        let found_volumes = self.volume_indices.len();
+        let missing_indices = self.missing_volume_indices.clone();
+
+        if !stats.is_ok() {
+            return ArchiveHealthStatus::Incomplete {
+                expected_volumes,
+                found_volumes,
+                missing_indices,
+                reason: format!(
+                    "verification reported {} block failures, {} incomplete files, {} errors",
+                    stats.blocks_failed,
+                    stats.files_incomplete,
+                    stats.errors.len()
+                ),
+            };
+        }
+
+        if !stats.warnings.is_empty() || !self.missing_volume_indices.is_empty() {
+            return ArchiveHealthStatus::Degraded {
+                expected_volumes,
+                found_volumes,
+                missing_indices,
+            };
+        }
+
+        ArchiveHealthStatus::Healthy
+    }
+
+    fn log_verify_result(&self, stats: &VerifyStats) {
+        match &stats.archive_health {
+            ArchiveHealthStatus::Healthy => {
+                info!(
+                    "Verification passed: {} blocks, {} files, {} bytes",
+                    stats.blocks_verified, stats.files_verified, stats.bytes_verified
+                );
+            }
+            ArchiveHealthStatus::Degraded {
+                expected_volumes,
+                found_volumes,
+                missing_indices,
+            } => {
+                if missing_indices.is_empty() {
+                    warn!(
+                        "Verification degraded: {} blocks, {} files, {} bytes",
+                        stats.blocks_verified, stats.files_verified, stats.bytes_verified
+                    );
+                } else {
+                    warn!(
+                        "Verification degraded: found {} of {} expected volumes; missing sequences {:?}",
+                        found_volumes, expected_volumes, missing_indices
+                    );
+                }
+            }
+            ArchiveHealthStatus::Incomplete {
+                expected_volumes,
+                found_volumes,
+                missing_indices,
+                reason,
+            } => {
+                info!(
+                    "Verification FAILED: {} block errors, {} incomplete files, {} total errors",
+                    stats.blocks_failed,
+                    stats.files_incomplete,
+                    stats.errors.len()
+                );
+                if !missing_indices.is_empty() {
+                    warn!(
+                        "Archive incomplete: found {} of {} expected volumes; missing sequences {:?}",
+                        found_volumes, expected_volumes, missing_indices
+                    );
+                }
+                warn!("Verification status: {}", reason);
+            }
+        }
+
+        for warn_msg in &stats.warnings {
+            warn!("Verify Warning: {}", warn_msg);
+        }
+        for err in &stats.errors {
+            warn!("Verify error: {}", err);
+        }
     }
 
     pub fn session(&self) -> &KeySession {
@@ -1399,26 +1524,6 @@ impl ArchiveReader {
                 .unwrap_or_default()
         });
 
-        if stats.is_ok() {
-            info!(
-                "Verification passed: {} blocks, {} files, {} bytes",
-                stats.blocks_verified, stats.files_verified, stats.bytes_verified
-            );
-            for warn in &stats.warnings {
-                tracing::warn!("Verify Warning: {}", warn);
-            }
-        } else {
-            info!(
-                "Verification FAILED: {} block errors, {} incomplete files, {} total errors",
-                stats.blocks_failed,
-                stats.files_incomplete,
-                stats.errors.len()
-            );
-            for err in &stats.errors {
-                tracing::warn!("Verify error: {}", err);
-            }
-        }
-
         Ok(stats)
     }
 
@@ -1544,7 +1649,10 @@ impl ArchiveReader {
             ))
         };
 
-        Self::verify_with_iterator(catalog, &mut iter).await
+        let mut stats = Self::verify_with_iterator(catalog, &mut iter).await?;
+        stats.archive_health = self.classify_archive_health(&stats);
+        self.log_verify_result(&stats);
+        Ok(stats)
     }
 }
 

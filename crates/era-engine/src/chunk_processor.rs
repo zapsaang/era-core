@@ -358,6 +358,37 @@ impl VerificationContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ArchiveHealthStatus {
+    #[default]
+    Healthy,
+    Degraded {
+        expected_volumes: usize,
+        found_volumes: usize,
+        missing_indices: Vec<usize>,
+    },
+    Incomplete {
+        expected_volumes: usize,
+        found_volumes: usize,
+        missing_indices: Vec<usize>,
+        reason: String,
+    },
+}
+
+impl ArchiveHealthStatus {
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded { .. })
+    }
+
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self, Self::Incomplete { .. })
+    }
+}
+
 /// Statistics about verification
 #[derive(Debug, Default)]
 pub struct VerifyStats {
@@ -375,6 +406,8 @@ pub struct VerifyStats {
     pub errors: Vec<String>,
     /// List of warnings (recovered issues, e.g. corrupted shards that were repaired via RS)
     pub warnings: Vec<String>,
+    /// Overall archive health, including physical volume-set completeness.
+    pub archive_health: ArchiveHealthStatus,
 }
 
 impl VerifyStats {
@@ -388,9 +421,21 @@ impl VerifyStats {
         !self.warnings.is_empty()
     }
 
-    /// Check if the archive needs repair (has errors OR warnings indicating shard corruption)
+    pub fn is_healthy(&self) -> bool {
+        matches!(self.archive_health, ArchiveHealthStatus::Healthy)
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        matches!(self.archive_health, ArchiveHealthStatus::Degraded { .. })
+    }
+
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self.archive_health, ArchiveHealthStatus::Incomplete { .. })
+    }
+
+    /// Check if the archive needs repair or operator attention.
     pub fn needs_repair(&self) -> bool {
-        !self.is_ok() || self.has_warnings()
+        !self.is_healthy()
     }
 }
 
@@ -440,12 +485,48 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_stats_archive_health_helpers() {
+        let healthy = VerifyStats::default();
+        assert!(healthy.is_healthy());
+        assert!(!healthy.is_degraded());
+        assert!(!healthy.is_incomplete());
+
+        let degraded = VerifyStats {
+            archive_health: ArchiveHealthStatus::Degraded {
+                expected_volumes: 6,
+                found_volumes: 5,
+                missing_indices: vec![2],
+            },
+            ..Default::default()
+        };
+        assert!(degraded.is_degraded());
+        assert!(!degraded.is_healthy());
+
+        let incomplete = VerifyStats {
+            archive_health: ArchiveHealthStatus::Incomplete {
+                expected_volumes: 6,
+                found_volumes: 3,
+                missing_indices: vec![1, 3, 5],
+                reason: "not enough shards".into(),
+            },
+            ..Default::default()
+        };
+        assert!(incomplete.is_incomplete());
+        assert!(!incomplete.is_healthy());
+    }
+
+    #[test]
     fn test_verify_stats_needs_repair() {
         let clean = VerifyStats::default();
         assert!(!clean.needs_repair());
 
         let degraded = VerifyStats {
             warnings: vec!["Block 0: recovered from 1 corrupted shards".to_string()],
+            archive_health: ArchiveHealthStatus::Degraded {
+                expected_volumes: 1,
+                found_volumes: 1,
+                missing_indices: Vec::new(),
+            },
             ..Default::default()
         };
         assert!(degraded.needs_repair());
@@ -454,6 +535,12 @@ mod tests {
         let broken = VerifyStats {
             blocks_failed: 1,
             errors: vec!["Block logic error: AEAD failure".to_string()],
+            archive_health: ArchiveHealthStatus::Incomplete {
+                expected_volumes: 1,
+                found_volumes: 1,
+                missing_indices: Vec::new(),
+                reason: "logical verification failed".into(),
+            },
             ..Default::default()
         };
         assert!(broken.needs_repair());
@@ -463,8 +550,41 @@ mod tests {
             blocks_failed: 1,
             errors: vec!["Block logic error".to_string()],
             warnings: vec!["Block 1: recovered from 2 corrupted shards".to_string()],
+            archive_health: ArchiveHealthStatus::Incomplete {
+                expected_volumes: 6,
+                found_volumes: 3,
+                missing_indices: vec![1, 3, 5],
+                reason: "missing expected volumes".into(),
+            },
             ..Default::default()
         };
         assert!(both.needs_repair());
+    }
+
+    #[test]
+    fn test_archive_health_status_helpers() {
+        let healthy = ArchiveHealthStatus::Healthy;
+        assert!(healthy.is_healthy());
+        assert!(!healthy.is_degraded());
+        assert!(!healthy.is_incomplete());
+
+        let degraded = ArchiveHealthStatus::Degraded {
+            expected_volumes: 6,
+            found_volumes: 5,
+            missing_indices: vec![2],
+        };
+        assert!(!degraded.is_healthy());
+        assert!(degraded.is_degraded());
+        assert!(!degraded.is_incomplete());
+
+        let incomplete = ArchiveHealthStatus::Incomplete {
+            expected_volumes: 6,
+            found_volumes: 2,
+            missing_indices: vec![1, 2, 3, 4],
+            reason: "not enough shards for full verification".to_string(),
+        };
+        assert!(!incomplete.is_healthy());
+        assert!(!incomplete.is_degraded());
+        assert!(incomplete.is_incomplete());
     }
 }
