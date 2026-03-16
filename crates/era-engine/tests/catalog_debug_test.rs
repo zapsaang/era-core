@@ -25,13 +25,12 @@ async fn test_catalog_recovery_debug() {
         ..Default::default()
     };
 
-    // Create archive with 4 volumes
-    println!("Creating archive with 4 volumes");
+    println!("Creating archive with 3 volumes");
     let mut writer = ArchiveWriterBuilder::new(&base_path)
         .config(config)
         .enable_erasure(true)
         .erasure_config(erasure_config)
-        .volume_count(4)
+        .volume_count(3)
         .build()
         .await
         .expect("Failed to create writer");
@@ -56,13 +55,9 @@ async fn test_catalog_recovery_debug() {
         }
     }
 
-    // Test losing 2 volumes
-    println!("\n=== TEST LOSING 2 VOLUMES ===");
-    println!("Deleting volume 1 and 2");
+    println!("\n=== TEST LOSING 1 VOLUME ===");
+    println!("Deleting volume 1");
     if let Some((_, _, path)) = files.iter().find(|(name, _, _)| name == "archive.era.001") {
-        fs::remove_file(path).ok();
-    }
-    if let Some((_, _, path)) = files.iter().find(|(name, _, _)| name == "archive.era.002") {
         fs::remove_file(path).ok();
     }
 
@@ -95,8 +90,8 @@ async fn test_catalog_recovery_debug() {
         }
     }
 
-    println!("\nAttempting to open with archive.era.003 (volume 3)");
-    let vol3_path = temp_dir.path().join("archive.era.003");
+    println!("\nAttempting to open with archive.era.002 (volume 2)");
+    let vol3_path = temp_dir.path().join("archive.era.002");
 
     match ArchiveReader::open(&vol3_path, "").await {
         Ok(mut reader) => {

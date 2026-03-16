@@ -17,7 +17,6 @@ async fn test_panic_root_cause_analysis() {
 
     let temp_dir = TempDir::new().unwrap();
 
-    // Create with 4 volumes
     let base_path = temp_dir.path().join("test.era");
 
     let config = ArchiveConfig {
@@ -28,12 +27,12 @@ async fn test_panic_root_cause_analysis() {
         ..Default::default()
     };
 
-    println!("Creating 4-volume archive...");
+    println!("Creating 3-volume archive...");
     let mut writer = ArchiveWriterBuilder::new(&base_path)
         .config(config)
         .enable_erasure(true)
         .erasure_config(erasure)
-        .volume_count(4)
+        .volume_count(3)
         .build()
         .await
         .expect("Failed");
@@ -45,7 +44,7 @@ async fn test_panic_root_cause_analysis() {
     println!("✓ Created\n");
 
     // Test progressively losing more volumes
-    for volumes_to_lose in 1..4 {
+    for volumes_to_lose in 1..3 {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Losing {} volumes", volumes_to_lose);
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -53,7 +52,7 @@ async fn test_panic_root_cause_analysis() {
         let test_dir = TempDir::new().unwrap();
 
         // Copy all volumes
-        for i in 0..4 {
+        for i in 0..3 {
             let src = if i == 0 {
                 base_path.clone()
             } else {
@@ -98,7 +97,7 @@ async fn test_panic_root_cause_analysis() {
 
         // Try to open and read
         let mut found_openable = false;
-        for i in volumes_to_lose..4 {
+        for i in volumes_to_lose..3 {
             let test_path = if i == 0 {
                 test_dir.path().join("test.era")
             } else {
@@ -173,11 +172,10 @@ fn test_volume_requirements_strict() {
     println!("Erasure Config: 4 data + 2 parity = 6 total shards\n");
     println!("Strict fault-tolerance requirements analysis:\n");
 
-    // For 4+2, with different volume counts
     let scenarios = vec![
-        (3, "minimal viable (parity+1)"),
-        (4, "suboptimal"),
-        (5, "near optimal"),
+        (1, "single-volume canonical"),
+        (2, "two-volume canonical"),
+        (3, "three-volume canonical"),
         (6, "optimal"),
     ];
 

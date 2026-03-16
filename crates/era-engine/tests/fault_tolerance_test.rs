@@ -15,7 +15,7 @@ async fn test_precise_fault_tolerance_limits() {
         parity_shards: 2,
     };
 
-    for volume_count in [3, 4, 6, 8].iter() {
+    for volume_count in [3, 6, 8].iter() {
         println!(
             "\nTest Configuration: {} volumes, 4+2 erasure",
             volume_count
@@ -120,32 +120,19 @@ async fn test_precise_fault_tolerance_limits() {
             }
 
             match ArchiveReader::open(&test_path, "").await {
-                Ok(mut reader) => {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tokio::runtime::Handle::current().block_on(async {
-                            reader
-                                .extract_all(&era_engine::ExtractOptions::new(
-                                    test_dir.path().join("extract"),
-                                ))
-                                .await
-                        })
-                    }));
-
-                    match result {
-                        Ok(Ok(_)) => {
-                            println!("  ✅ Lost {} volumes -> RECOVERED", volumes_to_lose);
-                        }
-                        Ok(Err(_)) => {
-                            println!("  ❌ Lost {} volumes -> FAILED TO RECOVER", volumes_to_lose);
-                        }
-                        Err(_) => {
-                            println!(
-                                "  ❌ Lost {} volumes -> PANIC DURING EXTRACTION",
-                                volumes_to_lose
-                            );
-                        }
+                Ok(mut reader) => match reader
+                    .extract_all(&era_engine::ExtractOptions::new(
+                        test_dir.path().join("extract"),
+                    ))
+                    .await
+                {
+                    Ok(_) => {
+                        println!("  ✅ Lost {} volumes -> RECOVERED", volumes_to_lose);
                     }
-                }
+                    Err(_) => {
+                        println!("  ❌ Lost {} volumes -> FAILED TO RECOVER", volumes_to_lose);
+                    }
+                },
                 Err(_) => {
                     println!("  ❌ Lost {} volumes -> READER FAILED", volumes_to_lose);
                 }

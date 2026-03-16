@@ -12,7 +12,7 @@ async fn test_design_promise_verification() {
     println!("Design doc promises:");
     println!("1. Tolerate up to parity_shards volume losses");
     println!("2. For 4+2: tolerate 2 volume losses");
-    println!("3. Only require volume_count >= parity_shards + 1");
+    println!("3. Canonical low-volume layouts must divide total shards");
     println!();
 
     let erasure = ErasureCodeConfig {
@@ -22,9 +22,9 @@ async fn test_design_promise_verification() {
 
     // Validate actual fault tolerance across volume_count configs
     let configs = vec![
-        (3, "minimal viable (parity+1)"),
-        (4, "+1 over minimum"),
-        (5, "+2 over minimum"),
+        (1, "single-volume canonical"),
+        (2, "two-volume canonical"),
+        (3, "three-volume canonical"),
         (6, "total_shards (optimal)"),
         (8, "above optimal"),
     ];
@@ -153,9 +153,9 @@ async fn test_design_promise_verification() {
 
     println!("\nDesign promise assessment:");
     println!("✓ Promise: tolerate up to 2 volume losses (for 4+2)");
-    println!("✓ Requirement: volume_count >= 3 (parity_shards + 1)");
-    println!("✓ Actual: needs volume_count = 6 to achieve this");
-    println!("⚠️ Conclusion: promise is incorrect; needs total_shards volumes");
+    println!("✓ Requirement: low counts must divide total_shards");
+    println!("✓ Actual: 1, 2, 3, 6, and 8 are canonical-valid for 4+2");
+    println!("⚠️ Conclusion: validity and fault tolerance are different concerns");
 }
 
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn test_sharding_math_verification() {
     println!();
 
     // Math validation: recovery condition after losing N volumes
-    for vol_count in 3..=8 {
+    for vol_count in 1..=8 {
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Volume count: {}", vol_count);
 
@@ -195,7 +195,7 @@ async fn test_sharding_math_verification() {
 
         // Verify
         for lost in 0..=3 {
-            let remaining_shards = total_shards - (lost * shards_per_vol);
+            let remaining_shards = total_shards.saturating_sub(lost * shards_per_vol);
             let can_recover = remaining_shards >= erasure.data_shards as usize;
             let status = if can_recover { "✅" } else { "❌" };
             println!(
