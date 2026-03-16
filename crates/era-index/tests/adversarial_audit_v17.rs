@@ -100,15 +100,14 @@ fn _use_imports() {
 #[test]
 fn v17_f1a_contains_key_before_insert() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 25000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 25000);
 
-    // Find the collision check and insert positions
     let contains_key_pos = fn_body
         .find("embedded_pages.contains_key")
-        .expect("embedded_pages.contains_key must exist in recover_from_volume");
+        .expect("embedded_pages.contains_key must exist in recover_pages_via_scan");
     let insert_pos = fn_body
         .find("embedded_pages.insert")
-        .expect("embedded_pages.insert must exist in recover_from_volume");
+        .expect("embedded_pages.insert must exist in recover_pages_via_scan");
 
     assert!(
         contains_key_pos < insert_pos,
@@ -121,7 +120,7 @@ fn v17_f1a_contains_key_before_insert() {
 #[test]
 fn v17_f1b_collision_check_warns() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 25000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 25000);
 
     let contains_key_pos = fn_body
         .find("embedded_pages.contains_key")
@@ -139,7 +138,7 @@ fn v17_f1b_collision_check_warns() {
 #[test]
 fn v17_f1c_collision_message_mentions_collision() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 25000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 25000);
 
     let contains_key_pos = fn_body
         .find("embedded_pages.contains_key")
@@ -443,11 +442,11 @@ fn v17_f7b_debug_assert_checks_block_id() {
 fn v17_f7c_add_page_behavioral_unique_ids() {
     // Adding pages with unique block_ids should succeed
     let mut meta = era_index::MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2), 0, 0)
         .unwrap();
 
     assert_eq!(meta.pages().len(), 3);

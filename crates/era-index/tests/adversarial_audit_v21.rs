@@ -610,7 +610,7 @@ fn v21_f10a_find_page_has_trace_log() {
 #[test]
 fn v21_f10b_find_page_err0_behavioral() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(200), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(200), BlockId::new(0), 0, 0)
         .unwrap();
 
     // Hash before first page range — should return None

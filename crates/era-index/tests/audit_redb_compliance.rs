@@ -169,9 +169,9 @@ fn test_a2_zero_copy_index_page_access() {
 #[test]
 fn test_a3_zero_copy_meta_index_access() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1), 0, 0)
         .unwrap();
 
     let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);

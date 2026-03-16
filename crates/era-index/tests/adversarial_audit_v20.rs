@@ -627,13 +627,13 @@ fn v20_f12b_doc_comment_mentions_bloom() {
 #[test]
 fn v20_regression_v19_f2_add_page_rejects_duplicate_block_id() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Duplicate block_id should fail
-    let result = meta.add_page(test_hash(200), test_hash(299), BlockId::new(1));
+    let result = meta.add_page(test_hash(200), test_hash(299), BlockId::new(1), 0, 0);
     assert!(
         result.is_err(),
         "V19-F2 regression: duplicate block_id must be rejected"

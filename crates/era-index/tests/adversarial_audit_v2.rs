@@ -84,8 +84,14 @@ fn test_meta_index_binary_search_correctness() {
     let mut meta = MetaIndex::new();
 
     for i in 0..10u64 {
-        meta.add_page(be_hash(i * 100), be_hash(i * 100 + 99), BlockId::new(i))
-            .unwrap();
+        meta.add_page(
+            be_hash(i * 100),
+            be_hash(i * 100 + 99),
+            BlockId::new(i),
+            0,
+            0,
+        )
+        .unwrap();
     }
 
     assert_eq!(
@@ -115,7 +121,7 @@ fn test_meta_index_le_hashes_no_wrong_page() {
     for i in 0..10u64 {
         let min = test_hash(i * 100);
         let max = test_hash(i * 100 + 99);
-        meta.add_page(min, max, BlockId::new(i)).unwrap();
+        meta.add_page(min, max, BlockId::new(i), 0, 0).unwrap();
     }
 
     let target = test_hash(950);

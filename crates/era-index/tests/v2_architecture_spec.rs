@@ -233,6 +233,8 @@ fn test_meta_index_lookup() {
             test_hash(i * 1000),
             test_hash((i + 1) * 1000 - 1),
             BlockId::new(100 + i),
+            0,
+            0,
         )
         .unwrap();
     }

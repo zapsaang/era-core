@@ -345,12 +345,17 @@ impl IndexBuilder {
 
         // Write encrypted blocks to volume (async) and build MetaIndex
         for (encrypted_block, min_hash, max_hash, block_id) in encrypted_blocks {
-            let _location = volume_writer
+            let location = volume_writer
                 .write_canonical_block(&encrypted_block, BlockType::IndexPage)
                 .await?;
 
-            // Add PagePointer to L1
-            meta.add_page(min_hash, max_hash, block_id)?;
+            meta.add_page(
+                min_hash,
+                max_hash,
+                block_id,
+                location.physical_offset,
+                location.encrypted_size,
+            )?;
         }
 
         // Reuse the builder's existing bloom — it already contains all entries.

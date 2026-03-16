@@ -366,12 +366,11 @@ impl IndexPage {
 #[derive(Debug, Clone, Copy, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct PagePointer {
-    /// Minimum hash in the target page
-    pub(crate) min_hash: ChunkHash, // V24-F2 fix
-    /// Maximum hash in the target page
-    pub(crate) max_hash: ChunkHash, // V24-F2 fix
-    /// Block ID of the L2 page
-    pub(crate) block_id: BlockId, // V24-F2 fix
+    pub(crate) min_hash: ChunkHash,
+    pub(crate) max_hash: ChunkHash,
+    pub(crate) block_id: BlockId,
+    pub(crate) physical_offset: u64,
+    pub(crate) encrypted_size: u32,
 }
 
 // V24-F2 fix: Public accessor methods for encapsulated fields.
@@ -392,6 +391,21 @@ impl PagePointer {
     #[must_use]
     pub fn block_id(&self) -> BlockId {
         self.block_id
+    }
+
+    #[must_use]
+    pub fn physical_offset(&self) -> u64 {
+        self.physical_offset
+    }
+
+    #[must_use]
+    pub fn encrypted_size(&self) -> u32 {
+        self.encrypted_size
+    }
+
+    #[must_use]
+    pub fn has_location(&self) -> bool {
+        self.physical_offset != 0
     }
 }
 
@@ -433,6 +447,8 @@ impl MetaIndex {
         min_hash: ChunkHash,
         max_hash: ChunkHash,
         block_id: BlockId,
+        physical_offset: u64,
+        encrypted_size: u32,
     ) -> era_common::Result<()> {
         // V18-F9 fix: Reject inverted hash ranges that would break binary search
         if min_hash > max_hash {
@@ -471,6 +487,8 @@ impl MetaIndex {
             min_hash,
             max_hash,
             block_id,
+            physical_offset,
+            encrypted_size,
         });
         Ok(())
     }
@@ -603,11 +621,11 @@ mod tests {
     #[test]
     fn test_meta_index_find() {
         let mut meta = MetaIndex::new();
-        meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+        meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
             .unwrap();
-        meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+        meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1), 0, 0)
             .unwrap();
-        meta.add_page(test_hash(2000), test_hash(2999), BlockId::new(2))
+        meta.add_page(test_hash(2000), test_hash(2999), BlockId::new(2), 0, 0)
             .unwrap();
 
         assert_eq!(

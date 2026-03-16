@@ -102,11 +102,11 @@ fn _use_imports() {
 #[test]
 fn v18_f1a_hashmap_index_exists_in_recovery() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 20000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 20000);
 
     assert!(
         fn_body.contains("block_id_to_page_idx"),
-        "V18-F1: recover_from_volume must use block_id_to_page_idx HashMap"
+        "V18-F1: recover_pages_via_scan must use block_id_to_page_idx HashMap"
     );
     assert!(
         fn_body.contains("HashMap<BlockId, usize>"),
@@ -117,9 +117,8 @@ fn v18_f1a_hashmap_index_exists_in_recovery() {
 #[test]
 fn v18_f1b_hashmap_removes_on_match() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 20000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 20000);
 
-    // After a page is recovered, its block_id must be removed from the index
     assert!(
         fn_body.contains("block_id_to_page_idx.remove"),
         "V18-F1: block_id_to_page_idx must be pruned on successful match"
@@ -129,9 +128,8 @@ fn v18_f1b_hashmap_removes_on_match() {
 #[test]
 fn v18_f1c_positional_hint_optimization() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 20000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 20000);
 
-    // Positional hint: try scan_idx as block_id first (happy path O(1))
     assert!(
         fn_body.contains("positional_hint"),
         "V18-F1: recovery must try positional hint (scan_idx as BlockId) first"
@@ -572,7 +570,7 @@ fn v18_f9b_inverted_range_returns_error() {
 fn v18_f9c_inverted_range_behavioral() {
     let mut meta = era_index::MetaIndex::new();
     // min_hash(200) > max_hash(100) → inverted range, must be rejected
-    let result = meta.add_page(test_hash(200), test_hash(100), BlockId::new(0));
+    let result = meta.add_page(test_hash(200), test_hash(100), BlockId::new(0), 0, 0);
     assert!(
         result.is_err(),
         "V18-F9: inverted hash range (min > max) must be rejected"
@@ -589,7 +587,7 @@ fn v18_f9c_inverted_range_behavioral() {
 fn v18_f9d_valid_range_still_works() {
     let mut meta = era_index::MetaIndex::new();
     // min_hash(100) <= max_hash(200) → valid range, must succeed
-    let result = meta.add_page(test_hash(100), test_hash(200), BlockId::new(0));
+    let result = meta.add_page(test_hash(100), test_hash(200), BlockId::new(0), 0, 0);
     assert!(
         result.is_ok(),
         "V18-F9: valid hash range (min <= max) must be accepted"
@@ -601,7 +599,7 @@ fn v18_f9d_valid_range_still_works() {
 fn v18_f9e_equal_range_accepted() {
     let mut meta = era_index::MetaIndex::new();
     // Single-entry page: min == max, should be accepted
-    let result = meta.add_page(test_hash(50), test_hash(50), BlockId::new(0));
+    let result = meta.add_page(test_hash(50), test_hash(50), BlockId::new(0), 0, 0);
     assert!(
         result.is_ok(),
         "V18-F9: equal hash range (min == max) must be accepted"
@@ -746,14 +744,14 @@ fn v18_f12c_error_message_format() {
 #[test]
 fn v18_regression_v17f1_contains_key_before_insert() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 20000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 20000);
 
     let contains_key_pos = fn_body
         .find("embedded_pages.contains_key")
-        .expect("embedded_pages.contains_key must exist in recover_from_volume");
+        .expect("embedded_pages.contains_key must exist in recover_pages_via_scan");
     let insert_pos = fn_body
         .find("embedded_pages.insert")
-        .expect("embedded_pages.insert must exist in recover_from_volume");
+        .expect("embedded_pages.insert must exist in recover_pages_via_scan");
 
     assert!(
         contains_key_pos < insert_pos,

@@ -964,9 +964,9 @@ fn test_p2_large_bloom_filter_sizing_causes_panic() {
 #[test]
 fn test_p3_page_boundary_lookup() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Exact boundary: hash 99 (last in page 0)

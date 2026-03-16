@@ -578,12 +578,12 @@ fn v16_f11b_entry_count_doc_mentions_deduplication() {
 #[test]
 fn v16_f12a_collision_warn_exists() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 25000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 25000);
 
     // Find the embedded_pages.insert section
     let insert_pos = fn_body
         .find("embedded_pages.insert")
-        .expect("embedded_pages.insert must exist in recover_from_volume");
+        .expect("embedded_pages.insert must exist in recover_pages_via_scan");
     let region_end = (insert_pos + 500).min(fn_body.len());
     let insert_region = &fn_body[insert_pos..region_end];
 
@@ -597,13 +597,12 @@ fn v16_f12a_collision_warn_exists() {
 #[test]
 fn v16_f12b_collision_warn_mentions_collision() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 25000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 25000);
 
     let insert_pos = fn_body
         .find("embedded_pages.insert")
         .expect("embedded_pages.insert must exist");
     // V17-F1 moved the collision check BEFORE insert, so search backwards too.
-    // Look in a window centered on the insert call: 500 chars before and after.
     let region_start = insert_pos.saturating_sub(500);
     let region_end = (insert_pos + 500).min(fn_body.len());
     let insert_region = &fn_body[region_start..region_end];

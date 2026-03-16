@@ -101,7 +101,7 @@ fn test_v6_1a_positional_contract_verification() {
     for i in 0..10u64 {
         let min = test_hash(i * 1000);
         let max = test_hash(i * 1000 + 999);
-        meta.add_page(min, max, BlockId::new(i)).unwrap();
+        meta.add_page(min, max, BlockId::new(i), 0, 0).unwrap();
     }
 
     // Verify positional contract: meta.pages[i].block_id == BlockId::new(i)
@@ -128,11 +128,11 @@ fn test_v6_1b_meta_index_order_independence() {
     let mut meta = MetaIndex::new();
 
     // Add pages in sequential order (as finalize does)
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2), 0, 0)
         .unwrap();
 
     // Verify lookups work for each page's range
@@ -176,11 +176,11 @@ fn test_v6_1b_meta_index_order_independence() {
 fn test_v6_1c_completeness_check_catches_missing_pages() {
     // Create a MetaIndex that expects 3 pages
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2), 0, 0)
         .unwrap();
 
     assert_eq!(meta.pages().len(), 3, "MetaIndex should have 3 pages");
@@ -211,9 +211,9 @@ fn test_v6_1d_page_blocks_fewer_than_meta_pages() {
     // This is a structural test: verify that MetaIndex with N pages
     // but only M < N embedded pages results in incomplete lookups.
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Only provide page 0, not page 1
@@ -1363,10 +1363,10 @@ fn test_v6_12c_count_after_drain_and_reinsert() {
 #[test]
 fn test_v6_13a_gap_between_pages() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
     // Gap: 100..199 has no page
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Hashes in the gap should return None
@@ -1393,11 +1393,11 @@ fn test_v6_13a_gap_between_pages() {
 fn test_v6_13b_single_entry_pages() {
     let mut meta = MetaIndex::new();
     // Each page has min_hash == max_hash (single entry)
-    meta.add_page(test_hash(100), test_hash(100), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(100), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(200), BlockId::new(1))
+    meta.add_page(test_hash(200), test_hash(200), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(300), test_hash(300), BlockId::new(2))
+    meta.add_page(test_hash(300), test_hash(300), BlockId::new(2), 0, 0)
         .unwrap();
 
     // Exact matches
@@ -1424,11 +1424,11 @@ fn test_v6_13b_single_entry_pages() {
 #[test]
 fn test_v6_13c_adjacent_pages_no_overlap() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2), 0, 0)
         .unwrap();
 
     // Boundary: hash 99 → page 0 (max_hash of page 0)
@@ -1457,9 +1457,9 @@ fn test_v6_13c_adjacent_pages_no_overlap() {
 #[test]
 fn test_v6_13d_max_hash_boundary() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1))
+    meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Exact max_hash of page 0

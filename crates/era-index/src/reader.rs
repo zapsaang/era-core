@@ -17,6 +17,56 @@ use rkyv::Deserialize;
 #[allow(unused_imports)] // Used in tests
 use super::{IndexEntry, IndexPage, MetaIndex};
 
+// ── Legacy format types for backward-compatible deserialization ──
+// rkyv 0.7 is layout-locked: adding fields to PagePointer changes the binary
+// layout. Archives written before the direct-read optimization have a 3-field
+// PagePointer. These types allow deserializing old MetaIndex blobs.
+
+#[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
+#[archive(check_bytes)]
+struct LegacyPagePointer {
+    min_hash: ChunkHash,
+    max_hash: ChunkHash,
+    block_id: BlockId,
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
+#[archive(check_bytes)]
+struct LegacyMetaIndex {
+    pages: Vec<LegacyPagePointer>,
+    bloom_filter: Vec<u8>,
+}
+
+/// Deserialize a MetaIndex from rkyv bytes, with fallback to legacy format.
+///
+/// Tries the current 5-field PagePointer format first. If that fails (old archive),
+/// falls back to the 3-field LegacyPagePointer format and converts with
+/// `physical_offset=0, encrypted_size=0` (signals the reader to use scan recovery).
+fn deserialize_meta_index(data: &[u8]) -> Result<MetaIndex> {
+    if let Ok(archived) = rkyv::check_archived_root::<MetaIndex>(data) {
+        let meta: MetaIndex = match archived.deserialize(&mut rkyv::Infallible) {
+            Ok(val) => val,
+            Err(never) => match never {},
+        };
+        return Ok(meta);
+    }
+
+    tracing::info!("MetaIndex new-format deserialization failed, trying legacy format");
+    let archived = rkyv::check_archived_root::<LegacyMetaIndex>(data)
+        .map_err(|e| EraError::Deserialization(format!("Legacy MetaIndex: {e}")))?;
+    let legacy: LegacyMetaIndex = match archived.deserialize(&mut rkyv::Infallible) {
+        Ok(val) => val,
+        Err(never) => match never {},
+    };
+
+    let mut meta = MetaIndex::new();
+    for lp in &legacy.pages {
+        meta.add_page(lp.min_hash, lp.max_hash, lp.block_id, 0, 0)?;
+    }
+    meta.set_bloom_filter(legacy.bloom_filter)?;
+    Ok(meta)
+}
+
 /// Simplified location result — includes volume_id for multi-volume lookups
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexLocation {
@@ -212,7 +262,7 @@ impl IndexReader {
             for (block_id, chunk) in entries.chunks(super::ENTRIES_PER_PAGE).enumerate() {
                 let page = IndexPage::try_new_presorted(chunk.to_vec())?;
                 let bid = BlockId::new(block_id as u64);
-                meta.add_page(*page.min_hash(), *page.max_hash(), bid)?;
+                meta.add_page(*page.min_hash(), *page.max_hash(), bid, 0, 0)?;
                 pages.insert(bid, Arc::new(page));
             }
             pages
@@ -270,7 +320,7 @@ impl IndexReader {
         meta.clear_pages();
         let mut embedded_pages = HashMap::new();
         for (page, block_id) in pages {
-            meta.add_page(*page.min_hash(), *page.max_hash(), block_id)?;
+            meta.add_page(*page.min_hash(), *page.max_hash(), block_id, 0, 0)?;
             embedded_pages.insert(block_id, Arc::new(page));
         }
 
@@ -375,13 +425,7 @@ impl IndexReader {
                     "MetaIndex",
                 )?;
 
-                // Deserialize MetaIndex using rkyv (check_archived_root + deserialize)
-                let archived = rkyv::check_archived_root::<MetaIndex>(&decrypted_data)
-                    .map_err(|e| EraError::Deserialization(e.to_string()))?;
-                let meta: MetaIndex = match archived.deserialize(&mut rkyv::Infallible) {
-                    Ok(val) => val,
-                    Err(never) => match never {},
-                };
+                let meta = deserialize_meta_index(&decrypted_data)?;
 
                 // V18-F2: Validate structural invariants before trusting the MetaIndex
                 validate_meta_index(&meta)?;
@@ -551,14 +595,7 @@ impl IndexReader {
                     {
                         continue;
                     }
-                    // Try to deserialize as MetaIndex using rkyv
-                    if let Ok(archived) = rkyv::check_archived_root::<MetaIndex>(&decrypted_data) {
-                        let meta_candidate: MetaIndex =
-                            match archived.deserialize(&mut rkyv::Infallible) {
-                                Ok(val) => val,
-                                Err(never) => match never {},
-                            };
-                        // Verify this looks like a valid MetaIndex
+                    if let Ok(meta_candidate) = deserialize_meta_index(&decrypted_data) {
                         // V18-F2: Validate structural invariants
                         if !meta_candidate.pages().is_empty()
                             && validate_meta_index(&meta_candidate).is_ok()
@@ -581,10 +618,259 @@ impl IndexReader {
             })?
         };
 
+        // Step 3: Recover IndexPage blocks
+        // Fast path: if all PagePointers have direct-read location data, read each
+        // block by offset (O(1) per page). Fall back to scan for legacy archives.
+        let all_have_offsets =
+            !meta.pages().is_empty() && meta.pages().iter().all(|pp| pp.has_location());
+
+        if all_have_offsets {
+            tracing::info!(
+                "All {} PagePointers have location data — using direct-read recovery",
+                meta.pages().len()
+            );
+
+            let mut embedded_pages = HashMap::with_capacity(meta.pages().len());
+
+            for (page_idx, page_ptr) in meta.pages().iter().enumerate() {
+                if let Some(dl) = deadline {
+                    if Instant::now() >= dl {
+                        return Err(EraError::IndexError(
+                            "Cold recovery timed out during direct-read page recovery".into(),
+                        ));
+                    }
+                }
+
+                let location = BlockLocation::single(
+                    VolumeId::new(),
+                    page_idx as u32,
+                    page_ptr.physical_offset(),
+                    page_ptr.encrypted_size(),
+                );
+
+                let (block_type, encrypted_block) = match volume_reader
+                    .read_typed_block(&location)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Direct read failed for PagePointer[{}] at offset {}: {}. Falling back to scan.",
+                            page_idx, page_ptr.physical_offset(), e
+                        );
+                        return Self::recover_pages_via_scan(
+                            volume_reader,
+                            session,
+                            volume_key,
+                            &index_nonce_context,
+                            &archive_id,
+                            epoch_id,
+                            &meta,
+                            cached_page_blocks,
+                            deadline,
+                        )
+                        .await;
+                    }
+                };
+
+                if block_type != BlockType::IndexPage {
+                    tracing::warn!(
+                        "Expected IndexPage at offset {}, found {:?}. Falling back to scan.",
+                        page_ptr.physical_offset(),
+                        block_type
+                    );
+                    return Self::recover_pages_via_scan(
+                        volume_reader,
+                        session,
+                        volume_key,
+                        &index_nonce_context,
+                        &archive_id,
+                        epoch_id,
+                        &meta,
+                        cached_page_blocks,
+                        deadline,
+                    )
+                    .await;
+                }
+
+                if encrypted_block.data.len() > MAX_INDEX_PAGE_SIZE + 64 {
+                    tracing::warn!(
+                        "Oversized IndexPage at offset {}: {} bytes. Falling back to scan.",
+                        page_ptr.physical_offset(),
+                        encrypted_block.data.len()
+                    );
+                    return Self::recover_pages_via_scan(
+                        volume_reader,
+                        session,
+                        volume_key,
+                        &index_nonce_context,
+                        &archive_id,
+                        epoch_id,
+                        &meta,
+                        cached_page_blocks,
+                        deadline,
+                    )
+                    .await;
+                }
+
+                let block_key = session.derive_block_key(
+                    volume_key,
+                    page_ptr.block_id().sequence(),
+                    &index_nonce_context,
+                )?;
+                let derived_key = block_key.to_derived_key()?;
+
+                let decrypted_data = match era_crypto::decrypt_with_context(
+                    &derived_key,
+                    &index_nonce_context,
+                    &archive_id,
+                    epoch_id,
+                    page_ptr.block_id(),
+                    &encrypted_block.data,
+                ) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Decryption failed for PagePointer[{}] block_id={}: {}. Falling back to scan.",
+                            page_idx, page_ptr.block_id().sequence(), e
+                        );
+                        return Self::recover_pages_via_scan(
+                            volume_reader,
+                            session,
+                            volume_key,
+                            &index_nonce_context,
+                            &archive_id,
+                            epoch_id,
+                            &meta,
+                            cached_page_blocks,
+                            deadline,
+                        )
+                        .await;
+                    }
+                };
+
+                if validate_rkyv_size(
+                    &decrypted_data,
+                    MIN_INDEX_PAGE_SIZE,
+                    MAX_INDEX_PAGE_SIZE,
+                    "IndexPage",
+                )
+                .is_err()
+                {
+                    tracing::warn!(
+                        "PagePointer[{}] rkyv size validation failed. Falling back to scan.",
+                        page_idx
+                    );
+                    return Self::recover_pages_via_scan(
+                        volume_reader,
+                        session,
+                        volume_key,
+                        &index_nonce_context,
+                        &archive_id,
+                        epoch_id,
+                        &meta,
+                        cached_page_blocks,
+                        deadline,
+                    )
+                    .await;
+                }
+
+                let page: IndexPage = match rkyv::check_archived_root::<IndexPage>(&decrypted_data)
+                {
+                    Ok(archived) => match archived.deserialize(&mut rkyv::Infallible) {
+                        Ok(val) => val,
+                        Err(never) => match never {},
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "PagePointer[{}] rkyv deserialization failed: {}. Falling back to scan.",
+                            page_idx, e
+                        );
+                        return Self::recover_pages_via_scan(
+                            volume_reader,
+                            session,
+                            volume_key,
+                            &index_nonce_context,
+                            &archive_id,
+                            epoch_id,
+                            &meta,
+                            cached_page_blocks,
+                            deadline,
+                        )
+                        .await;
+                    }
+                };
+
+                if *page.min_hash() != page_ptr.min_hash || *page.max_hash() != page_ptr.max_hash {
+                    tracing::warn!(
+                        "PagePointer[{}] hash mismatch. Falling back to scan.",
+                        page_idx
+                    );
+                    return Self::recover_pages_via_scan(
+                        volume_reader,
+                        session,
+                        volume_key,
+                        &index_nonce_context,
+                        &archive_id,
+                        epoch_id,
+                        &meta,
+                        cached_page_blocks,
+                        deadline,
+                    )
+                    .await;
+                }
+
+                embedded_pages.insert(page_ptr.block_id(), Arc::new(page));
+            }
+
+            let bloom = super::deserialize_bloom(meta.bloom_filter())?;
+
+            tracing::info!(
+                "Direct-read recovery complete: {} pages loaded",
+                embedded_pages.len()
+            );
+
+            return Ok(Self {
+                meta,
+                bloom,
+                embedded_pages,
+                archive_id,
+                epoch_id,
+            });
+        }
+
+        // Slow path: scan-based recovery (legacy archives or fallback)
+        tracing::info!("PagePointers lack location data — using scan-based recovery");
+        Self::recover_pages_via_scan(
+            volume_reader,
+            session,
+            volume_key,
+            &index_nonce_context,
+            &archive_id,
+            epoch_id,
+            &meta,
+            cached_page_blocks,
+            deadline,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_pages_via_scan<R: StorageReader>(
+        volume_reader: &VolumeReader<R>,
+        session: &KeySession,
+        volume_key: &VolumeKey,
+        index_nonce_context: &[u8; 16],
+        archive_id: &[u8; 16],
+        epoch_id: u32,
+        meta: &MetaIndex,
+        cached_page_blocks: Option<Vec<BlockLocation>>,
+        deadline: Option<Instant>,
+    ) -> Result<Self> {
         // Step 3: Scan for all IndexPage blocks
         // V20-F9 fix: Reuse cached page blocks from slow path if available,
         // avoiding a redundant scan_for_typed_blocks call.
-        let page_blocks = if let Some(cached) = cached_page_blocks.take() {
+        let page_blocks = if let Some(cached) = cached_page_blocks {
             tracing::info!(
                 "Reusing {} cached IndexPage blocks from manifest discovery",
                 cached.len()
@@ -678,14 +964,14 @@ impl IndexReader {
                 let block_key = session.derive_block_key(
                     volume_key,
                     page_ptr.block_id.sequence(),
-                    &index_nonce_context,
+                    index_nonce_context,
                 )?;
                 let derived_key = block_key.to_derived_key()?;
 
                 if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
                     &derived_key,
-                    &index_nonce_context,
-                    &archive_id,
+                    index_nonce_context,
+                    archive_id,
                     epoch_id,
                     page_ptr.block_id,
                     &encrypted_block.data,
@@ -758,12 +1044,11 @@ impl IndexReader {
         );
 
         Ok(Self {
-            // No external directory in recovery mode
-            meta,
+            meta: meta.clone(),
             bloom,
 
             embedded_pages,
-            archive_id,
+            archive_id: *archive_id,
             epoch_id,
         })
     }
@@ -895,5 +1180,92 @@ mod tests {
         // Test negative lookup
         let result = reader.lookup(&test_hash(500)).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_meta_index_new_format() {
+        let mut meta = MetaIndex::new();
+        meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 4224, 1024)
+            .unwrap();
+        meta.add_page(
+            test_hash(1000),
+            test_hash(1999),
+            BlockId::new(1),
+            5248,
+            2048,
+        )
+        .unwrap();
+        let bloom_bytes =
+            crate::serialize_bloom(&Bloom::<ChunkHash>::new_for_fp_rate(1024, 0.01)).unwrap();
+        meta.set_bloom_filter(bloom_bytes).unwrap();
+
+        let bytes = rkyv::to_bytes::<_, 4096>(&meta).expect("serialize");
+        let restored = deserialize_meta_index(&bytes).expect("deserialize new format");
+
+        assert_eq!(restored.pages().len(), 2);
+        assert_eq!(restored.pages()[0].physical_offset(), 4224);
+        assert_eq!(restored.pages()[0].encrypted_size(), 1024);
+        assert_eq!(restored.pages()[1].physical_offset(), 5248);
+        assert!(restored.pages()[0].has_location());
+    }
+
+    #[test]
+    fn test_deserialize_meta_index_legacy_fallback() {
+        let legacy = LegacyMetaIndex {
+            pages: vec![
+                LegacyPagePointer {
+                    min_hash: test_hash(0),
+                    max_hash: test_hash(999),
+                    block_id: BlockId::new(0),
+                },
+                LegacyPagePointer {
+                    min_hash: test_hash(1000),
+                    max_hash: test_hash(1999),
+                    block_id: BlockId::new(1),
+                },
+            ],
+            bloom_filter: crate::serialize_bloom(&Bloom::<ChunkHash>::new_for_fp_rate(1024, 0.01))
+                .unwrap(),
+        };
+
+        let bytes = rkyv::to_bytes::<_, 4096>(&legacy).expect("serialize legacy");
+
+        assert!(
+            rkyv::check_archived_root::<MetaIndex>(&bytes).is_err(),
+            "legacy bytes must not parse as new format"
+        );
+
+        let restored = deserialize_meta_index(&bytes).expect("legacy fallback");
+        assert_eq!(restored.pages().len(), 2);
+        assert_eq!(restored.pages()[0].block_id(), BlockId::new(0));
+        assert_eq!(restored.pages()[1].block_id(), BlockId::new(1));
+        assert_eq!(restored.pages()[0].physical_offset(), 0);
+        assert_eq!(restored.pages()[0].encrypted_size(), 0);
+        assert!(!restored.pages()[0].has_location());
+    }
+
+    #[test]
+    fn test_page_pointer_accessors_with_offset() {
+        let mut meta = MetaIndex::new();
+        meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 8192, 4096)
+            .unwrap();
+
+        let pp = &meta.pages()[0];
+        assert_eq!(pp.physical_offset(), 8192);
+        assert_eq!(pp.encrypted_size(), 4096);
+        assert_eq!(pp.block_id(), BlockId::new(0));
+        assert!(pp.has_location());
+    }
+
+    #[test]
+    fn test_page_pointer_zero_offset_signals_legacy() {
+        let mut meta = MetaIndex::new();
+        meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
+            .unwrap();
+
+        let pp = &meta.pages()[0];
+        assert_eq!(pp.physical_offset(), 0);
+        assert_eq!(pp.encrypted_size(), 0);
+        assert!(!pp.has_location());
     }
 }

@@ -158,10 +158,10 @@ fn v19_f2a_runtime_dup_check_in_source() {
 fn v19_f2b_duplicate_block_id_returns_error() {
     let mut meta = era_index::MetaIndex::new();
     // First add succeeds
-    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0), 0, 0)
         .expect("first add should succeed");
     // Second add with same block_id should fail
-    let result = meta.add_page(test_hash(200), test_hash(300), BlockId::new(0));
+    let result = meta.add_page(test_hash(200), test_hash(300), BlockId::new(0), 0, 0);
     assert!(
         result.is_err(),
         "V19-F2: duplicate block_id must be rejected"
@@ -177,11 +177,11 @@ fn v19_f2b_duplicate_block_id_returns_error() {
 #[test]
 fn v19_f2c_unique_block_ids_accepted() {
     let mut meta = era_index::MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(300), BlockId::new(1))
+    meta.add_page(test_hash(200), test_hash(300), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(400), test_hash(500), BlockId::new(2))
+    meta.add_page(test_hash(400), test_hash(500), BlockId::new(2), 0, 0)
         .unwrap();
     assert_eq!(meta.pages().len(), 3);
 }
@@ -632,7 +632,7 @@ fn v19_regression_v18f6_bloom_validation() {
 #[test]
 fn v19_regression_v18f9_inverted_range() {
     let mut meta = era_index::MetaIndex::new();
-    let result = meta.add_page(test_hash(200), test_hash(100), BlockId::new(0));
+    let result = meta.add_page(test_hash(200), test_hash(100), BlockId::new(0), 0, 0);
     assert!(
         result.is_err(),
         "V18-F9 regression: inverted hash range must be rejected"
@@ -655,7 +655,7 @@ fn v19_regression_v18f11_runtime_sorted_check() {
 #[test]
 fn v19_regression_v17f1_contains_key_before_insert() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "recover_from_volume", 25000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 25000);
 
     let contains_key_pos = fn_body
         .find("embedded_pages.contains_key")

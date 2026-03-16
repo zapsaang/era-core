@@ -105,7 +105,7 @@ fn v14_regression_v13f1_entry_count_exact_after_flush() {
 #[test]
 fn v14_regression_v13f2_from_memory_clears_stale_pages() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(49), BlockId::new(999))
+    meta.add_page(test_hash(0), test_hash(49), BlockId::new(999), 0, 0)
         .expect("add stale page");
 
     let entries: Vec<IndexEntry> = (100..200).map(make_entry).collect();
@@ -145,9 +145,9 @@ fn v14_regression_v13f4_bloom_after_commit() {
 #[test]
 fn v14_regression_v13f5_shared_boundary_rejected() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0), 0, 0)
         .expect("page 1");
-    let result = meta.add_page(test_hash(100), test_hash(200), BlockId::new(1));
+    let result = meta.add_page(test_hash(100), test_hash(200), BlockId::new(1), 0, 0);
     assert!(
         result.is_err(),
         "shared boundary hash must be rejected by <= check"
@@ -256,8 +256,14 @@ fn v14_regression_v13f11_read_sorted_uses_table_len() {
 fn v14_regression_v13f12_meta_find_page_binary_search() {
     let mut meta = MetaIndex::new();
     for i in 0..100u64 {
-        meta.add_page(test_hash(i * 100), test_hash(i * 100 + 99), BlockId::new(i))
-            .expect("add page");
+        meta.add_page(
+            test_hash(i * 100),
+            test_hash(i * 100 + 99),
+            BlockId::new(i),
+            0,
+            0,
+        )
+        .expect("add page");
     }
     let result = meta.find_page(&test_hash(5050));
     assert!(result.is_some(), "must find page containing hash 5050");

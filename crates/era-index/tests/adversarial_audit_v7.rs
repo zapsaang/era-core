@@ -751,9 +751,9 @@ fn test_v7_f7a_out_of_order_add_page_breaks_search() {
     let mut meta = MetaIndex::new();
 
     // Add pages OUT OF ORDER — should return Err on the second add_page
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2), 0, 0)
         .unwrap();
-    let result = meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+    let result = meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0);
     assert!(result.is_err(), "Out-of-order add_page must return Err");
 }
 
@@ -762,10 +762,10 @@ fn test_v7_f7a_out_of_order_add_page_breaks_search() {
 fn test_v7_f7b_add_page_accepts_unsorted_input() {
     let mut meta = MetaIndex::new();
 
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
     // This should return Err — min_hash(0) < previous max_hash(199)
-    let result = meta.add_page(test_hash(0), test_hash(99), BlockId::new(0));
+    let result = meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0);
     assert!(result.is_err(), "Unsorted add_page must return Err");
 }
 
@@ -775,10 +775,10 @@ fn test_v7_f7c_overlapping_page_ranges_accepted() {
     let mut meta = MetaIndex::new();
 
     // Page 0: [0, 199]
-    meta.add_page(test_hash(0), test_hash(199), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(199), BlockId::new(0), 0, 0)
         .unwrap();
     // Page 1: [100, 299] — overlaps with page 0 on [100, 199], should return Err
-    let result = meta.add_page(test_hash(100), test_hash(299), BlockId::new(1));
+    let result = meta.add_page(test_hash(100), test_hash(299), BlockId::new(1), 0, 0);
     assert!(result.is_err(), "Overlapping add_page must return Err");
 }
 
@@ -852,9 +852,9 @@ fn test_v7_f9a_manual_page_construction_no_validation() {
 fn test_v7_f9b_entry_outside_page_range_invisible() {
     // Build a valid multi-page MetaIndex
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Page 0 correctly contains entries 0..100

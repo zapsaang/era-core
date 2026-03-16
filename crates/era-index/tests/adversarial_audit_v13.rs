@@ -257,7 +257,7 @@ fn v13_f2b_from_memory_with_preexisting_pages_appends() {
     // from_memory appends new pages without clearing old ones.
     let mut meta = MetaIndex::new();
     // Add a "stale" page pointer pointing to block 999
-    meta.add_page(test_hash(0), test_hash(49), BlockId::new(999))
+    meta.add_page(test_hash(0), test_hash(49), BlockId::new(999), 0, 0)
         .expect("add stale page");
 
     let entries: Vec<IndexEntry> = (100..200).map(make_entry).collect();
@@ -403,9 +403,9 @@ fn v13_f4b_bloom_reflects_buffer_entries_before_flush() {
 fn v13_f5a_add_page_non_overlapping_succeeds() {
     // Happy path: strictly non-overlapping pages
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .expect("page 1");
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .expect("page 2 — non-overlapping");
 }
 
@@ -413,11 +413,11 @@ fn v13_f5a_add_page_non_overlapping_succeeds() {
 fn v13_f5b_add_page_shared_boundary_rejected() {
     // Adversarial: page2.min_hash == page1.max_hash (shared boundary)
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0), 0, 0)
         .expect("page 1");
 
     // page2 starts at exactly page1's max_hash
-    let result = meta.add_page(test_hash(100), test_hash(200), BlockId::new(1));
+    let result = meta.add_page(test_hash(100), test_hash(200), BlockId::new(1), 0, 0);
     assert!(
         result.is_err(),
         "shared boundary hash must be rejected by <= check"
@@ -433,9 +433,9 @@ fn v13_f5b_add_page_shared_boundary_rejected() {
 fn v13_f5c_add_page_gap_between_pages_allowed() {
     // Pages with a gap between them (no hash coverage in the gap)
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(50), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(50), BlockId::new(0), 0, 0)
         .expect("page 1");
-    meta.add_page(test_hash(200), test_hash(300), BlockId::new(1))
+    meta.add_page(test_hash(200), test_hash(300), BlockId::new(1), 0, 0)
         .expect("page 2 — gap between 50 and 200");
 
     // Hash 100 falls in the gap — find_page should return None
@@ -788,8 +788,14 @@ fn v13_f12a_meta_index_find_page_binary_search_works() {
     // Verify MetaIndex::find_page uses binary search for O(log n) lookup
     let mut meta = MetaIndex::new();
     for i in 0..100u64 {
-        meta.add_page(test_hash(i * 100), test_hash(i * 100 + 99), BlockId::new(i))
-            .expect("add page");
+        meta.add_page(
+            test_hash(i * 100),
+            test_hash(i * 100 + 99),
+            BlockId::new(i),
+            0,
+            0,
+        )
+        .expect("add page");
     }
 
     // find_page for hash in page 50
@@ -805,9 +811,9 @@ fn v13_f12a_meta_index_find_page_binary_search_works() {
 fn v13_f12b_meta_index_find_page_boundary_hashes() {
     // Test boundary conditions of binary search in find_page
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .expect("page 0");
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1), 0, 0)
         .expect("page 1");
 
     // Exact min boundary

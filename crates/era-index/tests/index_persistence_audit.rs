@@ -231,11 +231,11 @@ async fn test_cold_recovery_succeeds_with_nonzero_index_block_ids() {
 #[test]
 fn test_meta_index_rkyv_roundtrip() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(99), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(2), 0, 0)
         .unwrap();
 
     // Add a bloom filter

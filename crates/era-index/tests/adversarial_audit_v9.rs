@@ -48,7 +48,7 @@ fn v9_f1a_meta_index_fields_encapsulated() {
     // V8-F1 claimed MetaIndex.pages and .bloom_filter were pub.
     // Verify they are now private by testing that only add_page() works.
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(100), BlockId::new(0), 0, 0)
         .expect("First add_page should succeed");
 
     // The fix is verified by the fact that we can only access via pages() getter
@@ -61,25 +61,25 @@ fn v9_f1a_meta_index_fields_encapsulated() {
 fn v9_f1b_meta_index_ordering_enforced() {
     // Verify add_page rejects out-of-order pages
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(200), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(200), BlockId::new(0), 0, 0)
         .unwrap();
 
     // Out of order: min_hash(50) < previous max_hash(200)
-    let result = meta.add_page(test_hash(50), test_hash(150), BlockId::new(1));
+    let result = meta.add_page(test_hash(50), test_hash(150), BlockId::new(1), 0, 0);
     assert!(
         result.is_err(),
         "V9-F1b: add_page should reject out-of-order pages"
     );
 
     // Overlapping: min_hash(150) < previous max_hash(200)
-    let result = meta.add_page(test_hash(150), test_hash(300), BlockId::new(2));
+    let result = meta.add_page(test_hash(150), test_hash(300), BlockId::new(2), 0, 0);
     assert!(
         result.is_err(),
         "V9-F1b: add_page should reject overlapping pages"
     );
 
     // Valid: min_hash(201) > previous max_hash(200)
-    let result = meta.add_page(test_hash(201), test_hash(300), BlockId::new(3));
+    let result = meta.add_page(test_hash(201), test_hash(300), BlockId::new(3), 0, 0);
     assert!(
         result.is_ok(),
         "V9-F1b: add_page should accept non-overlapping ascending pages"
@@ -381,7 +381,7 @@ fn v9_f9a_index_page_dedup_deterministic() {
 fn v9_f10a_from_memory_with_nonempty_meta() {
     let mut meta = MetaIndex::new();
     // Pre-add a page to the meta (mimics a non-fresh MetaIndex)
-    meta.add_page(test_hash(0), test_hash(50), BlockId::new(99))
+    meta.add_page(test_hash(0), test_hash(50), BlockId::new(99), 0, 0)
         .unwrap();
     assert_eq!(meta.pages().len(), 1);
 
@@ -800,11 +800,11 @@ fn v9_f18a_bloom_no_false_negatives() {
 #[test]
 fn v9_f19a_find_page_exact_boundaries() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(200), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(200), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(300), test_hash(400), BlockId::new(1))
+    meta.add_page(test_hash(300), test_hash(400), BlockId::new(1), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(500), test_hash(600), BlockId::new(2))
+    meta.add_page(test_hash(500), test_hash(600), BlockId::new(2), 0, 0)
         .unwrap();
 
     // Exact min_hash matches

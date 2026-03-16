@@ -69,11 +69,11 @@ fn f1a_metaindex_pages_field_is_pub_allows_ordering_bypass() {
     let mut meta = MetaIndex::new();
 
     // add_page correctly enforces ordering (P0-4 fix)
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
         .unwrap();
 
     // Verify add_page rejects out-of-order input
-    let result = meta.add_page(test_hash(0), test_hash(500), BlockId::new(1));
+    let result = meta.add_page(test_hash(0), test_hash(500), BlockId::new(1), 0, 0);
     assert!(result.is_err(), "add_page should reject overlapping pages");
 
     // FIXED: `pages` is now private — direct push is impossible.
@@ -86,7 +86,7 @@ fn f1a_metaindex_pages_field_is_pub_allows_ordering_bypass() {
 #[test]
 fn f1b_metaindex_bloom_filter_field_is_pub_allows_garbage() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
         .unwrap();
 
     // FIXED: bloom_filter is now private. set_bloom_filter() validates input.
@@ -110,10 +110,10 @@ fn f1c_pub_pages_allows_overlapping_ranges() {
 
     // FIXED: pages is now private — overlapping ranges can only be attempted
     // via add_page(), which rejects them.
-    meta.add_page(test_hash(0), test_hash(1000), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(1000), BlockId::new(0), 0, 0)
         .unwrap();
 
-    let result = meta.add_page(test_hash(500), test_hash(1500), BlockId::new(1));
+    let result = meta.add_page(test_hash(500), test_hash(1500), BlockId::new(1), 0, 0);
     assert!(
         result.is_err(),
         "add_page should reject overlapping page ranges"
@@ -367,7 +367,7 @@ fn f4b_bloom_resize_only_triggers_at_2x() {
 #[test]
 fn f5a_set_bloom_filter_accepts_garbage() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0))
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(0), 0, 0)
         .unwrap();
 
     // FIXED: set_bloom_filter now validates and returns Result
@@ -426,7 +426,7 @@ fn f5c_set_bloom_filter_truncated_valid_data() {
 fn f6a_from_memory_with_pre_populated_meta() {
     // Create a MetaIndex that already has a page
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(0), test_hash(999), BlockId::new(99))
+    meta.add_page(test_hash(0), test_hash(999), BlockId::new(99), 0, 0)
         .unwrap();
 
     let _bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01);
@@ -1167,9 +1167,9 @@ fn f18b_read_sorted_zigzag_insertion() {
 #[test]
 fn f19a_find_page_exact_min_hash() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0), 0, 0)
         .unwrap();
-    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1))
+    meta.add_page(test_hash(200), test_hash(299), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Exact min_hash match
@@ -1186,7 +1186,7 @@ fn f19a_find_page_exact_min_hash() {
 #[test]
 fn f19b_find_page_exact_max_hash() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0), 0, 0)
         .unwrap();
 
     let result = meta.find_page(&test_hash(199));
@@ -1197,10 +1197,10 @@ fn f19b_find_page_exact_max_hash() {
 #[test]
 fn f19c_find_page_gap_between_pages() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0), 0, 0)
         .unwrap();
     // Gap: hashes 200-299 are not in any page
-    meta.add_page(test_hash(300), test_hash(399), BlockId::new(1))
+    meta.add_page(test_hash(300), test_hash(399), BlockId::new(1), 0, 0)
         .unwrap();
 
     // Hash in the gap should return None
@@ -1214,7 +1214,7 @@ fn f19c_find_page_gap_between_pages() {
 #[test]
 fn f19d_find_page_before_all_pages() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0), 0, 0)
         .unwrap();
 
     let result = meta.find_page(&test_hash(50));
@@ -1224,7 +1224,7 @@ fn f19d_find_page_before_all_pages() {
 #[test]
 fn f19e_find_page_after_all_pages() {
     let mut meta = MetaIndex::new();
-    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0))
+    meta.add_page(test_hash(100), test_hash(199), BlockId::new(0), 0, 0)
         .unwrap();
 
     let result = meta.find_page(&test_hash(500));

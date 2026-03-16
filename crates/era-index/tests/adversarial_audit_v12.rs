@@ -160,9 +160,10 @@ fn v12_f2b_cold_recovery_complexity_proof() {
     let fn_start = source
         .find("pub async fn recover_from_volume")
         .expect("recover_from_volume must exist");
-    let fn_body = &source[fn_start..fn_start + 20000.min(source.len() - fn_start)];
+    let fn_body = &source[fn_start..];
 
     // V18-F1: HashMap-indexed approach replaces swap_remove pattern
+    // (now lives in recover_pages_via_scan helper)
     assert!(
         fn_body.contains("block_id_to_page_idx.remove"),
         "Recovery loop removes matched entries from HashMap — V18-F1 optimization"
@@ -229,7 +230,7 @@ fn v12_f3c_from_memory_preserves_preexisting_pages() {
     // adding new pages. A pre-existing page is cleared, and only the newly-built pages remain.
     let mut meta = MetaIndex::new();
     // Pre-existing page covers hash range 0..50 (before the entries' range)
-    meta.add_page(test_hash(0), test_hash(50), BlockId::new(99))
+    meta.add_page(test_hash(0), test_hash(50), BlockId::new(99), 0, 0)
         .expect("add pre-existing page");
 
     // Entries cover hash range 100..199 — non-overlapping with pre-existing page

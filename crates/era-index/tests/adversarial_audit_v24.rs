@@ -333,7 +333,7 @@ fn v24_f5c_v24_comment_present_in_recovery() {
 #[test]
 fn v24_f6a_deadline_check_in_candidate_scan() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "pub async fn recover_from_volume", 20000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 20000);
 
     assert!(
         fn_body.contains("Cold recovery timed out during candidate scan"),
@@ -344,12 +344,14 @@ fn v24_f6a_deadline_check_in_candidate_scan() {
 #[test]
 fn v24_f6b_five_deadline_checkpoints() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "pub async fn recover_from_volume", 20000);
+    let recover_body = extract_fn_body(&source, "pub async fn recover_from_volume", 20000);
+    let scan_body = extract_fn_body(&source, "recover_pages_via_scan", 20000);
 
-    let timeout_count = fn_body.matches("Cold recovery timed out").count();
+    let timeout_count = recover_body.matches("Cold recovery timed out").count()
+        + scan_body.matches("Cold recovery timed out").count();
     assert!(
         timeout_count >= 5,
-        "V24-F6: recover_from_volume must have >= 5 deadline checkpoints, found {}",
+        "V24-F6: recovery paths must have >= 5 deadline checkpoints, found {}",
         timeout_count
     );
 }
@@ -357,7 +359,7 @@ fn v24_f6b_five_deadline_checkpoints() {
 #[test]
 fn v24_f6c_v24_comment_present_in_candidate_scan() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "pub async fn recover_from_volume", 20000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 20000);
 
     assert!(
         fn_body.contains("V24-F6"),

@@ -416,7 +416,7 @@ fn v22_f7a_recover_uses_reusable_candidate_vec() {
 #[test]
 fn v22_f7b_recover_has_v22_comment() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "pub async fn recover_from_volume", 15000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 15000);
 
     assert!(
         fn_body.contains("V22-F7"),
@@ -641,7 +641,7 @@ fn v22_f11a_recover_has_hashmap_prealloc() {
 #[test]
 fn v22_f11b_recover_has_v22_comment() {
     let source = read_source_file("src/reader.rs");
-    let fn_body = extract_fn_body(&source, "pub async fn recover_from_volume", 15000);
+    let fn_body = extract_fn_body(&source, "recover_pages_via_scan", 15000);
 
     assert!(
         fn_body.contains("V22-F11"),
