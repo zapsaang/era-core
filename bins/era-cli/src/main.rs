@@ -16,6 +16,7 @@
 //! ```
 
 mod commands;
+mod progress;
 use clap::{Parser, Subcommand};
 use era_crypto::disable_core_dumps;
 use std::path::PathBuf;
@@ -362,8 +363,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     use tracing_subscriber::fmt::format::FmtSpan;
+    progress::init();
     tracing_subscriber::fmt()
         .with_max_level(level)
+        .with_writer(progress::ProgressMakeWriter)
         .with_target(false)
         .without_time()
         .with_span_events(FmtSpan::NONE)
