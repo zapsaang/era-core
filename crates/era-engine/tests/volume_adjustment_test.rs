@@ -1,183 +1,114 @@
-//! Test volume count auto-adjustment for optimal fault tolerance
-
 use era_common::{ArchiveConfig, CompressionAlgorithm, CompressionConfig, ErasureCodeConfig};
-use era_engine::{ArchiveReader, ArchiveWriterBuilder};
+use era_engine::ArchiveWriterBuilder;
+use std::path::Path;
 use tempfile::TempDir;
 
-#[tokio::test]
-async fn test_volume_auto_adjustment() {
-    println!("\n=== VOLUME AUTO-ADJUSTMENT TEST ===\n");
-
-    let erasure_config = ErasureCodeConfig {
-        data_shards: 4,
-        parity_shards: 2,
-    };
-
-    let temp_dir = TempDir::new().unwrap();
-    let base_path = temp_dir.path().join("archive_auto.era");
-
-    let config = ArchiveConfig {
+fn no_compression_config() -> ArchiveConfig {
+    ArchiveConfig {
         compression: CompressionConfig {
             algorithm: CompressionAlgorithm::None,
             level: 0,
         },
         ..Default::default()
-    };
-
-    // Test 1: NOT specifying volume_count should auto-select optimal
-    println!("Test 1: Auto-select volumes (not specified)");
-    println!("Expected: 6 volumes (4+2 => 6 total shards)");
-
-    let mut writer = ArchiveWriterBuilder::new(&base_path)
-        .config(config.clone())
-        .enable_erasure(true)
-        .erasure_config(erasure_config)
-        // NOTE: NOT calling .volume_count() means default = 1
-        .build()
-        .await
-        .expect("Failed to create writer");
-
-    let data = vec![0xAB; 128 * 1024]; // 128KB
-    writer
-        .add_bytes("test.bin", &data)
-        .await
-        .expect("Failed to add file");
-    writer.finalize().await.expect("Failed to finalize");
-
-    // Check how many volumes were actually created
-    let mut volume_count = 0;
-    for i in 0..10 {
-        let vol_path = if i == 0 {
-            temp_dir.path().join("archive_auto.era")
-        } else {
-            temp_dir
-                .path()
-                .join("archive_auto")
-                .with_extension(format!("era.{:03}", i))
-        };
-        if vol_path.exists() {
-            volume_count += 1;
-            println!("  Volume {}: ✓", i);
-        }
     }
+}
 
-    assert_eq!(
-        volume_count, 6,
-        "Expected 6 volumes for 4+2 erasure with auto-selection"
-    );
-    println!("✅ Auto-selected 6 volumes\n");
-
-    // Test 2: Specifying smaller volume_count should warn but work
-    println!("Test 2: User specifies 3 volumes");
-    println!("Expected: 3 volumes (warned about reduced fault tolerance)");
-
-    let base_path2 = temp_dir.path().join("archive_manual.era");
-    let mut writer = ArchiveWriterBuilder::new(&base_path2)
-        .config(config.clone())
-        .enable_erasure(true)
-        .erasure_config(erasure_config)
-        .volume_count(3) // Explicitly set to minimum viable
-        .build()
-        .await
-        .expect("Failed to create writer");
-
-    writer
-        .add_bytes("test.bin", &data)
-        .await
-        .expect("Failed to add file");
-    writer.finalize().await.expect("Failed to finalize");
-
-    let mut volume_count = 0;
-    for i in 0..10 {
-        let vol_path = if i == 0 {
-            temp_dir.path().join("archive_manual.era")
-        } else {
-            temp_dir
-                .path()
-                .join("archive_manual")
-                .with_extension(format!("era.{:03}", i))
-        };
-        if vol_path.exists() {
-            volume_count += 1;
-        }
-    }
-
-    assert_eq!(
-        volume_count, 3,
-        "Expected 3 volumes when explicitly specified"
-    );
-    println!("✅ Respected user specification of 3 volumes\n");
-
-    // Test 3: Verify fault tolerance improves with 6 volumes
-    println!("Test 3: Fault tolerance with auto-adjusted 6 volumes");
-    let _reader = ArchiveReader::open(&base_path, "")
-        .await
-        .expect("Failed to open auto archive");
-    println!("✅ Successfully opened archive with optimal volumes");
+fn count_volume_files(base_path: &Path, max_scan: usize) -> usize {
+    (0..max_scan)
+        .filter(|idx| {
+            let path = if *idx == 0 {
+                base_path.to_path_buf()
+            } else {
+                base_path.with_extension(format!("era.{:03}", idx))
+            };
+            path.exists()
+        })
+        .count()
 }
 
 #[tokio::test]
-async fn test_volume_specification_compliance() {
-    println!("\n=== VOLUME SPECIFICATION COMPLIANCE TEST ===\n");
+async fn test_omitted_volume_count_defaults_to_total_shards_for_4_plus_2() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_path = temp_dir.path().join("default_volumes.era");
 
-    let erasure = ErasureCodeConfig {
-        data_shards: 4,
-        parity_shards: 2,
-    };
+    let mut writer = ArchiveWriterBuilder::new(&base_path)
+        .password("test_password")
+        .config(no_compression_config())
+        .enable_erasure(true)
+        .erasure_config(ErasureCodeConfig::new(4, 2))
+        .build()
+        .await
+        .expect("builder should succeed");
 
-    let config = ArchiveConfig {
-        compression: CompressionConfig {
-            algorithm: CompressionAlgorithm::None,
-            level: 0,
-        },
-        ..Default::default()
-    };
+    writer
+        .add_bytes("payload.bin", &vec![0xAA; 64 * 1024])
+        .await
+        .expect("add_bytes should succeed");
+    writer.finalize().await.expect("finalize should succeed");
 
-    let configs = vec![
-        (1, 6, "Auto-select when not specified"),
-        (3, 3, "3 volumes (minimum viable)"),
-        (4, 4, "4 volumes (specified)"),
-        (6, 6, "6 volumes (optimal)"),
-        (8, 8, "8 volumes (beyond optimal)"),
-    ];
+    let actual_count = count_volume_files(&base_path, 16);
+    assert_eq!(actual_count, 6, "omitted count should default to 6");
+}
 
-    for (specified, expected_actual, label) in configs {
+#[tokio::test]
+async fn test_explicit_low_volume_counts_are_respected_for_4_plus_2() {
+    for requested in [1usize, 2, 3, 6] {
         let temp_dir = TempDir::new().unwrap();
-        let base_path = temp_dir.path().join(format!("test_{}.era", specified));
+        let base_path = temp_dir.path().join(format!("explicit_{requested}.era"));
 
-        let mut builder = ArchiveWriterBuilder::new(&base_path)
-            .config(config.clone())
+        let mut writer = ArchiveWriterBuilder::new(&base_path)
+            .password("test_password")
+            .config(no_compression_config())
             .enable_erasure(true)
-            .erasure_config(erasure);
-
-        if specified > 1 {
-            builder = builder.volume_count(specified);
-        }
-
-        let mut writer = builder
+            .erasure_config(ErasureCodeConfig::new(4, 2))
+            .volume_count(requested)
             .build()
             .await
-            .unwrap_or_else(|_| panic!("Failed for {}", label));
-        let data = vec![0xAB; 64 * 1024];
-        writer.add_bytes("test", &data).await.ok();
-        writer.finalize().await.ok();
+            .unwrap_or_else(|e| panic!("build should succeed for {requested}: {e}"));
 
-        let mut actual_count = 0;
-        for i in 0..12 {
-            let vol_path = if i == 0 {
-                base_path.clone()
-            } else {
-                base_path.with_extension(format!("era.{:03}", i))
-            };
-            if vol_path.exists() {
-                actual_count += 1;
-            }
-        }
+        writer
+            .add_bytes("payload.bin", &vec![0xBB; 48 * 1024])
+            .await
+            .unwrap_or_else(|e| panic!("add_bytes should succeed for {requested}: {e}"));
+        writer
+            .finalize()
+            .await
+            .unwrap_or_else(|e| panic!("finalize should succeed for {requested}: {e}"));
 
-        println!(
-            "{}: specified={} -> actual={} ✓",
-            label, specified, actual_count
+        let actual_count = count_volume_files(&base_path, 16);
+        assert_eq!(
+            actual_count, requested,
+            "explicit volume count {requested} should be preserved"
         );
-        assert_eq!(actual_count, expected_actual, "Mismatch for: {}", label);
+    }
+}
+
+#[tokio::test]
+async fn test_invalid_low_volume_counts_fail_for_4_plus_2() {
+    for requested in [4usize, 5] {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path().join(format!("invalid_{requested}.era"));
+
+        let result = ArchiveWriterBuilder::new(&base_path)
+            .password("test_password")
+            .config(no_compression_config())
+            .enable_erasure(true)
+            .erasure_config(ErasureCodeConfig::new(4, 2))
+            .volume_count(requested)
+            .build()
+            .await;
+
+        assert!(
+            result.is_err(),
+            "build should fail for invalid requested count {requested}"
+        );
+        let err = result
+            .err()
+            .expect("invalid count should return an error")
+            .to_string();
+        assert!(
+            err.contains("divide") || err.contains("total shards"),
+            "error should mention canonical divisibility rule, got: {err}"
+        );
     }
 }

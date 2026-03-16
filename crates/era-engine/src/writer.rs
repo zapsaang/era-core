@@ -28,8 +28,8 @@ use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{PackedBlock, PackedChunk};
 use era_storage::LocalStorageBackend;
 use era_volume::{
-    Footer, RecipientSlot, RecipientType, SuperHeader, VolumePool, VolumePoolConfig, VolumeReader,
-    VolumeWriter,
+    validate_erasure_volume_count, Footer, RecipientSlot, RecipientType, SuperHeader, VolumePool,
+    VolumePoolConfig, VolumeReader, VolumeWriter,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -128,7 +128,7 @@ pub struct ArchiveWriterBuilder {
     /// Erasure coding configuration
     erasure_config: ErasureCodeConfig,
     /// Number of storage volumes to distribute data across
-    volume_count: usize,
+    volume_count: Option<usize>,
     /// Maximum volume size for fixed-size splitting (bytes)
     max_volume_size: Option<u64>,
     /// Target size for encrypted blocks (default: 4MB)
@@ -157,7 +157,7 @@ impl ArchiveWriterBuilder {
             recovery_options_explicit: false,
             enable_erasure: None,
             erasure_config: ErasureCodeConfig::default(),
-            volume_count: 1,
+            volume_count: None,
             max_volume_size: None,
             target_block_size: None,
             enable_small_file_packing: true,
@@ -273,7 +273,7 @@ impl ArchiveWriterBuilder {
     /// This enables true distributed erasure coding where shards of the same block
     /// are stored on different volumes.
     pub fn volume_count(mut self, count: usize) -> Self {
-        self.volume_count = count.max(1);
+        self.volume_count = Some(count.max(1));
         self
     }
 
@@ -716,7 +716,7 @@ impl ArchiveWriterBuilder {
         // Calculate optimal volume counts for erasure coding
         if enable_erasure {
             let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
-            config.distribution.min_volumes = (erasure_config.parity_shards as usize + 1).max(2);
+            config.distribution.min_volumes = 1;
             config.distribution.target_volumes = total_shards;
         }
 
@@ -735,49 +735,37 @@ impl ArchiveWriterBuilder {
         // Determine volume count based on erasure config
         let resolved_volume_count = if enable_erasure {
             let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
-            let recommended_volumes = total_shards;
+            let requested_volume_count = volume_count.unwrap_or(total_shards);
 
-            if volume_count <= 1 {
-                // User didn't specify, use recommended optimal count
+            validate_erasure_volume_count(erasure_config, requested_volume_count)?;
+
+            if volume_count.is_none() {
                 info!(
-                    "Erasure coding: automatically using {} volumes \
-                     for optimal fault tolerance (can tolerate {} volume failures)",
-                    recommended_volumes, erasure_config.parity_shards
+                    "Erasure coding: using default {} volumes \
+                     (up to {} independent volume failures when shards remain split one-per-volume)",
+                    total_shards, erasure_config.parity_shards
                 );
-                recommended_volumes
-            } else if volume_count < recommended_volumes {
-                // User specified fewer volumes than optimal
-                let min_viable = (erasure_config.parity_shards as usize + 1).max(2);
-                if volume_count >= min_viable {
-                    warn!(
-                        "Using {} volumes. \
-                         Note: will tolerate at most 1 volume failure \
-                         (recommended: {} volumes for up to {} volume failures)",
-                        volume_count, recommended_volumes, erasure_config.parity_shards
-                    );
-                    volume_count
-                } else {
-                    warn!(
-                        "Insufficient volumes: {} specified, but {} minimum required \
-                         for {},{} erasure. Adjusting to minimum.",
-                        volume_count,
-                        min_viable,
-                        erasure_config.data_shards,
-                        erasure_config.parity_shards
-                    );
-                    min_viable
-                }
+            } else if requested_volume_count < total_shards {
+                warn!(
+                    "Using {} volumes for {}/{} erasure. \
+                     Layout is canonical-valid, but multiple shards can share volumes; \
+                     volume-level fault tolerance is reduced versus {} volumes.",
+                    requested_volume_count,
+                    erasure_config.data_shards,
+                    erasure_config.parity_shards,
+                    total_shards
+                );
             } else {
-                // User specified at least recommended count
                 info!(
                     "Using {} volumes \
-                     (will tolerate up to {} volume failures)",
-                    volume_count, erasure_config.parity_shards
+                     (up to {} independent volume failures when shards remain split one-per-volume)",
+                    requested_volume_count, erasure_config.parity_shards
                 );
-                volume_count
             }
+
+            requested_volume_count
         } else {
-            volume_count
+            volume_count.unwrap_or(1)
         };
 
         // Unified Volume Management
