@@ -337,7 +337,7 @@ async fn test_v29_10_write_raw_accepts_small_data() {
 fn test_v29_12_validate_volume_count_returns_era_error() {
     let config = MatrixDistributionConfig {
         strategy: MatrixDistributionStrategy::RotatingOffset,
-        min_volumes: 3,
+        min_volumes: 1,
         target_volumes: 6,
     };
 
@@ -346,39 +346,40 @@ fn test_v29_12_validate_volume_count_returns_era_error() {
     assert!(ok_result.is_ok());
 
     // Invalid count should return EraError, not String
-    let err_result = config.validate_volume_count(1);
+    let err_result = config.validate_volume_count(4);
     assert!(err_result.is_err());
 
     // Verify it's an EraError::InvalidConfig
     let err = err_result.unwrap_err();
     let err_str = format!("{}", err);
     assert!(
-        err_str.contains("Insufficient volumes"),
-        "Error should mention insufficient volumes, got: {}",
+        err_str.contains("divide") || err_str.contains("total shards"),
+        "Error should mention canonical divisibility rule, got: {}",
         err_str
     );
 }
 
-/// V29-12: validate_volume_count at exactly min_volumes should succeed.
 #[test]
 fn test_v29_12_validate_volume_count_boundary() {
     let config = MatrixDistributionConfig {
         strategy: MatrixDistributionStrategy::RotatingOffset,
-        min_volumes: 4,
-        target_volumes: 8,
+        min_volumes: 1,
+        target_volumes: 6,
     };
 
     assert!(
-        config.validate_volume_count(4).is_ok(),
-        "Exactly min_volumes should succeed"
+        config.validate_volume_count(1).is_ok(),
+        "exactly min_volumes should succeed"
     );
+    assert!(config.validate_volume_count(2).is_ok(), "2 divides 6");
+    assert!(config.validate_volume_count(3).is_ok(), "3 divides 6");
     assert!(
-        config.validate_volume_count(3).is_err(),
-        "Below min_volumes should fail"
+        config.validate_volume_count(4).is_err(),
+        "4 does not divide 6 and is below 6"
     );
     assert!(
         config.validate_volume_count(100).is_ok(),
-        "Above min_volumes should succeed"
+        "Above target should succeed"
     );
 }
 
