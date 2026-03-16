@@ -34,7 +34,7 @@ fn test_directory_recursion() -> anyhow::Result<()> {
     // Assert success
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Archive created successfully"));
+        .stderr(predicate::str::contains("Archive created successfully"));
 
     // Now extract and verify
     let extract_dir = root.join("restored");

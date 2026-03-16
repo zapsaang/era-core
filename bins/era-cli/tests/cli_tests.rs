@@ -222,7 +222,7 @@ fn test_list_archive() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("document.txt"));
+        .stderr(predicate::str::contains("document.txt"));
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn test_verify_valid_archive() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("verified successfully"));
+        .stderr(predicate::str::contains("verified successfully"));
 }
 
 #[test]

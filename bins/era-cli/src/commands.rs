@@ -1,5 +1,6 @@
 //! CLI command implementations
 
+use crate::progress;
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Password};
 use era_common::{
@@ -8,9 +9,10 @@ use era_common::{
 };
 use era_engine::{
     repack_archive, repack_archive_with_keypair, repair_archive, repair_archive_matrix,
-    ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager, RepairOptions,
+    ArchiveHealthStatus, ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager,
+    RepairOptions,
 };
-use indicatif::{HumanBytes, HumanDuration, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, HumanDuration, ProgressStyle};
 use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -243,20 +245,6 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     }
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
-    // Validate erasure + volume count combinations
-    if let Some(ec) = &config.erasure {
-        let required = (ec.data_shards + ec.parity_shards) as usize;
-        if let Some(v) = volume_count {
-            if v < required {
-                anyhow::bail!(
-                    "Volume count ({}) must be >= total shards ({}) for erasure coding",
-                    v,
-                    required
-                );
-            }
-        }
-    }
-
     // Load public certificate
     let certificate = if let Some(path) = certificate_path {
         info!("Loading certificate: {}", path.display());
@@ -318,7 +306,10 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         builder = builder.volume_count(v);
     }
 
-    let mut writer = builder.build().await.context("Failed to create archive")?;
+    let mut writer = builder
+        .build()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create archive: {}", e))?;
 
     info!("Creating archive: {}", output.display());
 
@@ -354,7 +345,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         }
     }
 
-    let pb = ProgressBar::new(files_to_process.len() as u64);
+    let pb = progress::progress_bar(files_to_process.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -584,7 +575,7 @@ pub async fn verify(
     };
 
     let start_time = Instant::now();
-    let pb = ProgressBar::new_spinner();
+    let pb = progress::spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
@@ -611,40 +602,69 @@ pub async fn verify(
     );
     info!("");
 
-    if stats.is_ok() && !stats.has_warnings() {
-        info!("✅ Archive integrity verified successfully!");
-        Ok(())
-    } else if stats.is_ok() && stats.has_warnings() {
-        info!("⚠️  Archive integrity verified, but redundancy is degraded:");
-        info!("");
-        for (i, warning) in stats.warnings.iter().enumerate() {
-            warn!("  {}. {}", i + 1, warning);
+    match &stats.archive_health {
+        ArchiveHealthStatus::Healthy => {
+            info!("✅ Archive integrity verified successfully!");
+            Ok(())
         }
-        info!("");
-        info!(
-            "Run 'era repair {} --password <password>' to restore full redundancy.",
-            archive.display()
-        );
-        Ok(())
-    } else {
-        error!("❌ Archive integrity check FAILED!");
-        error!("");
-        error!("Errors found: {}", stats.errors.len());
-
-        if verbose {
-            error!("");
-            error!("Error details:");
-            for (i, error) in stats.errors.iter().enumerate() {
-                error!("  {}. {}", i + 1, error);
+        ArchiveHealthStatus::Degraded {
+            expected_volumes,
+            found_volumes,
+            missing_indices,
+        } => {
+            warn!("⚠️  Archive data is readable, but archive health is degraded.");
+            if !missing_indices.is_empty() {
+                warn!("Expected volumes:   {}", expected_volumes);
+                warn!("Volumes found:      {}", found_volumes);
+                warn!("Missing sequences:  {:?}", missing_indices);
             }
-        } else if !stats.errors.is_empty() {
-            warn!("Use --verbose to see error details");
+            if !stats.warnings.is_empty() {
+                warn!("");
+                warn!("Warnings:");
+                for (i, warning) in stats.warnings.iter().enumerate() {
+                    warn!("  {}. {}", i + 1, warning);
+                }
+            }
+            anyhow::bail!(
+                "Archive verification degraded: expected volumes={}, found={}, missing sequences={:?}",
+                expected_volumes,
+                found_volumes,
+                missing_indices
+            )
         }
+        ArchiveHealthStatus::Incomplete {
+            expected_volumes,
+            found_volumes,
+            missing_indices,
+            reason,
+        } => {
+            error!("❌ Archive integrity check FAILED!");
+            if !missing_indices.is_empty() {
+                error!("Expected volumes:   {}", expected_volumes);
+                error!("Volumes found:      {}", found_volumes);
+                error!("Missing sequences:  {:?}", missing_indices);
+            }
+            error!("Reason:             {}", reason);
+            error!("Errors found:       {}", stats.errors.len());
 
-        anyhow::bail!(
-            "Archive verification failed with {} errors",
-            stats.errors.len()
-        )
+            if verbose {
+                error!("");
+                error!("Error details:");
+                for (i, error) in stats.errors.iter().enumerate() {
+                    error!("  {}. {}", i + 1, error);
+                }
+            } else if !stats.errors.is_empty() {
+                warn!("Use --verbose to see error details");
+            }
+
+            anyhow::bail!(
+                "Archive verification incomplete: expected volumes={}, found={}, missing sequences={:?}; reason={}",
+                expected_volumes,
+                found_volumes,
+                missing_indices,
+                reason
+            )
+        }
     }
 }
 
@@ -740,29 +760,69 @@ pub async fn repair(
 
         let verify_stats = reader.verify().await.context("Verification failed")?;
 
-        if !verify_stats.needs_repair() {
+        if matches!(verify_stats.archive_health, ArchiveHealthStatus::Healthy) {
             info!("✅ Archive is intact. No repair needed.");
             return Ok(());
         }
 
-        if verify_stats.is_ok() && verify_stats.has_warnings() {
-            info!("⚠️  Archive data is readable but has degraded redundancy:");
-            for warn in &verify_stats.warnings {
-                info!("  - {}", warn);
-            }
-            info!("");
-        } else {
-            info!("❌ Archive has {} errors.", verify_stats.errors.len());
-
-            if verbose {
-                info!("");
-                info!("Errors found:");
-                for (i, error) in verify_stats.errors.iter().enumerate() {
-                    info!("  {}. {}", i + 1, error);
+        let mut missing_volume_sequences = Vec::new();
+        let mut expected_vs_found: Option<(usize, usize)> = None;
+        match &verify_stats.archive_health {
+            ArchiveHealthStatus::Healthy => {}
+            ArchiveHealthStatus::Degraded {
+                expected_volumes,
+                found_volumes,
+                missing_indices,
+            } => {
+                missing_volume_sequences = missing_indices.clone();
+                expected_vs_found = Some((*expected_volumes, *found_volumes));
+                info!("⚠️  Archive data is readable but archive health is degraded:");
+                if !missing_indices.is_empty() {
+                    info!("  Expected volumes:  {}", expected_volumes);
+                    info!("  Volumes found:     {}", found_volumes);
+                    info!("  Missing sequences: {:?}", missing_indices);
                 }
+                for warn in &verify_stats.warnings {
+                    info!("  - {}", warn);
+                }
+                info!("");
             }
+            ArchiveHealthStatus::Incomplete {
+                expected_volumes,
+                found_volumes,
+                missing_indices,
+                reason,
+            } => {
+                missing_volume_sequences = missing_indices.clone();
+                expected_vs_found = Some((*expected_volumes, *found_volumes));
+                info!("❌ Archive is incomplete:");
+                if !missing_indices.is_empty() {
+                    info!("  Expected volumes:  {}", expected_volumes);
+                    info!("  Volumes found:     {}", found_volumes);
+                    info!("  Missing sequences: {:?}", missing_indices);
+                }
+                info!("  Reason:            {}", reason);
 
-            info!("");
+                if verbose {
+                    info!("");
+                    info!("Errors found:");
+                    for (i, error) in verify_stats.errors.iter().enumerate() {
+                        info!("  {}. {}", i + 1, error);
+                    }
+                }
+
+                info!("");
+            }
+        }
+
+        if !missing_volume_sequences.is_empty() {
+            let (expected, found) = expected_vs_found.unwrap_or((0, 0));
+            anyhow::bail!(
+                "Archive is missing expected volume files: expected={}, found={}, missing sequences={:?}; current repair cannot recreate missing volume files",
+                expected,
+                found,
+                missing_volume_sequences,
+            );
         }
 
         if erasure_enabled {
@@ -985,4 +1045,158 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
     info!("  Blocks written: {}", stats.blocks_written);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn count_volume_files(base_path: &Path, max_scan: usize) -> usize {
+        (0..max_scan)
+            .filter(|idx| {
+                let path = if *idx == 0 {
+                    base_path.to_path_buf()
+                } else {
+                    base_path.with_extension(format!("era.{:03}", idx))
+                };
+                path.exists()
+            })
+            .count()
+    }
+
+    async fn create_missing_volume_archive(name: &str, missing_seq: usize) -> (TempDir, PathBuf) {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join(format!("{name}.era"));
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(ArchiveConfig {
+                compression: era_common::CompressionConfig {
+                    algorithm: CompressionAlgorithm::None,
+                    level: 0,
+                },
+                ..Default::default()
+            })
+            .enable_erasure(true)
+            .erasure_config(ErasureCodeConfig::new(4, 2))
+            .volume_count(6)
+            .build()
+            .await
+            .unwrap();
+
+        writer
+            .add_bytes("payload.bin", &vec![0xAB; 64 * 1024])
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        let missing_path = if missing_seq == 0 {
+            archive_path.clone()
+        } else {
+            archive_path.with_extension(format!("era.{:03}", missing_seq))
+        };
+        fs::remove_file(&missing_path).unwrap();
+
+        (temp_dir, archive_path)
+    }
+
+    #[tokio::test]
+    async fn create_accepts_canonical_low_volume_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let input = temp_dir.path().join("payload.bin");
+        fs::write(&input, vec![0xCD; 32 * 1024]).unwrap();
+        let output = temp_dir.path().join("lowvol.era");
+        let inputs = vec![input.clone()];
+
+        create(CreateArgs {
+            inputs: &inputs,
+            output: &output,
+            config_path: None,
+            certificate_path: None,
+            password: Some("test_password"),
+            compression_level: None,
+            no_compression: false,
+            erasure: Some("4:2"),
+            volume_count: Some(3),
+            max_volume_size: None,
+            cdc_min: None,
+            cdc_avg: None,
+            cdc_max: None,
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: None,
+            compact: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(count_volume_files(&output, 16), 3);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_non_divisible_low_volume_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let input = temp_dir.path().join("payload.bin");
+        fs::write(&input, vec![0xCD; 32 * 1024]).unwrap();
+        let output = temp_dir.path().join("invalid.era");
+        let inputs = vec![input.clone()];
+
+        let err = create(CreateArgs {
+            inputs: &inputs,
+            output: &output,
+            config_path: None,
+            certificate_path: None,
+            password: Some("test_password"),
+            compression_level: None,
+            no_compression: false,
+            erasure: Some("4:2"),
+            volume_count: Some(4),
+            max_volume_size: None,
+            cdc_min: None,
+            cdc_avg: None,
+            cdc_max: None,
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: None,
+            compact: false,
+        })
+        .await
+        .expect_err("4 volumes for 4+2 should fail");
+
+        assert!(
+            err.to_string().contains("divide") || err.to_string().contains("total shards"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_returns_error_for_missing_expected_volume() {
+        let (_temp_dir, archive_path) = create_missing_volume_archive("verify_missing", 2).await;
+
+        let err = verify(&archive_path, Some("test_password"), None, false)
+            .await
+            .expect_err("missing volume should degrade verify result");
+
+        assert!(
+            err.to_string().contains("Archive verification degraded")
+                || err.to_string().contains("missing sequences"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_returns_error_for_missing_expected_volume() {
+        let (_temp_dir, archive_path) = create_missing_volume_archive("repair_missing", 1).await;
+
+        let err = repair(&archive_path, Some("test_password"), None, false, false)
+            .await
+            .expect_err("missing volume should not report healthy repair status");
+
+        assert!(
+            err.to_string().contains("missing expected volume files"),
+            "unexpected error: {err}"
+        );
+    }
 }
