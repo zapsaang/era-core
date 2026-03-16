@@ -382,6 +382,16 @@ impl VerifyStats {
     pub fn is_ok(&self) -> bool {
         self.blocks_failed == 0 && self.files_incomplete == 0 && self.errors.is_empty()
     }
+
+    /// Check if there are any warnings (recovered issues that indicate degraded redundancy)
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    /// Check if the archive needs repair (has errors OR warnings indicating shard corruption)
+    pub fn needs_repair(&self) -> bool {
+        !self.is_ok() || self.has_warnings()
+    }
 }
 
 #[cfg(test)]
@@ -414,5 +424,47 @@ mod tests {
             ..Default::default()
         };
         assert!(!failed_stats.is_ok());
+    }
+
+    #[test]
+    fn test_verify_stats_has_warnings() {
+        let stats = VerifyStats::default();
+        assert!(!stats.has_warnings());
+
+        let warned_stats = VerifyStats {
+            warnings: vec!["Block 0: recovered from 1 corrupted shards".to_string()],
+            ..Default::default()
+        };
+        assert!(warned_stats.has_warnings());
+        assert!(warned_stats.is_ok());
+    }
+
+    #[test]
+    fn test_verify_stats_needs_repair() {
+        let clean = VerifyStats::default();
+        assert!(!clean.needs_repair());
+
+        let degraded = VerifyStats {
+            warnings: vec!["Block 0: recovered from 1 corrupted shards".to_string()],
+            ..Default::default()
+        };
+        assert!(degraded.needs_repair());
+        assert!(degraded.is_ok());
+
+        let broken = VerifyStats {
+            blocks_failed: 1,
+            errors: vec!["Block logic error: AEAD failure".to_string()],
+            ..Default::default()
+        };
+        assert!(broken.needs_repair());
+        assert!(!broken.is_ok());
+
+        let both = VerifyStats {
+            blocks_failed: 1,
+            errors: vec!["Block logic error".to_string()],
+            warnings: vec!["Block 1: recovered from 2 corrupted shards".to_string()],
+            ..Default::default()
+        };
+        assert!(both.needs_repair());
     }
 }

@@ -611,8 +611,20 @@ pub async fn verify(
     );
     info!("");
 
-    if stats.is_ok() {
+    if stats.is_ok() && !stats.has_warnings() {
         info!("✅ Archive integrity verified successfully!");
+        Ok(())
+    } else if stats.is_ok() && stats.has_warnings() {
+        info!("⚠️  Archive integrity verified, but redundancy is degraded:");
+        info!("");
+        for (i, warning) in stats.warnings.iter().enumerate() {
+            warn!("  {}. {}", i + 1, warning);
+        }
+        info!("");
+        info!(
+            "Run 'era repair {} --password <password>' to restore full redundancy.",
+            archive.display()
+        );
         Ok(())
     } else {
         error!("❌ Archive integrity check FAILED!");
@@ -728,22 +740,31 @@ pub async fn repair(
 
         let verify_stats = reader.verify().await.context("Verification failed")?;
 
-        if verify_stats.is_ok() {
+        if !verify_stats.needs_repair() {
             info!("✅ Archive is intact. No repair needed.");
             return Ok(());
         }
 
-        info!("❌ Archive has {} errors.", verify_stats.errors.len());
-
-        if verbose {
-            info!("");
-            info!("Errors found:");
-            for (i, error) in verify_stats.errors.iter().enumerate() {
-                info!("  {}. {}", i + 1, error);
+        if verify_stats.is_ok() && verify_stats.has_warnings() {
+            info!("⚠️  Archive data is readable but has degraded redundancy:");
+            for warn in &verify_stats.warnings {
+                info!("  - {}", warn);
             }
+            info!("");
+        } else {
+            info!("❌ Archive has {} errors.", verify_stats.errors.len());
+
+            if verbose {
+                info!("");
+                info!("Errors found:");
+                for (i, error) in verify_stats.errors.iter().enumerate() {
+                    info!("  {}. {}", i + 1, error);
+                }
+            }
+
+            info!("");
         }
 
-        info!("");
         if erasure_enabled {
             if key_path.is_some() {
                 anyhow::bail!(

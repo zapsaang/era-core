@@ -826,6 +826,121 @@ async fn test_repair_wrong_password() {
     );
 }
 
-// TODO: Add real corruption tests that manipulate shard data correctly
-// Current file-level corruption affects catalog/footer and causes deserialization errors
-// Need to implement precise shard-level corruption after understanding exact archive layout
+/// Test that repair correctly fixes shard corruption detected via warnings
+#[tokio::test]
+async fn test_repair_shard_corruption_roundtrip() {
+    use era_common::{ErasureCodeConfig, ShardHeader};
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+
+    let content = vec![0xBBu8; 30_000];
+    create_test_file(&input_dir, "data.bin", &content);
+
+    let archive_path = temp_dir.path().join("shard_repair.era");
+    let erasure_config = ErasureCodeConfig {
+        data_shards: 4,
+        parity_shards: 2,
+    };
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("repair_test")
+        .erasure_config(erasure_config)
+        .enable_small_file_packing(false)
+        .build()
+        .await
+        .unwrap();
+    writer.add_file(&input_dir.join("data.bin")).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    // Corrupt first shard's data payload
+    let corrupt_offset = {
+        let parent = archive_path.parent().unwrap();
+        let backend = era_storage::LocalStorageBackend::new(parent);
+        let volume_path = archive_path.file_name().unwrap();
+        let vr = era_volume::VolumeReader::open(&backend, std::path::Path::new(volume_path))
+            .await
+            .unwrap();
+        let (data_start, _) = vr.data_region();
+        let header_prefix_len = 4 * 4u64;
+        let header_bytes = vr
+            .read_raw(data_start + header_prefix_len, ShardHeader::SIZE)
+            .await
+            .unwrap();
+        let shard_header = ShardHeader::from_bytes(&header_bytes).unwrap();
+        data_start + header_prefix_len + ShardHeader::SIZE as u64 + (shard_header.length as u64 / 2)
+    };
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        file.write_all(&byte).unwrap();
+    }
+
+    // Step 1: Verify detects warnings (degraded but readable)
+    let mut reader = ArchiveReader::open(&archive_path, "repair_test")
+        .await
+        .unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    drop(reader);
+    assert!(verify_stats.is_ok(), "RS recovery should succeed");
+    assert!(
+        verify_stats.has_warnings(),
+        "Should have shard corruption warnings"
+    );
+    assert!(verify_stats.needs_repair(), "Should indicate repair needed");
+
+    // Step 2: Repair
+    let repair_options = RepairOptions {
+        create_backup: false,
+        dry_run: false,
+        continue_on_error: true,
+    };
+    let repair_stats = repair_archive(&archive_path, "repair_test", repair_options)
+        .await
+        .unwrap();
+    assert!(
+        repair_stats.corrupted_shards_found > 0,
+        "Should find corrupted shards"
+    );
+    assert!(repair_stats.fully_repaired(), "Should fully repair");
+    assert_eq!(repair_stats.unrecoverable_blocks, 0);
+
+    // Step 3: Verify again — should be clean now
+    let mut reader = ArchiveReader::open(&archive_path, "repair_test")
+        .await
+        .unwrap();
+    let post_repair_stats = reader.verify().await.unwrap();
+    drop(reader);
+    assert!(post_repair_stats.is_ok(), "Should pass after repair");
+    assert!(
+        !post_repair_stats.has_warnings(),
+        "No warnings after repair"
+    );
+    assert!(
+        !post_repair_stats.needs_repair(),
+        "No repair needed after repair"
+    );
+
+    // Step 4: Extract and verify data integrity
+    let output_dir = temp_dir.path().join("output");
+    let mut reader = ArchiveReader::open(&archive_path, "repair_test")
+        .await
+        .unwrap();
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&output_dir))
+        .await
+        .unwrap();
+    assert_eq!(extract_stats.extracted, 1);
+    let restored = fs::read(output_dir.join("data.bin")).unwrap();
+    assert_eq!(restored, content, "Data should be intact after repair");
+}

@@ -294,7 +294,7 @@ pub async fn repair_archive(
         let mut stripe_lengths: Option<Vec<u32>> = None;
 
         for shard_idx in 0..total_shards {
-            let shard_header_offset = offset;
+            let shard_header_offset = offset + header_prefix_len as u64;
 
             let prefix_bytes = match volume_reader.read_raw(offset, header_prefix_len).await {
                 Ok(bytes) if bytes.len() == header_prefix_len => bytes,
@@ -930,10 +930,18 @@ pub async fn repair_archive_matrix(
                     Ok(shard_data) => {
                         if shard_header.verify(&shard_data) {
                             shards.push((shard_idx, shard_data));
-                            shard_locations.push((shard_idx, reader_idx, shard_offset));
+                            shard_locations.push((
+                                shard_idx,
+                                reader_idx,
+                                shard_offset + header_prefix_len as u64,
+                            ));
                         } else {
                             corrupted_indices.push(shard_idx);
-                            shard_locations.push((shard_idx, reader_idx, shard_offset));
+                            shard_locations.push((
+                                shard_idx,
+                                reader_idx,
+                                shard_offset + header_prefix_len as u64,
+                            ));
                             stats.corrupted_shards_found += 1;
                         }
                     }

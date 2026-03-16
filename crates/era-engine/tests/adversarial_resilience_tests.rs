@@ -162,6 +162,14 @@ async fn test_single_shard_crc_auto_recovery() {
         .unwrap();
     let verify_stats = reader.verify().await.unwrap();
     assert!(verify_stats.is_ok());
+    assert!(
+        verify_stats.has_warnings(),
+        "Corrupted shard should produce warnings even after RS recovery"
+    );
+    assert!(
+        verify_stats.needs_repair(),
+        "Archive with corrupted shards should indicate repair is needed"
+    );
 }
 
 #[tokio::test]
