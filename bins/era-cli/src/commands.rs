@@ -9,7 +9,7 @@ use era_common::{
 };
 use era_engine::{
     repack_archive, repack_archive_with_keypair, repair_archive, repair_archive_matrix,
-    ArchiveHealthStatus, ArchiveReader, ArchiveWriter, ExtractOptions, RecoveryManager,
+    ArchiveHealthStatus, ArchiveReader, ArchiveWriter, AuthMode, ExtractOptions, RecoveryManager,
     RepairOptions,
 };
 use indicatif::{HumanBytes, HumanDuration, ProgressStyle};
@@ -17,7 +17,7 @@ use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info, warn};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Get password from user with a professional prompt
 ///
@@ -256,6 +256,8 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         None
     };
 
+    let user_supplied_password = password.is_some();
+
     // Get password with confirmation (only if not using certificate mode)
     let password = if certificate.is_some() {
         if let Some(p) = password {
@@ -273,13 +275,16 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         get_password_with_confirmation(password)?
     };
 
-    let mut builder = ArchiveWriter::builder(output)
-        .password(&password)
-        .config(config.clone()); // Use our resolved config
+    let mut builder = ArchiveWriter::builder(output).config(config.clone()); // Use our resolved config
 
-    if let Some(cert) = certificate {
-        builder = builder.certificate(cert);
-    }
+    builder = match (certificate, user_supplied_password) {
+        (Some(cert), true) => builder.auth_mode(AuthMode::Hybrid {
+            password: Zeroizing::new(password),
+            certificate: cert,
+        }),
+        (Some(cert), false) => builder.certificate(cert),
+        (None, _) => builder.password(&password),
+    };
 
     // Handle Volume Count Override for Matrix
     // The builder will use config.erasure and config.distribution
@@ -760,9 +765,21 @@ pub async fn repair(
 
         let verify_stats = reader.verify().await.context("Verification failed")?;
 
-        if matches!(verify_stats.archive_health, ArchiveHealthStatus::Healthy) {
+        if matches!(verify_stats.archive_health, ArchiveHealthStatus::Healthy)
+            && !verify_stats.needs_repair()
+        {
             info!("✅ Archive is intact. No repair needed.");
             return Ok(());
+        }
+
+        if matches!(verify_stats.archive_health, ArchiveHealthStatus::Healthy)
+            && verify_stats.needs_repair()
+        {
+            info!("⚠️  Archive is readable but has recoverable shard corruption.");
+            for warn in &verify_stats.warnings {
+                info!("  - {}", warn);
+            }
+            info!("");
         }
 
         let mut missing_volume_sequences = Vec::new();
@@ -1050,6 +1067,8 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use era_crypto::pem_support::export_private_key_as_pem;
+    use era_crypto::{export_public_key_as_pem, EraKeyPair};
     use std::fs;
     use tempfile::TempDir;
 
@@ -1100,6 +1119,215 @@ mod tests {
         fs::remove_file(&missing_path).unwrap();
 
         (temp_dir, archive_path)
+    }
+
+    fn overrides<'a>(
+        compression_level: Option<i32>,
+        no_compression: bool,
+        erasure: Option<&'a str>,
+        cdc_min: Option<usize>,
+        cdc_avg: Option<usize>,
+        cdc_max: Option<usize>,
+    ) -> ConfigOverrides<'a> {
+        ConfigOverrides {
+            compression_level,
+            no_compression,
+            erasure,
+            cdc_min,
+            cdc_avg,
+            cdc_max,
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: None,
+        }
+    }
+
+    #[test]
+    fn parse_erasure_config_valid_cases() {
+        let cases = [("4:2", 4u8, 2u8), ("6:3", 6u8, 3u8), ("1:1", 1u8, 1u8)];
+
+        for (input, expected_data, expected_parity) in cases {
+            let parsed = parse_erasure_config(input)
+                .unwrap_or_else(|e| panic!("expected valid erasure '{input}': {e}"));
+            assert_eq!(parsed.data_shards, expected_data, "data shards mismatch");
+            assert_eq!(
+                parsed.parity_shards, expected_parity,
+                "parity shards mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_erasure_config_invalid_cases() {
+        let cases = [
+            ("4", "Invalid erasure format"),
+            ("4:two", "Invalid parity shards value"),
+            ("zero:2", "Invalid data shards value"),
+            ("0:2", "Data shards must be at least 1"),
+            ("4:0", "Parity shards must be at least 1"),
+            ("200:100", "Total shards"),
+        ];
+
+        for (input, expected_fragment) in cases {
+            let err = parse_erasure_config(input)
+                .expect_err("invalid erasure config should return an error");
+            assert!(
+                err.to_string().contains(expected_fragment),
+                "expected '{expected_fragment}' in error for '{input}', got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_config_overrides_store_mode_and_erasure_none() {
+        let mut level_zero = ArchiveConfig::default();
+        apply_config_overrides(
+            &mut level_zero,
+            overrides(Some(0), false, None, None, None, None),
+        )
+        .expect("level 0 should be accepted");
+        assert_eq!(level_zero.compression.algorithm, CompressionAlgorithm::None);
+        assert_eq!(level_zero.compression.level, 0);
+
+        let mut no_compression = ArchiveConfig::default();
+        apply_config_overrides(
+            &mut no_compression,
+            overrides(Some(12), true, None, None, None, None),
+        )
+        .expect("--no-compression should take precedence");
+        assert_eq!(
+            no_compression.compression.algorithm,
+            CompressionAlgorithm::None
+        );
+        assert_eq!(no_compression.compression.level, 0);
+
+        let mut erasure_none = ArchiveConfig::default();
+        assert!(erasure_none.erasure.is_some());
+        apply_config_overrides(
+            &mut erasure_none,
+            overrides(None, false, Some("none"), None, None, None),
+        )
+        .expect("erasure none should be accepted");
+        assert!(erasure_none.erasure.is_none());
+
+        let mut erasure_custom = ArchiveConfig::default();
+        apply_config_overrides(
+            &mut erasure_custom,
+            overrides(None, false, Some("6:3"), None, None, None),
+        )
+        .expect("custom erasure should be accepted");
+        let custom = erasure_custom
+            .erasure
+            .as_ref()
+            .expect("erasure should remain enabled");
+        assert_eq!(custom.data_shards, 6);
+        assert_eq!(custom.parity_shards, 3);
+    }
+
+    #[test]
+    fn apply_config_overrides_rejects_out_of_bounds_compression() {
+        for level in [-1, 23] {
+            let mut config = ArchiveConfig::default();
+            let err = apply_config_overrides(
+                &mut config,
+                overrides(Some(level), false, None, None, None, None),
+            )
+            .expect_err("invalid compression level should fail");
+
+            assert!(
+                err.to_string().contains("between 0 and 22"),
+                "unexpected compression error for level {level}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_config_overrides_validates_cdc_zero_and_ordering() {
+        let zero_cases = [
+            (Some(0), None, None),
+            (None, Some(0), None),
+            (None, None, Some(0)),
+        ];
+        for (cdc_min, cdc_avg, cdc_max) in zero_cases {
+            let mut config = ArchiveConfig::default();
+            let err = apply_config_overrides(
+                &mut config,
+                overrides(None, false, None, cdc_min, cdc_avg, cdc_max),
+            )
+            .expect_err("zero CDC values should fail");
+            assert!(
+                err.to_string().contains("CDC sizes must be > 0"),
+                "unexpected zero CDC error: {err}"
+            );
+        }
+
+        let ordering_cases = [
+            (Some(128 * 1024), Some(64 * 1024), Some(256 * 1024)),
+            (Some(16 * 1024), Some(32 * 1024), Some(8 * 1024)),
+        ];
+        for (cdc_min, cdc_avg, cdc_max) in ordering_cases {
+            let mut config = ArchiveConfig::default();
+            let err = apply_config_overrides(
+                &mut config,
+                overrides(None, false, None, cdc_min, cdc_avg, cdc_max),
+            )
+            .expect_err("invalid CDC ordering should fail");
+            assert!(
+                err.to_string().contains("min <= avg <= max"),
+                "unexpected CDC ordering error: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_hybrid_mode_supports_password_and_key_open_paths() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let input = temp_dir.path().join("payload.txt");
+        fs::write(&input, "hybrid auth payload").expect("hybrid input should be written");
+
+        let archive = temp_dir.path().join("hybrid.era");
+        let cert_path = temp_dir.path().join("public.pem");
+        let key_path = temp_dir.path().join("private.pem");
+
+        let keypair = EraKeyPair::generate().expect("hybrid keypair should be generated");
+        let cert_pem =
+            export_public_key_as_pem(&keypair.certificate()).expect("public PEM should export");
+        let key_pem = export_private_key_as_pem(&keypair).expect("private PEM should export");
+        fs::write(&cert_path, cert_pem).expect("public PEM should be written");
+        fs::write(&key_path, key_pem).expect("private PEM should be written");
+
+        let inputs = vec![input.clone()];
+        create(CreateArgs {
+            inputs: &inputs,
+            output: &archive,
+            config_path: None,
+            certificate_path: Some(cert_path.as_path()),
+            password: Some("hybrid_password"),
+            compression_level: None,
+            no_compression: false,
+            erasure: None,
+            volume_count: None,
+            max_volume_size: None,
+            cdc_min: None,
+            cdc_avg: None,
+            cdc_max: None,
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: None,
+            compact: false,
+        })
+        .await
+        .expect("hybrid create should succeed");
+
+        ArchiveReader::open(&archive, "hybrid_password")
+            .await
+            .expect("password open should succeed for hybrid archive");
+
+        let read_keypair = era_crypto::load_private_key_from_pem(&key_path, None)
+            .expect("private key should load");
+        ArchiveReader::open_with_keypair(&archive, &read_keypair)
+            .await
+            .expect("key open should succeed for hybrid archive");
     }
 
     #[tokio::test]

@@ -1,0 +1,141 @@
+name: fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Fuzz profile"
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - deep
+  schedule:
+    - cron: "15 2 * * *"
+    - cron: "30 3 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    name: fuzz-smoke
+    runs-on: ubuntu-latest
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'smoke') || github.event.schedule == '15 2 * * *' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_footer_parse
+          - fuzz_super_header_structured
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init env
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo 'DPkg::Post-Invoke { "rm -f /var/lib/dpkg/triggers/* 2>/dev/null || true"; };' \
+            | sudo tee /etc/apt/apt.conf.d/99no-triggers > /dev/null
+          echo 'DPkg::TriggersPending "false";' \
+            | sudo tee -a /etc/apt/apt.conf.d/99no-triggers > /dev/null
+
+          sudo -E apt-get -qq update
+
+          sudo -E apt-get install -y --no-install-recommends \
+            build-essential \
+            protobuf-compiler \
+            libacl1-dev
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz smoke targets
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+        working-directory: fuzz
+        timeout-minutes: 8
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-artifacts
+          path: |
+            fuzz/artifacts/**
+            fuzz/corpus/**/crash-*
+            fuzz/corpus/**/leak-*
+            fuzz/corpus/**/oom-*
+            fuzz/corpus/**/timeout-*
+          if-no-files-found: ignore
+
+  fuzz-deep:
+    name: fuzz-deep
+    runs-on: ubuntu-latest
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'deep') || github.event.schedule == '30 3 * * 0' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_footer_parse
+          - fuzz_block_header_parse
+          - fuzz_super_header_parse
+          - fuzz_super_header_structured
+          - fuzz_footer_roundtrip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init env
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo 'DPkg::Post-Invoke { "rm -f /var/lib/dpkg/triggers/* 2>/dev/null || true"; };' \
+            | sudo tee /etc/apt/apt.conf.d/99no-triggers > /dev/null
+          echo 'DPkg::TriggersPending "false";' \
+            | sudo tee -a /etc/apt/apt.conf.d/99no-triggers > /dev/null
+
+          sudo -E apt-get -qq update
+
+          sudo -E apt-get install -y --no-install-recommends \
+            build-essential \
+            protobuf-compiler \
+            libacl1-dev
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run deep fuzz target
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+        working-directory: fuzz
+        timeout-minutes: 20
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-deep-artifacts-${{ matrix.target }}
+          path: |
+            fuzz/artifacts/**
+            fuzz/corpus/**/crash-*
+            fuzz/corpus/**/leak-*
+            fuzz/corpus/**/oom-*
+            fuzz/corpus/**/timeout-*
+          if-no-files-found: ignore

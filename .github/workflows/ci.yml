@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: fmt + clippy + test
+  lint:
+    name: lint
     runs-on: ubuntu-latest
 
     steps:
@@ -24,13 +24,13 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99no-triggers > /dev/null
           echo 'DPkg::TriggersPending "false";' \
             | sudo tee -a /etc/apt/apt.conf.d/99no-triggers > /dev/null
-    
+
           sudo -E apt-get -qq update
-    
+
           sudo -E apt-get install -y --no-install-recommends \
-              build-essential \
-              protobuf-compiler \
-              libacl1-dev
+            build-essential \
+            protobuf-compiler \
+            libacl1-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -46,5 +46,68 @@ jobs:
       - name: cargo clippy (-D warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: cargo test
+  test-era-cli:
+    name: test-era-cli
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init env
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo 'DPkg::Post-Invoke { "rm -f /var/lib/dpkg/triggers/* 2>/dev/null || true"; };' \
+            | sudo tee /etc/apt/apt.conf.d/99no-triggers > /dev/null
+          echo 'DPkg::TriggersPending "false";' \
+            | sudo tee -a /etc/apt/apt.conf.d/99no-triggers > /dev/null
+
+          sudo -E apt-get -qq update
+
+          sudo -E apt-get install -y --no-install-recommends \
+            build-essential \
+            protobuf-compiler \
+            libacl1-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test -p era-cli
+        run: cargo test -p era-cli
+
+  test-workspace:
+    name: test-workspace
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init env
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo 'DPkg::Post-Invoke { "rm -f /var/lib/dpkg/triggers/* 2>/dev/null || true"; };' \
+            | sudo tee /etc/apt/apt.conf.d/99no-triggers > /dev/null
+          echo 'DPkg::TriggersPending "false";' \
+            | sudo tee -a /etc/apt/apt.conf.d/99no-triggers > /dev/null
+
+          sudo -E apt-get -qq update
+
+          sudo -E apt-get install -y --no-install-recommends \
+            build-essential \
+            protobuf-compiler \
+            libacl1-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test --workspace
         run: cargo test --workspace

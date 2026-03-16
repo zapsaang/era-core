@@ -31,3 +31,5 @@ zeroize = { workspace = true }
 assert_cmd = "2.0"
 predicates = "3.0"
 tempfile = { workspace = true }
+era-storage = { workspace = true }
+era-volume = { workspace = true }

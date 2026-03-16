@@ -223,4 +223,29 @@ mod tests {
             .expect("buffer should contain UTF-8 text");
         assert!(output.contains("hello from tracing"));
     }
+
+    #[test]
+    fn test_make_writer_buffers_partial_line_until_flush_and_trims_crlf() {
+        let (sink, bytes) = SharedBuffer::new();
+        let coordinator = CliProgressCoordinator::with_sink(false, Box::new(sink));
+
+        let factory = coordinator.make_writer();
+        let mut writer = factory.make_writer();
+
+        writer
+            .write_all(b"first line\r\nsecond line")
+            .expect("write_all should succeed");
+
+        let before_flush =
+            String::from_utf8(bytes.lock().expect("shared buffer lock poisoned").clone())
+                .expect("buffer should contain UTF-8 text");
+        assert_eq!(before_flush, "first line\n");
+
+        writer.flush().expect("flush should succeed");
+
+        let after_flush =
+            String::from_utf8(bytes.lock().expect("shared buffer lock poisoned").clone())
+                .expect("buffer should contain UTF-8 text");
+        assert_eq!(after_flush, "first line\nsecond line\n");
+    }
 }

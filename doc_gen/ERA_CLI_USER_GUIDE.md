@@ -657,7 +657,8 @@ Not recommended for important data. Without erasure coding, a single corrupted b
 
 ## Volume count
 
-When erasure coding is enabled, the volume count must be at least equal to the total shard count. For `4:2`, that means at least 6 volumes.
+When erasure coding is enabled, `--volumes` must divide the total shard count for the selected erasure layout.
+For `4:2`, accepted `--volumes` values include `1`, `2`, `3`, and `6`; `4` is rejected.
 
 ```bash
 era create --output archive.era --password "secret" --erasure 4:2 --volumes 6 ./data
@@ -982,9 +983,11 @@ Use a value in that range, or use `--no-compression`.
 
 Use `--erasure 4:2`, not `4,2` or `4`.
 
-## "Volume count must be >= total shards"
+## "Invalid volume count for erasure layout"
 
-With `--erasure 4:2`, volume count must be at least `6`. Either omit `--volumes` (the CLI sets it automatically) or pass `--volumes 6` or higher.
+With `--erasure 4:2`, the `--volumes` value must divide total shards (`6`).
+Accepted examples: `1`, `2`, `3`, `6`. Rejected example: `4`.
+Either omit `--volumes` (the CLI chooses a compatible value) or pass one of the compatible counts.
 
 ## Config file parse failure
 
