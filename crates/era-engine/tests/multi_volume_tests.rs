@@ -4,7 +4,9 @@
 //! across physically separate files, and can recover from extreme failures.
 
 use era_common::ErasureCodeConfig;
-use era_engine::{ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
+use era_engine::{
+    repair_archive_matrix, ArchiveReader, ArchiveWriterBuilder, ExtractOptions, RepairOptions,
+};
 use std::fs;
 use tempfile::TempDir;
 
@@ -253,6 +255,55 @@ fn verify_extracted_content(
     true
 }
 
+fn count_created_volumes(base_path: &std::path::Path, max_scan: usize) -> usize {
+    (0..max_scan)
+        .filter(|idx| {
+            let path = if *idx == 0 {
+                base_path.to_path_buf()
+            } else {
+                base_path.with_extension(format!("era.{:03}", idx))
+            };
+            path.exists()
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn test_4_plus_2_canonical_volume_counts_create_expected_file_count() {
+    let files = [("layout.bin", 96 * 1024)];
+
+    for count in [1usize, 2, 3, 6] {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path =
+            create_erasure_archive(&temp_dir, "canonical.era", 4, 2, count, &files).await;
+
+        let actual = count_created_volumes(&archive_path, 16);
+        assert_eq!(
+            actual, count,
+            "expected {count} volume files for canonical count {count}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_4_plus_2_rejects_invalid_low_volume_count() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("invalid_layout.era");
+
+    let result = ArchiveWriterBuilder::new(&archive_path)
+        .password("test_password")
+        .enable_erasure(true)
+        .erasure_config(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        })
+        .volume_count(4)
+        .build()
+        .await;
+
+    assert!(result.is_err(), "4 volumes for 4+2 should be rejected");
+}
+
 /// Test recovery with 4+2 erasure coding (can lose up to 2 volumes)
 #[tokio::test]
 async fn test_e2e_recovery_4_plus_2_lose_one() {
@@ -451,13 +502,64 @@ async fn test_e2e_verify_with_missing_volume() {
 
     println!("Verify stats: {:?}", stats);
 
-    // With erasure recovery, some shards may be marked as corrupted/missing
-    // but overall verification should succeed
     assert_eq!(stats.files_verified, 1, "Should verify 1 file");
-    // Accept recovered archive as valid
     assert_eq!(
         stats.blocks_failed, 0,
         "No blocks should fail with recovery"
+    );
+    assert!(
+        stats.is_degraded(),
+        "missing expected volume must be degraded"
+    );
+    assert!(
+        !stats.is_healthy(),
+        "missing expected volume is not healthy"
+    );
+
+    match &stats.archive_health {
+        era_engine::ArchiveHealthStatus::Degraded {
+            expected_volumes,
+            found_volumes,
+            missing_indices,
+        } => {
+            assert_eq!(*expected_volumes, 6);
+            assert_eq!(*found_volumes, 5);
+            assert!(missing_indices.contains(&2));
+        }
+        other => panic!("expected degraded archive health, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_e2e_repair_with_missing_volume_reports_non_healthy_status() {
+    let temp_dir = TempDir::new().unwrap();
+    let files = [("repair_missing.bin", 64 * 1024)];
+
+    let archive_path =
+        create_erasure_archive(&temp_dir, "repair_missing.era", 4, 2, 6, &files).await;
+
+    let vol1 = temp_dir.path().join("repair_missing.era.001");
+    fs::remove_file(&vol1).unwrap();
+
+    let repair_stats = repair_archive_matrix(
+        &archive_path,
+        "test_password",
+        RepairOptions {
+            create_backup: false,
+            dry_run: true,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !repair_stats.is_healthy(),
+        "repair must not report healthy when expected volume is missing"
+    );
+    assert!(
+        repair_stats.is_degraded() || repair_stats.is_incomplete(),
+        "repair should report degraded or incomplete for missing expected volume"
     );
 }
 
@@ -932,14 +1034,11 @@ async fn test_single_volume_no_erasure() {
     assert_eq!(stats.extracted, 1);
 }
 
-/// Test that volume_count matches erasure config total shards
 #[tokio::test]
 async fn test_volume_count_matches_erasure_shards() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("match.era");
 
-    // 3+2 = 5 total shards, but only set volume_count=3
-    // This tests what happens when volume_count != total_shards
     let mut writer = ArchiveWriterBuilder::new(&archive_path)
         .password("test_password")
         .enable_erasure(true)
@@ -947,7 +1046,7 @@ async fn test_volume_count_matches_erasure_shards() {
             data_shards: 3,
             parity_shards: 2,
         })
-        .volume_count(3) // Less than total shards
+        .volume_count(1)
         .build()
         .await
         .unwrap();
@@ -958,7 +1057,6 @@ async fn test_volume_count_matches_erasure_shards() {
         .unwrap();
     writer.finalize().await.unwrap();
 
-    // Should still work - shards distributed round-robin
     let mut reader = ArchiveReader::open(&archive_path, "test_password")
         .await
         .unwrap();
