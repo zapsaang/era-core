@@ -13,7 +13,9 @@ use era_storage::StorageBackend;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
-use crate::distribution::{DistributionCalculator, DistributionConfigExt};
+use crate::distribution::{
+    validate_erasure_volume_count, DistributionCalculator, DistributionConfigExt,
+};
 use crate::{
     extract_filename, SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE,
     MIN_VOLUME_SIZE,
@@ -53,31 +55,16 @@ impl VolumePoolConfig {
     }
 
     /// Set distribution configuration.
-    ///
-    /// If the current `initial_volume_count` is below the distribution's
-    /// `min_volumes`, it is automatically raised to match — the same
-    /// postcondition enforced by [`for_erasure`](Self::for_erasure).
     pub fn with_distribution(mut self, distribution: MatrixDistributionConfig) -> Self {
         self.distribution = distribution;
-        // BP26-01: Match for_erasure() postcondition — auto-adjust volume count
-        if self.initial_volume_count < self.distribution.min_volumes {
-            self.initial_volume_count = self.distribution.min_volumes;
-        }
-        debug_assert!(self.initial_volume_count >= self.distribution.min_volumes);
+        debug_assert!(self.initial_volume_count >= 1);
         self
     }
 
     /// Configure based on erasure config.
-    ///
-    /// Derives the matrix distribution from the erasure parameters and
-    /// ensures `initial_volume_count` is at least `distribution.min_volumes`.
     pub fn for_erasure(mut self, erasure: ErasureCodeConfig) -> Self {
         self.distribution = MatrixDistributionConfig::from_erasure_config(erasure);
-        // Ensure we have enough volumes
-        if self.initial_volume_count < self.distribution.min_volumes {
-            self.initial_volume_count = self.distribution.min_volumes;
-        }
-        debug_assert!(self.initial_volume_count >= self.distribution.min_volumes);
+        debug_assert!(self.initial_volume_count >= 1);
         self
     }
 
@@ -142,6 +129,9 @@ impl<B: StorageBackend> VolumePool<B> {
         template_header: SuperHeader,
     ) -> Result<Self> {
         let volume_count = config.initial_volume_count;
+        if let Some(erasure) = template_header.config().erasure {
+            validate_erasure_volume_count(erasure, volume_count)?;
+        }
         let mut writers = Vec::with_capacity(volume_count);
         let mut sequences = Vec::with_capacity(volume_count);
 
@@ -1095,18 +1085,16 @@ mod tests {
 
     // ── Iteration 26: Builder Pattern & Fluent API Safety Tests ──
 
-    /// BP26-01: with_distribution() auto-adjusts initial_volume_count
-    /// when distribution.min_volumes exceeds the current count.
     #[test]
-    fn bp26_01_with_distribution_auto_adjusts_volume_count() {
+    fn bp26_01_with_distribution_preserves_explicit_count() {
         let config =
             VolumePoolConfig::new("/tmp/test", 1).with_distribution(MatrixDistributionConfig {
                 strategy: era_common::MatrixDistributionStrategy::RotatingOffset,
                 min_volumes: 5,
                 target_volumes: 8,
             });
-        // initial_volume_count was 1, but min_volumes is 5 → auto-raised
-        assert_eq!(config.initial_volume_count, 5);
+        assert_eq!(config.initial_volume_count, 1);
+        assert_eq!(config.distribution.min_volumes, 5);
     }
 
     /// BP26-01: with_distribution() preserves count when it already meets min_volumes.
@@ -1122,10 +1110,8 @@ mod tests {
         assert_eq!(config.initial_volume_count, 10);
     }
 
-    /// BP26-02: for_erasure() then with_distribution() — volume count
-    /// is re-adjusted to the new distribution's min_volumes.
     #[test]
-    fn bp26_02_for_erasure_then_with_distribution_adjusts() {
+    fn bp26_02_for_erasure_then_with_distribution_preserves_count() {
         let erasure = ErasureCodeConfig::new(4, 2);
         let config = VolumePoolConfig::new("/tmp/test", 1)
             .for_erasure(erasure)
@@ -1134,15 +1120,11 @@ mod tests {
                 min_volumes: 8,
                 target_volumes: 10,
             });
-        // for_erasure set initial_volume_count to >=3 (min for 4+2),
-        // then with_distribution raises it to 8
-        assert!(config.initial_volume_count >= 8);
+        assert_eq!(config.initial_volume_count, 1);
     }
 
-    /// BP26-02: with_distribution() then for_erasure() — for_erasure
-    /// also re-adjusts, so order doesn't matter for final postcondition.
     #[test]
-    fn bp26_02_with_distribution_then_for_erasure_adjusts() {
+    fn bp26_02_with_distribution_then_for_erasure_preserves_count() {
         let erasure = ErasureCodeConfig::new(4, 2);
         let config = VolumePoolConfig::new("/tmp/test", 1)
             .with_distribution(MatrixDistributionConfig {
@@ -1151,9 +1133,36 @@ mod tests {
                 target_volumes: 4,
             })
             .for_erasure(erasure);
-        // with_distribution set initial_volume_count to 2,
-        // then for_erasure overrides distribution and re-adjusts count to >=3
-        assert!(config.initial_volume_count >= config.distribution.min_volumes);
+        assert_eq!(config.initial_volume_count, 1);
+    }
+
+    #[test]
+    fn test_for_erasure_preserves_explicit_low_counts_for_4_plus_2() {
+        let erasure = ErasureCodeConfig::new(4, 2);
+
+        for count in [1usize, 2, 3] {
+            let config = VolumePoolConfig::new("/tmp/test", count).for_erasure(erasure);
+            assert_eq!(
+                config.initial_volume_count, count,
+                "explicit count {count} should be preserved"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_for_erasure_invalid_low_count_fails_canonical_validation() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("invalid_low");
+        let erasure = ErasureCodeConfig::new(4, 2);
+        let config = VolumePoolConfig::new(&base_path, 4).for_erasure(erasure);
+        let header = create_test_header();
+
+        let result = VolumePool::create(backend, config, header).await;
+        assert!(
+            result.is_err(),
+            "4 volumes for 4+2 should fail canonical validation"
+        );
     }
 
     /// BP26-03: with_max_size() clamps values below MIN_VOLUME_SIZE.
@@ -1170,7 +1179,6 @@ mod tests {
         assert_eq!(config.max_volume_size, MIN_VOLUME_SIZE);
     }
 
-    /// BP26-04: Double with_distribution() — last wins, count still valid.
     #[test]
     fn bp26_04_double_with_distribution_last_wins() {
         let config = VolumePoolConfig::new("/tmp/test", 1)
@@ -1184,8 +1192,7 @@ mod tests {
                 min_volumes: 7,
                 target_volumes: 9,
             });
-        // Second call should auto-adjust to min_volumes=7
-        assert_eq!(config.initial_volume_count, 7);
+        assert_eq!(config.initial_volume_count, 1);
         assert_eq!(config.distribution.min_volumes, 7);
     }
 }

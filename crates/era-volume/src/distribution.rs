@@ -9,6 +9,46 @@ use era_common::{
     ErasureCodeConfig, MatrixDistributionConfig, MatrixDistributionStrategy, VolumePoolStatus,
 };
 
+fn is_canonical_erasure_volume_count(total_shards: usize, volume_count: usize) -> bool {
+    if volume_count == 0 || total_shards == 0 {
+        return false;
+    }
+
+    if volume_count >= total_shards {
+        return true;
+    }
+
+    total_shards.is_multiple_of(volume_count)
+}
+
+pub fn canonical_erasure_volume_count_error(total_shards: usize, volume_count: usize) -> String {
+    format!(
+        "Invalid volume count {} for erasure layout with {} total shards; \
+         volume count must be >= total shards ({}) or divide total shards evenly",
+        volume_count, total_shards, total_shards
+    )
+}
+
+pub fn validate_canonical_erasure_volume_count(
+    total_shards: usize,
+    volume_count: usize,
+) -> era_common::Result<()> {
+    if is_canonical_erasure_volume_count(total_shards, volume_count) {
+        Ok(())
+    } else {
+        Err(era_common::EraError::InvalidConfig(
+            canonical_erasure_volume_count_error(total_shards, volume_count),
+        ))
+    }
+}
+
+pub fn validate_erasure_volume_count(
+    erasure: ErasureCodeConfig,
+    volume_count: usize,
+) -> era_common::Result<()> {
+    validate_canonical_erasure_volume_count(erasure.total_shards(), volume_count)
+}
+
 /// Extension trait for `MatrixDistributionStrategy` providing calculation logic.
 pub trait DistributionCalculator {
     /// Calculate which volume a shard should be written to.
@@ -64,10 +104,9 @@ pub trait DistributionConfigExt {
 impl DistributionConfigExt for MatrixDistributionConfig {
     fn from_erasure_config(erasure: ErasureCodeConfig) -> Self {
         let total_shards = erasure.total_shards();
-        let min_volumes = (erasure.parity_shards as usize + 1).max(2);
         Self {
             strategy: MatrixDistributionStrategy::RotatingOffset,
-            min_volumes,
+            min_volumes: 1,
             target_volumes: total_shards,
         }
     }
@@ -78,8 +117,12 @@ impl DistributionConfigExt for MatrixDistributionConfig {
                 "Insufficient volumes: have {}, need at least {}",
                 volume_count, self.min_volumes
             )))
+        } else if self.target_volumes == 0 {
+            Err(era_common::EraError::InvalidConfig(
+                "target_volumes must be > 0".into(),
+            ))
         } else {
-            Ok(())
+            validate_canonical_erasure_volume_count(self.target_volumes, volume_count)
         }
     }
 }
@@ -169,21 +212,73 @@ mod tests {
         let erasure = ErasureCodeConfig::new(4, 2);
         let config = MatrixDistributionConfig::from_erasure_config(erasure);
 
-        assert_eq!(config.min_volumes, 3); // parity + 1
+        assert_eq!(config.min_volumes, 1);
         assert_eq!(config.target_volumes, 6); // total shards
     }
 
     #[test]
-    fn test_validate_volume_count() {
-        let config = MatrixDistributionConfig {
-            strategy: MatrixDistributionStrategy::RotatingOffset,
-            min_volumes: 3,
-            target_volumes: 6,
-        };
+    fn test_validate_volume_count_canonical_4_plus_2() {
+        let config = MatrixDistributionConfig::from_erasure_config(ErasureCodeConfig::new(4, 2));
 
-        assert!(config.validate_volume_count(3).is_ok());
-        assert!(config.validate_volume_count(6).is_ok());
-        assert!(config.validate_volume_count(2).is_err());
+        for count in [1usize, 2, 3, 6, 7, 8] {
+            assert!(
+                config.validate_volume_count(count).is_ok(),
+                "expected {count} to be valid for 4+2"
+            );
+        }
+
+        for count in [4usize, 5] {
+            assert!(
+                config.validate_volume_count(count).is_err(),
+                "expected {count} to be invalid for 4+2"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_volume_count_canonical_6_plus_3() {
+        let config = MatrixDistributionConfig::from_erasure_config(ErasureCodeConfig::new(6, 3));
+
+        for count in [1usize, 3, 9, 10] {
+            assert!(
+                config.validate_volume_count(count).is_ok(),
+                "expected {count} to be valid for 6+3"
+            );
+        }
+
+        for count in [2usize, 4, 5, 6, 7, 8] {
+            assert!(
+                config.validate_volume_count(count).is_err(),
+                "expected {count} to be invalid for 6+3"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_erasure_volume_count_helper_error_text() {
+        let err = validate_erasure_volume_count(ErasureCodeConfig::new(4, 2), 4)
+            .expect_err("4 should be invalid for 4+2")
+            .to_string();
+        assert!(err.contains("divide") || err.contains("total shards"));
+    }
+
+    #[test]
+    fn test_rotating_offset_even_grouping_for_divisible_low_volume_counts() {
+        let strategy = MatrixDistributionStrategy::RotatingOffset;
+
+        let mut counts_4_plus_2 = [0usize; 3];
+        for shard_idx in 0..6 {
+            let vol = strategy.calculate_volume(shard_idx, 0, 3).unwrap();
+            counts_4_plus_2[vol] += 1;
+        }
+        assert_eq!(counts_4_plus_2, [2, 2, 2]);
+
+        let mut counts_6_plus_3 = [0usize; 3];
+        for shard_idx in 0..9 {
+            let vol = strategy.calculate_volume(shard_idx, 2, 3).unwrap();
+            counts_6_plus_3[vol] += 1;
+        }
+        assert_eq!(counts_6_plus_3, [3, 3, 3]);
     }
 
     #[test]

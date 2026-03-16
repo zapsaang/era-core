@@ -34,10 +34,8 @@ pub enum MatrixDistributionStrategy {
 pub struct MatrixDistributionConfig {
     /// Distribution strategy
     pub strategy: MatrixDistributionStrategy,
-    /// Minimum number of volumes required
-    /// Should be >= parity_shards + 1 for optimal fault tolerance
+    /// Minimum number of volumes required by the layout validator.
     pub min_volumes: usize,
-    /// Target number of volumes (ideally equals total_shards)
     pub target_volumes: usize,
 }
 
@@ -45,7 +43,7 @@ impl Default for MatrixDistributionConfig {
     fn default() -> Self {
         Self {
             strategy: MatrixDistributionStrategy::RotatingOffset,
-            min_volumes: 3,    // Minimum for 4+2 erasure
+            min_volumes: 1,
             target_volumes: 6, // Optimal for 4+2 erasure
         }
     }
@@ -158,7 +156,7 @@ mod tests {
     fn test_matrix_distribution_config_default() {
         let config = MatrixDistributionConfig::default();
         assert_eq!(config.strategy, MatrixDistributionStrategy::RotatingOffset);
-        assert_eq!(config.min_volumes, 3);
+        assert_eq!(config.min_volumes, 1);
         assert_eq!(config.target_volumes, 6);
     }
 

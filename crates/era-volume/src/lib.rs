@@ -37,7 +37,11 @@ mod reader;
 mod volume_pool;
 mod writer;
 
-pub use distribution::{DistributionCalculator, DistributionConfigExt, VolumePoolStatusExt};
+pub use distribution::{
+    canonical_erasure_volume_count_error, validate_canonical_erasure_volume_count,
+    validate_erasure_volume_count, DistributionCalculator, DistributionConfigExt,
+    VolumePoolStatusExt,
+};
 pub use footer::{
     Footer, FooterBuilder, BACKUP_FOOTER_GAP, FOOTER_MAGIC, FOOTER_SIZE, FOOTER_VERSION,
 };
