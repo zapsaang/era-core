@@ -1145,9 +1145,15 @@ impl ArchiveWriter {
                 )));
             }
 
+            let excluded = self.collect_own_volume_paths();
             let entries = collect_files_async(path.to_path_buf()).await?;
             for entry_path in entries {
-                // Compute relative path from the input directory
+                if let Ok(canonical) = entry_path.canonicalize() {
+                    if excluded.contains(&canonical) {
+                        debug!("Skipping self-referential file: {}", entry_path.display());
+                        continue;
+                    }
+                }
                 let relative_path = entry_path.strip_prefix(path).unwrap_or(&entry_path);
                 self.add_file_with_path(&entry_path, relative_path).await?;
             }
@@ -1155,6 +1161,23 @@ impl ArchiveWriter {
             self.add_file_with_path(path, path).await?;
         }
         Ok(())
+    }
+
+    fn collect_own_volume_paths(&self) -> HashSet<PathBuf> {
+        let mut paths = HashSet::new();
+        if let Ok(canonical) = self.output_path.canonicalize() {
+            paths.insert(canonical.clone());
+            let stem = canonical.with_extension("");
+            for seq in 1..=u16::MAX {
+                let vol_path = stem.with_extension(format!("era.{:03}", seq));
+                if vol_path.exists() {
+                    paths.insert(vol_path);
+                } else {
+                    break;
+                }
+            }
+        }
+        paths
     }
 
     /// Add a file with a specific stored path

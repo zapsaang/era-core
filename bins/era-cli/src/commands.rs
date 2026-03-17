@@ -180,6 +180,23 @@ pub struct CreateArgs<'a> {
     pub compact: bool,
 }
 
+fn collect_archive_volume_paths(output: &Path) -> std::collections::HashSet<PathBuf> {
+    let mut paths = std::collections::HashSet::new();
+    if let Ok(canonical) = output.canonicalize() {
+        paths.insert(canonical.clone());
+        let stem = canonical.with_extension("");
+        for seq in 1..=u16::MAX {
+            let vol_path = stem.with_extension(format!("era.{:03}", seq));
+            if vol_path.exists() {
+                paths.insert(vol_path);
+            } else {
+                break;
+            }
+        }
+    }
+    paths
+}
+
 /// Create a new ERA archive
 pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     let CreateArgs {
@@ -319,12 +336,10 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     info!("Creating archive: {}", output.display());
 
     let start_time = Instant::now();
-    // Pre-scan files to update the progress bar length
     let mut files_to_process: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    // Use ignore::WalkBuilder (implied standard, but user asked for walkdir explicitly or implies standard recursion)
-    // The instructions said "Introduce walkdir crate".
-    // Let's use walkdir::WalkDir
+    let excluded_paths = collect_archive_volume_paths(output);
+
     for input in inputs {
         let path = input.as_path();
         if path.is_dir() {
@@ -335,6 +350,12 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
             {
                 if entry.file_type().is_file() {
                     let disk_path = entry.path().to_path_buf();
+                    if let Ok(canonical) = disk_path.canonicalize() {
+                        if excluded_paths.contains(&canonical) {
+                            info!("Skipping archive output file: {}", disk_path.display());
+                            continue;
+                        }
+                    }
                     let stored_path = entry
                         .path()
                         .strip_prefix(base)
