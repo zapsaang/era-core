@@ -1,7 +1,8 @@
 //! Benchmarks for FastCDC chunking operations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_ingest::{Chunker, ChunkerConfig};
+use std::hint::black_box;
 use std::time::Duration;
 
 /// Generate data with specified entropy level

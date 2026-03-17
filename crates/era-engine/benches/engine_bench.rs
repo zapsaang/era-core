@@ -1,8 +1,9 @@
 //! End-to-end benchmarks for the ERA engine.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_engine::{ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
 use std::fs;
+use std::hint::black_box;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tempfile::TempDir;
 

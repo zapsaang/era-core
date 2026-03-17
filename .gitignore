@@ -36,4 +36,4 @@ bins/
 **/bench_data/
 **/test_shell/
 .sisyphus/
-.tmp-tests/
+.tmp*

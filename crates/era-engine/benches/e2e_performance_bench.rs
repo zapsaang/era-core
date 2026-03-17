@@ -5,9 +5,10 @@
 //!
 //! Run with: cargo bench -p era-engine --bench e2e_performance_bench
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
 use std::fs;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 /// Create a test file with random-like content

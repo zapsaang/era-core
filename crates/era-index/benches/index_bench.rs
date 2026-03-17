@@ -2,10 +2,11 @@
 //!
 //! Run with: cargo bench -p era-index
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{ChunkIndex, ChunkIndexConfig, IndexEntry};
 use rand::RngCore;
+use std::hint::black_box;
 
 fn random_hash() -> ChunkHash {
     let mut bytes = [0u8; 32];

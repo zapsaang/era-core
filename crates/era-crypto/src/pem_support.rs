@@ -1,7 +1,7 @@
 //! # PEM and X.509 Certificate Support
 //!
 //! Provides standard PEM PKCS#8 and X.509 parsing utilities.
-//! Uses industry-standard crates: der, spki, x509-parser, ssh-key.
+//! Uses industry-standard crates: der, spki, x509-cert, ssh-key.
 //!
 //! ## Supported Formats
 //!

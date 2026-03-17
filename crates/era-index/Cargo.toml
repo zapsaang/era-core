@@ -40,7 +40,7 @@ era-storage = { path = "../era-storage" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-criterion = "0.5"
+criterion = "0.8.2"
 rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 

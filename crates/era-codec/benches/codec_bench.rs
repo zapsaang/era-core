@@ -1,7 +1,8 @@
 //! Benchmarks for ERA compression operations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_codec::{Compressor, ZstdCompressor};
+use std::hint::black_box;
 
 /// Generate test data with varying compressibility
 fn generate_compressible_data(size: usize) -> Vec<u8> {

@@ -5,10 +5,11 @@
 //!
 //! Run with: cargo bench --bench real_world_perf_test
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_crypto::{AeadContext, KdfParams, KeySession, Salt, XChaCha20Poly1305Context};
 use era_engine::{auth::PasswordSlotParams, ArchiveReader, ArchiveWriterBuilder, ExtractOptions};
 use era_volume::{RecipientType, SuperHeader};
+use std::hint::black_box;
 use tempfile::TempDir;
 
 /// Helper to manually derive the Master Key Session from an archive header

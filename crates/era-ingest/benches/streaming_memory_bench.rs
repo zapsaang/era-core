@@ -6,8 +6,9 @@
 //!
 //! Run with: cargo bench --bench streaming_memory_bench
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_ingest::{ChunkerConfig, StreamingChunker, StreamingChunkerZeroCopy};
+use std::hint::black_box;
 use std::io::Cursor;
 use std::time::Duration;
 

@@ -2,9 +2,10 @@
 //!
 //! This benchmark compares the performance of batch file operations vs individual adds.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_engine::ArchiveWriterBuilder;
 use std::fs;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 /// Create test files with specified sizes

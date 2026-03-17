@@ -1,8 +1,9 @@
 //! Benchmark for small file packing performance
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_engine::ArchiveWriterBuilder;
 use std::fs;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 fn bench_small_files_packing(c: &mut Criterion) {

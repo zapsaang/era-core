@@ -1,11 +1,12 @@
 //! Benchmarks for MacroBlock packing operations.
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_codec::ZstdCompressor;
 use era_common::UniqueChunk;
 use era_crypto::{derive_key, hash, DerivedKey, KdfParams, Salt};
 use era_packing::{MacroBlockBuilder, MacroBlockUnpacker};
+use std::hint::black_box;
 
 /// Test nonce context
 const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];

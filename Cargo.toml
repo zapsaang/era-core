@@ -114,20 +114,17 @@ thiserror = "1.0"
 anyhow = "1.0"
 
 # Time handling
-time = { version = "0.3", features = ["serde"] }
-
-# Data validation
-garde = { version = "0.4", features = ["derive"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 
 # Metrics and observability
 metrics = "0.24.3"
 
 # Configuration
-toml = "0.8"
+toml = "1.0.6"
 
 # Testing
 tempfile = "3.27"
-criterion = "0.5"
+criterion = "0.8.2"
 proptest = "1.6"
 
 [profile.release]

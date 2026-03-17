@@ -1,11 +1,12 @@
 //! Benchmarks for ERA cryptographic operations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use era_common::BlockId;
 use era_crypto::{
     decrypt_with_context, derive_key, encrypt_with_context, generate_password_verification_tag,
     hash, verify_password_tag, DerivedKey, KdfParams, KeySession, Salt,
 };
+use std::hint::black_box;
 
 const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
 const TEST_EPOCH_ID: u32 = 1;
