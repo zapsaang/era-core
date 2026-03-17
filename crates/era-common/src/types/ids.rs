@@ -1,6 +1,7 @@
 //! Identifier types for ERA archive system.
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use rkyv::rancor::Fallible;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -41,18 +42,18 @@ impl Archive for VolumeId {
     type Archived = [u8; 16];
     type Resolver = ();
 
-    unsafe fn resolve(&self, _pos: usize, _resolver: Self::Resolver, out: *mut Self::Archived) {
+    fn resolve(&self, _resolver: Self::Resolver, out: Place<Self::Archived>) {
         out.write(*self.0.as_bytes());
     }
 }
 
-impl<S: rkyv::ser::Serializer + ?Sized> RkyvSerialize<S> for VolumeId {
+impl<S: Fallible + ?Sized> RkyvSerialize<S> for VolumeId {
     fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(())
     }
 }
 
-impl<D: rkyv::Fallible + ?Sized> RkyvDeserialize<VolumeId, D> for [u8; 16] {
+impl<D: Fallible + ?Sized> RkyvDeserialize<VolumeId, D> for [u8; 16] {
     fn deserialize(&self, _deserializer: &mut D) -> Result<VolumeId, D::Error> {
         Ok(VolumeId(Uuid::from_bytes(*self)))
     }
@@ -92,8 +93,8 @@ impl std::fmt::Display for VolumeId {
     Archive,
     RkyvDeserialize,
     RkyvSerialize,
+    bytecheck::CheckBytes,
 )]
-#[archive(check_bytes)]
 pub struct BlockId(pub u64);
 
 impl BlockId {
@@ -128,9 +129,9 @@ impl std::fmt::Display for BlockId {
     Archive,
     RkyvDeserialize,
     RkyvSerialize,
+    bytecheck::CheckBytes,
 )]
-#[archive(check_bytes)]
-#[archive_attr(derive(Hash, Eq, PartialEq))]
+#[rkyv(derive(Hash, Eq, PartialEq))]
 pub struct ChunkHash(pub [u8; 32]);
 
 impl ChunkHash {

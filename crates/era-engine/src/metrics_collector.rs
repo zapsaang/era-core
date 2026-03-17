@@ -28,13 +28,13 @@ impl OperationTimer {
         // the value without dynamic operation names. In production,
         // you would use a metrics exporter that supports labels.
         match self.name {
-            "archive_create" => metrics::histogram!("archive_create_ms", elapsed_ms),
-            "archive_extract" => metrics::histogram!("archive_extract_ms", elapsed_ms),
-            "compression" => metrics::histogram!("compression_ms", elapsed_ms),
-            "encryption" => metrics::histogram!("encryption_ms", elapsed_ms),
-            "decryption" => metrics::histogram!("decryption_ms", elapsed_ms),
-            "file_read" => metrics::histogram!("file_read_ms", elapsed_ms),
-            "file_write" => metrics::histogram!("file_write_ms", elapsed_ms),
+            "archive_create" => metrics::histogram!("archive_create_ms").record(elapsed_ms),
+            "archive_extract" => metrics::histogram!("archive_extract_ms").record(elapsed_ms),
+            "compression" => metrics::histogram!("compression_ms").record(elapsed_ms),
+            "encryption" => metrics::histogram!("encryption_ms").record(elapsed_ms),
+            "decryption" => metrics::histogram!("decryption_ms").record(elapsed_ms),
+            "file_read" => metrics::histogram!("file_read_ms").record(elapsed_ms),
+            "file_write" => metrics::histogram!("file_write_ms").record(elapsed_ms),
             _ => {
                 debug!(
                     "Unknown operation '{}', skipping metrics recording",
@@ -61,10 +61,10 @@ impl OperationTimer {
 /// Record bytes processed for an operation
 pub fn record_bytes_processed(operation: &'static str, bytes: u64) {
     match operation {
-        "compression" => metrics::counter!("compression_bytes_total", bytes),
-        "encryption" => metrics::counter!("encryption_bytes_total", bytes),
-        "archive_write" => metrics::counter!("archive_write_bytes_total", bytes),
-        "archive_read" => metrics::counter!("archive_read_bytes_total", bytes),
+        "compression" => metrics::counter!("compression_bytes_total").increment(bytes),
+        "encryption" => metrics::counter!("encryption_bytes_total").increment(bytes),
+        "archive_write" => metrics::counter!("archive_write_bytes_total").increment(bytes),
+        "archive_read" => metrics::counter!("archive_read_bytes_total").increment(bytes),
         _ => {
             debug!(
                 "Unknown operation '{}', skipping metrics recording",
@@ -77,11 +77,11 @@ pub fn record_bytes_processed(operation: &'static str, bytes: u64) {
 /// Record a single operation count
 pub fn record_operation(operation: &'static str) {
     match operation {
-        "file_encrypt" => metrics::counter!("file_encrypt_operations_total", 1u64),
-        "file_decrypt" => metrics::counter!("file_decrypt_operations_total", 1u64),
-        "chunk_process" => metrics::counter!("chunk_process_operations_total", 1u64),
-        "archive_create" => metrics::counter!("archive_create_operations_total", 1u64),
-        "archive_extract" => metrics::counter!("archive_extract_operations_total", 1u64),
+        "file_encrypt" => metrics::counter!("file_encrypt_operations_total").increment(1),
+        "file_decrypt" => metrics::counter!("file_decrypt_operations_total").increment(1),
+        "chunk_process" => metrics::counter!("chunk_process_operations_total").increment(1),
+        "archive_create" => metrics::counter!("archive_create_operations_total").increment(1),
+        "archive_extract" => metrics::counter!("archive_extract_operations_total").increment(1),
         _ => {
             debug!(
                 "Unknown operation '{}', skipping metrics recording",
@@ -94,9 +94,9 @@ pub fn record_operation(operation: &'static str) {
 /// Record a gauge value (e.g., active connections, cache size)
 pub fn record_gauge(metric_name: &'static str, value: f64) {
     match metric_name {
-        "active_extractions" => metrics::gauge!("active_extractions", value),
-        "cache_size_mb" => metrics::gauge!("cache_size_mb", value),
-        "queue_depth" => metrics::gauge!("queue_depth", value),
+        "active_extractions" => metrics::gauge!("active_extractions").set(value),
+        "cache_size_mb" => metrics::gauge!("cache_size_mb").set(value),
+        "queue_depth" => metrics::gauge!("queue_depth").set(value),
         _ => {
             debug!("Unknown metric '{}', skipping gauge recording", metric_name);
         }

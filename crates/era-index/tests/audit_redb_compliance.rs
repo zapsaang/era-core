@@ -98,14 +98,15 @@ fn test_a1_zero_copy_index_entry_access() {
     let entry = IndexEntry::new(test_hash(42), VolumeId::new(), BlockId::new(7), 8192, 4096)
         .expect("valid entry");
 
-    let bytes = rkyv::to_bytes::<_, 256>(&entry).expect("IndexEntry serialization must succeed");
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
+        .expect("IndexEntry serialization must succeed");
 
-    let _archived = rkyv::check_archived_root::<IndexEntry>(&bytes)
+    let _archived = rkyv::access::<rkyv::Archived<IndexEntry>, rkyv::rancor::Error>(&bytes)
         .expect("check_archived_root must succeed for valid IndexEntry bytes");
     // V24-F1: ArchivedIndexEntry fields are now pub(crate), so verify
     // via deserialization + accessor methods instead of direct archived field access.
-    let deserialized: IndexEntry =
-        rkyv::from_bytes(&bytes).expect("IndexEntry deserialization must succeed");
+    let deserialized: IndexEntry = rkyv::from_bytes::<IndexEntry, rkyv::rancor::Error>(&bytes)
+        .expect("IndexEntry deserialization must succeed");
     assert_eq!(
         deserialized.offset(),
         8192,
@@ -123,7 +124,7 @@ fn test_a1_zero_copy_index_entry_access() {
     );
 
     // Also verify check_archived_root succeeds (zero-copy validation)
-    let _archived = rkyv::check_archived_root::<IndexEntry>(&bytes)
+    let _archived = rkyv::access::<rkyv::Archived<IndexEntry>, rkyv::rancor::Error>(&bytes)
         .expect("check_archived_root must succeed for valid IndexEntry bytes");
 }
 
@@ -133,15 +134,16 @@ fn test_a2_zero_copy_index_page_access() {
     let entries: Vec<IndexEntry> = (0..100).map(make_entry).collect();
     let page = IndexPage::try_new(entries).unwrap();
 
-    let bytes = rkyv::to_bytes::<_, 4096>(&page).expect("IndexPage serialization must succeed");
+    let bytes =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&page).expect("IndexPage serialization must succeed");
 
     // Prove check_archived_root succeeds (zero-copy validation)
-    let _archived = rkyv::check_archived_root::<IndexPage>(&bytes)
+    let _archived = rkyv::access::<rkyv::Archived<IndexPage>, rkyv::rancor::Error>(&bytes)
         .expect("check_archived_root must succeed for valid IndexPage bytes");
 
     // Deserialize and verify via getters (fields are private)
-    let deserialized: IndexPage =
-        rkyv::from_bytes(&bytes).expect("IndexPage deserialization must succeed");
+    let deserialized: IndexPage = rkyv::from_bytes::<IndexPage, rkyv::rancor::Error>(&bytes)
+        .expect("IndexPage deserialization must succeed");
 
     assert_eq!(
         *deserialized.min_hash(),
@@ -178,15 +180,16 @@ fn test_a3_zero_copy_meta_index_access() {
     let bloom_bytes = serialize_bloom(&bloom).unwrap();
     meta.set_bloom_filter(bloom_bytes.clone()).unwrap();
 
-    let bytes = rkyv::to_bytes::<_, 4096>(&meta).expect("MetaIndex serialization must succeed");
+    let bytes =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&meta).expect("MetaIndex serialization must succeed");
 
     // Verify zero-copy access works via check_archived_root
-    let _archived = rkyv::check_archived_root::<MetaIndex>(&bytes)
+    let _archived = rkyv::access::<rkyv::Archived<MetaIndex>, rkyv::rancor::Error>(&bytes)
         .expect("check_archived_root must succeed for valid MetaIndex bytes");
 
     // Deserialize and verify via getters (fields are private)
-    let restored: MetaIndex =
-        rkyv::from_bytes(&bytes).expect("MetaIndex deserialization must succeed");
+    let restored: MetaIndex = rkyv::from_bytes::<MetaIndex, rkyv::rancor::Error>(&bytes)
+        .expect("MetaIndex deserialization must succeed");
     assert_eq!(restored.pages().len(), 2, "Archived page count must match");
     assert_eq!(
         restored.bloom_filter().len(),
@@ -210,12 +213,13 @@ fn test_a4_zero_copy_bloom_filter_data() {
         bloom.sip_keys(),
     )
     .expect("BloomFilterData::new should succeed");
-    let bytes =
-        rkyv::to_bytes::<_, 4096>(&data).expect("BloomFilterData serialization must succeed");
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
+        .expect("BloomFilterData serialization must succeed");
 
     // For zero-copy verification, just ensure round-trip works
     let restored: BloomFilterData =
-        rkyv::from_bytes(&bytes).expect("BloomFilterData deserialization must succeed");
+        rkyv::from_bytes::<BloomFilterData, rkyv::rancor::Error>(&bytes)
+            .expect("BloomFilterData deserialization must succeed");
 
     assert_eq!(
         restored.bitmap_bits(),
@@ -454,10 +458,10 @@ async fn test_c2_zombie_recovery_wrong_credentials_fails_cleanly() {
 #[test]
 fn test_d1_check_archived_root_rejects_truncated_index_entry() {
     let entry = make_entry(42);
-    let bytes = rkyv::to_bytes::<_, 256>(&entry).unwrap();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
 
     let truncated = &bytes[..bytes.len() / 2];
-    let result = rkyv::check_archived_root::<IndexEntry>(truncated);
+    let result = rkyv::access::<rkyv::Archived<IndexEntry>, rkyv::rancor::Error>(truncated);
     assert!(
         result.is_err(),
         "check_archived_root must reject truncated IndexEntry bytes"
@@ -468,7 +472,7 @@ fn test_d1_check_archived_root_rejects_truncated_index_entry() {
 #[test]
 fn test_d2_check_archived_root_rejects_garbage_index_page() {
     let garbage = vec![0xFF; 1024];
-    let result = rkyv::check_archived_root::<IndexPage>(&garbage);
+    let result = rkyv::access::<rkyv::Archived<IndexPage>, rkyv::rancor::Error>(&garbage);
     assert!(
         result.is_err(),
         "check_archived_root must reject garbage bytes for IndexPage"
@@ -479,7 +483,7 @@ fn test_d2_check_archived_root_rejects_garbage_index_page() {
 #[test]
 fn test_d3_check_archived_root_rejects_garbage_meta_index() {
     let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF, 0x01, 0x02];
-    let result = rkyv::check_archived_root::<MetaIndex>(&garbage);
+    let result = rkyv::access::<rkyv::Archived<MetaIndex>, rkyv::rancor::Error>(&garbage);
     assert!(
         result.is_err(),
         "check_archived_root must reject garbage bytes for MetaIndex"
@@ -490,7 +494,7 @@ fn test_d3_check_archived_root_rejects_garbage_meta_index() {
 #[test]
 fn test_d4_from_bytes_rejects_garbage_meta_index() {
     let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF, 0x01, 0x02];
-    let result = rkyv::from_bytes::<MetaIndex>(&garbage);
+    let result = rkyv::from_bytes::<MetaIndex, rkyv::rancor::Error>(&garbage);
     assert!(
         result.is_err(),
         "rkyv::from_bytes must reject garbage bytes (validation enabled)"
@@ -501,12 +505,14 @@ fn test_d4_from_bytes_rejects_garbage_meta_index() {
 #[test]
 fn test_d5_check_archived_root_handles_bitflipped_vec() {
     let entries: Vec<IndexEntry> = (0..10).map(make_entry).collect();
-    let mut bytes = rkyv::to_bytes::<_, 4096>(&entries).unwrap().to_vec();
+    let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entries)
+        .unwrap()
+        .to_vec();
 
     let mid = bytes.len() / 2;
     bytes[mid] ^= 0x01;
 
-    match rkyv::check_archived_root::<Vec<IndexEntry>>(&bytes) {
+    match rkyv::access::<rkyv::Archived<Vec<IndexEntry>>, rkyv::rancor::Error>(&bytes) {
         Err(_) => { /* Good: validation caught the corruption */ }
         Ok(archived) => {
             let _len = archived.len();
@@ -537,10 +543,12 @@ fn test_d6_store_uses_validated_deserialization() {
 fn test_d7_reader_deserialization_audit() {
     let reader_source = include_str!("../src/reader.rs");
 
-    let uses_check_archived = reader_source.contains("check_archived_root");
+    let uses_checked_api = reader_source.contains("check_archived_root")
+        || reader_source.contains("rkyv::from_bytes")
+        || reader_source.contains("rkyv::access::<");
     assert!(
-        uses_check_archived,
-        "reader.rs must use check_archived_root for validated deserialization"
+        uses_checked_api,
+        "reader.rs must use a validated rkyv deserialization API"
     );
 }
 

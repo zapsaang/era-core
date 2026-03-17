@@ -184,7 +184,9 @@ fn auth_04_any_of_n_correct_logic() {
         slots.push(RecipientSlot::new(
             RecipientType::Argon2idPassword,
             None,
-            rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
+            rkyv::to_bytes::<rkyv::rancor::Error>(&p_params)
+                .unwrap()
+                .to_vec(),
             combined,
         ));
     }
@@ -256,7 +258,9 @@ fn auth_06_corrupt_emk_rejected_gracefully() {
     let slot = RecipientSlot::new(
         RecipientType::Argon2idPassword,
         None,
-        rkyv::to_bytes::<_, 64>(&p_params).unwrap().to_vec(),
+        rkyv::to_bytes::<rkyv::rancor::Error>(&p_params)
+            .unwrap()
+            .to_vec(),
         // Corrupt: random garbage instead of [nonce(24) | ciphertext]
         vec![0xDE, 0xAD, 0xBE, 0xEF],
     );

@@ -212,7 +212,7 @@ fn test_index_page_layout() {
         assert_eq!(*entry.hash(), test_hash(i as u64));
     }
 
-    let serialized = rkyv::to_bytes::<_, 4096>(&page).unwrap();
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&page).unwrap();
     let size_kb = serialized.len() / 1024;
     assert!(
         (50..=1000).contains(&size_kb),
@@ -378,7 +378,7 @@ fn test_index_page_compression_and_encryption() {
 
     let page = IndexPage::try_new(entries).unwrap();
 
-    let uncompressed = rkyv::to_bytes::<_, 4096>(&page).unwrap();
+    let uncompressed = rkyv::to_bytes::<rkyv::rancor::Error>(&page).unwrap();
     let uncompressed_size = uncompressed.len();
 
     assert!(

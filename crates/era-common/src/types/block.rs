@@ -54,9 +54,18 @@ impl EncryptedMacroBlock {
 /// A block is either stored as a single copy (non-erasure) or has explicit
 /// erasure-coded shard locations. There is no intermediate "maybe erasure" state.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    bytecheck::CheckBytes,
 )]
-#[archive(check_bytes)]
+#[repr(u8)]
 pub enum ShardLayout {
     /// Non-erasure-coded block (single copy on one volume).
     Single,
@@ -76,9 +85,17 @@ pub enum ShardLayout {
 
 /// Location of a block in the archive
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    bytecheck::CheckBytes,
 )]
-#[archive(check_bytes)]
 pub struct BlockLocation {
     /// Volume containing this block (or shard 0 for erasure-coded blocks)
     pub volume_id: VolumeId,
@@ -105,8 +122,8 @@ pub struct BlockLocation {
     Archive,
     RkyvDeserialize,
     RkyvSerialize,
+    bytecheck::CheckBytes,
 )]
-#[archive(check_bytes)]
 pub struct ErasureBlockInfo {
     /// Number of data shards
     pub data_shards: u8,

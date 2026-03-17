@@ -76,9 +76,18 @@ pub(crate) const MAX_BLOOM_ITEMS: usize = 100_000_000;
 /// bypassing the validated `new()` constructor via struct literal construction.
 /// Use `new()` to create instances and accessor methods to read fields.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Archive, RkyvDeserialize, RkyvSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Archive,
+    RkyvDeserialize,
+    RkyvSerialize,
+    bytecheck::CheckBytes,
 )]
-#[archive(check_bytes)]
 pub struct IndexEntry {
     /// Hash of the chunk (primary key)
     pub(crate) hash: ChunkHash, // V24-F1 fix
@@ -186,8 +195,7 @@ impl std::fmt::Display for IndexEntry {
     }
 }
 /// An L2 Index Page (fundamental unit of storage)
-#[derive(Debug, Clone, Archive, RkyvDeserialize, RkyvSerialize)]
-#[archive(check_bytes)]
+#[derive(Debug, Clone, Archive, RkyvDeserialize, RkyvSerialize, bytecheck::CheckBytes)]
 pub struct IndexPage {
     /// Minimum hash in this page (for range queries)
     min_hash: ChunkHash,
@@ -363,8 +371,7 @@ impl IndexPage {
 /// V24-F2 fix: Fields are `pub(crate)` to prevent external consumers from
 /// constructing PagePointers directly, bypassing MetaIndex::add_page() validation.
 /// Use accessor methods to read fields.
-#[derive(Debug, Clone, Copy, Archive, RkyvDeserialize, RkyvSerialize)]
-#[archive(check_bytes)]
+#[derive(Debug, Clone, Copy, Archive, RkyvDeserialize, RkyvSerialize, bytecheck::CheckBytes)]
 pub struct PagePointer {
     pub(crate) min_hash: ChunkHash,
     pub(crate) max_hash: ChunkHash,
@@ -410,8 +417,7 @@ impl PagePointer {
 }
 
 /// The L1 Meta-Index (root directory)
-#[derive(Debug, Clone, Archive, RkyvDeserialize, RkyvSerialize)]
-#[archive(check_bytes)]
+#[derive(Debug, Clone, Archive, RkyvDeserialize, RkyvSerialize, bytecheck::CheckBytes)]
 pub struct MetaIndex {
     /// Sparse index of L2 pages
     pages: Vec<PagePointer>,

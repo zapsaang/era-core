@@ -438,14 +438,16 @@ impl ArchiveWriterBuilder {
                     RecipientType::Argon2idPassword,
                 ) = (&self.auth_mode, slot.r_type())
                 {
-                    if let Ok(archived) =
-                        rkyv::check_archived_root::<PasswordSlotParams>(slot.params())
+                    if let Ok(archived) = rkyv::access::<
+                        rkyv::Archived<PasswordSlotParams>,
+                        rkyv::rancor::Error,
+                    >(slot.params())
                     {
                         let salt = Salt::from_bytes(archived.salt);
                         let kdf_params = KdfParams {
-                            memory_cost: archived.kdf_memory_cost,
-                            time_cost: archived.kdf_time_cost,
-                            parallelism: archived.kdf_parallelism,
+                            memory_cost: archived.kdf_memory_cost.into(),
+                            time_cost: archived.kdf_time_cost.into(),
+                            parallelism: archived.kdf_parallelism.into(),
                         };
                         if let Ok(kek) = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)
                         {
@@ -597,7 +599,7 @@ impl ArchiveWriterBuilder {
                             recipients.push(RecipientSlot::new(
                                 RecipientType::Argon2idPassword,
                                 None,
-                                rkyv::to_bytes::<_, 64>(&p_params)
+                                rkyv::to_bytes::<rkyv::rancor::Error>(&p_params)
                                     .map_err(|e| {
                                         era_common::EraError::Serialization(e.to_string())
                                     })?
@@ -633,7 +635,7 @@ impl ArchiveWriterBuilder {
                         recipients.push(RecipientSlot::new(
                             RecipientType::Argon2idPassword,
                             None,
-                            rkyv::to_bytes::<_, 64>(&p_params)
+                            rkyv::to_bytes::<rkyv::rancor::Error>(&p_params)
                                 .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
                                 .to_vec(),
                             combined,
@@ -2166,7 +2168,7 @@ pub mod generic {
             let slot = RecipientSlot::new(
                 RecipientType::Argon2idPassword,
                 None,
-                rkyv::to_bytes::<_, 64>(&p_params)
+                rkyv::to_bytes::<rkyv::rancor::Error>(&p_params)
                     .map_err(|e| era_common::EraError::Serialization(e.to_string()))?
                     .to_vec(),
                 combined,

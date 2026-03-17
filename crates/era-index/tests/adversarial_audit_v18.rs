@@ -789,7 +789,8 @@ fn v18_regression_v17f9_bloom_version_check() {
         .expect("archived.version check must exist");
     let deserialize_pos = fn_body
         .find(".deserialize(")
-        .expect(".deserialize() must exist");
+        .or_else(|| fn_body.find("rkyv::deserialize::<"))
+        .expect("a deserialize path must exist");
 
     assert!(
         version_check_pos < deserialize_pos,

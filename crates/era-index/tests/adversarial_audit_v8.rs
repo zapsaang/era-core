@@ -19,7 +19,6 @@ use era_common::{BlockId, ChunkHash, VolumeId};
 use era_index::{
     ChunkIndex, IndexBuilder, IndexEntry, IndexPage, IndexReader, MetaIndex, ENTRIES_PER_PAGE,
 };
-use rkyv::Deserialize;
 
 // ============================================================================
 // Helpers
@@ -730,14 +729,14 @@ fn f10a_rkyv_deserialization_accepts_large_page() {
     let entries: Vec<IndexEntry> = (0..count as u64).map(make_entry).collect();
     let page = IndexPage::try_new(entries).unwrap();
 
-    let serialized = rkyv::to_bytes::<_, 4096>(&page).unwrap();
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&page).unwrap();
     let serialized_size = serialized.len();
 
     // Deserialize — no size check happens at the rkyv level
-    let archived = rkyv::check_archived_root::<IndexPage>(&serialized).unwrap();
-    let deserialized: IndexPage = archived
-        .deserialize(&mut rkyv::Infallible)
-        .unwrap_or_else(|never| match never {});
+    let archived =
+        rkyv::access::<rkyv::Archived<IndexPage>, rkyv::rancor::Error>(&serialized).unwrap();
+    let deserialized: IndexPage =
+        rkyv::deserialize::<IndexPage, rkyv::rancor::Error>(archived).unwrap();
 
     assert_eq!(deserialized.len(), count);
     eprintln!(
@@ -1616,11 +1615,11 @@ fn f26a_stress_100k_entries_zero_loss() {
 #[test]
 fn f27a_serialization_sizes() {
     let entry = make_entry(42);
-    let entry_bytes = rkyv::to_bytes::<_, 256>(&entry).unwrap();
+    let entry_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
 
     let entries: Vec<IndexEntry> = (0..ENTRIES_PER_PAGE as u64).map(make_entry).collect();
     let page = IndexPage::try_new(entries).unwrap();
-    let page_bytes = rkyv::to_bytes::<_, 4096>(&page).unwrap();
+    let page_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&page).unwrap();
 
     let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100_000, 0.01);
     let bloom_data = era_index::BloomFilterData::new(

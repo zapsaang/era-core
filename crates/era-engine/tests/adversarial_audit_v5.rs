@@ -243,12 +243,15 @@ async fn test_v5_state_06_resume_loads_durable_checkpoint_state() {
     let header = volume.header();
 
     let slot = header.recipients().first().unwrap();
-    let archived =
-        rkyv::check_archived_root::<era_engine::auth::PasswordSlotParams>(slot.params()).unwrap();
+    let archived = rkyv::access::<
+        rkyv::Archived<era_engine::auth::PasswordSlotParams>,
+        rkyv::rancor::Error,
+    >(slot.params())
+    .unwrap();
     let kdf = KdfParams {
-        memory_cost: archived.kdf_memory_cost,
-        time_cost: archived.kdf_time_cost,
-        parallelism: archived.kdf_parallelism,
+        memory_cost: archived.kdf_memory_cost.into(),
+        time_cost: archived.kdf_time_cost.into(),
+        parallelism: archived.kdf_parallelism.into(),
     };
     let salt = Salt::from_bytes(archived.salt);
     let kek = era_crypto::derive_key(b"v5-state-06", &salt, &kdf).unwrap();

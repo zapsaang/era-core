@@ -26,6 +26,7 @@ xattr = "1.0"
 exacl = "0.12.0"
 prost = "0.14.3"
 rkyv = { workspace = true }
+bytecheck = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

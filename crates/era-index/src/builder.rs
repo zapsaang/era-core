@@ -291,7 +291,7 @@ impl IndexBuilder {
             let idx_nonce = index_nonce_context;
             self.store.for_each_sorted_page(|page, _page_block_id| {
                 // Serialize page to rkyv
-                let page_bytes = rkyv::to_bytes::<_, 4096>(&page)
+                let page_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&page)
                     .map_err(|e| EraError::Serialization(e.to_string()))?;
 
                 // Encrypt page with session keys
@@ -363,8 +363,8 @@ impl IndexBuilder {
         meta.set_bloom_filter(bloom_bytes)?;
 
         // Encrypt and write MetaIndex as IndexManifest block
-        let meta_bytes =
-            rkyv::to_bytes::<_, 4096>(&meta).map_err(|e| EraError::Serialization(e.to_string()))?;
+        let meta_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
 
         let manifest_block_id = BlockId::new(block_id_counter);
         let manifest_key = session.derive_block_key(

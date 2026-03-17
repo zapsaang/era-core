@@ -438,10 +438,9 @@ fn test_audit_v1_checkpoint_version_check_in_source() {
         .expect("Checkpoint::from_bytes must exist");
     let fn_body = &source[fn_start..fn_start + 500.min(source.len() - fn_start)];
 
-    // from_bytes must use rkyv's check_archived_root for validation
     assert!(
-        fn_body.contains("check_archived_root"),
-        "from_bytes must use rkyv's check_archived_root for safe deserialization"
+        fn_body.contains("check_archived_root") || fn_body.contains("rkyv::from_bytes"),
+        "from_bytes must use a validated rkyv deserialization path"
     );
 
     // Must return proper error on validation failure

@@ -24,14 +24,15 @@ fn derive_session_from_header(
             "No password slot found".into(),
         ))?;
 
-    let archived = rkyv::check_archived_root::<PasswordSlotParams>(slot.params())
-        .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
+    let archived =
+        rkyv::access::<rkyv::Archived<PasswordSlotParams>, rkyv::rancor::Error>(slot.params())
+            .map_err(|e| era_common::EraError::Serialization(e.to_string()))?;
 
     let salt = Salt::from_bytes(archived.salt);
     let kdf_params = KdfParams {
-        memory_cost: archived.kdf_memory_cost,
-        time_cost: archived.kdf_time_cost,
-        parallelism: archived.kdf_parallelism,
+        memory_cost: archived.kdf_memory_cost.into(),
+        time_cost: archived.kdf_time_cost.into(),
+        parallelism: archived.kdf_parallelism.into(),
     };
 
     // 1. Derive KEK

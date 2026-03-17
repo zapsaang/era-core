@@ -41,6 +41,7 @@ parking_lot = { workspace = true }
 hex = "0.4"
 metrics = { workspace = true }
 rkyv = { workspace = true }
+bytecheck = { workspace = true }
 sharks = { workspace = true }
 zeroize = { workspace = true }
 uuid = { workspace = true }

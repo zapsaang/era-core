@@ -24,8 +24,7 @@ pub trait AuthProvider: Send + Sync {
     fn try_unlock(&self, slot: &RecipientSlot) -> Result<Option<Vec<u8>>>;
 }
 
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[archive(check_bytes)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, bytecheck::CheckBytes)]
 pub struct PasswordSlotParams {
     pub salt: [u8; 16],
     pub kdf_memory_cost: u32,
@@ -52,14 +51,15 @@ impl AuthProvider for PasswordProvider {
         }
 
         // Deserialize parameters using rkyv zero-copy
-        let archived = rkyv::check_archived_root::<PasswordSlotParams>(slot.params())
-            .map_err(|e| EraError::Deserialization(e.to_string()))?;
+        let archived =
+            rkyv::access::<rkyv::Archived<PasswordSlotParams>, rkyv::rancor::Error>(slot.params())
+                .map_err(|e| EraError::Deserialization(e.to_string()))?;
 
         // Derive KEK (Key Encryption Key)
         let kdf_params = KdfParams {
-            memory_cost: archived.kdf_memory_cost,
-            time_cost: archived.kdf_time_cost,
-            parallelism: archived.kdf_parallelism,
+            memory_cost: archived.kdf_memory_cost.into(),
+            time_cost: archived.kdf_time_cost.into(),
+            parallelism: archived.kdf_parallelism.into(),
             // Output length is implicit 32
         };
 

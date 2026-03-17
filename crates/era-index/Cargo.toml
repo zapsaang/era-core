@@ -14,10 +14,11 @@ era-crypto = { path = "../era-crypto" }
 era-volume = { path = "../era-volume" }
 
 # Embedded database (RFC-023 mandated)
-redb = "2.1"
+redb = "3.1.1"
 
 # Serialization
 rkyv = { workspace = true }
+bytecheck = { workspace = true }
 
 # Bytes
 bytes = "1.5"
@@ -32,13 +33,13 @@ tracing = "0.1"
 bloomfilter = "1.0"
 
 # Temporary files (for Redb staging file)
-tempfile = "3.10"
+tempfile = { workspace = true }
 
 # Storage backend (needed for VolumeWriter trait bound)
 era-storage = { path = "../era-storage" }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = { workspace = true }
 criterion = "0.5"
 rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

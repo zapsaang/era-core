@@ -6,8 +6,9 @@
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// ACL entry kind (mirrors exacl::AclEntryKind)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, bytecheck::CheckBytes,
+)]
 #[repr(u8)]
 pub enum AclEntryKind {
     User = 0,
@@ -59,8 +60,9 @@ impl From<AclEntryKind> for exacl::AclEntryKind {
 }
 
 /// Permission flags for ACL entries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, bytecheck::CheckBytes,
+)]
 pub struct AclPerms {
     pub read: bool,
     pub write: bool,
@@ -94,8 +96,9 @@ impl From<AclPerms> for exacl::Perm {
 }
 
 /// NFSv4 ACL flags
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, bytecheck::CheckBytes,
+)]
 pub struct AclFlags {
     pub bits: u32,
 }
@@ -113,8 +116,7 @@ impl From<AclFlags> for exacl::Flag {
 }
 
 /// A single ACL entry (mirrors exacl::AclEntry)
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, bytecheck::CheckBytes)]
 pub struct AclEntry {
     pub kind: AclEntryKind,
     /// User or group name (empty for UserObj/GroupObj/Other/Mask)
@@ -150,8 +152,7 @@ impl From<&AclEntry> for exacl::AclEntry {
 }
 
 /// Collection of ACL entries for serialization
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, bytecheck::CheckBytes)]
 pub struct AclData {
     pub entries: Vec<AclEntry>,
 }
@@ -171,14 +172,14 @@ impl AclData {
 
     /// Serialize to bytes using rkyv
     pub fn to_bytes(&self) -> Option<Vec<u8>> {
-        rkyv::to_bytes::<_, 256>(self).ok().map(|v| v.to_vec())
+        rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .ok()
+            .map(|v| v.to_vec())
     }
 
     /// Deserialize from bytes using rkyv
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        let archived = rkyv::check_archived_root::<Self>(data).ok()?;
-        let deserialized: Self = archived.deserialize(&mut rkyv::Infallible).ok()?;
-        Some(deserialized)
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(data).ok()
     }
 }
 

@@ -38,8 +38,7 @@ pub const CHECKPOINT_VERSION: u32 = 3;
 /// - Uses `rkyv` for zero-copy deserialization
 /// - Stored as typed block in volume (no sidecar files)
 /// - Linked via footer's `last_checkpoint_offset`
-#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, bytecheck::CheckBytes)]
 pub struct Checkpoint {
     /// Checkpoint format version (current: 3)
     pub version: u32,
@@ -68,8 +67,7 @@ pub struct Checkpoint {
 }
 
 /// Tracks progress within a file being processed
-#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, bytecheck::CheckBytes)]
 pub struct InProgressFile {
     /// Path to the file (as string for serialization)
     pub path: String,
@@ -110,24 +108,16 @@ impl Checkpoint {
 
     /// Serialize to bytes using rkyv (zero-copy)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        rkyv::to_bytes::<_, 256>(self)
+        rkyv::to_bytes::<rkyv::rancor::Error>(self)
             .map(|bytes| bytes.to_vec())
             .map_err(|e| EraError::Serialization(format!("Failed to serialize checkpoint: {}", e)))
     }
 
     /// Deserialize from bytes with validation
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let archived = rkyv::check_archived_root::<Self>(bytes).map_err(|e| {
+        let checkpoint = rkyv::from_bytes::<Self, rkyv::rancor::Error>(bytes).map_err(|e| {
             EraError::Deserialization(format!("Checkpoint validation failed: {}", e))
         })?;
-
-        // SAFETY: rkyv::Infallible is an uninhabited type (like core::convert::Infallible) — it
-        // cannot be constructed, so deserialize() cannot produce an error. After check_archived_root
-        // succeeds, the unwrap is provably safe and will never panic.
-        let checkpoint: Self = match archived.deserialize(&mut rkyv::Infallible) {
-            Ok(v) => v,
-            Err(infallible) => match infallible {},
-        };
 
         // V2-SEC-09: Post-deserialize bounds validation to prevent memory exhaustion
         // from maliciously crafted checkpoint data

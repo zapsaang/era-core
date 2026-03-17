@@ -322,12 +322,15 @@ mod low_severity {
 
         assert!(
             source.contains("match archived.deserialize(&mut rkyv::Infallible)")
-                && source.contains("Err(infallible) => match infallible {}"),
-            "checkpoint deserialization must match exhaustively on Infallible"
+                && source.contains("Err(infallible) => match infallible {}")
+                || source.contains("rkyv::from_bytes::<Self, rkyv::rancor::Error>"),
+            "checkpoint deserialization must use a validated non-unwrap path"
         );
         assert!(
-            !source.contains("archived.deserialize(&mut rkyv::Infallible).unwrap()"),
-            "checkpoint deserialization must not unwrap Infallible result"
+            !source.contains("archived.deserialize(&mut rkyv::Infallible).unwrap()")
+                && !source
+                    .contains("rkyv::from_bytes::<Self, rkyv::rancor::Error>(bytes).unwrap()"),
+            "checkpoint deserialization must not unwrap validation results"
         );
     }
 

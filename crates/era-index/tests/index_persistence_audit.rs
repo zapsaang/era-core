@@ -247,9 +247,10 @@ fn test_meta_index_rkyv_roundtrip() {
     meta.set_bloom_filter(bloom_bytes).unwrap();
 
     // Serialize → deserialize
-    let bytes = rkyv::to_bytes::<_, 4096>(&meta).expect("MetaIndex serialization must not fail");
-    let restored: MetaIndex =
-        rkyv::from_bytes(&bytes).expect("MetaIndex deserialization must not fail");
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
+        .expect("MetaIndex serialization must not fail");
+    let restored: MetaIndex = rkyv::from_bytes::<MetaIndex, rkyv::rancor::Error>(&bytes)
+        .expect("MetaIndex deserialization must not fail");
 
     assert_eq!(
         restored.pages().len(),
@@ -636,7 +637,7 @@ async fn test_wrong_key_cold_recovery_fails_cleanly() {
 #[test]
 fn test_meta_index_rejects_garbage_input() {
     let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF, 0x01, 0x02];
-    let result = rkyv::from_bytes::<MetaIndex>(&garbage);
+    let result = rkyv::from_bytes::<MetaIndex, rkyv::rancor::Error>(&garbage);
     assert!(
         result.is_err(),
         "MetaIndex deserialization must reject garbage bytes"

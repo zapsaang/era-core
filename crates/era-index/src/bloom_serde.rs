@@ -21,8 +21,7 @@ const MAX_BLOOM_BITMAP_SIZE: usize = 128 * 1024 * 1024;
 /// V23-F1 fix: Fields are `pub(crate)` to prevent external consumers from
 /// bypassing the validated `new()` constructor via struct literal construction.
 /// Use `new()` or `from_bytes()` to create instances.
-#[derive(Archive, RkyvDeserialize, RkyvSerialize, Debug, Clone)]
-#[archive(check_bytes)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Debug, Clone, bytecheck::CheckBytes)]
 pub struct BloomFilterData {
     /// Schema version for future evolution (currently 1)
     pub(crate) version: u8,
@@ -178,7 +177,7 @@ impl BloomFilterData {
     /// `Vec<u8>`. This copy is necessary because `AlignedVec` uses a different
     /// allocator alignment and does not implement `Into<Vec<u8>>`.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        rkyv::to_bytes::<_, 4096>(self)
+        rkyv::to_bytes::<rkyv::rancor::Error>(self)
             .map(|bytes| bytes.to_vec())
             .map_err(|e| EraError::Serialization(e.to_string()))
     }
@@ -189,7 +188,7 @@ impl BloomFilterData {
     /// BEFORE performing the full deserialization to avoid allocating the bitmap
     /// Vec for unsupported versions.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let archived = rkyv::check_archived_root::<Self>(bytes)
+        let archived = rkyv::access::<rkyv::Archived<Self>, rkyv::rancor::Error>(bytes)
             .map_err(|e| EraError::Deserialization(e.to_string()))?;
         // V17-F9: Version check.
         if archived.version != 1 {
@@ -200,10 +199,8 @@ impl BloomFilterData {
         }
         // V24-F8: Pre-deser bitmap check.
         Self::validate_archived(archived)?;
-        let result: Self = match archived.deserialize(&mut rkyv::Infallible) {
-            Ok(val) => val,
-            Err(never) => match never {},
-        };
+        let result = rkyv::deserialize::<Self, rkyv::rancor::Error>(archived)
+            .map_err(|e| EraError::Deserialization(e.to_string()))?;
         result.validate()?;
         // V19-F4 fix: Reject oversized bloom bitmaps that could exhaust memory.
         // 128 MiB is generous for any realistic bloom filter.
@@ -228,18 +225,19 @@ impl BloomFilterData {
                 MAX_BLOOM_BITMAP_SIZE
             )));
         }
-        if (archived.bitmap.len() as u64) * 8 < archived.bitmap_bits {
+        let bitmap_bits: u64 = archived.bitmap_bits.into();
+        if (archived.bitmap.len() as u64) * 8 < bitmap_bits {
             return Err(EraError::IndexError(format!(
                 "bloom bitmap too short (pre-deser): {} B for {} bits",
                 archived.bitmap.len(),
-                archived.bitmap_bits
+                bitmap_bits
             )));
         }
         let max_bits = (MAX_BLOOM_BITMAP_SIZE as u64) * 8;
-        if archived.bitmap_bits > max_bits {
+        if bitmap_bits > max_bits {
             return Err(EraError::IndexError(format!(
                 "bloom bitmap_bits too large (pre-deser): {} (max {})",
-                archived.bitmap_bits, max_bits
+                bitmap_bits, max_bits
             )));
         }
         Ok(())

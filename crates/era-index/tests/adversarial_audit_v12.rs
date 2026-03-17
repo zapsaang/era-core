@@ -578,8 +578,6 @@ fn v12_f8a_from_memory_has_size_guard() {
 
 #[test]
 fn v12_f8b_cold_recovery_missing_size_guard() {
-    // Source verification: recover_from_volume passes decrypted data directly to
-    // check_archived_root without any size bounds check
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reader.rs"),
     )
@@ -590,39 +588,15 @@ fn v12_f8b_cold_recovery_missing_size_guard() {
         .expect("recover_from_volume must exist");
     let fn_body = &source[fn_start..];
 
-    // Find the check_archived_root calls in recovery
-    let check_count = fn_body.matches("check_archived_root").count();
+    let checked_deser_count = fn_body.matches("rkyv::from_bytes").count();
     assert!(
-        check_count >= 2,
-        "recover_from_volume has {} check_archived_root calls — multiple unguarded paths",
-        check_count
+        checked_deser_count >= 2,
+        "recover_from_volume should use checked rkyv deserialization on multiple paths"
     );
 
-    // For each check_archived_root call, verify no size-limit pattern appears
-    // in the 300 chars immediately preceding it. This proves the call is unguarded.
-    let size_limit_patterns = [
-        ".len() >",
-        ".len() <",
-        "MAX_PAGES",
-        "MAX_MEMORY",
-        "MAX_ENTRIES",
-    ];
-    let mut search_pos = 0;
-    let mut unguarded_count = 0;
-    while let Some(rel_pos) = fn_body[search_pos..].find("check_archived_root") {
-        let abs_pos = search_pos + rel_pos;
-        let window_start = abs_pos.saturating_sub(300);
-        let window = &fn_body[window_start..abs_pos];
-        let has_guard = size_limit_patterns.iter().any(|p| window.contains(p));
-        if !has_guard {
-            unguarded_count += 1;
-        }
-        search_pos = abs_pos + 1;
-    }
     assert!(
-        unguarded_count >= 2,
-        "At least 2 check_archived_root calls in recover_from_volume have no size guard \
-         in the preceding 300 chars — recovery path is unguarded"
+        fn_body.matches("validate_rkyv_size(").count() >= 2,
+        "recover_from_volume should validate serialized sizes before checked deserialization"
     );
 }
 

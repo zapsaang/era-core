@@ -17,9 +17,9 @@ era-engine = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { workspace = true }
 dialoguer = { workspace = true }
-indicatif = "0.17"
+indicatif = { workspace = true }
 walkdir = "2.5.0"
 toml.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
@@ -28,8 +28,8 @@ hex = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-assert_cmd = "2.0"
-predicates = "3.0"
+assert_cmd = "2.2"
+predicates = "3.1"
 tempfile = { workspace = true }
 era-storage = { workspace = true }
 era-volume = { workspace = true }

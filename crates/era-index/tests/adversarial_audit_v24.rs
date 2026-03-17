@@ -454,20 +454,21 @@ fn v24_f8a_pre_deserialize_bitmap_size_check() {
     let source = read_source_file("src/bloom_serde.rs");
     let from_bytes_body = extract_fn_body(&source, "pub fn from_bytes", 1800);
 
-    // from_bytes must call validate_archived before .deserialize()
     let validate_call = from_bytes_body.find("validate_archived");
-    let deserialize_call = from_bytes_body.find(".deserialize(");
+    let deserialize_call = from_bytes_body
+        .find(".deserialize(")
+        .or_else(|| from_bytes_body.find("rkyv::deserialize::<"));
     assert!(
         validate_call.is_some(),
         "V24-F8: from_bytes must call validate_archived"
     );
     assert!(
         deserialize_call.is_some(),
-        "V24-F8: from_bytes must call .deserialize()"
+        "V24-F8: from_bytes must call a deserialize path"
     );
     assert!(
         validate_call.expect("validate") < deserialize_call.expect("deserialize"),
-        "V24-F8: validate_archived must be called BEFORE .deserialize()"
+        "V24-F8: validate_archived must be called BEFORE deserialization"
     );
 
     // validate_archived must check archived.bitmap.len()
@@ -483,16 +484,17 @@ fn v24_f8b_pre_deserialize_bitmap_bits_check() {
     let source = read_source_file("src/bloom_serde.rs");
     let from_bytes_body = extract_fn_body(&source, "pub fn from_bytes", 1800);
 
-    // from_bytes must call validate_archived before .deserialize()
     let validate_call = from_bytes_body.find("validate_archived");
-    let deserialize_call = from_bytes_body.find(".deserialize(");
+    let deserialize_call = from_bytes_body
+        .find(".deserialize(")
+        .or_else(|| from_bytes_body.find("rkyv::deserialize::<"));
     assert!(
         validate_call.is_some() && deserialize_call.is_some(),
-        "V24-F8: from_bytes must call validate_archived before .deserialize()"
+        "V24-F8: from_bytes must call validate_archived before deserialization"
     );
     assert!(
         validate_call.expect("validate") < deserialize_call.expect("deserialize"),
-        "V24-F8: validate_archived must precede .deserialize()"
+        "V24-F8: validate_archived must precede deserialization"
     );
 
     // validate_archived must check archived.bitmap_bits
@@ -622,15 +624,17 @@ fn v24_f10b_size_check_before_archived_root() {
     let fn_body = extract_fn_body(&source, "fn deserialize_entry_with_buf", 400);
 
     let size_check_pos = fn_body.find("size_of::<IndexEntry>()");
-    let archived_root_pos = fn_body.find("check_archived_root");
+    let checked_deser_pos = fn_body
+        .find("check_archived_root")
+        .or_else(|| fn_body.find("rkyv::from_bytes::<IndexEntry"));
 
     assert!(
-        size_check_pos.is_some() && archived_root_pos.is_some(),
-        "V24-F10: deserialize_entry_with_buf must have both size check and check_archived_root"
+        size_check_pos.is_some() && checked_deser_pos.is_some(),
+        "V24-F10: deserialize_entry_with_buf must have both size check and checked deserialization"
     );
     assert!(
-        size_check_pos.expect("size check") < archived_root_pos.expect("archived root"),
-        "V24-F10: size check must appear BEFORE check_archived_root"
+        size_check_pos.expect("size check") < checked_deser_pos.expect("checked deserialization"),
+        "V24-F10: size check must appear BEFORE checked deserialization"
     );
 }
 

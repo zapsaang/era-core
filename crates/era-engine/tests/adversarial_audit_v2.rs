@@ -80,7 +80,10 @@ fn v2_sec_08_checkpoint_bruteforce_loop_removed() {
 #[test]
 fn v2_sec_09_rkyv_deserialization_errors_handled() {
     let source = include_str!("../src/auth.rs");
-    assert!(source.contains("check_archived_root::<PasswordSlotParams>"));
+    assert!(
+        source.contains("check_archived_root::<PasswordSlotParams>")
+            || source.contains("rkyv::access::<rkyv::Archived<PasswordSlotParams>")
+    );
     assert!(source.contains("EraError::Deserialization"));
 }
 

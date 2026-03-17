@@ -8,30 +8,30 @@ use std::time::{Duration, Instant};
 
 use bloomfilter::Bloom;
 
+#[allow(unused_imports)] // Used in tests
+use super::{IndexEntry, IndexPage, MetaIndex};
 use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result, VolumeId};
 use era_crypto::{KeySession, VolumeKey};
 use era_storage::StorageReader;
 use era_volume::VolumeReader;
-use rkyv::Deserialize;
-
-#[allow(unused_imports)] // Used in tests
-use super::{IndexEntry, IndexPage, MetaIndex};
 
 // ── Legacy format types for backward-compatible deserialization ──
 // rkyv 0.7 is layout-locked: adding fields to PagePointer changes the binary
 // layout. Archives written before the direct-read optimization have a 3-field
 // PagePointer. These types allow deserializing old MetaIndex blobs.
 
-#[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
-#[archive(check_bytes)]
+#[derive(
+    Debug, Clone, Copy, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, bytecheck::CheckBytes,
+)]
 struct LegacyPagePointer {
     min_hash: ChunkHash,
     max_hash: ChunkHash,
     block_id: BlockId,
 }
 
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
-#[archive(check_bytes)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, bytecheck::CheckBytes,
+)]
 struct LegacyMetaIndex {
     pages: Vec<LegacyPagePointer>,
     bloom_filter: Vec<u8>,
@@ -43,21 +43,13 @@ struct LegacyMetaIndex {
 /// falls back to the 3-field LegacyPagePointer format and converts with
 /// `physical_offset=0, encrypted_size=0` (signals the reader to use scan recovery).
 fn deserialize_meta_index(data: &[u8]) -> Result<MetaIndex> {
-    if let Ok(archived) = rkyv::check_archived_root::<MetaIndex>(data) {
-        let meta: MetaIndex = match archived.deserialize(&mut rkyv::Infallible) {
-            Ok(val) => val,
-            Err(never) => match never {},
-        };
+    if let Ok(meta) = rkyv::from_bytes::<MetaIndex, rkyv::rancor::Error>(data) {
         return Ok(meta);
     }
 
     tracing::info!("MetaIndex new-format deserialization failed, trying legacy format");
-    let archived = rkyv::check_archived_root::<LegacyMetaIndex>(data)
+    let legacy = rkyv::from_bytes::<LegacyMetaIndex, rkyv::rancor::Error>(data)
         .map_err(|e| EraError::Deserialization(format!("Legacy MetaIndex: {e}")))?;
-    let legacy: LegacyMetaIndex = match archived.deserialize(&mut rkyv::Infallible) {
-        Ok(val) => val,
-        Err(never) => match never {},
-    };
 
     let mut meta = MetaIndex::new();
     for lp in &legacy.pages {
@@ -775,12 +767,10 @@ impl IndexReader {
                     .await;
                 }
 
-                let page: IndexPage = match rkyv::check_archived_root::<IndexPage>(&decrypted_data)
-                {
-                    Ok(archived) => match archived.deserialize(&mut rkyv::Infallible) {
-                        Ok(val) => val,
-                        Err(never) => match never {},
-                    },
+                let page: IndexPage = match rkyv::from_bytes::<IndexPage, rkyv::rancor::Error>(
+                    &decrypted_data,
+                ) {
+                    Ok(val) => val,
                     Err(e) => {
                         tracing::warn!(
                             "PagePointer[{}] rkyv deserialization failed: {}. Falling back to scan.",
@@ -987,11 +977,9 @@ impl IndexReader {
                     {
                         continue;
                     }
-                    if let Ok(archived) = rkyv::check_archived_root::<IndexPage>(&decrypted_data) {
-                        let page: IndexPage = match archived.deserialize(&mut rkyv::Infallible) {
-                            Ok(val) => val,
-                            Err(never) => match never {},
-                        };
+                    if let Ok(page) =
+                        rkyv::from_bytes::<IndexPage, rkyv::rancor::Error>(&decrypted_data)
+                    {
                         if *page.min_hash() == page_ptr.min_hash
                             && *page.max_hash() == page_ptr.max_hash
                         {
@@ -1199,7 +1187,7 @@ mod tests {
             crate::serialize_bloom(&Bloom::<ChunkHash>::new_for_fp_rate(1024, 0.01)).unwrap();
         meta.set_bloom_filter(bloom_bytes).unwrap();
 
-        let bytes = rkyv::to_bytes::<_, 4096>(&meta).expect("serialize");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta).expect("serialize");
         let restored = deserialize_meta_index(&bytes).expect("deserialize new format");
 
         assert_eq!(restored.pages().len(), 2);
@@ -1228,10 +1216,10 @@ mod tests {
                 .unwrap(),
         };
 
-        let bytes = rkyv::to_bytes::<_, 4096>(&legacy).expect("serialize legacy");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&legacy).expect("serialize legacy");
 
         assert!(
-            rkyv::check_archived_root::<MetaIndex>(&bytes).is_err(),
+            rkyv::access::<rkyv::Archived<MetaIndex>, rkyv::rancor::Error>(&bytes).is_err(),
             "legacy bytes must not parse as new format"
         );
 

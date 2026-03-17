@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use bloomfilter::Bloom;
-use redb::{Database, ReadableTable, ReadableTableMetadata};
-use rkyv::Deserialize;
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
+use rkyv::util::AlignedVec;
 
 use era_common::{ChunkHash, EraError, Result};
 
@@ -36,19 +36,15 @@ const MAX_READONLY_ENTRIES: usize = 100_000_000;
 ///
 /// Reuses `buf` across calls to avoid per-entry heap allocation in loops.
 /// The buffer is cleared and refilled on each call, so alignment is maintained.
-fn deserialize_entry_with_buf(bytes: &[u8], buf: &mut rkyv::AlignedVec) -> Result<IndexEntry> {
+fn deserialize_entry_with_buf(bytes: &[u8], buf: &mut AlignedVec) -> Result<IndexEntry> {
     // V24-F10: size limit (4x ~80B)
     if bytes.len() > std::mem::size_of::<IndexEntry>() * 4 {
         return Err(EraError::Deserialization("oversized".to_string()));
     }
     buf.clear();
     buf.extend_from_slice(bytes);
-    let archived = rkyv::check_archived_root::<IndexEntry>(buf)
-        .map_err(|e| EraError::Deserialization(e.to_string()))?;
-    Ok(match archived.deserialize(&mut rkyv::Infallible) {
-        Ok(val) => val,
-        Err(never) => match never {},
-    })
+    rkyv::from_bytes::<IndexEntry, rkyv::rancor::Error>(buf.as_ref())
+        .map_err(|e| EraError::Deserialization(e.to_string()))
 }
 
 /// Deserialize an IndexEntry from potentially unaligned bytes.
@@ -56,7 +52,7 @@ fn deserialize_entry_with_buf(bytes: &[u8], buf: &mut rkyv::AlignedVec) -> Resul
 /// Convenience wrapper over [`deserialize_entry_with_buf`] for single-call
 /// sites (e.g. `get()`). For hot loops, prefer the buffered variant directly.
 fn deserialize_entry_aligned(bytes: &[u8]) -> Result<IndexEntry> {
-    let mut buf = rkyv::AlignedVec::with_capacity(bytes.len());
+    let mut buf = AlignedVec::with_capacity(bytes.len());
     deserialize_entry_with_buf(bytes, &mut buf)
 }
 
@@ -231,7 +227,7 @@ impl IndexStore {
                 .map_err(|e| EraError::IndexError(e.to_string()))?
                 .is_none();
             if is_new {
-                let value_bytes = rkyv::to_bytes::<_, 256>(entry)
+                let value_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(entry)
                     .map_err(|e| EraError::Serialization(e.to_string()))?;
                 table
                     .insert(entry.hash.as_bytes(), value_bytes.as_slice())
@@ -330,7 +326,7 @@ impl IndexStore {
                     .map_err(|e| EraError::IndexError(e.to_string()))?
                     .is_none();
                 if is_new {
-                    let value_bytes = rkyv::to_bytes::<_, 256>(*entry)
+                    let value_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(*entry)
                         .map_err(|e| EraError::Serialization(e.to_string()))?;
                     table
                         .insert(entry.hash.as_bytes(), value_bytes.as_slice())
@@ -527,7 +523,7 @@ impl IndexStore {
         let mut block_id_counter = 0u64;
         // V21-F12 fix: Initialize align_buf with a capacity based on actual IndexEntry
         // memory size to reduce reallocations. 256 bytes was often too small.
-        let mut align_buf = rkyv::AlignedVec::with_capacity(IndexEntry::memory_size() * 2);
+        let mut align_buf = AlignedVec::with_capacity(IndexEntry::memory_size() * 2);
         for result in table
             .iter()
             .map_err(|e| EraError::IndexError(e.to_string()))?

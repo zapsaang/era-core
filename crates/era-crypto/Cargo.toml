@@ -47,7 +47,7 @@ windows-sys = { version = "0.52", features = [
 
 [dev-dependencies]
 criterion = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 serde_json = { workspace = true }
 
 [[bench]]

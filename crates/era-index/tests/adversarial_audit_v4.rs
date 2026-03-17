@@ -125,12 +125,14 @@ fn test_q1_store_deserialize_uses_infallible_unwrap() {
 
     let has_infallible = helper_body.contains("Infallible");
     let has_unwrap = helper_body.contains(".unwrap()");
+    let has_checked_from_bytes = helper_body.contains("rkyv::from_bytes::<IndexEntry");
     assert!(
-        has_infallible && !has_unwrap,
-        "FIX Q1 VERIFIED: deserialization helper uses Infallible without .unwrap(). \
-         has_infallible={}, has_unwrap={}",
+        (has_infallible && !has_unwrap) || has_checked_from_bytes,
+        "FIX Q1 VERIFIED: deserialization helper must use a non-unwrap checked deserialization path. \
+         has_infallible={}, has_unwrap={}, has_checked_from_bytes={}",
         has_infallible,
-        has_unwrap
+        has_unwrap,
+        has_checked_from_bytes
     );
 }
 
@@ -973,7 +975,7 @@ fn test_y3_get_still_performs_two_copies() {
 
     // Copy 2: .deserialize() — full owned copy from archived
     assert!(
-        fn_body.contains(".deserialize("),
+        fn_body.contains(".deserialize(") || fn_body.contains("rkyv::from_bytes::<IndexEntry"),
         "Copy 2: full deserialization from archived to owned"
     );
 

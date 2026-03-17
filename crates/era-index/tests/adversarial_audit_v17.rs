@@ -487,7 +487,8 @@ fn v17_f9a_version_check_before_deserialize() {
         .expect("archived.version check must exist in from_bytes");
     let deserialize_pos = fn_body
         .find(".deserialize(")
-        .expect(".deserialize() must exist in from_bytes");
+        .or_else(|| fn_body.find("rkyv::deserialize::<"))
+        .expect("a deserialize path must exist in from_bytes");
 
     assert!(
         version_check_pos < deserialize_pos,
