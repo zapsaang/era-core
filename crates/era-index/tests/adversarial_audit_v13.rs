@@ -119,15 +119,10 @@ fn v13_regression_v11f9_be_tail_hash_ordering() {
 /// V11-F11 regression: BloomFilterData has version field
 #[test]
 fn v13_regression_v11f11_bloom_version_field() {
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("bloom data");
-    assert_eq!(data.version(), 1, "BloomFilterData must have version=1");
+    let bloom: bloomfilter::Bloom<ChunkHash> =
+        bloomfilter::Bloom::new_for_fp_rate(100, 0.01).unwrap();
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("bloom data");
+    assert_eq!(data.version(), 2, "BloomFilterData must have version=2");
 }
 
 /// V11-F7 regression: require_building prevents insert after finalize
@@ -617,7 +612,7 @@ fn v13_f8b_from_pages_lookup_also_clones() {
     let entries: Vec<IndexEntry> = (0..50).map(make_entry).collect();
     let page = IndexPage::try_new(entries.clone()).expect("try_new");
     let bloom = {
-        let mut b = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
+        let mut b = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01).unwrap();
         for e in &entries {
             b.set(e.hash());
         }

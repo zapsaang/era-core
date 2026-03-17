@@ -23,7 +23,7 @@
 //! | ID | Severity | Title |
 //! |----|----------|-------|
 //! | V25-F1 | LOW | IndexLocation accessor methods for encapsulation parity |
-//! | V25-F2 | LOW | MAX_BLOOM_BITMAP_SIZE consolidation (module-level const) |
+//! | V25-F2 | LOW | MAX_BLOOM_DATA_SIZE consolidation (module-level const) |
 //! | V25-F3 | LOW | MAX_BLOOM_ITEMS consolidation (single pub(crate) const in lib.rs) |
 //! | V25-F4 | MEDIUM | ChunkIndexConfig mem_limit validation (zero + absurdly large) |
 
@@ -155,10 +155,10 @@ fn v25_f1d_fix_comment_present() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// V25-F2: MAX_BLOOM_BITMAP_SIZE consolidation (module-level const)
+// V25-F2: MAX_BLOOM_DATA_SIZE consolidation (module-level const)
 // ═══════════════════════════════════════════════════════════════════════
 
-// V25-F2 (LOW): MAX_BLOOM_BITMAP_SIZE was defined as a function-scoped constant
+// V25-F2 (LOW): MAX_BLOOM_DATA_SIZE was defined as a function-scoped constant
 // inside from_bytes() and validate_archived(). Consolidated to a single
 // module-level const to eliminate duplication and ensure consistency.
 // SOURCE: bloom_serde.rs
@@ -167,18 +167,18 @@ fn v25_f1d_fix_comment_present() {
 fn v25_f2a_single_module_level_definition() {
     let source = read_source_file("src/bloom_serde.rs");
 
-    // Count non-comment lines containing `const MAX_BLOOM_BITMAP_SIZE`
+    // Count non-comment lines containing `const MAX_BLOOM_DATA_SIZE`
     let def_count = source
         .lines()
         .filter(|l| {
             let trimmed = l.trim();
-            !trimmed.starts_with("//") && trimmed.contains("const MAX_BLOOM_BITMAP_SIZE")
+            !trimmed.starts_with("//") && trimmed.contains("const MAX_BLOOM_DATA_SIZE")
         })
         .count();
 
     assert_eq!(
         def_count, 1,
-        "V25-F2: bloom_serde.rs must have exactly 1 MAX_BLOOM_BITMAP_SIZE definition, found {}",
+        "V25-F2: bloom_serde.rs must have exactly 1 MAX_BLOOM_DATA_SIZE definition, found {}",
         def_count
     );
 }
@@ -187,7 +187,7 @@ fn v25_f2a_single_module_level_definition() {
 fn v25_f2b_no_function_scoped_definitions() {
     let source = read_source_file("src/bloom_serde.rs");
 
-    // Find all `const MAX_BLOOM_BITMAP_SIZE` lines and verify they appear
+    // Find all `const MAX_BLOOM_DATA_SIZE` lines and verify they appear
     // before the first `fn ` line (i.e., at module level, not inside a function)
     let first_fn_line = source
         .lines()
@@ -205,21 +205,21 @@ fn v25_f2b_no_function_scoped_definitions() {
         .enumerate()
         .filter(|(_, l)| {
             let trimmed = l.trim();
-            !trimmed.starts_with("//") && trimmed.contains("const MAX_BLOOM_BITMAP_SIZE")
+            !trimmed.starts_with("//") && trimmed.contains("const MAX_BLOOM_DATA_SIZE")
         })
         .map(|(i, _)| i)
         .collect();
 
     assert!(
         !const_lines.is_empty(),
-        "V25-F2: bloom_serde.rs must contain MAX_BLOOM_BITMAP_SIZE definition"
+        "V25-F2: bloom_serde.rs must contain MAX_BLOOM_DATA_SIZE definition"
     );
 
     if let Some(first_fn) = first_fn_line {
         for line_num in &const_lines {
             assert!(
                 *line_num < first_fn,
-                "V25-F2: MAX_BLOOM_BITMAP_SIZE at line {} must be at module level (before first fn at line {})",
+                "V25-F2: MAX_BLOOM_DATA_SIZE at line {} must be at module level (before first fn at line {})",
                 line_num + 1,
                 first_fn + 1
             );

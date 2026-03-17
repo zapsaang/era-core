@@ -260,7 +260,7 @@ fn v10_d2_read_sorted_returns_ascending_order() {
 #[test]
 fn v10_e1_bloom_serde_roundtrip() {
     // Serialize then deserialize a bloom filter; membership must be preserved
-    let mut bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(500, 0.01);
+    let mut bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(500, 0.01).unwrap();
     for i in 0..100u64 {
         bloom.set(&test_hash(i));
     }

@@ -377,11 +377,10 @@ fn v18_f5c_deterministic_dedup_behavioral() {
 #[test]
 fn v18_f6a_validates_zero_bitmap_bits() {
     let source = read_source_file("src/bloom_serde.rs");
-    // V23-F3: validation moved to validate() method, called from from_bytes()
     let validate_body = extract_fn_body(&source, "validate", 2000);
     assert!(
-        validate_body.contains("bitmap_bits == 0"),
-        "V18-F6: validate() must check for bitmap_bits == 0"
+        validate_body.contains("data.is_empty()"),
+        "V18-F6: validate() must check for empty data"
     );
     let from_bytes_body = extract_fn_body(&source, "from_bytes", 2000);
     assert!(
@@ -393,65 +392,43 @@ fn v18_f6a_validates_zero_bitmap_bits() {
 #[test]
 fn v18_f6b_validates_zero_k_num() {
     let source = read_source_file("src/bloom_serde.rs");
-    // V23-F3: validation moved to validate() method
     let validate_body = extract_fn_body(&source, "validate", 2000);
     assert!(
-        validate_body.contains("k_num == 0"),
-        "V18-F6: validate() must check for k_num == 0"
+        validate_body.contains("data.len()"),
+        "V18-F6: validate() must check data length"
     );
 }
 
 #[test]
 fn v18_f6c_validates_bitmap_length() {
     let source = read_source_file("src/bloom_serde.rs");
-    // V23-F3: validation moved to validate() method
     let validate_body = extract_fn_body(&source, "validate", 2000);
     assert!(
-        validate_body.contains("bitmap_bits"),
-        "V18-F6: validate() must validate bitmap length against bitmap_bits"
-    );
-    assert!(
-        validate_body.contains("* 8 <") || validate_body.contains("*8 <"),
-        "V18-F6: validate() must check bitmap.len()*8 >= bitmap_bits"
+        validate_body.contains("MAX_BLOOM_DATA_SIZE"),
+        "V18-F6: validate() must check against MAX_BLOOM_DATA_SIZE"
     );
 }
 
 #[test]
 fn v18_f6d_zero_bitmap_bits_behavioral() {
-    // V23-F3: validate() rejects bitmap_bits=0 at construction time via new()
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let result = BloomFilterData::new(
-        bloom.bitmap(),
-        0, // zero bitmap_bits
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    );
-    assert!(result.is_err(), "V18-F6: bitmap_bits=0 must be rejected");
+    // V3 format: BloomFilterData stores opaque bytes. Empty data must be rejected.
+    let result = BloomFilterData::new(vec![]);
+    assert!(result.is_err(), "V18-F6: empty bloom data must be rejected");
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("bitmap_bits"),
-        "V18-F6: error must mention bitmap_bits, got: {}",
+        err_msg.contains("empty"),
+        "V18-F6: error must mention empty, got: {}",
         err_msg
     );
 }
 
 #[test]
 fn v18_f6e_zero_k_num_behavioral() {
-    // V23-F3: validate() rejects k_num=0 at construction time via new()
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let result = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        0, // zero k_num
-        bloom.sip_keys(),
-    );
-    assert!(result.is_err(), "V18-F6: k_num=0 must be rejected");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("k_num"),
-        "V18-F6: error must mention k_num, got: {}",
-        err_msg
-    );
+    // V3 format: BloomFilterData stores opaque bytes. Valid bloom data must be accepted.
+    let bloom: bloomfilter::Bloom<ChunkHash> =
+        bloomfilter::Bloom::new_for_fp_rate(100, 0.01).unwrap();
+    let result = BloomFilterData::new(bloom.to_bytes());
+    assert!(result.is_ok(), "V18-F6: valid bloom data must be accepted");
 }
 
 // ═══════════════════════════════════════════════════════════════════════

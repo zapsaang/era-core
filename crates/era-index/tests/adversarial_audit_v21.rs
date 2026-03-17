@@ -251,8 +251,8 @@ fn v21_f4b_to_bloom_validates_bitmap_bits() {
     let fn_body = extract_fn_body(&source, "to_bloom", 500);
 
     assert!(
-        fn_body.contains("bitmap_bits"),
-        "V21-F4: to_bloom must validate bitmap_bits"
+        fn_body.contains("validate()"),
+        "V21-F4: to_bloom must call validate()"
     );
 }
 
@@ -262,79 +262,65 @@ fn v21_f4c_to_bloom_validates_k_num() {
     let fn_body = extract_fn_body(&source, "to_bloom", 500);
 
     assert!(
-        fn_body.contains("k_num"),
-        "V21-F4: to_bloom must validate k_num"
+        fn_body.contains("Bloom::from_bytes"),
+        "V21-F4: to_bloom must use Bloom::from_bytes"
     );
 }
 
 #[test]
 fn v21_f4d_to_bloom_rejects_zero_bitmap_bits() {
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let result = BloomFilterData::new(
-        bloom.bitmap(),
-        0,
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    );
-    assert!(result.is_err(), "V21-F4: new() must reject bitmap_bits=0");
+    // V3 format: empty data must be rejected
+    let result = BloomFilterData::new(vec![]);
+    assert!(result.is_err(), "V21-F4: new() must reject empty data");
     let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("bitmap_bits"),
-        "V21-F4: error must mention bitmap_bits"
-    );
+    assert!(err.contains("empty"), "V21-F4: error must mention empty");
 }
 
 #[test]
 fn v21_f4e_to_bloom_rejects_zero_k_num() {
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let result = BloomFilterData::new(bloom.bitmap(), bloom.number_of_bits(), 0, bloom.sip_keys());
-    assert!(result.is_err(), "V21-F4: new() must reject k_num=0");
+    // V3 format: garbage data must be rejected by to_bloom()
+    let data = BloomFilterData::new(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+    let result = data.to_bloom::<ChunkHash>();
+    assert!(
+        result.is_err(),
+        "V21-F4: to_bloom() must reject garbage data"
+    );
 }
 
 #[test]
 fn v21_f4f_to_bloom_rejects_short_bitmap() {
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let oversized_bits = (bloom.bitmap().len() as u64 + 1) * 8 + 1;
-    let result = BloomFilterData::new(
-        bloom.bitmap(),
-        oversized_bits,
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    );
+    // V3 format: truncated bloom bytes must be rejected by to_bloom()
+    let bloom: bloomfilter::Bloom<ChunkHash> =
+        bloomfilter::Bloom::new_for_fp_rate(100, 0.01).unwrap();
+    let mut truncated = bloom.to_bytes();
+    truncated.truncate(truncated.len() / 2);
+    let data = BloomFilterData::new(truncated).unwrap();
+    let result = data.to_bloom::<ChunkHash>();
     assert!(
         result.is_err(),
-        "V21-F4: new() must reject bitmap too short for bitmap_bits"
+        "V21-F4: to_bloom() must reject truncated bloom data"
     );
 }
 
 #[test]
 fn v21_f4g_to_bloom_rejects_all_zero_sip_keys() {
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let result = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        [(0, 0); 2],
-    );
+    // V3 format: all-zero data must be rejected by to_bloom()
+    let data = BloomFilterData::new(vec![0u8; 64]).unwrap();
+    let result = data.to_bloom::<ChunkHash>();
     assert!(
         result.is_err(),
-        "V21-F4: new() must reject all-zero sip_keys"
+        "V21-F4: to_bloom() must reject all-zero data"
     );
 }
 
 #[test]
 fn v21_f4h_to_bloom_valid_roundtrip() {
-    let mut bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
+    let mut bloom: bloomfilter::Bloom<ChunkHash> =
+        bloomfilter::Bloom::new_for_fp_rate(1000, 0.01).unwrap();
     for i in 0..100u64 {
         bloom.set(&test_hash(i));
     }
-    let data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("BloomFilterData::new should succeed");
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("BloomFilterData::new should succeed");
     let restored = data
         .to_bloom::<ChunkHash>()
         .expect("V21-F4: valid bloom must roundtrip");
@@ -737,7 +723,7 @@ fn v21_regression_v20_f5_zero_sip_keys_rejected() {
 
     let validate_body = extract_fn_body(&source, "validate(", 900);
     assert!(
-        validate_body.contains("sip_keys") && validate_body.contains("(0, 0)"),
-        "V20-F5 regression: validate() must still reject all-zero sip_keys"
+        validate_body.contains("data.is_empty()") && validate_body.contains("MAX_BLOOM_DATA_SIZE"),
+        "V20-F5 regression: validate() must check data emptiness and size limits"
     );
 }

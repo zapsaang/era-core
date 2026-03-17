@@ -323,48 +323,29 @@ fn v20_f4c_read_sorted_behavioral() {
 fn v20_f5a_from_bytes_validates_sip_keys() {
     let source = read_source_file("src/bloom_serde.rs");
 
-    // Check that from_bytes calls validate() which includes sip_keys check
     let from_bytes_body = extract_fn_body(&source, "from_bytes(", 1000);
     assert!(
         from_bytes_body.contains("validate()"),
-        "V20-F5: from_bytes must call validate() which checks sip_keys"
+        "V20-F5: from_bytes must call validate()"
     );
 
-    // Check that validate() contains the sip_keys check
     let validate_body = extract_fn_body(&source, "validate(", 900);
     assert!(
-        validate_body.contains("sip_keys") && validate_body.contains("0, 0"),
-        "V20-F5: validate() must check that sip_keys are not all zeros"
+        validate_body.contains("data.is_empty()") && validate_body.contains("MAX_BLOOM_DATA_SIZE"),
+        "V20-F5: validate() must check data emptiness and size limits"
     );
 }
 
 #[test]
 fn v20_f5b_zero_sip_keys_rejected_behavioral() {
-    // Attempt to construct a BloomFilterData with all-zero sip_keys directly
-    // Using new() which calls validate() — this should reject zero sip_keys
-    let result = BloomFilterData::new(
-        vec![0u8; 128], // valid bitmap
-        1024,           // valid bitmap_bits
-        7,              // valid k_num
-        [(0, 0); 2],    // INVALID: all-zero sip_keys
-    );
+    // V3 format: all-zero data must be rejected by to_bloom()
+    let data = BloomFilterData::new(vec![0u8; 128]).unwrap();
+    let result = data.to_bloom::<ChunkHash>();
 
     assert!(
         result.is_err(),
-        "V20-F5: BloomFilterData::new must reject all-zero sip_keys"
+        "V20-F5: to_bloom() must reject all-zero data"
     );
-
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("sip_keys") && err_msg.contains("zeros"),
-        "V20-F5: error message must mention sip_keys and zeros, got: {}",
-        err_msg
-    );
-
-    // Also verify from_bytes rejects it: create a valid bloom, serialize,
-    // then try from_bytes on data that would have zero sip_keys.
-    // Since we can't construct invalid BloomFilterData through new(),
-    // this confirms the validate() path is enforced.
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -664,8 +645,8 @@ fn v20_regression_v19_f4_oversized_bloom_bitmap_rejected() {
     let fn_body = extract_fn_body(&source, "from_bytes(", 2000);
 
     assert!(
-        fn_body.contains("MAX_BLOOM_BITMAP_SIZE"),
-        "V19-F4 regression: from_bytes must enforce MAX_BLOOM_BITMAP_SIZE"
+        fn_body.contains("MAX_BLOOM_DATA_SIZE"),
+        "V19-F4 regression: from_bytes must enforce MAX_BLOOM_DATA_SIZE"
     );
 }
 

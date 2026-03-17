@@ -44,7 +44,7 @@ fn make_entry(i: u64) -> IndexEntry {
 #[allow(dead_code)]
 /// Build a valid Bloom<ChunkHash> with n items inserted
 fn make_bloom(n: usize) -> Bloom<ChunkHash> {
-    let mut bloom = Bloom::new_for_fp_rate(n.max(100), 0.01);
+    let mut bloom = Bloom::new_for_fp_rate(n.max(100), 0.01).unwrap();
     for i in 0..n as u64 {
         bloom.set(&test_hash(i));
     }
@@ -68,55 +68,36 @@ const _EPP: usize = ENTRIES_PER_PAGE;
 fn v11_f1a_sip_keys_accessible_after_deserialization() {
     // SETUP: Create a bloom filter, serialize via BloomFilterData, deserialize
     let bloom = make_bloom(500);
-    let data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("bloom data");
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("bloom data");
 
-    // Serialize to bytes (simulates on-disk or in-volume storage)
     let serialized = data
         .to_bytes()
         .expect("BloomFilterData serialization must succeed");
 
-    // Deserialize — simulates an adversary reading the stored bytes
     let recovered = BloomFilterData::from_bytes(&serialized)
         .expect("BloomFilterData deserialization must succeed");
 
-    // ASSERT: sip_keys are directly accessible and non-zero
-    // This proves an adversary can extract the hash function secrets
-    let keys = recovered.sip_keys();
-    assert_ne!(keys[0], (0, 0), "First SipHash key pair must be non-zero");
-    assert_ne!(keys[1], (0, 0), "Second SipHash key pair must be non-zero");
+    // ASSERT: seed is accessible via the reconstructed bloom and non-zero
+    let recovered_bloom: Bloom<ChunkHash> = recovered.to_bloom().expect("to_bloom");
+    let seed = recovered_bloom.seed();
+    assert_ne!(seed, [0u8; 32], "Seed must be non-zero");
 
-    // The keys are the EXACT internal state of the bloom filter's hash functions
     assert_eq!(
-        keys,
-        data.sip_keys(),
-        "Extracted sip_keys must match original — adversary has full key material"
+        seed,
+        bloom.seed(),
+        "Extracted seed must match original — adversary has full key material"
     );
 }
 
 #[test]
 fn v11_f1b_extracted_keys_enable_false_positive_prediction() {
-    // SETUP: Build a bloom, extract keys, reconstruct, and probe
     let bloom = make_bloom(200);
-    let data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("bloom data");
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("bloom data");
 
-    // Adversary extracts sip_keys from serialized data
     let serialized = data.to_bytes().expect("serialization must succeed");
     let adversary_data =
         BloomFilterData::from_bytes(&serialized).expect("deserialization must succeed");
 
-    // Adversary reconstructs the bloom filter using extracted keys
     let adversary_bloom: Bloom<ChunkHash> =
         adversary_data.to_bloom().expect("to_bloom must succeed");
 
@@ -157,43 +138,39 @@ fn v11_f1b_extracted_keys_enable_false_positive_prediction() {
 
 #[test]
 fn v11_f1c_sip_keys_survive_serialization_roundtrip_unchanged() {
-    // Multiple roundtrips must preserve keys identically — no re-randomization
     let bloom = make_bloom(1000);
-    let original_data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("bloom data");
-    let original_keys = original_data.sip_keys();
+    let original_data = BloomFilterData::new(bloom.to_bytes()).expect("bloom data");
+    let original_seed = bloom.seed();
 
     // Roundtrip 1
     let bytes1 = original_data.to_bytes().expect("roundtrip 1 serialize");
     let data1 = BloomFilterData::from_bytes(&bytes1).expect("roundtrip 1 deserialize");
+    let bloom1: Bloom<ChunkHash> = data1.to_bloom().expect("to_bloom 1");
     assert_eq!(
-        data1.sip_keys(),
-        original_keys,
-        "Keys must survive roundtrip 1 unchanged"
+        bloom1.seed(),
+        original_seed,
+        "Seed must survive roundtrip 1 unchanged"
     );
 
     // Roundtrip 2 (from roundtrip 1's output)
     let bytes2 = data1.to_bytes().expect("roundtrip 2 serialize");
     let data2 = BloomFilterData::from_bytes(&bytes2).expect("roundtrip 2 deserialize");
+    let bloom2: Bloom<ChunkHash> = data2.to_bloom().expect("to_bloom 2");
     assert_eq!(
-        data2.sip_keys(),
-        original_keys,
-        "Keys must survive roundtrip 2 unchanged"
+        bloom2.seed(),
+        original_seed,
+        "Seed must survive roundtrip 2 unchanged"
     );
 
     // Roundtrip 3 (from roundtrip 2's output)
     let bytes3 = data2.to_bytes().expect("roundtrip 3 serialize");
     let data3 = BloomFilterData::from_bytes(&bytes3).expect("roundtrip 3 deserialize");
+    let bloom3: Bloom<ChunkHash> = data3.to_bloom().expect("to_bloom 3");
     assert_eq!(
-        data3.sip_keys(),
-        original_keys,
-        "Keys must survive roundtrip 3 unchanged — \
-         sip_keys are never re-randomized on deserialization"
+        bloom3.seed(),
+        original_seed,
+        "Seed must survive roundtrip 3 unchanged — \
+         seed is never re-randomized on deserialization"
     );
 
     assert_eq!(
@@ -300,8 +277,8 @@ fn v11_f3b_page_count_matches_entry_count() {
 
 #[test]
 fn v11_f4a_bloom_memory_overhead_vs_ribbon() {
-    let bloom = Bloom::<ChunkHash>::new_for_fp_rate(1_000_000, 0.01);
-    let bloom_bytes = bloom.bitmap().len();
+    let bloom = Bloom::<ChunkHash>::new_for_fp_rate(1_000_000, 0.01).unwrap();
+    let bloom_bytes = bloom.as_slice().len();
     // Ribbon filter theoretical size: 7.0 bits/element = 875,000 bytes for 1M items
     let ribbon_bytes = (1_000_000usize * 7) / 8;
     assert!(
@@ -722,23 +699,13 @@ fn v11_f11a_bloom_filter_data_has_version_field() {
         !struct_body.contains("magic"),
         "BloomFilterData must NOT have a magic field"
     );
-    assert!(struct_body.contains("bitmap"), "must have bitmap field");
-    assert!(struct_body.contains("sip_keys"), "must have sip_keys field");
+    assert!(struct_body.contains("data"), "must have data field");
 }
 #[test]
 fn v11_f11b_bloom_format_corruption_coverage() {
     let bloom = make_bloom(100);
-    let bitmap = bloom.bitmap();
-    let bitmap_bits = bloom.number_of_bits();
-    let k_num = bloom.number_of_hash_functions();
-    let sip_keys = bloom.sip_keys();
-    let data = BloomFilterData::new(bitmap, bitmap_bits, k_num, sip_keys).expect("bloom data");
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("bloom data");
     let bytes = data.to_bytes().expect("serialize must succeed");
-    // V11-F11: rkyv's check_archived_root + validate() covers structural corruption
-    // (version, bitmap_bits=0, k_num=0, sip_keys=zeros, bitmap length mismatch).
-    // However, single-byte corruption within the bitmap or other fields may produce
-    // valid-looking data that passes validation. This is expected behavior:
-    // the Bloom filter is a probabilistic structure, not a security-critical one.
     // Verify that truncation IS caught:
     let truncated = &bytes[..bytes.len().saturating_sub(8).max(1)];
     assert!(

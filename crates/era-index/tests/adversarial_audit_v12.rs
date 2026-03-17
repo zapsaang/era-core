@@ -206,7 +206,7 @@ fn v12_f3b_from_memory_appends_to_caller_meta() {
     let fn_start = source
         .find("pub fn from_memory(")
         .expect("from_memory must exist");
-    let fn_body = &source[fn_start..(fn_start + 2000).min(source.len())];
+    let fn_body = &source[fn_start..(fn_start + 2500).min(source.len())];
 
     // V16-F2: parameter is now `mut meta: MetaIndex` (not shadow rebinding)
     assert!(

@@ -176,7 +176,7 @@ fn test_a3_zero_copy_meta_index_access() {
     meta.add_page(test_hash(1000), test_hash(1999), BlockId::new(1), 0, 0)
         .unwrap();
 
-    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
     let bloom_bytes = serialize_bloom(&bloom).unwrap();
     meta.set_bloom_filter(bloom_bytes.clone()).unwrap();
 
@@ -201,35 +201,28 @@ fn test_a3_zero_copy_meta_index_access() {
 /// Prove BloomFilterData survives zero-copy roundtrip.
 #[test]
 fn test_a4_zero_copy_bloom_filter_data() {
-    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01);
+    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01).unwrap();
     for i in 0..500u64 {
         bloom.set(&test_hash(i));
     }
 
-    let data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("BloomFilterData::new should succeed");
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("BloomFilterData::new should succeed");
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&data)
         .expect("BloomFilterData serialization must succeed");
 
-    // For zero-copy verification, just ensure round-trip works
     let restored: BloomFilterData =
         rkyv::from_bytes::<BloomFilterData, rkyv::rancor::Error>(&bytes)
             .expect("BloomFilterData deserialization must succeed");
 
     assert_eq!(
-        restored.bitmap_bits(),
-        data.bitmap_bits(),
-        "Deserialized bitmap_bits must match"
+        restored.data_ref(),
+        data.data_ref(),
+        "Deserialized bloom data must match"
     );
     assert_eq!(
-        restored.k_num(),
-        data.k_num(),
-        "Deserialized k_num must match"
+        restored.version(),
+        data.version(),
+        "Deserialized version must match"
     );
 }
 

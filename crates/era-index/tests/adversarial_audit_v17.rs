@@ -505,33 +505,27 @@ fn v17_f9b_version_check_on_archived_view() {
 
     // Must check version != 1 on the archived view
     assert!(
-        fn_body.contains("archived.version != 1"),
-        "V17-F9: must check archived.version != 1 before deserialize, got:\n{}",
+        fn_body.contains("archived.version != 2"),
+        "V17-F9: must check archived.version != 2 before deserialize, got:\n{}",
         &fn_body[..500.min(fn_body.len())]
     );
 }
 
 #[test]
 fn v17_f9c_invalid_version_behavioral() {
-    // Create valid bloom data, then find and corrupt the version byte in rkyv output.
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("bloom data construction");
+    let bloom: bloomfilter::Bloom<ChunkHash> =
+        bloomfilter::Bloom::new_for_fp_rate(100, 0.01).unwrap();
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("bloom data construction");
 
     let bytes = data.to_bytes().unwrap();
-    // rkyv's byte layout is opaque, so we scan for the version byte (value=1)
-    // and try corrupting each candidate position to version=2.
+    // rkyv's byte layout is opaque, so we scan for the version byte (value=2)
+    // and try corrupting each candidate position to version=3.
     // The correct position will trigger "unsupported bloom filter version".
     let mut found_version_byte = false;
     for i in 0..bytes.len() {
-        if bytes[i] == 1 {
+        if bytes[i] == 2 {
             let mut corrupted = bytes.clone();
-            corrupted[i] = 2;
+            corrupted[i] = 3;
             if let Err(e) = BloomFilterData::from_bytes(&corrupted) {
                 let msg = e.to_string();
                 if msg.contains("unsupported bloom filter version") {
@@ -549,18 +543,12 @@ fn v17_f9c_invalid_version_behavioral() {
 
 #[test]
 fn v17_f9d_valid_version_still_works() {
-    // Verify version 1 (valid) still deserializes correctly
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    let data = BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("bloom data construction");
+    let bloom: bloomfilter::Bloom<ChunkHash> =
+        bloomfilter::Bloom::new_for_fp_rate(100, 0.01).unwrap();
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("bloom data construction");
     let bytes = data.to_bytes().unwrap();
     let restored = BloomFilterData::from_bytes(&bytes).unwrap();
-    assert_eq!(restored.version(), 1);
+    assert_eq!(restored.version(), 2);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

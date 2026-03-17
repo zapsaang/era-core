@@ -147,7 +147,7 @@ fn v9_f3b_set_bloom_rejects_empty() {
 #[test]
 fn v9_f3c_set_bloom_accepts_valid() {
     use bloomfilter::Bloom;
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
+    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01).unwrap();
     let bytes = era_index::serialize_bloom(&bloom).unwrap();
     let mut meta = MetaIndex::new();
     let result = meta.set_bloom_filter(bytes);
@@ -843,7 +843,7 @@ fn v9_f20a_from_pages_ordering() {
     use bloomfilter::Bloom;
 
     let meta = MetaIndex::new();
-    let _bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
+    let _bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01).unwrap();
 
     // Create two pages in correct order
     let page1 = IndexPage::try_new((0..100).map(make_entry).collect()).unwrap();
@@ -864,7 +864,7 @@ fn v9_f20b_from_pages_rejects_disorder() {
     use bloomfilter::Bloom;
 
     let meta = MetaIndex::new();
-    let _bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
+    let _bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01).unwrap();
 
     // Create two pages in REVERSE order (page2 has lower hashes)
     let page1 = IndexPage::try_new((200..300).map(make_entry).collect()).unwrap();
@@ -889,7 +889,7 @@ fn v9_f20b_from_pages_rejects_disorder() {
 fn v9_f21a_bloom_roundtrip_correctness() {
     use bloomfilter::Bloom;
 
-    let mut bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(10_000, 0.01);
+    let mut bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(10_000, 0.01).unwrap();
     let mut hashes = Vec::new();
     for i in 0..1000u64 {
         let h = test_hash(i);
@@ -1174,7 +1174,7 @@ fn v9_f30a_bloom_serialization_size() {
     use bloomfilter::Bloom;
 
     // Small bloom
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01);
+    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(1000, 0.01).unwrap();
     let bytes = era_index::serialize_bloom(&bloom).unwrap();
     println!(
         "V9-F30a: Bloom(1000 items, 1% FP): {} bytes serialized",
@@ -1182,7 +1182,7 @@ fn v9_f30a_bloom_serialization_size() {
     );
 
     // Medium bloom
-    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(100_000, 0.01);
+    let bloom: Bloom<ChunkHash> = Bloom::new_for_fp_rate(100_000, 0.01).unwrap();
     let bytes = era_index::serialize_bloom(&bloom).unwrap();
     println!(
         "V9-F30a: Bloom(100K items, 1% FP): {} bytes serialized",

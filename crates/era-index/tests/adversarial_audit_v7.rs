@@ -556,7 +556,7 @@ fn test_v7_f4c_bloom_no_resize_mechanism() {
     let mut builder = IndexBuilder::new(small_limit).unwrap();
 
     // Record bloom state before inserts
-    let bits_before = builder.bloom().number_of_bits();
+    let bits_before = builder.bloom().len();
 
     // Insert 10× the expected capacity
     for i in 0..10_240u64 {
@@ -564,7 +564,7 @@ fn test_v7_f4c_bloom_no_resize_mechanism() {
     }
 
     // FIXED: Bloom size should have CHANGED (resize occurred)
-    let bits_after = builder.bloom().number_of_bits();
+    let bits_after = builder.bloom().len();
 
     assert_ne!(
         bits_before, bits_after,
@@ -720,7 +720,7 @@ fn test_v7_f6b_finalize_data_traversal_count() {
 
     // Simulate the bloom rebuild that finalize() does
     let bloom_start = Instant::now();
-    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(drained.len().max(1024), 0.01);
+    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(drained.len().max(1024), 0.01).unwrap();
     for entry in &drained {
         bloom.set(entry.hash());
     }

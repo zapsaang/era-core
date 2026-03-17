@@ -255,8 +255,8 @@ fn v19_f4a_max_bloom_bitmap_size_exists() {
     let fn_body = extract_fn_body(&source, "from_bytes", 2000);
 
     assert!(
-        fn_body.contains("MAX_BLOOM_BITMAP_SIZE"),
-        "V19-F4: from_bytes must check MAX_BLOOM_BITMAP_SIZE"
+        fn_body.contains("MAX_BLOOM_DATA_SIZE"),
+        "V19-F4: from_bytes must check MAX_BLOOM_DATA_SIZE"
     );
 }
 
@@ -609,22 +609,20 @@ fn v19_regression_v18f5_stable_sort() {
 fn v19_regression_v18f6_bloom_validation() {
     let source = read_source_file("src/bloom_serde.rs");
 
-    // Check that from_bytes calls validate() which performs all checks
     let from_bytes_body = extract_fn_body(&source, "from_bytes", 2000);
     assert!(
         from_bytes_body.contains("validate()"),
         "V18-F6 regression: from_bytes must call validate()"
     );
 
-    // Check that validate() method contains the checks
     let validate_body = extract_fn_body(&source, "validate", 500);
     assert!(
-        validate_body.contains("bitmap_bits == 0"),
-        "V18-F6 regression: validate() must check bitmap_bits == 0"
+        validate_body.contains("data.is_empty()"),
+        "V18-F6 regression: validate() must check data.is_empty()"
     );
     assert!(
-        validate_body.contains("k_num == 0"),
-        "V18-F6 regression: validate() must check k_num == 0"
+        validate_body.contains("MAX_BLOOM_DATA_SIZE"),
+        "V18-F6 regression: validate() must check MAX_BLOOM_DATA_SIZE"
     );
 }
 

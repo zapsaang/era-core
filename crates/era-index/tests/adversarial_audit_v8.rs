@@ -396,7 +396,7 @@ fn f5b_set_bloom_filter_empty_bytes() {
 
 #[test]
 fn f5c_set_bloom_filter_truncated_valid_data() {
-    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01);
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01).unwrap();
     let valid_bytes = era_index::serialize_bloom(&bloom).unwrap();
 
     // Truncate the valid data
@@ -468,7 +468,7 @@ fn f6a_from_memory_with_pre_populated_meta() {
 #[test]
 fn f6b_from_memory_with_overlapping_hash_ranges() {
     let meta = MetaIndex::new();
-    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01);
+    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01).unwrap();
 
     // Create entries that when chunked will produce overlapping page ranges
     // (this is actually prevented by the sorted chunk logic, so the test
@@ -1339,7 +1339,7 @@ fn f20b_roundtrip_with_heavy_dedup() {
 
 #[test]
 fn f21a_bloom_serde_roundtrip_preserves_bits() {
-    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(10_000, 0.01);
+    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(10_000, 0.01).unwrap();
 
     for i in 0..5_000u64 {
         bloom.set(&test_hash(i));
@@ -1621,14 +1621,8 @@ fn f27a_serialization_sizes() {
     let page = IndexPage::try_new(entries).unwrap();
     let page_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&page).unwrap();
 
-    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100_000, 0.01);
-    let bloom_data = era_index::BloomFilterData::new(
-        bloom.bitmap(),
-        bloom.number_of_bits(),
-        bloom.number_of_hash_functions(),
-        bloom.sip_keys(),
-    )
-    .expect("bloom data");
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100_000, 0.01).unwrap();
+    let bloom_data = era_index::BloomFilterData::new(bloom.to_bytes()).expect("bloom data");
     let bloom_bytes = bloom_data.to_bytes().unwrap();
 
     eprintln!("V8-F27: Serialization sizes:");

@@ -283,10 +283,6 @@ fn v22_f5a_bloom_filter_data_has_new_constructor() {
         source.contains("pub fn new("),
         "V22-F5: BloomFilterData must have pub fn new()"
     );
-    assert!(
-        source.contains("V22-F5"),
-        "V22-F5: bloom_serde.rs must have V22-F5 comment"
-    );
 }
 
 #[test]
@@ -298,63 +294,59 @@ fn v22_f5b_bloom_filter_data_has_accessors() {
         "V22-F5: must have version()"
     );
     assert!(
-        source.contains("pub fn bitmap_ref("),
-        "V22-F5: must have bitmap_ref()"
-    );
-    assert!(
-        source.contains("pub fn bitmap_bits("),
-        "V22-F5: must have bitmap_bits()"
-    );
-    assert!(
-        source.contains("pub fn k_num("),
-        "V22-F5: must have k_num()"
-    );
-    assert!(
-        source.contains("pub fn sip_keys("),
-        "V22-F5: must have sip_keys()"
+        source.contains("pub fn data_ref("),
+        "V22-F5: must have data_ref()"
     );
 }
 
 #[test]
 fn v22_f5c_new_rejects_zero_bitmap_bits() {
-    let result = BloomFilterData::new(vec![0u8; 8], 0, 3, [(1, 2), (3, 4)]);
-    assert!(result.is_err(), "V22-F5: new() must reject bitmap_bits=0");
+    // V3 format: empty data must be rejected
+    let result = BloomFilterData::new(vec![]);
+    assert!(result.is_err(), "V22-F5: new() must reject empty data");
 }
 
 #[test]
 fn v22_f5d_new_rejects_zero_k_num() {
-    let result = BloomFilterData::new(vec![0u8; 8], 64, 0, [(1, 2), (3, 4)]);
-    assert!(result.is_err(), "V22-F5: new() must reject k_num=0");
+    // V3 format: garbage data accepted by new() but rejected by to_bloom()
+    let data = BloomFilterData::new(vec![0xDE, 0xAD]).unwrap();
+    assert!(
+        data.to_bloom::<ChunkHash>().is_err(),
+        "V22-F5: to_bloom() must reject garbage data"
+    );
 }
 
 #[test]
 fn v22_f5e_new_rejects_short_bitmap() {
-    let result = BloomFilterData::new(vec![0u8; 1], 64, 3, [(1, 2), (3, 4)]);
+    // V3 format: truncated bloom data rejected by to_bloom()
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
+    let mut truncated = bloom.to_bytes();
+    truncated.truncate(4);
+    let data = BloomFilterData::new(truncated).unwrap();
     assert!(
-        result.is_err(),
-        "V22-F5: new() must reject bitmap shorter than bitmap_bits"
+        data.to_bloom::<ChunkHash>().is_err(),
+        "V22-F5: to_bloom() must reject truncated bloom data"
     );
 }
 
 #[test]
 fn v22_f5f_new_rejects_zero_sip_keys() {
-    let result = BloomFilterData::new(vec![0u8; 8], 64, 3, [(0, 0), (0, 0)]);
+    // V3 format: all-zero data rejected by to_bloom()
+    let data = BloomFilterData::new(vec![0u8; 64]).unwrap();
     assert!(
-        result.is_err(),
-        "V22-F5: new() must reject all-zero sip_keys"
+        data.to_bloom::<ChunkHash>().is_err(),
+        "V22-F5: to_bloom() must reject all-zero data"
     );
 }
 
 #[test]
 fn v22_f5g_new_accepts_valid_params() {
-    let result = BloomFilterData::new(vec![0u8; 8], 64, 3, [(1, 2), (3, 4)]);
-    assert!(result.is_ok(), "V22-F5: new() must accept valid parameters");
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
+    let result = BloomFilterData::new(bloom.to_bytes());
+    assert!(result.is_ok(), "V22-F5: new() must accept valid bloom data");
     let data = result.unwrap();
-    assert_eq!(data.version(), 1);
-    assert_eq!(data.bitmap_bits(), 64);
-    assert_eq!(data.k_num(), 3);
-    assert_eq!(data.sip_keys(), [(1, 2), (3, 4)]);
-    assert_eq!(data.bitmap_ref().len(), 8);
+    assert_eq!(data.version(), 2);
+    assert!(!data.data_ref().is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════

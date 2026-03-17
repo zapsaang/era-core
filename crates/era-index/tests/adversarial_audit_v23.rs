@@ -99,7 +99,7 @@ fn v23_f1a_bloom_fields_are_pub_crate() {
     let struct_body = extract_struct_body(&source, "pub struct BloomFilterData", 1200);
 
     // Every field should be pub(crate), not bare pub
-    for field in &["version", "bitmap:", "bitmap_bits", "k_num", "sip_keys"] {
+    for field in &["version", "data:"] {
         // Find the field line
         let field_line = struct_body
             .lines()
@@ -166,12 +166,10 @@ fn v23_f2b_from_bloom_returns_result() {
 #[test]
 fn v23_f2c_from_bloom_behavioral() {
     // Creating a bloom filter and converting via from_bloom should succeed
-    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01);
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01).unwrap();
     let bytes = era_index::serialize_bloom(&bloom).unwrap();
-    // Round-trip via serialize→deserialize proves from_bloom works
     let restored = era_index::deserialize_bloom(&bytes).unwrap();
-    // The restored bloom should have the same parameters
-    assert_eq!(bloom.number_of_bits(), restored.number_of_bits());
+    assert_eq!(bloom.len(), restored.len());
     assert_eq!(
         bloom.number_of_hash_functions(),
         restored.number_of_hash_functions()
@@ -235,70 +233,67 @@ fn v23_f3e_validate_checks_all_invariants() {
     let fn_body = extract_fn_body(&source, "fn validate(&self)", 900);
 
     assert!(
-        fn_body.contains("bitmap_bits == 0"),
-        "V23-F3: validate must check bitmap_bits == 0"
+        fn_body.contains("data.is_empty()"),
+        "V23-F3: validate must check data is empty"
     );
     assert!(
-        fn_body.contains("k_num == 0"),
-        "V23-F3: validate must check k_num == 0"
-    );
-    assert!(
-        fn_body.contains("bitmap.len()"),
-        "V23-F3: validate must check bitmap length"
-    );
-    assert!(
-        fn_body.contains("sip_keys"),
-        "V23-F3: validate must check sip_keys"
+        fn_body.contains("data.len()"),
+        "V23-F3: validate must check data length"
     );
 }
 
 #[test]
 fn v23_f3f_validate_behavioral_bitmap_bits_zero() {
-    // BloomFilterData::new with bitmap_bits=0 must fail
-    let result = BloomFilterData::new(vec![0u8; 8], 0, 3, [(1, 2), (3, 4)]);
+    // BloomFilterData::new with empty data must fail
+    let result = BloomFilterData::new(vec![]);
     assert!(
         result.is_err(),
-        "V23-F3: bitmap_bits=0 must be rejected by validate()"
+        "V23-F3: empty data must be rejected by validate()"
     );
 }
 
 #[test]
 fn v23_f3g_validate_behavioral_k_num_zero() {
-    // BloomFilterData::new with k_num=0 must fail
-    let result = BloomFilterData::new(vec![0u8; 8], 64, 0, [(1, 2), (3, 4)]);
+    // BloomFilterData::new with garbage data — construction succeeds but to_bloom fails
+    let data = BloomFilterData::new(vec![0xDE, 0xAD]).unwrap();
+    let result = data.to_bloom::<ChunkHash>();
     assert!(
         result.is_err(),
-        "V23-F3: k_num=0 must be rejected by validate()"
+        "V23-F3: garbage data must be rejected by to_bloom()"
     );
 }
 
 #[test]
 fn v23_f3h_validate_behavioral_bitmap_too_short() {
-    // Bitmap has 8 bytes = 64 bits, but bitmap_bits says 128
-    let result = BloomFilterData::new(vec![0u8; 8], 128, 3, [(1, 2), (3, 4)]);
+    // Truncated bloom bytes must be rejected by to_bloom()
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
+    let mut truncated = bloom.to_bytes();
+    truncated.truncate(4);
+    let data = BloomFilterData::new(truncated).unwrap();
     assert!(
-        result.is_err(),
-        "V23-F3: bitmap too short must be rejected by validate()"
+        data.to_bloom::<ChunkHash>().is_err(),
+        "V23-F3: truncated bloom data must be rejected by to_bloom()"
     );
 }
 
 #[test]
 fn v23_f3i_validate_behavioral_sip_keys_zero() {
-    // All-zero sip_keys must fail
-    let result = BloomFilterData::new(vec![0u8; 8], 64, 3, [(0, 0), (0, 0)]);
+    // All-zero data must be rejected by to_bloom()
+    let data = BloomFilterData::new(vec![0u8; 64]).unwrap();
     assert!(
-        result.is_err(),
-        "V23-F3: all-zero sip_keys must be rejected by validate()"
+        data.to_bloom::<ChunkHash>().is_err(),
+        "V23-F3: all-zero data must be rejected by to_bloom()"
     );
 }
 
 #[test]
 fn v23_f3j_validate_behavioral_valid_construction() {
-    // Valid parameters must succeed
-    let result = BloomFilterData::new(vec![0u8; 16], 64, 3, [(1, 2), (3, 4)]);
+    // Valid bloom bytes must succeed
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
+    let result = BloomFilterData::new(bloom.to_bytes());
     assert!(
         result.is_ok(),
-        "V23-F3: valid parameters must pass validation"
+        "V23-F3: valid bloom data must pass validation"
     );
 }
 
@@ -629,7 +624,7 @@ fn v23_f10b_has_v23_comment() {
 #[test]
 fn v23_f10c_set_bloom_filter_behavioral() {
     // set_bloom_filter with valid data should succeed
-    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01);
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(1000, 0.01).unwrap();
     let bytes = era_index::serialize_bloom(&bloom).unwrap();
 
     let mut meta = MetaIndex::new();

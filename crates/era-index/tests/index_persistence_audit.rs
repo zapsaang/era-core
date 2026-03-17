@@ -239,7 +239,7 @@ fn test_meta_index_rkyv_roundtrip() {
         .unwrap();
 
     // Add a bloom filter
-    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01);
+    let mut bloom = bloomfilter::Bloom::new_for_fp_rate(1000, 0.01).unwrap();
     for i in 0..300u64 {
         bloom.set(&test_hash(i));
     }
@@ -277,7 +277,7 @@ fn test_meta_index_rkyv_roundtrip() {
 /// Verify Bloom filter survives serde roundtrip with correct false-positive behavior.
 #[test]
 fn test_bloom_filter_serde_roundtrip_correctness() {
-    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(10_000, 0.01);
+    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(10_000, 0.01).unwrap();
 
     // Insert 1000 hashes
     for i in 0..1000u64 {
@@ -647,7 +647,7 @@ fn test_meta_index_rejects_garbage_input() {
 /// Verify that truncated bloom filter data is rejected.
 #[test]
 fn test_truncated_bloom_filter_rejected() {
-    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);
+    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
     bloom.set(&test_hash(0));
     let bytes = era_index::serialize_bloom(&bloom).unwrap();
 
@@ -861,7 +861,7 @@ fn test_index_reader_from_memory_empty() {
 #[test]
 fn test_index_reader_from_memory_with_entries() {
     let meta = MetaIndex::new();
-    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01);
+    let mut bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
 
     let entries: Vec<IndexEntry> = (0..50u64)
         .map(|i| {

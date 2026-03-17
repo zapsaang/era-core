@@ -474,8 +474,8 @@ fn v24_f8a_pre_deserialize_bitmap_size_check() {
     // validate_archived must check archived.bitmap.len()
     let validate_body = extract_fn_body(&source, "fn validate_archived", 1200);
     assert!(
-        validate_body.contains("archived.bitmap.len()"),
-        "V24-F8: validate_archived must check archived.bitmap.len()"
+        validate_body.contains("archived.data.len()"),
+        "V24-F8: validate_archived must check archived.data.len()"
     );
 }
 
@@ -497,11 +497,10 @@ fn v24_f8b_pre_deserialize_bitmap_bits_check() {
         "V24-F8: validate_archived must precede deserialization"
     );
 
-    // validate_archived must check archived.bitmap_bits
     let validate_body = extract_fn_body(&source, "fn validate_archived", 1200);
     assert!(
-        validate_body.contains("archived.bitmap_bits"),
-        "V24-F8: validate_archived must check archived.bitmap_bits"
+        validate_body.contains("archived.data"),
+        "V24-F8: validate_archived must check archived.data"
     );
 }
 
@@ -520,8 +519,8 @@ fn v24_f8d_v24_comment_present_in_from_bytes() {
     let fn_body = extract_fn_body(&source, "pub fn from_bytes", 1800);
 
     assert!(
-        fn_body.contains("V24-F8"),
-        "V24-F8: from_bytes must reference V24-F8 fix"
+        fn_body.contains("Pre-deser size check") || fn_body.contains("validate_archived"),
+        "V24-F8: from_bytes must have pre-deserialize validation"
     );
 }
 
@@ -531,8 +530,8 @@ fn v24_f8e_pre_deserialize_max_bitmap_size() {
     let fn_body = extract_fn_body(&source, "pub fn from_bytes", 1800);
 
     assert!(
-        fn_body.contains("MAX_BLOOM_BITMAP_SIZE"),
-        "V24-F8: from_bytes must define/use MAX_BLOOM_BITMAP_SIZE for size limit"
+        fn_body.contains("MAX_BLOOM_DATA_SIZE"),
+        "V24-F8: from_bytes must define/use MAX_BLOOM_DATA_SIZE for size limit"
     );
 }
 
@@ -551,28 +550,29 @@ fn v24_f9a_degenerate_key_check_in_source() {
     let fn_body = extract_fn_body(&source, "fn validate(&self)", 1200);
 
     assert!(
-        fn_body.contains("sip_keys[0] == self.sip_keys[1]"),
-        "V24-F9: validate() must check for degenerate sip_keys"
+        fn_body.contains("data.is_empty()"),
+        "V24-F9: validate() must check for empty data"
     );
 }
 
 #[test]
 fn v24_f9b_rejects_degenerate_keys() {
-    // Both key pairs identical → degenerate → must reject
-    let result = BloomFilterData::new(vec![0u8; 16], 64, 3, [(1, 2), (1, 2)]);
+    // V3 format: all-zero data rejected by to_bloom()
+    let data = BloomFilterData::new(vec![0u8; 64]).unwrap();
     assert!(
-        result.is_err(),
-        "V24-F9: BloomFilterData::new must reject degenerate sip_keys (both pairs identical)"
+        data.to_bloom::<ChunkHash>().is_err(),
+        "V24-F9: to_bloom() must reject invalid bloom data"
     );
 }
 
 #[test]
 fn v24_f9c_accepts_distinct_keys() {
-    // Distinct key pairs → must accept
-    let result = BloomFilterData::new(vec![0u8; 16], 64, 3, [(1, 2), (3, 4)]);
+    // Valid bloom data must be accepted
+    let bloom = bloomfilter::Bloom::<ChunkHash>::new_for_fp_rate(100, 0.01).unwrap();
+    let result = BloomFilterData::new(bloom.to_bytes());
     assert!(
         result.is_ok(),
-        "V24-F9: BloomFilterData::new must accept distinct sip_keys"
+        "V24-F9: BloomFilterData::new must accept valid bloom data"
     );
 }
 
@@ -580,10 +580,9 @@ fn v24_f9c_accepts_distinct_keys() {
 fn v24_f9d_sip_keys_doc_comment() {
     let source = read_source_file("src/bloom_serde.rs");
 
-    // Check for documentation about SipHash key non-determinism
     assert!(
-        source.contains("non-determinism") || source.contains("randomly generated"),
-        "V24-F9: bloom_serde.rs must document SipHash key non-determinism"
+        source.contains("self-describing") || source.contains("opaque"),
+        "V24-F9: bloom_serde.rs must document the opaque bloom format"
     );
 }
 
@@ -593,8 +592,8 @@ fn v24_f9e_v24_comment_present_in_validate() {
     let fn_body = extract_fn_body(&source, "fn validate(&self)", 900);
 
     assert!(
-        fn_body.contains("V24-F9"),
-        "V24-F9: validate() must reference V24-F9 fix"
+        fn_body.contains("empty") || fn_body.contains("is_empty"),
+        "V24-F9: validate() must check for empty data"
     );
 }
 
@@ -658,7 +657,7 @@ fn v24_regression_v23_f1_bloom_fields_pub_crate() {
     let source = read_source_file("src/bloom_serde.rs");
     let struct_body = extract_struct_body(&source, "pub struct BloomFilterData", 1800);
 
-    for field in &["version", "bitmap:", "bitmap_bits", "k_num", "sip_keys"] {
+    for field in &["version", "data:"] {
         let field_line = struct_body
             .lines()
             .find(|l| l.contains(field) && !l.trim_start().starts_with("//"))

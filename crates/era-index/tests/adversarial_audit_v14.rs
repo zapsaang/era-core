@@ -822,18 +822,13 @@ fn v14_extra_be_tail_canonical_sort_order() {
     }
 }
 
-/// Verify BloomFilterData version field is still 1
+/// Verify BloomFilterData version field is 2 (bloomfilter v3 format)
 #[test]
 fn v14_extra_bloom_version_field() {
-    let bloom: bloomfilter::Bloom<ChunkHash> = bloomfilter::Bloom::new_for_fp_rate(100, 0.01);
-    // from_bloom is pub(crate), so we test via the public accessor on a bloom built through
-    // the public new() constructor path instead.
-    let bitmap = bloom.bitmap();
-    let bits = bloom.number_of_bits();
-    let k = bloom.number_of_hash_functions();
-    let keys = bloom.sip_keys();
-    let data = BloomFilterData::new(bitmap, bits, k, keys).expect("valid bloom data");
-    assert_eq!(data.version(), 1, "BloomFilterData must have version=1");
+    let bloom: bloomfilter::Bloom<ChunkHash> =
+        bloomfilter::Bloom::new_for_fp_rate(100, 0.01).unwrap();
+    let data = BloomFilterData::new(bloom.to_bytes()).expect("valid bloom data");
+    assert_eq!(data.version(), 2, "BloomFilterData must have version=2");
 }
 
 /// Verify insert after finalize is still rejected
