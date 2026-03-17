@@ -18,7 +18,7 @@ subtle = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
-zeroize = { version = "1.7", features = ["derive"] }
+zeroize = { version = "1.8", features = ["derive"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 pqcrypto-mlkem = { workspace = true }
 pqcrypto-traits = { workspace = true }
@@ -30,14 +30,14 @@ spki = "0.7"
 pkcs8 = "0.10"
 x509-cert = "0.2"
 ssh-key = "0.6"
-zeroize_alloc = "0.1"
+
 sharks = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
 ] }

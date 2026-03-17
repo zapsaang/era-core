@@ -18,7 +18,7 @@ era-volume = { workspace = true }
 era-packing = { workspace = true }
 era-ingest = { workspace = true }
 era-index = { workspace = true }
-futures = "0.3"
+futures = "0.3.32"
 async-trait = { workspace = true }
 
 bytes = { workspace = true }
