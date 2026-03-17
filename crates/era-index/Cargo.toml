@@ -30,7 +30,7 @@ tracing = "0.1"
 
 
 # Bloom filter
-bloomfilter = "1.0"
+bloomfilter = "3.0"
 
 # Temporary files (for Redb staging file)
 tempfile = { workspace = true }

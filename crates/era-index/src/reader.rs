@@ -238,7 +238,8 @@ impl IndexReader {
         // (causing false negatives) or contains phantom entries. Rebuilding from
         // the ground truth (entries) guarantees bloom ↔ entries consistency.
         let mut verified_bloom: Bloom<ChunkHash> =
-            Bloom::new_for_fp_rate(entries.len().max(1024), 0.01);
+            Bloom::new_for_fp_rate(entries.len().max(1024), 0.01)
+                .map_err(|e| EraError::IndexError(e.to_string()))?;
         for entry in &entries {
             verified_bloom.set(&entry.hash);
         }
@@ -301,7 +302,8 @@ impl IndexReader {
         // bloom ↔ entries consistency.
         let total_entries: usize = pages.iter().map(|(p, _)| p.len()).sum();
         let mut verified_bloom: Bloom<ChunkHash> =
-            Bloom::new_for_fp_rate(total_entries.max(1024), 0.01);
+            Bloom::new_for_fp_rate(total_entries.max(1024), 0.01)
+                .map_err(|e| EraError::IndexError(e.to_string()))?;
         for (page, _) in &pages {
             for entry in page.entries() {
                 verified_bloom.set(&entry.hash);
@@ -1149,7 +1151,7 @@ mod tests {
         let mut meta = MetaIndex::new();
 
         // Create a simple bloom filter
-        let mut bloom = Bloom::new_for_fp_rate(1000, 0.01);
+        let mut bloom = Bloom::new_for_fp_rate(1000, 0.01).unwrap();
         for entry in &entries {
             bloom.set(&entry.hash);
         }
@@ -1184,7 +1186,8 @@ mod tests {
         )
         .unwrap();
         let bloom_bytes =
-            crate::serialize_bloom(&Bloom::<ChunkHash>::new_for_fp_rate(1024, 0.01)).unwrap();
+            crate::serialize_bloom(&Bloom::<ChunkHash>::new_for_fp_rate(1024, 0.01).unwrap())
+                .unwrap();
         meta.set_bloom_filter(bloom_bytes).unwrap();
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta).expect("serialize");
@@ -1212,8 +1215,10 @@ mod tests {
                     block_id: BlockId::new(1),
                 },
             ],
-            bloom_filter: crate::serialize_bloom(&Bloom::<ChunkHash>::new_for_fp_rate(1024, 0.01))
-                .unwrap(),
+            bloom_filter: crate::serialize_bloom(
+                &Bloom::<ChunkHash>::new_for_fp_rate(1024, 0.01).unwrap(),
+            )
+            .unwrap(),
         };
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&legacy).expect("serialize legacy");

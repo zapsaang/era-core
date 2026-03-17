@@ -97,7 +97,8 @@ impl IndexStore {
         Ok(Self {
             db,
             db_path: path.to_path_buf(),
-            bloom: Bloom::new_for_fp_rate(items, BLOOM_FP_RATE),
+            bloom: Bloom::new_for_fp_rate(items, BLOOM_FP_RATE)
+                .map_err(|e| EraError::IndexError(e.to_string()))?,
             entry_count: 0,
             bloom_sized_for: items,
             should_keep_on_drop: false,
@@ -150,7 +151,8 @@ impl IndexStore {
                 MAX_READONLY_BLOOM_ENTRIES
             );
         }
-        let mut bloom = Bloom::new_for_fp_rate(bloom_size, BLOOM_FP_RATE);
+        let mut bloom = Bloom::new_for_fp_rate(bloom_size, BLOOM_FP_RATE)
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
         for (idx, result) in table
             .iter()
             .map_err(|e| EraError::IndexError(e.to_string()))?
@@ -428,7 +430,8 @@ impl IndexStore {
             new_capacity,
             self.entry_count
         );
-        let mut new_bloom = Bloom::new_for_fp_rate(new_capacity.max(1024), BLOOM_FP_RATE);
+        let mut new_bloom = Bloom::new_for_fp_rate(new_capacity.max(1024), BLOOM_FP_RATE)
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
 
         let read_txn = self
             .db
