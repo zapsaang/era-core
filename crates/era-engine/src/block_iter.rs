@@ -756,6 +756,199 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
     }
 }
 
+pub struct MultiVolumeSessionBlockIterator<'a, R: era_storage::StorageReader> {
+    volume_readers: &'a [VolumeReader<R>],
+    unpacker: SessionBlockUnpacker<'a>,
+    current_volume_idx: usize,
+    current_offsets: Vec<u64>,
+    data_ends: Vec<u64>,
+    block_index: u32,
+    stats: BlockIterStats,
+}
+
+impl<'a, R: era_storage::StorageReader> MultiVolumeSessionBlockIterator<'a, R> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        volume_readers: &'a [VolumeReader<R>],
+        session: &'a KeySession,
+        volume_key: &'a VolumeKey,
+        nonce_context: [u8; 16],
+        archive_id: [u8; 16],
+        epoch_id: u32,
+        compressor: Box<dyn era_codec::Compressor>,
+    ) -> Self {
+        let mut current_offsets = Vec::with_capacity(volume_readers.len());
+        let mut data_ends = Vec::with_capacity(volume_readers.len());
+
+        for reader in volume_readers {
+            let (start, end) = reader.data_region();
+            let footer = reader.footer();
+
+            // Stop before catalog/index blocks (same logic as SessionErasureBlockIterator)
+            let mut limit = if let Some(f) = footer {
+                if f.has_catalog_location() {
+                    f.catalog_offset()
+                } else {
+                    end
+                }
+            } else {
+                end
+            };
+
+            if let Some(f) = footer {
+                if f.has_index() && f.index_offset() < limit {
+                    limit = f.index_offset();
+                }
+            }
+
+            current_offsets.push(start);
+            data_ends.push(limit);
+        }
+
+        let unpacker = SessionBlockUnpacker::new(
+            session,
+            volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            compressor,
+        );
+
+        Self {
+            volume_readers,
+            unpacker,
+            current_volume_idx: 0,
+            current_offsets,
+            data_ends,
+            block_index: 0,
+            stats: BlockIterStats::default(),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBlockIterator<'a, R> {
+    async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
+        loop {
+            if self.current_volume_idx >= self.volume_readers.len() {
+                return None;
+            }
+
+            let vol_idx = self.current_volume_idx;
+            let offset = self.current_offsets[vol_idx];
+            let data_end = self.data_ends[vol_idx];
+
+            if offset >= data_end {
+                self.current_volume_idx += 1;
+                continue;
+            }
+
+            let reader = &self.volume_readers[vol_idx];
+
+            let header_bytes = match reader.read_raw(offset, BlockHeader::SIZE).await {
+                Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
+                Ok(bytes) if bytes.is_empty() => {
+                    self.current_volume_idx += 1;
+                    continue;
+                }
+                Ok(bytes) => {
+                    return Some(Err(EraError::IntegrityError(format!(
+                        "Unexpected partial read: expected {} bytes, got {}",
+                        BlockHeader::SIZE,
+                        bytes.len()
+                    ))));
+                }
+                Err(e) => return Some(Err(e)),
+            };
+
+            let header = match BlockHeader::from_bytes(&header_bytes) {
+                Some(h) => h,
+                None => {
+                    self.stats.blocks_failed += 1;
+                    self.current_offsets[vol_idx] += BlockHeader::SIZE as u64;
+                    return Some(Err(EraError::CorruptedHeader(format!(
+                        "Invalid BlockHeader at offset {} on volume {}",
+                        offset, vol_idx
+                    ))));
+                }
+            };
+
+            let block_size = header.length;
+
+            if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
+                self.current_offsets[vol_idx] += BlockHeader::SIZE as u64 + block_size as u64;
+                continue;
+            }
+
+            if block_size == 0 {
+                self.stats.blocks_failed += 1;
+                self.current_offsets[vol_idx] += BlockHeader::SIZE as u64;
+                return Some(Err(EraError::CorruptedHeader(format!(
+                    "Zero-length block at offset {} on volume {}",
+                    offset, vol_idx
+                ))));
+            }
+            if block_size > MAX_BLOCK_SIZE {
+                self.stats.blocks_failed += 1;
+                self.current_offsets[vol_idx] = data_end;
+                return Some(Err(EraError::BlockTooLarge {
+                    size: block_size as usize,
+                    max_size: MAX_BLOCK_SIZE as usize,
+                }));
+            }
+
+            let location = BlockLocation::single(
+                reader.header().volume_id(),
+                self.block_index,
+                offset,
+                block_size,
+            );
+
+            let result = match reader.read_block(&location).await {
+                Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
+                    Ok(chunks) => {
+                        self.stats.blocks_read += 1;
+                        Ok(DecodedBlock {
+                            block_index: self.block_index,
+                            chunks,
+                            corrupted_shards: 0,
+                        })
+                    }
+                    Err(e) => {
+                        self.stats.blocks_failed += 1;
+                        Err(e)
+                    }
+                },
+                Err(e) => {
+                    self.stats.blocks_failed += 1;
+                    Err(e)
+                }
+            };
+
+            self.current_offsets[vol_idx] += BlockHeader::SIZE as u64 + block_size as u64;
+            self.block_index += 1;
+
+            return Some(result);
+        }
+    }
+
+    fn has_more(&self) -> bool {
+        if self.current_volume_idx >= self.volume_readers.len() {
+            return false;
+        }
+        for i in self.current_volume_idx..self.volume_readers.len() {
+            if self.current_offsets[i] < self.data_ends[i] {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn stats(&self) -> &BlockIterStats {
+        &self.stats
+    }
+}
+
 /// Iterator for erasure-coded blocks with per-block key derivation.
 ///
 /// Unlike `ErasureBlockIterator`, this iterator uses the HKDF "Onion Model"

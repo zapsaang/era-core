@@ -46,8 +46,9 @@ mod writer;
 
 pub use async_pipeline::{ChunkPipeline, PipelineConfig, ProcessedChunk};
 pub use block_iter::{
-    BlockIterStats, BlockIterator, DecodedBlock, ErasureBlockIterator, SessionBlockIterator,
-    SessionErasureBlockIterator, StandardBlockIterator,
+    BlockIterStats, BlockIterator, DecodedBlock, ErasureBlockIterator,
+    MultiVolumeSessionBlockIterator, SessionBlockIterator, SessionErasureBlockIterator,
+    StandardBlockIterator,
 };
 pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_VERSION};
 // Re-export KeySession for convenient access

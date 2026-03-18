@@ -24,7 +24,11 @@ async fn test_add_path_excludes_output_archive_from_input_directory() {
     fs::create_dir_all(&source_dir).unwrap();
 
     create_test_file(&source_dir, "readme.txt", b"Hello ERA");
-    create_test_file(&source_dir, "data/config.toml", b"[settings]\nkey = \"value\"");
+    create_test_file(
+        &source_dir,
+        "data/config.toml",
+        b"[settings]\nkey = \"value\"",
+    );
     create_test_file(&source_dir, "src/main.rs", b"fn main() {}");
 
     let archive_path = source_dir.join("output.era");
@@ -100,10 +104,7 @@ async fn test_add_path_excludes_volume_files_from_input_directory() {
     assert!(paths.iter().any(|p| p.contains("file_a.bin")));
     assert!(paths.iter().any(|p| p.contains("file_b.bin")));
 
-    let archive_files: Vec<&String> = paths
-        .iter()
-        .filter(|p| p.contains("archive.era"))
-        .collect();
+    let archive_files: Vec<&String> = paths.iter().filter(|p| p.contains("archive.era")).collect();
     assert!(
         archive_files.is_empty(),
         "Archive must NOT include itself or its volume files! Found: {:?}",

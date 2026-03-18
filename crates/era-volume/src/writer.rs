@@ -372,6 +372,10 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.header.volume_id()
     }
 
+    pub fn update_total_volumes(&mut self, total: u16) {
+        self.header.set_total_volumes(total);
+    }
+
     /// Get the current size of the volume (valid data size)
     #[must_use]
     pub fn current_size(&self) -> u64 {
@@ -596,6 +600,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
             )));
         }
         let header_bytes = self.header.to_bytes()?;
+
+        // Rewrite primary header at offset 0 so total_volumes is current
+        self.writer.write_at(0, &header_bytes).await?;
 
         if self.max_size.is_some() {
             self.writer

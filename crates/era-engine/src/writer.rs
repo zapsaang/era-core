@@ -17,8 +17,8 @@
 use crate::auth::PasswordSlotParams;
 use bytes::Bytes;
 use era_common::{
-    ArchiveConfig, ArchiveId, ChunkHash, EraError, ErasureCodeConfig, MatrixDistributionStrategy,
-    Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, ChunkHash, EncryptedMacroBlock, EraError, ErasureCodeConfig,
+    MatrixDistributionStrategy, Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::Nonce;
@@ -1662,30 +1662,84 @@ impl ArchiveWriter {
 
         // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
-        let catalog_hash = era_crypto::hash(&catalog_bytes);
-        let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
 
-        // Create session-based builder for catalog encryption
-        let compressor = self.pipeline.create_compressor();
-        let catalog_builder = self
-            .pipeline
-            .encryption()
-            .create_block_builder(compressor)?;
+        // Split catalog into chunks that fit within MAX_SHARD_SIZE after compression.
+        // Conservative limit: half of MAX_SHARD_SIZE to account for compression overhead.
+        let max_catalog_chunk = era_volume::MAX_SHARD_SIZE / 2;
+        let catalog_chunk_count = catalog_bytes.len().div_ceil(max_catalog_chunk).max(1);
 
-        // Pack catalog ONCE to ensure same block_id (and thus same nonce) for all volumes
-        // This is critical because the block_id is used to derive the encryption nonce
-        let catalog_block = catalog_builder.pack_single(catalog_chunk.clone())?;
-        let catalog_block_id = catalog_block.block_id.sequence() as u32;
+        // Prepend header: [u32 chunk_count][u64 total_len] = 12 bytes
+        let total_len = catalog_bytes.len() as u64;
+        let mut first_chunk_prefix = Vec::with_capacity(12);
+        first_chunk_prefix.extend_from_slice(&(catalog_chunk_count as u32).to_le_bytes());
+        first_chunk_prefix.extend_from_slice(&total_len.to_le_bytes());
 
-        // Optionally create a backup block for erasure-coded archives
-        let backup_block = if self.pipeline.erasure_enabled() {
-            // Create another builder for the backup block (will get next block_id)
+        let mut catalog_blocks = Vec::with_capacity(catalog_chunk_count);
+        let mut first_block_id = 0u32;
+
+        if catalog_bytes.is_empty() {
+            let chunk_data = Bytes::from(first_chunk_prefix.clone());
+            let hash = era_crypto::hash(&chunk_data);
+            let chunk = UniqueChunk::new(chunk_data, hash);
             let compressor = self.pipeline.create_compressor();
-            let backup_builder = self
+            let builder = self
                 .pipeline
                 .encryption()
                 .create_block_builder(compressor)?;
-            Some(backup_builder.pack_single(catalog_chunk)?)
+            let block = builder.pack_single(chunk)?;
+            first_block_id = block.block_id.sequence() as u32;
+            catalog_blocks.push(block);
+        } else {
+            for (i, raw_chunk) in catalog_bytes.chunks(max_catalog_chunk).enumerate() {
+                let chunk_data = if i == 0 {
+                    let mut buf = Vec::with_capacity(first_chunk_prefix.len() + raw_chunk.len());
+                    buf.extend_from_slice(&first_chunk_prefix);
+                    buf.extend_from_slice(raw_chunk);
+                    Bytes::from(buf)
+                } else {
+                    Bytes::copy_from_slice(raw_chunk)
+                };
+
+                let hash = era_crypto::hash(&chunk_data);
+                let chunk = UniqueChunk::new(chunk_data, hash);
+
+                let compressor = self.pipeline.create_compressor();
+                let builder = self
+                    .pipeline
+                    .encryption()
+                    .create_block_builder(compressor)?;
+                let block = builder.pack_single(chunk)?;
+
+                if i == 0 {
+                    first_block_id = block.block_id.sequence() as u32;
+                }
+                catalog_blocks.push(block);
+            }
+        }
+
+        let catalog_block_id = first_block_id;
+
+        let backup_blocks: Option<Vec<EncryptedMacroBlock>> = if self.pipeline.erasure_enabled() {
+            let mut backups = Vec::with_capacity(catalog_blocks.len());
+            for (i, raw_chunk) in catalog_bytes.chunks(max_catalog_chunk).enumerate() {
+                let chunk_data = if i == 0 {
+                    let mut buf = Vec::with_capacity(first_chunk_prefix.len() + raw_chunk.len());
+                    buf.extend_from_slice(&first_chunk_prefix);
+                    buf.extend_from_slice(raw_chunk);
+                    Bytes::from(buf)
+                } else {
+                    Bytes::copy_from_slice(raw_chunk)
+                };
+                let hash = era_crypto::hash(&chunk_data);
+                let chunk = UniqueChunk::new(chunk_data, hash);
+                let compressor = self.pipeline.create_compressor();
+                let builder = self
+                    .pipeline
+                    .encryption()
+                    .create_block_builder(compressor)?;
+                backups.push(builder.pack_single(chunk)?);
+            }
+            Some(backups)
         } else {
             None
         };
@@ -1693,11 +1747,12 @@ impl ArchiveWriter {
         let catalog_locations = self
             .pipeline
             .volume_mut()
-            .write_catalog_to_all(&catalog_block, backup_block.as_ref())
+            .write_catalog_blocks_to_all(&catalog_blocks, backup_blocks.as_deref())
             .await?;
 
         debug!(
-            "Catalog (block_id={}) written to {} volumes for full redundancy",
+            "Catalog ({} blocks, block_id={}) written to {} volumes for full redundancy",
+            catalog_blocks.len(),
             catalog_block_id,
             catalog_locations.len()
         );

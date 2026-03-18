@@ -309,52 +309,46 @@ impl<B: StorageBackend> VolumePool<B> {
     async fn rotate_volumes(&mut self) -> Result<()> {
         let volume_count = self.writers.len();
 
-        // Use drain to avoid cloning — moves data into old_sequences and clears self.sequences
         let old_sequences: Vec<u16> = self.sequences.drain(..).collect();
+        let old_writers: Vec<VolumeWriter<B::Writer>> = self.writers.drain(..).collect();
 
-        // 1. Pad current volumes to max size, sync data to disk, and update stats
-        for (i, writer) in self.writers.iter_mut().enumerate() {
-            // Force padding if max size is set
-            writer.set_max_size(self.config.max_volume_size).await?;
-
-            // RL33-01: Sync shard data to persistent storage before dropping writers.
-            // Without this, rotated-out volumes' data exists only in OS page cache and
-            // would be lost on power failure. Uses fdatasync (no metadata sync needed).
-            writer.sync_data().await?;
-
-            // Record size
-            let size = writer.current_size();
-            let sequence = old_sequences[i];
-            self.stats.volume_sizes.push((sequence, size));
-        }
-
-        // 2. Drop current writers (file descriptors closed by OS on drop;
-        //    data is already synced to disk by the sync_data() call above)
-        self.writers.clear();
-
-        // 3. Create new set of volumes
         let vc_u16 = u16::try_from(volume_count).map_err(|_| {
             era_common::EraError::InvalidConfig(format!(
                 "volume count {} exceeds u16",
                 volume_count
             ))
         })?;
+
+        // Compute the total_volumes that will exist after this rotation completes.
+        // The highest new sequence is old_sequences.last() + vc_u16, so total = that + 1.
+        let max_old_seq = old_sequences.iter().copied().max().unwrap_or(0);
+        let max_new_seq = max_old_seq.checked_add(vc_u16).ok_or_else(|| {
+            era_common::EraError::InvalidConfig("volume sequence overflow".into())
+        })?;
+        let new_total = max_new_seq
+            .checked_add(1)
+            .ok_or_else(|| era_common::EraError::InvalidConfig("total_volumes overflow".into()))?;
+
+        for (i, mut writer) in old_writers.into_iter().enumerate() {
+            let size = writer.current_size();
+            let sequence = old_sequences[i];
+            self.stats.volume_sizes.push((sequence, size));
+
+            writer.update_total_volumes(new_total);
+            // Finalize writes backup header + primary/backup footers + sync + close.
+            // Without this, rotated-out volumes have no footer and VolumeReader::open fails.
+            writer.finalize().await?;
+        }
+
         for &sequence in old_sequences.iter().take(volume_count) {
-            // Next sequence: previous + volume_count
             let next_sequence = sequence.checked_add(vc_u16).ok_or_else(|| {
                 era_common::EraError::InvalidConfig("volume sequence overflow".into())
             })?;
 
             let mut header = self.template_header.clone();
-            // Each rotated volume must have a unique volume_id
             header.set_volume_id(VolumeId::new());
             header.set_volume_sequence(next_sequence);
-            // total_volumes = next_sequence + 1 represents the count of volumes
-            // up to and including this one. The reader takes the maximum across
-            // all volumes when discovering the archive set.
-            header.set_total_volumes(next_sequence.checked_add(1).ok_or_else(|| {
-                era_common::EraError::InvalidConfig("total_volumes overflow".into())
-            })?);
+            header.set_total_volumes(new_total);
 
             let volume_path = self.config.volume_path(next_sequence);
             let volume_filename = extract_filename(&volume_path)?;

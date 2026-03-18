@@ -37,3 +37,4 @@ bins/
 **/test_shell/
 .sisyphus/
 .tmp*
+tmp*

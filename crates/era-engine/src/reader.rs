@@ -10,7 +10,7 @@
 //! Each block is decrypted with a unique key derived on-the-fly.
 
 use crate::block_iter::{
-    BlockIterator, SessionBlockIterator, SessionErasureBlockIterator,
+    BlockIterator, MultiVolumeSessionBlockIterator, SessionErasureBlockIterator,
     SessionErasureBlockIteratorArgs,
 };
 use crate::chunk_processor::{
@@ -677,8 +677,8 @@ impl ArchiveReader {
                 },
             ))
         } else {
-            Box::new(SessionBlockIterator::new(
-                &self.volume_readers[0],
+            Box::new(MultiVolumeSessionBlockIterator::new(
+                &self.volume_readers,
                 &self.session,
                 &self.volume_key,
                 self.nonce_context,
@@ -868,30 +868,29 @@ impl ArchiveReader {
             EraError::CorruptedFooter("Catalog volume has no valid footer".into())
         })?;
 
-        let catalog_location = BlockLocation::single(
-            reader.header().volume_id(),
-            footer.catalog_block_id(),
-            footer.catalog_offset(),
-            footer.catalog_size(),
-        );
+        let catalog_offset = footer.catalog_offset();
+        let catalog_size = footer.catalog_size();
+        let catalog_block_id = footer.catalog_block_id();
 
         debug!(
             "Loading catalog from volume {} at offset={}, size={}, block_id={}",
-            reader_idx,
-            footer.catalog_offset(),
-            footer.catalog_size(),
-            footer.catalog_block_id()
+            reader_idx, catalog_offset, catalog_size, catalog_block_id
+        );
+
+        let catalog_location = BlockLocation::single(
+            reader.header().volume_id(),
+            catalog_block_id,
+            catalog_offset,
+            catalog_size,
         );
 
         let encrypted_block = self.volume_readers[reader_idx]
             .read_block(&catalog_location)
             .await?;
 
-        // Create temporary session-based unpacker for decryption
         let unpacker = self.create_unpacker();
         let chunks = unpacker.unpack(&encrypted_block)?;
 
-        // Extract chunk data from unpacked block
         if chunks.index.entries.is_empty() {
             return Err(EraError::EmptyCatalog);
         }
@@ -904,7 +903,80 @@ impl ArchiveReader {
                 "Catalog chunk offset exceeds data size",
             ));
         }
-        let catalog_data = chunks.data.slice(start..end);
+        let first_chunk_data = chunks.data.slice(start..end);
+
+        // Multi-block catalog: header is [u32 chunk_count][u64 total_len] = 12 bytes
+        let catalog_data = if first_chunk_data.len() >= 12 {
+            let chunk_count =
+                u32::from_le_bytes(first_chunk_data[0..4].try_into().unwrap_or([0; 4]));
+            let total_len =
+                u64::from_le_bytes(first_chunk_data[4..12].try_into().unwrap_or([0; 8]));
+
+            if chunk_count > 1 && total_len > 0 {
+                debug!(
+                    "Multi-block catalog: {} blocks, {} total bytes",
+                    chunk_count, total_len
+                );
+                let mut catalog_buf = Vec::with_capacity(total_len as usize);
+                catalog_buf.extend_from_slice(&first_chunk_data[12..]);
+
+                let bh_size = era_common::BlockHeader::SIZE as u64;
+                let mut next_offset = catalog_offset + bh_size + catalog_size as u64;
+
+                for block_num in 1..chunk_count {
+                    let header_bytes = self.volume_readers[reader_idx]
+                        .read_raw(next_offset, era_common::BlockHeader::SIZE)
+                        .await?;
+                    let header =
+                        era_common::BlockHeader::from_bytes(&header_bytes).ok_or_else(|| {
+                            EraError::CorruptedHeader(format!(
+                                "Invalid catalog block header at offset {} (block {}/{})",
+                                next_offset, block_num, chunk_count
+                            ))
+                        })?;
+
+                    let next_block_id = catalog_block_id + block_num;
+                    let block_location = BlockLocation::single(
+                        self.volume_readers[reader_idx].header().volume_id(),
+                        next_block_id,
+                        next_offset,
+                        header.length,
+                    );
+
+                    let enc_block = self.volume_readers[reader_idx]
+                        .read_block(&block_location)
+                        .await?;
+
+                    let block_unpacker = self.create_unpacker();
+                    let block_chunks = block_unpacker.unpack(&enc_block)?;
+
+                    if !block_chunks.index.entries.is_empty() {
+                        let entry = &block_chunks.index.entries[0];
+                        let s = entry.offset as usize;
+                        let e = s + entry.length as usize;
+                        if e <= block_chunks.data.len() {
+                            catalog_buf.extend_from_slice(&block_chunks.data[s..e]);
+                        }
+                    }
+
+                    next_offset += bh_size + header.length as u64;
+                }
+
+                Bytes::from(catalog_buf)
+            } else {
+                // Single-block catalog: try parsing with header stripped first,
+                // fall back to raw data for backward compatibility
+                let stripped = first_chunk_data.slice(12..);
+                if Catalog::from_bytes(&stripped).is_ok() {
+                    stripped
+                } else {
+                    first_chunk_data
+                }
+            }
+        } else {
+            first_chunk_data
+        };
+
         let catalog = Catalog::from_bytes(&catalog_data)?;
 
         info!(
@@ -1047,7 +1119,12 @@ impl ArchiveReader {
             )
         } else {
             // Standard block: read and unpack directly with session-based unpacker
-            let encrypted_block = self.volume_readers[0].read_block(location).await?;
+            let reader = self
+                .volume_readers
+                .iter()
+                .find(|r| r.header().volume_id() == location.volume_id)
+                .unwrap_or(&self.volume_readers[0]);
+            let encrypted_block = reader.read_block(location).await?;
             let unpacker = self.create_unpacker();
             let unpacked = unpacker.unpack(&encrypted_block)?;
 
@@ -1576,8 +1653,8 @@ impl ArchiveReader {
                 },
             ))
         } else {
-            Box::new(SessionBlockIterator::new(
-                &self.volume_readers[0],
+            Box::new(MultiVolumeSessionBlockIterator::new(
+                &self.volume_readers,
                 &self.session,
                 &self.volume_key,
                 self.nonce_context,
@@ -1638,8 +1715,8 @@ impl ArchiveReader {
                 },
             ))
         } else {
-            Box::new(SessionBlockIterator::new(
-                &self.volume_readers[0],
+            Box::new(MultiVolumeSessionBlockIterator::new(
+                &self.volume_readers,
                 &self.session,
                 &self.volume_key,
                 self.nonce_context,
@@ -2018,6 +2095,110 @@ mod tests {
     fn test_max_declared_file_size_constant() {
         // Verify MAX_DECLARED_FILE_SIZE is 100GB
         assert_eq!(super::MAX_DECLARED_FILE_SIZE, 100 * 1024 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_multivolume_non_erasure_roundtrip() {
+        use rand::RngCore;
+
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("multi.era");
+        let password = "test";
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password(password)
+            .config(test_config_no_ec())
+            .max_volume_size(200 * 1024)
+            .target_block_size(64 * 1024)
+            .build()
+            .await
+            .unwrap();
+
+        // Random data to defeat compression
+        let mut rng = rand::rngs::OsRng;
+        let mut data_a = vec![0u8; 64 * 1024];
+        rng.fill_bytes(&mut data_a);
+        let mut data_b = vec![0u8; 64 * 1024];
+        rng.fill_bytes(&mut data_b);
+        let mut data_c = vec![0u8; 64 * 1024];
+        rng.fill_bytes(&mut data_c);
+
+        writer.add_bytes("a.bin", &data_a).await.unwrap();
+        writer.add_bytes("b.bin", &data_b).await.unwrap();
+        writer.add_bytes("c.bin", &data_c).await.unwrap();
+        let stats = writer.finalize().await.unwrap();
+        assert_eq!(stats.total_files, 3);
+
+        // Confirm multiple volumes were created
+        assert!(
+            temp_dir.path().join("multi.era.001").exists(),
+            "Expected at least 2 volumes but only found volume 0"
+        );
+
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let extract_dir = temp_dir.path().join("extracted");
+        let options = ExtractOptions::new(&extract_dir);
+        let extract_stats = reader.extract_all(&options).await.unwrap();
+
+        assert_eq!(
+            extract_stats.extracted, 3,
+            "All 3 files should be extracted"
+        );
+
+        let extracted_a = fs::read(extract_dir.join("a.bin")).unwrap();
+        assert_eq!(extracted_a, data_a, "File a.bin content mismatch");
+        let extracted_b = fs::read(extract_dir.join("b.bin")).unwrap();
+        assert_eq!(extracted_b, data_b, "File b.bin content mismatch");
+        let extracted_c = fs::read(extract_dir.join("c.bin")).unwrap();
+        assert_eq!(extracted_c, data_c, "File c.bin content mismatch");
+
+        let mut reader2 = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let verify_stats = reader2.verify().await.unwrap();
+        assert!(
+            verify_stats.is_ok(),
+            "Verification should pass for multi-volume archive"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_catalog_roundtrip() {
+        use rand::RngCore;
+
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("bigcat.era");
+        let password = "test";
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password(password)
+            .config(test_config_no_ec())
+            .build()
+            .await
+            .unwrap();
+
+        // Each entry ~200 bytes in catalog. 100K entries × 200B ≈ 20MB catalog.
+        // Use random hex names to defeat protobuf/zstd compression.
+        let mut rng = rand::rngs::OsRng;
+        let file_count = 200_000;
+        for i in 0..file_count {
+            let mut name_bytes = [0u8; 96];
+            rng.fill_bytes(&mut name_bytes);
+            let name = format!(
+                "dir_{:04x}/{:04x}/{}.dat",
+                i / 256,
+                i % 256,
+                hex::encode(name_bytes)
+            );
+            let mut data = [0u8; 16];
+            rng.fill_bytes(&mut data);
+            writer.add_bytes(&name, &data).await.unwrap();
+        }
+
+        let stats = writer.finalize().await.unwrap();
+        assert_eq!(stats.total_files, file_count);
+
+        let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+        let files = reader.list_files().await.unwrap();
+        assert_eq!(files.len() as u64, file_count);
     }
 
     #[tokio::test]

@@ -179,6 +179,63 @@ impl<B: StorageBackend> VolumeStage<B> {
         Ok(catalog_locations)
     }
 
+    pub async fn write_catalog_blocks_to_all(
+        &mut self,
+        blocks: &[EncryptedMacroBlock],
+        backup_blocks: Option<&[EncryptedMacroBlock]>,
+    ) -> Result<Vec<(u64, u32, u32)>> {
+        let volume_count = self.pool.volume_count();
+        if volume_count == 0 {
+            return Err(EraError::Other(
+                "No writable volumes available for catalog fanout".into(),
+            ));
+        }
+        if blocks.is_empty() {
+            return Err(EraError::Other("No catalog blocks to write".into()));
+        }
+
+        let first_block_id = u32::try_from(blocks[0].block_id.sequence())
+            .map_err(|_| EraError::Other("Block sequence ID exceeds u32::MAX".into()))?;
+
+        let mut catalog_locations: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
+
+        for slot in 0..volume_count {
+            if let Some(writer) = self.pool.get_writer_mut(slot) {
+                let mut first_location = None;
+
+                for (i, block) in blocks.iter().enumerate() {
+                    let mut location = writer
+                        .write_canonical_block(block, BlockType::Catalog)
+                        .await?;
+
+                    if i == 0 {
+                        // AEAD key derivation requires logical block_id, not physical slot_index
+                        location.slot_index = first_block_id;
+                        first_location = Some(location);
+                    }
+                }
+
+                if let Some(backup_blocks) = backup_blocks {
+                    for backup in backup_blocks {
+                        let _backup_location = writer
+                            .write_canonical_block(backup, BlockType::Catalog)
+                            .await?;
+                    }
+                }
+
+                let loc = first_location
+                    .ok_or_else(|| EraError::Other("No catalog block written".into()))?;
+                catalog_locations.push((loc.physical_offset, loc.encrypted_size, first_block_id));
+            } else {
+                return Err(EraError::Other(format!(
+                    "Missing catalog writer slot {slot} while writing catalog fanout"
+                )));
+            }
+        }
+
+        Ok(catalog_locations)
+    }
+
     /// Finalize all volumes with catalog location information.
     ///
     /// This writes footers to all volumes and closes them.
