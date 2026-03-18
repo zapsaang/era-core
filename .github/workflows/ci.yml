@@ -110,4 +110,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo test --workspace
+        env:
+          RUST_BACKTRACE: 1
         run: cargo test --workspace
