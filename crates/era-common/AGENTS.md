@@ -1,19 +1,19 @@
 # era-common crate
 
-Shared errors, config types, protobuf codegen, and reusable IDs/metadata. See root `AGENTS.md` for workspace-wide rules and `src/AGENTS.md` for source-level detail.
+Shared types, EraError, Result, protobuf codegen, and config types. L0. Bottom of stack.
 
 ## SURFACES
-- `src/AGENTS.md` — module map for `error.rs`, `config.rs`, `serde.rs`, and `types/`
-- `proto/` — `era_common.proto` and `test_evolution.proto`
-- `build.rs` — prost codegen entrypoint
-- No dedicated `tests/`, `benches/`, or `examples/` surface right now
+- `src/AGENTS.md` — error types, config, protobuf codegen, serialization helpers
+- `tests/compact_proto_schema.rs` — protobuf schema validation
+- `proto/` — protobuf definitions compiled by `build.rs`
 
 ## WHEN CHANGING
-- `EraError` or shared config changes ripple into every crate.
-- Protobuf schema updates require matching `From` / `TryFrom` conversions and compatibility checks in readers and writers.
-- Serialization bounds belong here; format-specific validation belongs in `era-volume`.
+- Error variants added here affect all crates; use consistent error categorization.
+- Protobuf schema changes require `cargo build` to regenerate from `build.rs`.
 
 ## VALIDATION
 ```bash
 cargo test -p era-common
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

@@ -6,13 +6,12 @@ Physical volume format v8.1 and multi-volume management. L2.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `header.rs` | — | SuperHeader (4096B), RecipientSlot, EncryptedVolumeKey, KeyWrapAlgorithm |
-| `footer.rs` | — | Footer (128B), FOOTER_MAGIC, Blake3 checksum, block count, index location |
-| `reader.rs` | — | VolumeReader — async read with SECURITY: length validation against MAX_SHARD_SIZE (4 locations) |
-| `writer.rs` | — | VolumeWriter — async write with padding |
-| `multi_volume.rs` | — | MultiVolumeReader, MultiVolumeWriter — multi-disk coordination |
-| `volume_pool.rs` | 825 | Volume pool — rotation state machine, matrix shard distribution, space tracking |
-| `distribution.rs` | — | Shard distribution strategies (RotatingOffset), extension traits |
+| `header.rs` | 1225 | SuperHeader (4096B), RecipientSlot, EncryptedVolumeKey, KeyWrapAlgorithm |
+| `footer.rs` | 835 | Footer (128B), FOOTER_MAGIC, Blake3 checksum, block count, index location |
+| `reader.rs` | 700 | VolumeReader — async read with SECURITY: length validation against MAX_SHARD_SIZE (4 locations) |
+| `writer.rs` | 889 | VolumeWriter — async write with padding |
+| `multi_volume.rs` | 671 | MultiVolumeReader, MultiVolumeWriter — multi-disk coordination |
+| `volume_pool.rs` | 1192 | Volume pool — rotation state machine, matrix shard distribution, space tracking |
 
 ## VOLUME FORMAT v8.1
 
@@ -35,3 +34,10 @@ Physical volume format v8.1 and multi-volume management. L2.
 - All length fields validated against MAX_SHARD_SIZE before allocation
 - Symmetric validation on read and write paths
 - Corrupted magic bytes cause hard failure (no silent recovery)
+
+## TEST
+
+```bash
+cargo test -p era-volume
+cargo test -p era-volume --test adversarial_audit_v30
+```

@@ -1,6 +1,6 @@
 # era-index crate
 
-Embedded dedup index staging, page layout, persistence, and cold recovery. See root `AGENTS.md` for workspace rules, `src/AGENTS.md` for implementation detail, and `tests/AGENTS.md` for the audit surface.
+Embedded dedup index staging, page layout, persistence, and cold recovery. L3.
 
 ## SURFACES
 - `src/AGENTS.md` — `ChunkIndex`, builder/reader/store internals, Bloom + L1/L2 layout
@@ -18,3 +18,5 @@ cargo test -p era-index
 cargo test -p era-index --test index_persistence_audit
 cargo bench -p era-index
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

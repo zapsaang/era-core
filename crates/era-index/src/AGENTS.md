@@ -32,6 +32,5 @@ V2.1 embedded deduplication index. L3 — depends on era-storage and era-volume 
 
 ```bash
 cargo test -p era-index
-cargo test -p era-index --test index_persistence_audit  # 30 V2.1 audit tests
-cargo test -p era-index --test adversarial_audit_v9     # behavioral security tests
+cargo test -p era-index --test index_persistence_audit
 ```

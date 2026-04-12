@@ -1,19 +1,21 @@
 # era-packing crate
 
-MacroBlock packing, session builders, unpackers, and resilient AEAD recovery heuristics. See root `AGENTS.md` for workspace rules and `src/AGENTS.md` for algorithm detail.
+k-Bounded Best-Fit MacroBlock packing with resilient AEAD unpacking. L3.
 
 ## SURFACES
-- `src/AGENTS.md` — packing internals, stripe buffering, unpackers, and in-source perf tests
-- `tests/` — vulnerability and resilience coverage
-- `benches/packing_bench.rs` — packing throughput / utilization checks
+- `src/AGENTS.md` — `MacroBlockBuilder`, `SessionBlockBuilder`, `StagingPool`, `ResilientBlockUnpacker` internals
+- `tests/` — vulnerability and resilience test coverage
+- `benches/packing_bench.rs` — packing efficiency benchmarks
 
 ## WHEN CHANGING
-- Packing thresholds and chunk ordering affect `era-engine` write/read paths and index offsets.
-- `resilient_aead` heuristics are recovery policy, not generic crypto behavior; keep them aligned with `era-volume` shard validation.
-- Session builder changes must stay compatible with `KeySession` block-key derivation and engine checkpoint/resume logic.
+- Packing algorithm changes affect era-engine writer and reader flows.
+- 4-tier corruption detection (CRC flag → CRC re-verify → size check → all-same-byte heuristic) is a security contract; do not weaken it.
+- Small-file buffering is handled by `era-engine/src/small_file_packer.rs`; changes there may affect packing efficiency.
 
 ## VALIDATION
 ```bash
 cargo test -p era-packing
 cargo bench -p era-packing
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

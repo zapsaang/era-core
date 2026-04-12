@@ -1,6 +1,6 @@
 # era-engine crate
 
-Top-level archive orchestration across ingest, packing, crypto, volume, and index layers. See root `AGENTS.md` for workspace rules, `src/AGENTS.md` for pipeline internals, and `tests/AGENTS.md` for the 43-file Rust test surface.
+Top-level archive orchestration across ingest, packing, crypto, volume, and index layers. L4.
 
 ## SURFACES
 - `src/AGENTS.md` — writer/reader/recovery/checkpoint internals and stage decomposition files
@@ -18,3 +18,5 @@ cargo test -p era-engine
 cargo test -p era-engine --test fourth_audit
 cargo bench -p era-engine
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

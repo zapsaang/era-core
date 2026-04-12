@@ -1,19 +1,21 @@
 # era-codec crate
 
-Compression and Reed-Solomon building blocks used by packing, volume, and engine layers. See root `AGENTS.md` for workspace-wide rules and `src/AGENTS.md` for implementation detail.
+Compression (Zstd/LZ4) and Reed-Solomon erasure coding. L2.
 
 ## SURFACES
-- `src/AGENTS.md` — `compression.rs` and `erasure.rs`
-- `tests/` — adversarial coverage for codec boundaries
-- `benches/codec_bench.rs` and `benches/erasure_bench.rs` — throughput and shard-cost baselines
+- `src/AGENTS.md` — `Compressor` trait, `ErasureCoder`, `ErasureConfig` internals
+- `tests/` — adversarial compression and erasure coding coverage
+- `benches/codec_bench.rs`, `benches/erasure_bench.rs` — throughput benchmarks
 
 ## WHEN CHANGING
-- Compression defaults ripple into CLI UX and engine write/read throughput.
-- Erasure config validation here must stay consistent with `era-volume` shard layout and `era-engine` repair logic.
-- Keep public types (`Compressor`, `ErasureCoder`, `ErasureConfig`) small and stable; routing state machines live elsewhere.
+- Compression algorithm or level changes affect era-engine write throughput and archive size.
+- Erasure coding parameter changes (n data shards, n parity shards) affect data redundancy and repair capabilities.
+- Test with both small and large inputs; compression behavior differs significantly by input size.
 
 ## VALIDATION
 ```bash
 cargo test -p era-codec
 cargo bench -p era-codec
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

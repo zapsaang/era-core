@@ -1,6 +1,6 @@
 # era-volume crate
 
-On-disk format, multi-volume coordination, footer/header validation, and volume-pool rotation. See root `AGENTS.md` for workspace-wide rules, `src/AGENTS.md` for format internals, and `tests/AGENTS.md` for the large audit surface.
+On-disk format, multi-volume coordination, footer/header validation, and volume-pool rotation. L2.
 
 ## SURFACES
 - `src/AGENTS.md` — header/footer/layout, `VolumePool`, distribution helpers, and constants
@@ -18,3 +18,5 @@ cargo test -p era-volume
 cargo test -p era-volume --test adversarial_audit_v30
 cargo test -p era-volume --test property_tests
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

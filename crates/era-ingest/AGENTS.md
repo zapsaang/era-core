@@ -1,19 +1,20 @@
 # era-ingest crate
 
-File scanning, ACL capture, and FastCDC chunking entrypoints. See root `AGENTS.md` for workspace rules and `src/AGENTS.md` for module detail.
+File ingestion, FastCDC content-defined chunking, and directory scanning. L3.
 
 ## SURFACES
-- `src/AGENTS.md` — chunker variants, `FileReader`, `DirectoryScanner`, and ACL helpers
-- `tests/` — directory scanning, ignore handling, zero-copy integration, and ACL support
-- `benches/ingest_bench.rs` and `benches/streaming_memory_bench.rs` — chunking throughput and memory baselines
+- `src/AGENTS.md` — `Chunker`, `StreamingChunker`, `DirectoryScanner`, `FileReader` internals
+- `tests/` — zerocopy, directory scanning, and platform-specific ACL handling
+- `benches/ingest_bench.rs`, `benches/streaming_memory_bench.rs` — chunking throughput
 
 ## WHEN CHANGING
-- Chunk-size defaults ripple into packing efficiency, dedup hit rate, and CLI defaults.
-- ACL or filesystem metadata behavior must stay platform-aware and should not leak into higher layers.
-- Zero-copy and ring-buffer changes need extra scrutiny because they trade readability for throughput.
+- Chunking algorithm changes affect deduplication effectiveness and era-engine write throughput.
+- Platform-specific ACL handling (unix extensions) is gated behind cfg flags; test on both unix and windows.
 
 ## VALIDATION
 ```bash
 cargo test -p era-ingest
 cargo bench -p era-ingest
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

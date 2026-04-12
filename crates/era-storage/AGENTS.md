@@ -1,18 +1,18 @@
 # era-storage crate
 
-Async storage abstraction for local and in-memory backends. See root `AGENTS.md` for workspace rules and `src/AGENTS.md` for trait/module detail.
+Async storage backend abstraction. L1.
 
 ## SURFACES
-- `src/AGENTS.md` — `StorageBackend`, `StorageReader`, `StorageWriter`, and backend implementations
-- `tests/pwrite_test.rs` — integration coverage for write semantics
-- No benches or examples today
+- `src/AGENTS.md` — `StorageBackend` trait, `LocalStorageBackend`, `MemoryStorageBackend` internals
+- `tests/pwrite_test.rs` — storage backend write/read compliance
 
 ## WHEN CHANGING
-- Trait signature changes ripple into `era-volume` and `era-engine`.
-- Local backend semantics must stay async-friendly; blocking filesystem behavior belongs behind Tokio or backend boundaries.
-- New backends should preserve range-read, append, flush, and metadata expectations before higher layers depend on them.
+- New storage backends (S3, MinIO) should implement the `StorageBackend` trait.
+- Async I/O is mandatory; blocking I/O in storage paths violates the async contract.
 
 ## VALIDATION
 ```bash
 cargo test -p era-storage
 ```
+
+See root `AGENTS.md` for workspace-wide rules and anti-patterns.

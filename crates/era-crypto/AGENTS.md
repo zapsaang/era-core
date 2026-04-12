@@ -1,6 +1,6 @@
 # era-crypto crate
 
-Cryptographic primitives, key lifecycle, secure memory, and certificate/KEM helpers. See root `AGENTS.md` for workspace-wide security rules and `src/AGENTS.md` for module-level detail.
+Cryptographic primitives, key lifecycle, secure memory, and certificate/KEM helpers. L0.
 
 ## SURFACES
 - `src/AGENTS.md` — AEAD, KDF, `KeySession`, PEM, secure memory, and timestamp internals
@@ -20,3 +20,5 @@ cargo test -p era-crypto --test envelope_adversarial
 cargo test -p era-crypto --test context_binding_security
 cargo bench -p era-crypto
 ```
+
+See root `AGENTS.md` for workspace-wide security rules and anti-patterns.
