@@ -3160,6 +3160,73 @@ mod header_footer_recovery_tests {
             .assert()
             .success();
     }
+
+    /// When both primary and backup footers are corrupted, VolumeReader::open
+    /// falls back to the third-level floating footer reverse scan (reader.rs:143-204).
+    /// This test appends garbage after the primary footer (burying it) and corrupts
+    /// the backup footer at offset 4096, forcing the reverse scan to locate the
+    /// buried real footer within the last 1 MB of the file.
+    #[test]
+    fn test_both_footers_corrupted_floating_recovery() {
+        let temp = TempDir::new().unwrap();
+        let data = vec![0xBB; 64 * 1024];
+        let input = create_test_file(temp.path(), "float_rec.bin", &data);
+        let archive = temp.path().join("float_rec.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--no-compression",
+            ])
+            .assert()
+            .success();
+
+        // Append 512 bytes of 0xDE after the primary footer.
+        // This buries the real primary footer inside the file so that
+        // reading at new EOF-128 yields garbage.
+        // 0xDE does not match any byte in FOOTER_MAGIC [0x45,0x52,0x41,0x46].
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&archive).unwrap();
+            f.write_all(&[0xDE; 512]).unwrap();
+            f.flush().unwrap();
+        }
+
+        // Corrupt backup footer at offset 4096 (HEADER_SIZE).
+        // corrupt_archive_shard flips 100 bytes, destroying the "ERAF" magic.
+        corrupt_archive_shard(&archive, 4096);
+
+        // Extract — floating footer reverse scan should find the buried real footer
+        let out_dir = temp.path().join("out");
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "pwd",
+            ])
+            .assert()
+            .success();
+
+        let restored = fs::read(out_dir.join("float_rec.bin")).unwrap();
+        assert_eq!(
+            restored, data,
+            "floating footer recovery must produce correct data"
+        );
+
+        // Verify command should also succeed via the same recovery path
+        era_cmd()
+            .args(["verify", archive.to_str().unwrap(), "--password", "pwd"])
+            .assert()
+            .success();
+    }
 }
 
 // ===========================================================================
@@ -3676,6 +3743,101 @@ mod splicing_attack_tests {
         assert_eq!(
             restored, data_a,
             "spliced volume from different archive_id must not corrupt extracted data"
+        );
+    }
+
+    /// Existing splicing tests rely on archive_id mismatch at the header level.
+    /// If an attacker copies Archive A's header (including archive_id_A and
+    /// encrypted VK_A) onto Archive B, the header check passes. The AEAD layer
+    /// must still reject because blocks_B were encrypted with BK_B while the
+    /// reader derives BK_A from the forged header — key, nonce, and AAD all
+    /// differ, causing tag verification failure.
+    #[test]
+    fn test_aead_rejects_forged_header_with_matching_archive_id() {
+        let temp_a = TempDir::new().unwrap();
+        let temp_b = TempDir::new().unwrap();
+
+        let data_a = vec![0xAA; 256 * 1024];
+        let input_a = create_test_file(temp_a.path(), "forge_a.bin", &data_a);
+        let archive_a = temp_a.path().join("forge_a.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input_a.to_str().unwrap(),
+                "--output",
+                archive_a.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--no-compression",
+            ])
+            .assert()
+            .success();
+
+        let data_b = vec![0xBB; 256 * 1024];
+        let input_b = create_test_file(temp_b.path(), "forge_b.bin", &data_b);
+        let archive_b = temp_b.path().join("forge_b.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input_b.to_str().unwrap(),
+                "--output",
+                archive_b.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--no-compression",
+            ])
+            .assert()
+            .success();
+
+        // Graft Archive A's header (4096 bytes) onto Archive B.
+        // Backup footer at offset 4096 is untouched.
+        {
+            let header_a = {
+                let mut f = fs::File::open(&archive_a).unwrap();
+                let mut buf = vec![0u8; 4096];
+                f.read_exact(&mut buf).unwrap();
+                buf
+            };
+            let mut f = fs::OpenOptions::new().write(true).open(&archive_b).unwrap();
+            f.seek(SeekFrom::Start(0)).unwrap();
+            f.write_all(&header_a).unwrap();
+            f.flush().unwrap();
+        }
+
+        // Password "pwd" → MK_A → IK_A → unwrap VK_A → BK_A →
+        // decrypt blocks_B (encrypted with BK_B) → AEAD tag failure
+        let out_dir = temp_b.path().join("out");
+        let assert_result = era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive_b.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "pwd",
+            ])
+            .assert();
+
+        assert!(
+            !assert_result.get_output().status.success(),
+            "extraction must fail when header is forged from a different archive"
+        );
+
+        let stderr = String::from_utf8_lossy(&assert_result.get_output().stderr);
+        let stderr_lower = stderr.to_lowercase();
+        assert!(
+            stderr_lower.contains("decrypt")
+                || stderr_lower.contains("security")
+                || stderr_lower.contains("aead")
+                || stderr_lower.contains("tamper")
+                || stderr_lower.contains("integrity")
+                || stderr_lower.contains("corrupt")
+                || stderr_lower.contains("authentication"),
+            "AEAD rejection should cite decryption/integrity failure, got: {}",
+            stderr
         );
     }
 }
