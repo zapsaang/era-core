@@ -76,8 +76,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test -p era-cli
-        run: cargo test -p era-cli
+      - name: cargo test -p era-cli (release)
+        run: cargo test --release -p era-cli
 
   test-workspace:
     name: test-workspace
@@ -109,7 +109,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test --workspace
+      - name: cargo test --workspace (release)
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --workspace
+        run: cargo test --release --workspace
