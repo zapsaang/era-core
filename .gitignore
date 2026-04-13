@@ -32,8 +32,6 @@ Cargo.lock
 !CLAUDE.md
 
 fuzz/
-bins/
-!bins/era-cli/tests/cli_e2e_tests.rs
 **/bench_data/
 **/test_shell/
 .sisyphus/
