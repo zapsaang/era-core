@@ -803,7 +803,8 @@ fn l3_password_provider_swallows_errors() {
 // SECTION 12: DETERMINISTIC NONCE REUSE RISK
 // ============================================================================
 //
-// Block encryption uses encrypt_with_context(key, nonce_context, block_id, plaintext)
+// Block encryption uses encrypt_with_context(key, nonce_context, archive_id, epoch_id,
+// volume_index, block_id, plaintext)
 // which derives the nonce deterministically from (nonce_context, block_id).
 //
 // If an archive is re-created with the SAME password AND the SAME salt,
@@ -838,6 +839,7 @@ fn d1_deterministic_nonce_reuse_risk() {
                 &salt,
                 &TEST_ARCHIVE_ID,
                 TEST_EPOCH_ID,
+                0,
                 era_common::BlockId::new(1),
                 plaintext,
             )
@@ -847,6 +849,7 @@ fn d1_deterministic_nonce_reuse_risk() {
                 &salt,
                 &TEST_ARCHIVE_ID,
                 TEST_EPOCH_ID,
+                0,
                 era_common::BlockId::new(1),
                 plaintext,
             )

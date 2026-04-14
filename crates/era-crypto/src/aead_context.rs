@@ -29,15 +29,17 @@ pub trait AeadContext {
         nonce_context: &[u8; 16],
         archive_id: &[u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         block_id: BlockId,
         plaintext: &[u8],
     ) -> Result<Vec<u8>> {
         let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
 
-        let mut aad = [0u8; 28];
+        let mut aad = [0u8; 32];
         aad[0..16].copy_from_slice(archive_id);
         aad[16..20].copy_from_slice(&epoch_id.to_le_bytes());
-        aad[20..28].copy_from_slice(&block_id.sequence().to_le_bytes());
+        aad[20..24].copy_from_slice(&volume_index.to_le_bytes());
+        aad[24..32].copy_from_slice(&block_id.sequence().to_le_bytes());
 
         self.encrypt(&nonce, &aad, plaintext)
     }
@@ -48,15 +50,17 @@ pub trait AeadContext {
         nonce_context: &[u8; 16],
         archive_id: &[u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         block_id: BlockId,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
         let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
 
-        let mut aad = [0u8; 28];
+        let mut aad = [0u8; 32];
         aad[0..16].copy_from_slice(archive_id);
         aad[16..20].copy_from_slice(&epoch_id.to_le_bytes());
-        aad[20..28].copy_from_slice(&block_id.sequence().to_le_bytes());
+        aad[20..24].copy_from_slice(&volume_index.to_le_bytes());
+        aad[24..32].copy_from_slice(&block_id.sequence().to_le_bytes());
 
         self.decrypt(&nonce, &aad, ciphertext)
     }
@@ -192,6 +196,8 @@ impl CiphertextPacket {
 mod tests {
     use super::*;
 
+    const TEST_VOLUME_INDEX: u32 = 0;
+
     #[test]
     fn test_xchacha20_context() {
         let key = [0x42u8; 32];
@@ -236,6 +242,7 @@ mod tests {
                 &nonce_context,
                 &test_archive_id,
                 test_epoch_id,
+                TEST_VOLUME_INDEX,
                 block_id_100,
                 plaintext,
             )
@@ -246,6 +253,7 @@ mod tests {
             &nonce_context,
             &test_archive_id,
             test_epoch_id,
+            TEST_VOLUME_INDEX,
             block_id_200,
             &ciphertext,
         );
@@ -261,11 +269,49 @@ mod tests {
                 &nonce_context,
                 &test_archive_id,
                 test_epoch_id,
+                TEST_VOLUME_INDEX,
                 block_id_100,
                 &ciphertext,
             )
             .unwrap();
 
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_volume_index_binding_prevents_cross_volume_attack() {
+        let key = [0x42u8; 32];
+        let context = XChaCha20Poly1305Context::new(&key).unwrap();
+
+        let test_archive_id = [0x42u8; 16];
+        let test_epoch_id = 1u32;
+        let plaintext = b"secret data";
+        let block_id = BlockId::new(100);
+        let nonce_context = [0x11; 16];
+
+        let ciphertext = context
+            .encrypt_with_context(
+                &nonce_context,
+                &test_archive_id,
+                test_epoch_id,
+                0,
+                block_id,
+                plaintext,
+            )
+            .unwrap();
+
+        let result = context.decrypt_with_context(
+            &nonce_context,
+            &test_archive_id,
+            test_epoch_id,
+            1,
+            block_id,
+            &ciphertext,
+        );
+
+        assert!(
+            result.is_err(),
+            "AAD mismatch should cause cross-volume decryption failure"
+        );
     }
 }

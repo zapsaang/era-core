@@ -41,6 +41,7 @@ pub struct EncryptionContext {
     nonce_context: [u8; 16],
     archive_id: [u8; 16],
     epoch_id: u32,
+    volume_index: u32,
     /// Block ID counter for per-block key derivation
     next_block_id: AtomicU64,
 }
@@ -58,6 +59,7 @@ impl EncryptionContext {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        volume_index: u32,
     ) -> Self {
         Self {
             session,
@@ -65,6 +67,7 @@ impl EncryptionContext {
             nonce_context,
             archive_id,
             epoch_id,
+            volume_index,
             next_block_id: AtomicU64::new(0),
         }
     }
@@ -78,6 +81,7 @@ impl EncryptionContext {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         block_id: u64,
     ) -> Self {
         Self {
@@ -86,6 +90,7 @@ impl EncryptionContext {
             nonce_context,
             archive_id,
             epoch_id,
+            volume_index,
             next_block_id: AtomicU64::new(block_id),
         }
     }
@@ -145,6 +150,11 @@ impl EncryptionContext {
         self.epoch_id
     }
 
+    #[allow(dead_code)]
+    pub fn set_volume_index(&mut self, volume_index: u32) {
+        self.volume_index = volume_index;
+    }
+
     /// Create a SessionBlockBuilder configured with this context's keys.
     ///
     /// Returns an error if the block index would exceed u32::MAX,
@@ -154,6 +164,33 @@ impl EncryptionContext {
         compressor: Box<dyn Compressor>,
     ) -> era_common::Result<SessionBlockBuilder<'a>> {
         let block_id = self.next_block_id()?;
+        if block_id > MAX_BLOCK_INDEX {
+            return Err(EraError::IntegrityError(
+                "Block index exceeds maximum u32 capacity".into(),
+            ));
+        }
+        Ok(SessionBlockBuilder::new(
+            &self.session,
+            &self.volume_key,
+            self.nonce_context,
+            self.archive_id,
+            self.epoch_id,
+            self.volume_index,
+            compressor,
+        )
+        .with_starting_block_id(block_id))
+    }
+
+    /// Create a SessionBlockBuilder for an explicit volume/block pairing.
+    ///
+    /// This is used when the write path must rebind a block to a rotated volume
+    /// without consuming a new logical block ID.
+    pub fn create_block_builder_with_block_id<'a>(
+        &'a self,
+        compressor: Box<dyn Compressor>,
+        volume_index: u32,
+        block_id: u64,
+    ) -> era_common::Result<SessionBlockBuilder<'a>> {
         if block_id > MAX_BLOCK_INDEX {
             return Err(EraError::IntegrityError(format!(
                 "Block index {} exceeds maximum u32 capacity ({})",
@@ -166,6 +203,7 @@ impl EncryptionContext {
             self.nonce_context,
             self.archive_id,
             self.epoch_id,
+            volume_index,
             compressor,
         )
         .with_starting_block_id(block_id))
@@ -183,7 +221,7 @@ mod tests {
         let session = KeySession::new(b"test_password", &salt, &params).unwrap();
         let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let nonce_context = salt.as_bytes()[..16].try_into().unwrap();
-        EncryptionContext::new(session, volume_key, nonce_context, [0x11; 16], 1)
+        EncryptionContext::new(session, volume_key, nonce_context, [0x11; 16], 1, 0)
     }
 
     #[test]
@@ -209,6 +247,7 @@ mod tests {
             nonce_context,
             [0x22; 16],
             2,
+            0,
             100,
         );
         assert_eq!(ctx.next_block_id().unwrap(), 100);
@@ -229,6 +268,7 @@ mod tests {
             nonce_context,
             [0x33; 16],
             3,
+            0,
             MAX_BLOCK_INDEX,
         );
 

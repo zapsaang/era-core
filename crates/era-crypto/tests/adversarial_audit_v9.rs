@@ -8,6 +8,7 @@ use era_crypto::*;
 
 const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
 const TEST_EPOCH_ID: u32 = 1;
+const TEST_VOLUME_INDEX: u32 = 0;
 
 // ═══════════════════════════════════════════════════════════════════════
 // V9-C1: panic!() in HybridSecretKey::public_key() — unconditional abort
@@ -57,6 +58,7 @@ fn v9_c3a_aead_context_binding_prevents_cross_block_replay() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         plaintext,
     )
@@ -67,6 +69,7 @@ fn v9_c3a_aead_context_binding_prevents_cross_block_replay() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &ciphertext,
     )
@@ -82,6 +85,7 @@ fn v9_c3a_aead_context_binding_prevents_cross_block_replay() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id_2,
         &ciphertext,
     );
@@ -104,6 +108,7 @@ fn v9_c3b_aead_context_binding_prevents_cross_nonce_replay() {
         &nonce_context_1,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         plaintext,
     )
@@ -114,6 +119,7 @@ fn v9_c3b_aead_context_binding_prevents_cross_nonce_replay() {
         &nonce_context_2,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &ciphertext,
     );
@@ -323,6 +329,7 @@ fn v9_c10a_aead_ciphertext_bit_flip_detected() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         plaintext,
     )
@@ -337,6 +344,7 @@ fn v9_c10a_aead_ciphertext_bit_flip_detected() {
             &nonce_context,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &tampered,
         );
@@ -363,6 +371,7 @@ fn v9_c11a_aead_empty_plaintext() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         plaintext,
     )
@@ -372,6 +381,7 @@ fn v9_c11a_aead_empty_plaintext() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &ciphertext,
     )

@@ -36,6 +36,11 @@ use crate::SessionBlockBuilder;
 ///     &session,
 ///     &volume_key,
 ///     nonce_context,
+///     crate::BlockContext {
+///         archive_id,
+///         epoch_id,
+///         volume_index,
+///     },
 ///     compressor,
 ///     ErasureCodeConfig::new(4, 2),
 /// )?;
@@ -65,8 +70,7 @@ impl<'a> SessionErasureBlockBuilder<'a> {
         session: &'a KeySession,
         volume_key: &'a VolumeKey,
         nonce_context: [u8; 16],
-        archive_id: [u8; 16],
-        epoch_id: u32,
+        block_context: crate::BlockContext,
         compressor: Box<dyn Compressor>,
         erasure_config: ErasureCodeConfig,
     ) -> Result<Self> {
@@ -74,8 +78,9 @@ impl<'a> SessionErasureBlockBuilder<'a> {
             session,
             volume_key,
             nonce_context,
-            archive_id,
-            epoch_id,
+            block_context.archive_id,
+            block_context.epoch_id,
+            block_context.volume_index,
             compressor,
         );
 
@@ -209,9 +214,10 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         shards: Vec<(usize, bytes::Bytes)>,
         erasure_info: &era_common::ErasureBlockInfo,
         block_id: era_common::BlockId,
+        volume_index: u32,
     ) -> Result<ChunkVec> {
         let encrypted_block = self.decode_shards(shards, erasure_info, block_id)?;
-        let unpacked = self.inner.unpack(&encrypted_block)?;
+        let unpacked = self.inner.unpack(&encrypted_block, volume_index)?;
         crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
 
@@ -224,11 +230,12 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         shards: Vec<(usize, bytes::Bytes)>,
         erasure_info: &era_common::ErasureBlockInfo,
         block_id: era_common::BlockId,
+        volume_index: u32,
     ) -> Result<(ChunkVec, Vec<usize>)> {
         use crate::resilient_aead::ResilientBlockUnpacker;
 
         let resilient = ResilientBlockUnpacker::new(&self.inner);
-        resilient.unpack_resilient(shards, erasure_info, block_id)
+        resilient.unpack_resilient(shards, erasure_info, block_id, volume_index)
     }
 
     /// Decode CRC-verified shards with resilience to corruption.
@@ -241,11 +248,12 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         shards: Vec<era_common::VerifiedShard>,
         erasure_info: &era_common::ErasureBlockInfo,
         block_id: era_common::BlockId,
+        volume_index: u32,
     ) -> Result<(ChunkVec, Vec<usize>)> {
         use crate::resilient_aead::ResilientBlockUnpacker;
 
         let resilient = ResilientBlockUnpacker::new(&self.inner);
-        resilient.unpack_resilient_verified(shards, erasure_info, block_id)
+        resilient.unpack_resilient_verified(shards, erasure_info, block_id, volume_index)
     }
 
     /// Decode shards for a specific data shard index (virtual striping).
@@ -255,9 +263,10 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         erasure_info: &era_common::ErasureBlockInfo,
         block_id: era_common::BlockId,
         shard_index: usize,
+        volume_index: u32,
     ) -> Result<ChunkVec> {
         let encrypted_block = self.decode_shard(shards, erasure_info, block_id, shard_index)?;
-        let unpacked = self.inner.unpack(&encrypted_block)?;
+        let unpacked = self.inner.unpack(&encrypted_block, volume_index)?;
         crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
 
@@ -268,9 +277,10 @@ impl<'a> SessionErasureBlockUnpacker<'a> {
         erasure_info: &era_common::ErasureBlockInfo,
         block_id: era_common::BlockId,
         chunk_hash: &era_common::ChunkHash,
+        volume_index: u32,
     ) -> Result<Option<bytes::Bytes>> {
         let encrypted_block = self.decode_shards(shards, erasure_info, block_id)?;
-        let unpacked = self.inner.unpack(&encrypted_block)?;
+        let unpacked = self.inner.unpack(&encrypted_block, volume_index)?;
         crate::block_codec::extract_chunk_by_hash(&unpacked.index, &unpacked.data, chunk_hash)
     }
 
@@ -392,6 +402,7 @@ mod tests {
 
     const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
     const TEST_EPOCH_ID: u32 = 1;
+    const TEST_VOLUME_INDEX: u32 = 0;
 
     fn test_session() -> (KeySession, Salt) {
         let salt = Salt::generate();
@@ -415,8 +426,11 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            crate::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             compressor,
             config,
         )
@@ -446,8 +460,11 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            crate::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             compressor,
             config,
         )
@@ -481,8 +498,11 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            crate::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             compressor1,
             config,
         )
@@ -492,8 +512,11 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            crate::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             compressor2,
             config,
         )
@@ -525,8 +548,11 @@ mod tests {
             &session,
             &volume_key,
             *salt.as_bytes(),
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            crate::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             compressor,
             config,
         )

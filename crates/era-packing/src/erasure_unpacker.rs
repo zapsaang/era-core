@@ -26,9 +26,17 @@ impl ErasureBlockUnpacker {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         compressor: Box<dyn Compressor>,
     ) -> Self {
-        let inner = MacroBlockUnpacker::new(key, nonce_context, archive_id, epoch_id, compressor);
+        let inner = MacroBlockUnpacker::new(
+            key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            compressor,
+        );
         Self { inner }
     }
 
@@ -140,6 +148,8 @@ mod tests {
         (key, nonce_context, [7u8; 16], 1)
     }
 
+    const TEST_VOLUME_INDEX: u32 = 0;
+
     #[test]
     fn test_erasure_roundtrip_no_loss() {
         let (key, nonce_context, archive_id, epoch_id) = setup_keys();
@@ -159,6 +169,7 @@ mod tests {
             nonce_context,
             archive_id,
             epoch_id,
+            TEST_VOLUME_INDEX,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
         )
@@ -172,6 +183,7 @@ mod tests {
             nonce_context,
             archive_id,
             epoch_id,
+            TEST_VOLUME_INDEX,
             Box::new(ZstdCompressor::new(3)),
         );
 
@@ -212,6 +224,7 @@ mod tests {
             nonce_context,
             archive_id,
             epoch_id,
+            TEST_VOLUME_INDEX,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
         )
@@ -242,6 +255,7 @@ mod tests {
             nonce_context,
             archive_id,
             epoch_id,
+            TEST_VOLUME_INDEX,
             Box::new(ZstdCompressor::new(3)),
         );
 
@@ -273,6 +287,7 @@ mod tests {
             nonce_context,
             archive_id,
             epoch_id,
+            TEST_VOLUME_INDEX,
             Box::new(ZstdCompressor::new(3)),
             erasure_config,
         )
@@ -302,6 +317,7 @@ mod tests {
             nonce_context,
             archive_id,
             epoch_id,
+            TEST_VOLUME_INDEX,
             Box::new(ZstdCompressor::new(3)),
         );
 

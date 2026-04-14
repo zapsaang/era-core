@@ -23,10 +23,18 @@ impl ErasureBlockBuilder {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         compressor: Box<dyn era_codec::Compressor>,
         erasure_config: ErasureCodeConfig,
     ) -> Result<Self> {
-        let inner = MacroBlockBuilder::new(key, nonce_context, archive_id, epoch_id, compressor);
+        let inner = MacroBlockBuilder::new(
+            key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            compressor,
+        );
         let codec_config = ErasureConfig::new(
             erasure_config.data_shards as usize,
             erasure_config.parity_shards as usize,
@@ -104,6 +112,7 @@ mod tests {
 
     const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
     const TEST_EPOCH_ID: u32 = 1;
+    const TEST_VOLUME_INDEX: u32 = 0;
 
     fn test_key() -> DerivedKey {
         let salt = Salt::from_bytes([0u8; 16]);
@@ -126,6 +135,7 @@ mod tests {
             [0u8; 16],
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
             config,
         )
@@ -155,6 +165,7 @@ mod tests {
             [0u8; 16],
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
             config,
         )
@@ -188,6 +199,7 @@ mod tests {
             [0u8; 16],
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
             config,
         )

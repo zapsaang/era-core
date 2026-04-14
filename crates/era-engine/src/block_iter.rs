@@ -719,20 +719,22 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
 
             // Read and decrypt block with per-block key derivation
             let result = match self.volume_reader.read_block(&location).await {
-                Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
-                    Ok(chunks) => {
-                        self.stats.blocks_read += 1;
-                        Ok(DecodedBlock {
-                            block_index: self.block_index,
-                            chunks,
-                            corrupted_shards: 0,
-                        })
+                Ok(encrypted_block) => {
+                    match self.unpacker.extract_all_chunks(&encrypted_block, 0) {
+                        Ok(chunks) => {
+                            self.stats.blocks_read += 1;
+                            Ok(DecodedBlock {
+                                block_index: self.block_index,
+                                chunks,
+                                corrupted_shards: 0,
+                            })
+                        }
+                        Err(e) => {
+                            self.stats.blocks_failed += 1;
+                            Err(e)
+                        }
                     }
-                    Err(e) => {
-                        self.stats.blocks_failed += 1;
-                        Err(e)
-                    }
-                },
+                }
                 Err(e) => {
                     self.stats.blocks_failed += 1;
                     Err(e)
@@ -905,20 +907,22 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
             );
 
             let result = match reader.read_block(&location).await {
-                Ok(encrypted_block) => match self.unpacker.extract_all_chunks(&encrypted_block) {
-                    Ok(chunks) => {
-                        self.stats.blocks_read += 1;
-                        Ok(DecodedBlock {
-                            block_index: self.block_index,
-                            chunks,
-                            corrupted_shards: 0,
-                        })
+                Ok(encrypted_block) => {
+                    match self.unpacker.extract_all_chunks(&encrypted_block, 0) {
+                        Ok(chunks) => {
+                            self.stats.blocks_read += 1;
+                            Ok(DecodedBlock {
+                                block_index: self.block_index,
+                                chunks,
+                                corrupted_shards: 0,
+                            })
+                        }
+                        Err(e) => {
+                            self.stats.blocks_failed += 1;
+                            Err(e)
+                        }
                     }
-                    Err(e) => {
-                        self.stats.blocks_failed += 1;
-                        Err(e)
-                    }
-                },
+                }
                 Err(e) => {
                     self.stats.blocks_failed += 1;
                     Err(e)
@@ -1342,6 +1346,19 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
         for (i, shard_data) in recovered.into_iter().enumerate().take(data_shards) {
             let block_index = (self.current_stripe_index * data_shards + i) as u32;
+            let volume_index = match self.distribution_strategy.calculate_volume(
+                i,
+                self.current_stripe_index as u64,
+                self.original_volume_count,
+            ) {
+                Ok(volume_index) => volume_index as u32,
+                Err(e) => {
+                    self.pending_blocks.push_back(Err(e));
+                    self.stats.blocks_failed += 1;
+                    self.block_index += 1;
+                    continue;
+                }
+            };
             let build_candidate_lengths = |data: &[u8]| {
                 // Heuristic for recovered data-shard length:
                 // 1) Prefer explicit per-shard lengths (from headers) when available.
@@ -1401,7 +1418,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         chunk_count: 0,
                     };
 
-                    match self.unpacker.extract_all_chunks(&encrypted_block) {
+                    match self
+                        .unpacker
+                        .extract_all_chunks(&encrypted_block, volume_index)
+                    {
                         Ok(chunks) => {
                             return Some(chunks);
                         }
@@ -1489,7 +1509,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                             chunk_count: 0,
                         };
 
-                        match self.unpacker.extract_all_chunks(&encrypted_block) {
+                        match self
+                            .unpacker
+                            .extract_all_chunks(&encrypted_block, volume_index)
+                        {
                             Ok(chunks) => {
                                 decoded = Some(chunks);
                                 break;
@@ -1621,6 +1644,7 @@ mod tests {
             [0x11; 16],
             [0x22; 16],
             1,
+            0,
             Box::new(NoCompressor),
         );
 
@@ -1642,6 +1666,7 @@ mod tests {
             [0x33; 16],
             [0x44; 16],
             1,
+            0,
             Box::new(NoCompressor),
         );
 

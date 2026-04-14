@@ -17,6 +17,7 @@ pub struct MacroBlockUnpacker {
     nonce_context: [u8; 16],
     archive_id: [u8; 16],
     epoch_id: u32,
+    volume_index: u32,
 }
 
 impl MacroBlockUnpacker {
@@ -31,6 +32,7 @@ impl MacroBlockUnpacker {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         compressor: Box<dyn Compressor>,
     ) -> Self {
         Self {
@@ -39,16 +41,24 @@ impl MacroBlockUnpacker {
             nonce_context,
             archive_id,
             epoch_id,
+            volume_index,
         }
     }
 
     /// Decrypt and decompress a MacroBlock, returning raw data and index
     pub fn unpack(&self, block: &EncryptedMacroBlock) -> Result<UnpackedBlock> {
+        let decrypt_context = crate::DecryptContext {
+            key: &self.key,
+            nonce_context: &self.nonce_context,
+            block_context: crate::BlockContext {
+                archive_id: self.archive_id,
+                epoch_id: self.epoch_id,
+                volume_index: self.volume_index,
+            },
+        };
+
         let (index, data) = block_codec::decrypt_and_decompress(
-            &self.key,
-            &self.nonce_context,
-            &self.archive_id,
-            self.epoch_id,
+            &decrypt_context,
             block.block_id,
             &block.data,
             self.compressor.as_ref(),
@@ -118,6 +128,7 @@ mod tests {
 
     const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
     const TEST_EPOCH_ID: u32 = 1;
+    const TEST_VOLUME_INDEX: u32 = 0;
 
     #[test]
     fn test_pack_unpack_roundtrip() {
@@ -128,6 +139,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -143,6 +155,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
         let unpacked = unpacker.unpack(&encrypted).unwrap();
@@ -161,6 +174,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -181,6 +195,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
 
@@ -206,6 +221,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -229,6 +245,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
         let result = unpacker.unpack(&encrypted);
@@ -245,6 +262,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -268,6 +286,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
         let result = unpacker.unpack(&encrypted);
@@ -284,6 +303,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -300,6 +320,7 @@ mod tests {
             wrong_context,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
         let result = unpacker.unpack(&encrypted);
@@ -319,6 +340,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -337,6 +359,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
         let result = unpacker.unpack(&encrypted);

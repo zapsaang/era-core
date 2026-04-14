@@ -12,6 +12,7 @@ use era_crypto::{AeadCipher, AeadKey, Nonce};
 
 const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
 const TEST_EPOCH_ID: u32 = 1;
+const TEST_VOLUME_INDEX: u32 = 0;
 
 /// FINDING-CRYPTO-1: Deterministic encryption — same inputs = same ciphertext.
 /// This is the convergent encryption property. Verify it holds AND that
@@ -165,6 +166,7 @@ fn test_context_nonce_derivation_uniqueness() {
             &context,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             BlockId::new(i),
             plaintext,
         )

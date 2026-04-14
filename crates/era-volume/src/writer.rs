@@ -372,6 +372,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.header.volume_id()
     }
 
+    /// Get the volume sequence number (0-based position in multi-volume archive)
+    #[must_use]
+    pub fn volume_sequence(&self) -> u16 {
+        self.header.volume_sequence()
+    }
+
     pub fn update_total_volumes(&mut self, total: u16) {
         self.header.set_total_volumes(total);
     }

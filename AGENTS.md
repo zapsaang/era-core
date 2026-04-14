@@ -43,7 +43,7 @@ L0: era-crypto, era-common
 | NEVER log key material | Zero logging |
 | NEVER `unwrap()` in runtime | `Result<T, EraError>` + `?` |
 | NEVER circular deps between crates | Strict downward only |
-| NEVER skip AEAD context binding | `archive_id ‖ epoch_id ‖ block_index` |
+| NEVER skip AEAD context binding | `archive_id ‖ epoch_id ‖ volume_index ‖ block_index` |
 | NEVER persist IK to disk | Derive from MK at runtime |
 | NEVER `as any` type suppression | Proper type conversions |
 | NEVER block async runtime | `spawn_blocking` for CPU-heavy work |

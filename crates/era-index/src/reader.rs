@@ -359,6 +359,7 @@ impl IndexReader {
         // Now we use a 4-byte domain tag that clearly distinguishes index nonces.
         let mut index_nonce_context = nonce_context;
         index_nonce_context[0..4].copy_from_slice(b"IDX\x01");
+        let volume_index = volume_reader.header().volume_sequence() as u32;
 
         // Step 1: Try to read MetaIndex from footer (fast path)
         let meta = if let Some(footer) = volume_reader.footer() {
@@ -407,6 +408,7 @@ impl IndexReader {
                     &index_nonce_context,
                     &archive_id,
                     epoch_id,
+                    volume_index,
                     block_id,
                     &encrypted_block.data,
                 )?;
@@ -564,6 +566,7 @@ impl IndexReader {
                     &index_nonce_context,
                     &archive_id,
                     epoch_id,
+                    volume_index,
                     block_id,
                     &encrypted_block.data,
                 ) {
@@ -719,6 +722,7 @@ impl IndexReader {
                     &index_nonce_context,
                     &archive_id,
                     epoch_id,
+                    volume_index,
                     page_ptr.block_id(),
                     &encrypted_block.data,
                 ) {
@@ -965,6 +969,7 @@ impl IndexReader {
                     index_nonce_context,
                     archive_id,
                     epoch_id,
+                    volume_reader.header().volume_sequence() as u32,
                     page_ptr.block_id,
                     &encrypted_block.data,
                 ) {

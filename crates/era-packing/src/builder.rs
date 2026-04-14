@@ -20,6 +20,7 @@ pub struct MacroBlockBuilder {
     nonce_context: [u8; 16],
     archive_id: [u8; 16],
     epoch_id: u32,
+    volume_index: u32,
     /// Next block ID
     next_block_id: AtomicU64,
 }
@@ -40,6 +41,7 @@ impl MacroBlockBuilder {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         compressor: Box<dyn Compressor>,
     ) -> Self {
         Self {
@@ -49,6 +51,7 @@ impl MacroBlockBuilder {
             nonce_context,
             archive_id,
             epoch_id,
+            volume_index,
             next_block_id: AtomicU64::new(0),
         }
     }
@@ -111,6 +114,7 @@ impl MacroBlockBuilder {
             &self.nonce_context,
             &self.archive_id,
             self.epoch_id,
+            self.volume_index,
             block_id,
             &compressed,
         )?;
@@ -151,6 +155,7 @@ mod tests {
     const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
     const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
     const TEST_EPOCH_ID: u32 = 1;
+    const TEST_VOLUME_INDEX: u32 = 0;
 
     #[test]
     fn test_pack_single_chunk() {
@@ -161,6 +166,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -184,6 +190,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -215,6 +222,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -238,6 +246,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -257,6 +266,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 
@@ -279,6 +289,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         )
         .with_target_size(1024 * 1024); // 1MB
@@ -302,6 +313,7 @@ mod tests {
             [1u8; 16],
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor1,
         );
 
@@ -311,6 +323,7 @@ mod tests {
             [2u8; 16],
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor2,
         );
 
@@ -337,6 +350,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             compressor,
         );
 

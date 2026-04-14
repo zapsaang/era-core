@@ -8,11 +8,13 @@
 
 use era_codec::{Compressor, ErasureCoder, ErasureConfig, NoCompressor, ZstdCompressor};
 use era_common::{
-    BlockLocation, BlockType, ChunkHash, CompressionAlgorithm, CompressionConfig,
-    EncryptedMacroBlock, EraError, ErasureBlockInfo, Result, UniqueChunk,
+    BlockHeader, BlockLocation, BlockType, ChunkHash, CompressionAlgorithm, CompressionConfig,
+    EncryptedMacroBlock, EraError, ErasureBlockInfo, MatrixDistributionStrategy, Result,
+    UniqueChunk,
 };
 use era_packing::{BlockMeta, Stripe};
 use era_storage::StorageBackend;
+use era_volume::DistributionCalculator;
 
 use crate::encryption_context::EncryptionContext;
 use crate::erasure_stage::ErasureStage;
@@ -55,6 +57,10 @@ pub struct WritePipeline<B: StorageBackend> {
     index: IndexStage,
     /// Compression configuration
     compression_config: CompressionConfig,
+    /// Shard placement strategy used when erasure coding is enabled.
+    distribution_strategy: MatrixDistributionStrategy,
+    /// Next data-shard position within the in-flight stripe.
+    pending_erasure_shard_index: usize,
     /// Cached erasure coder: (data_shards, parity_shards, coder)
     /// Reused across stripes with matching RS parameters
     cached_erasure_coder: Option<(usize, usize, ErasureCoder)>,
@@ -75,6 +81,7 @@ impl<B: StorageBackend> WritePipeline<B> {
         volume: VolumeStage<B>,
         index: IndexStage,
         compression_config: CompressionConfig,
+        distribution_strategy: MatrixDistributionStrategy,
     ) -> Self {
         Self {
             encryption,
@@ -82,6 +89,8 @@ impl<B: StorageBackend> WritePipeline<B> {
             volume,
             index,
             compression_config,
+            distribution_strategy,
+            pending_erasure_shard_index: 0,
             cached_erasure_coder: None,
         }
     }
@@ -104,11 +113,47 @@ impl<B: StorageBackend> WritePipeline<B> {
     ) -> Result<()> {
         let mut hashes: Vec<ChunkHash> = chunks.iter().map(|c| c.hash).collect();
         hashes.extend(extra_hashes);
+        let retry_chunks =
+            (!self.erasure.is_enabled() && self.volume.volume_count() == 1).then(|| chunks.clone());
 
         // Create encrypted block
+        let active_volume_sequence = if self.erasure.is_enabled() {
+            let shard_slot = self.distribution_strategy.calculate_volume(
+                self.pending_erasure_shard_index,
+                self.volume.block_sequence(),
+                self.volume.volume_count(),
+            )?;
+            self.volume.volume_sequence(shard_slot).ok_or_else(|| {
+                EraError::InvalidFormat(format!(
+                    "Missing volume sequence for shard slot {}",
+                    shard_slot
+                ))
+            })? as u32
+        } else {
+            0u32
+        };
+        self.encryption.set_volume_index(active_volume_sequence);
         let compressor = self.create_compressor();
         let builder = self.encryption.create_block_builder(compressor)?;
-        let encrypted_block = builder.pack_chunks(chunks)?;
+        let mut encrypted_block = builder.pack_chunks(chunks)?;
+
+        if !self.erasure.is_enabled() && self.volume.volume_count() == 1 {
+            let total_size = BlockHeader::SIZE as u64 + encrypted_block.data.len() as u64;
+            if self.volume.needs_expansion(total_size)? {
+                self.encryption.set_volume_index(0);
+                let compressor = self.create_compressor();
+                let builder = self.encryption.create_block_builder_with_block_id(
+                    compressor,
+                    0,
+                    encrypted_block.block_id.sequence(),
+                )?;
+                encrypted_block = builder.pack_chunks(retry_chunks.ok_or_else(|| {
+                    EraError::IntegrityError(
+                        "retry chunk buffer unavailable during volume rebinding".into(),
+                    )
+                })?)?;
+            }
+        }
 
         if self.erasure.is_enabled() {
             let block_meta = BlockMeta {
@@ -118,7 +163,10 @@ impl<B: StorageBackend> WritePipeline<B> {
             // Erasure Coding Path: buffer block until stripe is complete
             let maybe_stripe = self.erasure.buffer_block(encrypted_block, block_meta)?;
             if let Some(stripe) = maybe_stripe {
+                self.pending_erasure_shard_index = 0;
                 self.flush_stripe_internal(stripe).await?;
+            } else {
+                self.pending_erasure_shard_index += 1;
             }
         } else {
             // Non-erasure path: write directly
@@ -142,6 +190,7 @@ impl<B: StorageBackend> WritePipeline<B> {
     /// blocks are written (with padding if necessary).
     pub async fn flush_stripe(&mut self) -> Result<()> {
         if let Some(stripe) = self.erasure.flush()? {
+            self.pending_erasure_shard_index = 0;
             self.flush_stripe_internal(stripe).await?;
         }
         Ok(())
@@ -175,6 +224,18 @@ impl<B: StorageBackend> WritePipeline<B> {
                 stripe_lengths[i] = stripe.data_blocks[i].data.len() as u32;
             } else {
                 // Create padding block for partial stripe
+                let shard_slot = self.distribution_strategy.calculate_volume(
+                    i,
+                    self.volume.block_sequence(),
+                    volume_count,
+                )?;
+                let volume_sequence = self.volume.volume_sequence(shard_slot).ok_or_else(|| {
+                    EraError::InvalidFormat(format!(
+                        "Missing volume sequence for padding shard slot {}",
+                        shard_slot
+                    ))
+                })? as u32;
+                self.encryption.set_volume_index(volume_sequence);
                 let compressor = self.create_compressor();
                 let builder = self.encryption.create_block_builder(compressor)?;
                 let encrypted_block = builder.pack_chunks(vec![])?;
@@ -403,6 +464,11 @@ impl<B: StorageBackend> WritePipeline<B> {
         &self.encryption
     }
 
+    /// Get a mutable reference to the encryption context.
+    pub fn encryption_mut(&mut self) -> &mut EncryptionContext {
+        &mut self.encryption
+    }
+
     /// Get a reference to the erasure stage.
     #[allow(dead_code)]
     pub fn erasure(&self) -> &ErasureStage {
@@ -464,7 +530,7 @@ mod tests {
         let session = KeySession::new(b"test_password", &salt, &params).unwrap();
         let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
         let nonce_context = salt.as_bytes()[..16].try_into().unwrap();
-        EncryptionContext::new(session, volume_key, nonce_context, [0xAA; 16], 1)
+        EncryptionContext::new(session, volume_key, nonce_context, [0xAA; 16], 1, 0)
     }
 
     fn create_test_header() -> SuperHeader {
@@ -509,7 +575,14 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
+        let mut pipeline = WritePipeline::new(
+            encryption,
+            erasure,
+            volume,
+            index,
+            compression,
+            MatrixDistributionStrategy::default(),
+        );
 
         // Process a chunk
         let chunk = create_test_chunk(b"Hello, World!");
@@ -540,7 +613,14 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
+        let mut pipeline = WritePipeline::new(
+            encryption,
+            erasure,
+            volume,
+            index,
+            compression,
+            MatrixDistributionStrategy::default(),
+        );
 
         // Process a chunk with extra hashes (simulating packed small files)
         let chunk = create_test_chunk(b"Packed data");
@@ -572,7 +652,14 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
+        let mut pipeline = WritePipeline::new(
+            encryption,
+            erasure,
+            volume,
+            index,
+            compression,
+            MatrixDistributionStrategy::default(),
+        );
 
         assert!(pipeline.erasure_enabled());
 

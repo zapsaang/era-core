@@ -28,6 +28,7 @@ use era_crypto::{
 
 const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
 const TEST_EPOCH_ID: u32 = 1;
+const TEST_VOLUME_INDEX: u32 = 0;
 
 /// Fast KDF params for testing (DO NOT use in production)
 fn test_kdf_params() -> KdfParams {
@@ -75,6 +76,7 @@ fn test_attack_cross_volume_block_injection() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &plaintext,
     )
@@ -90,6 +92,7 @@ fn test_attack_cross_volume_block_injection() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &ciphertext_from_a,
     );
@@ -122,6 +125,7 @@ fn test_attack_block_offset_manipulation() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id_100,
         &plaintext,
     )
@@ -137,6 +141,7 @@ fn test_attack_block_offset_manipulation() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id_200,
         &ciphertext_at_100,
     );
@@ -169,6 +174,7 @@ fn test_attack_nonce_context_tampering() {
         &nonce_context_a,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &plaintext,
     )
@@ -181,6 +187,7 @@ fn test_attack_nonce_context_tampering() {
         &nonce_context_b,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &ciphertext,
     );
@@ -218,6 +225,7 @@ fn test_attack_mixed_volume_and_block_context() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &plaintext,
     )
@@ -233,6 +241,7 @@ fn test_attack_mixed_volume_and_block_context() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &ciphertext_from_a,
     );
@@ -271,6 +280,7 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &plaintext,
     )
@@ -282,6 +292,7 @@ fn test_legitimate_encrypt_decrypt_with_full_context() {
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        TEST_VOLUME_INDEX,
         block_id,
         &ciphertext,
     )
@@ -323,80 +334,64 @@ fn test_volume_uuid_affects_derived_keys() {
 }
 
 // ============================================================================
-// FORENSIC TEST: Demonstrate Current Vulnerability (Before Fix)
+// FORENSIC TEST: Cross-Volume Block Injection with Reused VK
 // ============================================================================
 
 #[test]
-#[ignore] // LEFT IGNORED: test premise is flawed — generate_and_wrap_volume_key uses OsRng so different VKs → different block keys; no vulnerability manifests. Real defense-in-depth (volume identity in AAD) is a format-breaking change requiring archive version bump.
 fn test_demonstrate_current_vulnerability() {
-    // This test documents the CURRENT state before the fix.
-    // It should PASS before the fix (showing the vulnerability exists)
-    // and FAIL after the fix (showing we've closed the hole).
-    //
-    // Run with: cargo test test_demonstrate_current_vulnerability -- --ignored
-
-    println!("\n=== DEMONSTRATING VULNERABILITY ===\n");
-
+    // This proves volume_index in AAD blocks cross-volume block injection even if
+    // a bug reuses the same volume key across volumes and therefore produces the
+    // same block key for the same block index and nonce context.
     let session = KeySession::from_derived_key(&test_master_key()).unwrap();
 
-    // Two different volumes
-    let volume_a_key = session.generate_and_wrap_volume_key().unwrap().0;
-    let volume_b_key = session.generate_and_wrap_volume_key().unwrap().0;
+    let shared_volume_key = session.generate_and_wrap_volume_key().unwrap().0;
 
     let block_id = BlockId::new(0);
     let nonce_context = [0x99; 16];
+    let volume_index_a = 0;
+    let volume_index_b = 1;
 
-    // Encrypt in Volume A
     let plaintext = Bytes::from(b"SECRET DATA FROM VOLUME A".to_vec());
-    let block_key_a = session
-        .derive_block_key(&volume_a_key, block_id.sequence(), &nonce_context)
+    let shared_block_key = session
+        .derive_block_key(&shared_volume_key, block_id.sequence(), &nonce_context)
         .unwrap();
 
-    println!("Volume A Block Key: {:?}", block_key_a.as_bytes());
-
     let ciphertext = encrypt_with_context(
-        &block_key_a.to_derived_key().unwrap(),
+        &shared_block_key.to_derived_key().unwrap(),
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        volume_index_a,
         block_id,
         &plaintext,
     )
     .unwrap();
 
-    println!("Encrypted {} bytes", ciphertext.len());
-
-    // Derive key for Volume B at same block
-    let block_key_b = session
-        .derive_block_key(&volume_b_key, block_id.sequence(), &nonce_context)
-        .unwrap();
-
-    println!("Volume B Block Key: {:?}", block_key_b.as_bytes());
-
-    // Check if keys are different
-    if block_key_a.as_bytes() == block_key_b.as_bytes() {
-        println!("\n🚨 VULNERABILITY CONFIRMED: Keys are IDENTICAL across volumes!");
-        println!("An encrypted block from Volume A can be injected into Volume B.\n");
-    } else {
-        println!("\n✅ Keys are different. Attempting decryption...\n");
-    }
-
-    // Try to decrypt in Volume B
-    match decrypt_with_context(
-        &block_key_b.to_derived_key().unwrap(),
+    let wrong_volume_result = decrypt_with_context(
+        &shared_block_key.to_derived_key().unwrap(),
         &nonce_context,
         &TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        volume_index_b,
         block_id,
         &ciphertext,
-    ) {
-        Ok(decrypted) => {
-            println!("🚨 VULNERABILITY CONFIRMED: Decryption succeeded in wrong volume!");
-            println!("Decrypted: {:?}", String::from_utf8_lossy(&decrypted));
-            panic!("Cross-volume decryption should have failed!");
-        }
-        Err(e) => {
-            println!("✅ SECURE: Decryption failed as expected: {}", e);
-        }
-    }
+    );
+
+    assert!(
+        wrong_volume_result.is_err(),
+        "Cross-volume decryption must fail when volume_index changes"
+    );
+
+    let decrypted = decrypt_with_context(
+        &shared_block_key.to_derived_key().unwrap(),
+        &nonce_context,
+        &TEST_ARCHIVE_ID,
+        TEST_EPOCH_ID,
+        volume_index_a,
+        block_id,
+        &ciphertext,
+    )
+    .unwrap();
+
+    assert_eq!(decrypted, plaintext);
 }

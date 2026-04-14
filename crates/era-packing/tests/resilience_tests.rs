@@ -36,6 +36,7 @@ mod aead_resilience {
 
     const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
     const TEST_EPOCH_ID: u32 = 1;
+    const TEST_VOLUME_INDEX: u32 = 0;
 
     #[test]
     fn test_resilient_unpacker_exists() {
@@ -54,8 +55,11 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            era_packing::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             Box::new(ZstdCompressor::default()),
             ErasureCodeConfig::new(4, 2),
         )
@@ -96,6 +100,7 @@ mod aead_resilience {
                     shard_size: 0,
                 },
                 sharded.block_id,
+                TEST_VOLUME_INDEX,
             )
             .unwrap();
 
@@ -112,8 +117,11 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            era_packing::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             Box::new(ZstdCompressor::default()),
             ErasureCodeConfig::new(4, 2),
         )
@@ -152,6 +160,7 @@ mod aead_resilience {
                     shard_size: 0,
                 },
                 sharded.block_id,
+                TEST_VOLUME_INDEX,
             )
             .unwrap();
 
@@ -168,8 +177,11 @@ mod aead_resilience {
             &session,
             &volume_key,
             nonce_context,
-            TEST_ARCHIVE_ID,
-            TEST_EPOCH_ID,
+            era_packing::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
             Box::new(ZstdCompressor::default()),
             ErasureCodeConfig::new(4, 2), // Can recover from 2 shard losses max
         )
@@ -205,6 +217,7 @@ mod aead_resilience {
                 shard_size: 0,
             },
             sharded.block_id,
+            TEST_VOLUME_INDEX,
         );
 
         // Should fail with ErasureError

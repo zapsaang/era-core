@@ -912,6 +912,13 @@ impl<B: StorageBackend> VolumePool<B> {
         self.sequences.get(slot).copied()
     }
 
+    /// Get the volume sequence for the next canonical block write target.
+    #[must_use]
+    pub fn next_canonical_volume_sequence(&self) -> Option<u16> {
+        let slot = (self.block_sequence as usize) % self.writers.len().max(1);
+        self.sequences.get(slot).copied()
+    }
+
     /// Add a new volume to the pool.
     ///
     /// This is called when all existing volumes are full and more space is needed.

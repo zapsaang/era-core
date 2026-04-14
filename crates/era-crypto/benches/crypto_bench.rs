@@ -10,6 +10,7 @@ use std::hint::black_box;
 
 const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
 const TEST_EPOCH_ID: u32 = 1;
+const TEST_VOLUME_INDEX: u32 = 0;
 
 /// Create a test key with fast KDF parameters (for benchmarking encryption, not KDF)
 fn fast_test_key() -> DerivedKey {
@@ -96,6 +97,7 @@ fn bench_aead_encrypt(c: &mut Criterion) {
                     &nonce_context,
                     &TEST_ARCHIVE_ID,
                     TEST_EPOCH_ID,
+                    TEST_VOLUME_INDEX,
                     block_id,
                     data,
                 )
@@ -163,6 +165,7 @@ fn bench_aead_decrypt(c: &mut Criterion) {
             &nonce_context,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &plaintext,
         )
@@ -176,6 +179,7 @@ fn bench_aead_decrypt(c: &mut Criterion) {
                     &nonce_context,
                     &TEST_ARCHIVE_ID,
                     TEST_EPOCH_ID,
+                    TEST_VOLUME_INDEX,
                     block_id,
                     data,
                 )

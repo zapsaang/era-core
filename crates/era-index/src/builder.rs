@@ -287,6 +287,7 @@ impl IndexBuilder {
         let mut encrypted_blocks: Vec<(EncryptedMacroBlock, ChunkHash, ChunkHash, BlockId)> =
             Vec::with_capacity(estimated_pages);
         let mut block_id_counter = starting_block_id;
+        let volume_index = volume_writer.volume_sequence() as u32;
         {
             let idx_nonce = index_nonce_context;
             self.store.for_each_sorted_page(|page, _page_block_id| {
@@ -304,6 +305,7 @@ impl IndexBuilder {
                     &idx_nonce,
                     &self.archive_id,
                     self.epoch_id,
+                    volume_index,
                     block_id,
                     &page_bytes,
                 )?;
@@ -378,6 +380,7 @@ impl IndexBuilder {
             &index_nonce_context,
             &self.archive_id,
             self.epoch_id,
+            volume_index,
             manifest_block_id,
             &meta_bytes,
         )?;

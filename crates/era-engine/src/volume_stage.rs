@@ -56,6 +56,21 @@ impl<B: StorageBackend> VolumeStage<B> {
         self.pool.block_sequence()
     }
 
+    /// Get the current sequence number for a volume slot.
+    pub fn volume_sequence(&self, slot: usize) -> Option<u16> {
+        self.pool.volume_sequence(slot)
+    }
+
+    /// Get the volume sequence for the next canonical block write target.
+    pub fn next_canonical_volume_sequence(&self) -> Option<u16> {
+        self.pool.next_canonical_volume_sequence()
+    }
+
+    /// Check whether a canonical block would force volume expansion/rotation.
+    pub fn needs_expansion(&self, required_size: u64) -> Result<bool> {
+        self.pool.needs_expansion(required_size)
+    }
+
     /// Write a single canonical block (non-erasure path).
     ///
     /// This writes a block using the BlockHeader format directly to storage.

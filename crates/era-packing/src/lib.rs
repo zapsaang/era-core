@@ -29,11 +29,19 @@ mod staging_pool;
 mod stripe;
 mod unpacker;
 
+#[derive(Clone, Copy, Debug)]
+pub struct BlockContext {
+    pub archive_id: [u8; 16],
+    pub epoch_id: u32,
+    pub volume_index: u32,
+}
+
 #[cfg(test)]
 mod test_helpers;
 
 pub use block_codec::{
     create_compressor, decrypt_and_decompress, extract_all_chunks, extract_chunk_by_hash,
+    DecryptContext,
 };
 pub use builder::MacroBlockBuilder;
 pub use erasure_builder::ErasureBlockBuilder;

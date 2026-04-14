@@ -889,7 +889,8 @@ impl ArchiveReader {
             .await?;
 
         let unpacker = self.create_unpacker();
-        let chunks = unpacker.unpack(&encrypted_block)?;
+        // Catalog is always encrypted with volume_index=0 (written once, replicated to all volumes)
+        let chunks = unpacker.unpack(&encrypted_block, 0)?;
 
         if chunks.index.entries.is_empty() {
             return Err(EraError::EmptyCatalog);
@@ -948,7 +949,9 @@ impl ArchiveReader {
                         .await?;
 
                     let block_unpacker = self.create_unpacker();
-                    let block_chunks = block_unpacker.unpack(&enc_block)?;
+                    let block_chunks = block_unpacker.unpack(
+                        &enc_block, 0, // catalog encrypted with volume_index=0
+                    )?;
 
                     if !block_chunks.index.entries.is_empty() {
                         let entry = &block_chunks.index.entries[0];
@@ -1111,11 +1114,18 @@ impl ArchiveReader {
             let block_id = BlockId::new(location.slot_index as u64);
             // Create temporary session-based erasure unpacker
             let erasure_unpacker = self.create_erasure_unpacker();
+            let volume_index = self
+                .volume_readers
+                .iter()
+                .find(|r| r.header().volume_id() == location.volume_id)
+                .map(|r| r.header().volume_sequence() as u32)
+                .unwrap_or(0);
             erasure_unpacker.decode_and_extract_all_for_shard(
                 available_shards,
                 erasure_info,
                 block_id,
                 my_shard_idx,
+                volume_index,
             )
         } else {
             // Standard block: read and unpack directly with session-based unpacker
@@ -1126,7 +1136,7 @@ impl ArchiveReader {
                 .unwrap_or(&self.volume_readers[0]);
             let encrypted_block = reader.read_block(location).await?;
             let unpacker = self.create_unpacker();
-            let unpacked = unpacker.unpack(&encrypted_block)?;
+            let unpacked = unpacker.unpack(&encrypted_block, 0)?;
 
             // Extract all chunks using consolidated helpers
             era_packing::extract_all_chunks(&unpacked.index, &unpacked.data)

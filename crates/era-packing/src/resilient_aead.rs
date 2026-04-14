@@ -52,6 +52,7 @@ impl<'a> ResilientBlockUnpacker<'a> {
         shards: Vec<(usize, Bytes)>,
         erasure_info: &ErasureBlockInfo,
         block_id: BlockId,
+        volume_index: u32,
     ) -> Result<(ChunkVec, Vec<usize>)> {
         // Convert to VerifiedShard without CRC info (legacy path)
         let verified: Vec<VerifiedShard> = shards
@@ -66,7 +67,7 @@ impl<'a> ResilientBlockUnpacker<'a> {
                 }
             })
             .collect();
-        self.unpack_resilient_verified(verified, erasure_info, block_id)
+        self.unpack_resilient_verified(verified, erasure_info, block_id, volume_index)
     }
 
     /// Attempt decryption with resilience using CRC-verified shards.
@@ -78,6 +79,7 @@ impl<'a> ResilientBlockUnpacker<'a> {
         shards: Vec<VerifiedShard>,
         erasure_info: &ErasureBlockInfo,
         block_id: BlockId,
+        volume_index: u32,
     ) -> Result<(ChunkVec, Vec<usize>)> {
         let parity_shards = erasure_info.parity_shards as usize;
 
@@ -92,7 +94,7 @@ impl<'a> ResilientBlockUnpacker<'a> {
             if let Ok(encrypted_block) =
                 self.recover_encrypted_block(&valid_shards, erasure_info, block_id)
             {
-                if let Ok(unpacked) = self.session_unpacker.unpack(&encrypted_block) {
+                if let Ok(unpacked) = self.session_unpacker.unpack(&encrypted_block, volume_index) {
                     if let Ok(chunks) =
                         crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
                     {
@@ -148,7 +150,7 @@ impl<'a> ResilientBlockUnpacker<'a> {
             self.recover_encrypted_block(&recovered_shards, erasure_info, block_id)?;
 
         // Step 5: Retry decryption on reconstructed block
-        match self.session_unpacker.unpack(&encrypted_block) {
+        match self.session_unpacker.unpack(&encrypted_block, volume_index) {
             Ok(unpacked) => {
                 let chunks =
                     crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)?;

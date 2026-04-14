@@ -965,6 +965,7 @@ impl ArchiveWriterBuilder {
             nonce_context,
             *active_header.archive_id().0.as_bytes(),
             active_header.epoch_id(),
+            active_header.volume_sequence() as u32,
             next_block_id,
         );
 
@@ -988,6 +989,7 @@ impl ArchiveWriterBuilder {
             volume,
             index,
             config.compression.clone(),
+            config.distribution.strategy,
         );
 
         Ok(ArchiveWriter {
@@ -1681,10 +1683,11 @@ impl ArchiveWriter {
             let chunk_data = Bytes::from(first_chunk_prefix.clone());
             let hash = era_crypto::hash(&chunk_data);
             let chunk = UniqueChunk::new(chunk_data, hash);
+            self.pipeline.encryption_mut().set_volume_index(0);
             let compressor = self.pipeline.create_compressor();
             let builder = self
                 .pipeline
-                .encryption()
+                .encryption_mut()
                 .create_block_builder(compressor)?;
             let block = builder.pack_single(chunk)?;
             first_block_id = block.block_id.sequence() as u32;
@@ -1703,10 +1706,11 @@ impl ArchiveWriter {
                 let hash = era_crypto::hash(&chunk_data);
                 let chunk = UniqueChunk::new(chunk_data, hash);
 
+                self.pipeline.encryption_mut().set_volume_index(0);
                 let compressor = self.pipeline.create_compressor();
                 let builder = self
                     .pipeline
-                    .encryption()
+                    .encryption_mut()
                     .create_block_builder(compressor)?;
                 let block = builder.pack_single(chunk)?;
 
@@ -1732,10 +1736,11 @@ impl ArchiveWriter {
                 };
                 let hash = era_crypto::hash(&chunk_data);
                 let chunk = UniqueChunk::new(chunk_data, hash);
+                self.pipeline.encryption_mut().set_volume_index(0);
                 let compressor = self.pipeline.create_compressor();
                 let builder = self
                     .pipeline
-                    .encryption()
+                    .encryption_mut()
                     .create_block_builder(compressor)?;
                 backups.push(builder.pack_single(chunk)?);
             }
@@ -2296,6 +2301,7 @@ pub mod generic {
                 nonce_context,
                 *archive_id.0.as_bytes(),
                 epoch_id,
+                0,
             );
 
             Ok(GenericArchiveWriter {
@@ -2399,6 +2405,8 @@ pub mod generic {
             let hashes: Vec<_> = packed.chunks.iter().map(|c| c.hash).collect();
 
             // Create session-based builder for this block
+            self.encryption
+                .set_volume_index(self.volume_writer.volume_sequence() as u32);
             let compressor = self.create_compressor();
             let block_builder = self.encryption.create_block_builder(compressor)?;
 
@@ -2438,6 +2446,8 @@ pub mod generic {
             let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
 
             // Create session-based builder for catalog encryption
+            self.encryption
+                .set_volume_index(self.volume_writer.volume_sequence() as u32);
             let compressor = self.create_compressor();
             let catalog_builder = self.encryption.create_block_builder(compressor)?;
 

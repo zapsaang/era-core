@@ -190,7 +190,7 @@ Dependencies flow downward only — no upward or circular references:
 │  Data Region (Encrypted Blocks)                              │
 │  - Packed chunks with erasure shards                         │
 │  - AEAD encrypted with per-block derived keys                │
-│  - AAD = archive_id ‖ epoch_id ‖ block_index (context-bound)│
+│  - AAD = archive_id ‖ epoch_id ‖ volume_index ‖ block_index │
 │  - V2.1 Index Pages (Bloom + L1/L2) embedded as typed blocks │
 ├──────────────────────────────────────────────────────────────┤
 │  Backup Header (4096 bytes)                                  │
@@ -245,7 +245,7 @@ Layer 3: Volume Key (VK)
 - **Memory hygiene**: All key material (MK, IK, VK) zeroized on drop via `zeroize` crate
 - **No key logging**: Key material never appears in any log level including TRACE
 - **AEAD integrity**: Tag verification failure returns `EraError::Security("Key Tampering Detected")`
-- **Context-bound AEAD**: All encryption binds `archive_id ‖ epoch_id ‖ block_index` as AAD — blocks cannot be spliced between archives or reordered within one
+- **Context-bound AEAD**: All encryption binds `archive_id ‖ epoch_id ‖ volume_index ‖ block_index` as AAD — blocks cannot be spliced between archives, volumes, or reordered within one
 - **Header validation**: Corrupted magic bytes cause hard failure (no silent recovery)
 - **Threshold enforcement**: Reader rejects `Threshold(T<2)` to prevent policy downgrade
 - **Erasure validation**: Extraction fails explicitly when insufficient shards are available

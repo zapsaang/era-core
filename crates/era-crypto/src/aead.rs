@@ -122,11 +122,19 @@ pub fn encrypt_with_context(
     nonce_context: &[u8; 16],
     archive_id: &[u8; 16],
     epoch_id: u32,
+    volume_index: u32,
     block_id: BlockId,
     plaintext: &[u8],
 ) -> Result<Bytes> {
     XChaCha20Poly1305Context::from_derived_key(key)?
-        .encrypt_with_context(nonce_context, archive_id, epoch_id, block_id, plaintext)
+        .encrypt_with_context(
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            block_id,
+            plaintext,
+        )
         .map(Bytes::from)
 }
 
@@ -136,11 +144,19 @@ pub fn decrypt_with_context(
     nonce_context: &[u8; 16],
     archive_id: &[u8; 16],
     epoch_id: u32,
+    volume_index: u32,
     block_id: BlockId,
     ciphertext: &[u8],
 ) -> Result<Bytes> {
     XChaCha20Poly1305Context::from_derived_key(key)?
-        .decrypt_with_context(nonce_context, archive_id, epoch_id, block_id, ciphertext)
+        .decrypt_with_context(
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            block_id,
+            ciphertext,
+        )
         .map(Bytes::from)
 }
 
@@ -153,6 +169,7 @@ mod tests {
     const TEST_NONCE_CONTEXT: [u8; 16] = [42u8; 16];
     const TEST_ARCHIVE_ID: [u8; 16] = [0x42u8; 16];
     const TEST_EPOCH_ID: u32 = 1;
+    const TEST_VOLUME_INDEX: u32 = 0;
 
     fn test_key_with_salt(salt_byte: u8) -> DerivedKey {
         derive_key(
@@ -182,6 +199,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -191,6 +209,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &ciphertext,
         )
@@ -210,6 +229,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -219,6 +239,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -238,6 +259,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             BlockId::new(1),
             plaintext,
         )
@@ -247,6 +269,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             BlockId::new(2),
             plaintext,
         )
@@ -270,6 +293,7 @@ mod tests {
             &context1,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -279,6 +303,7 @@ mod tests {
             &context2,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -301,6 +326,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -310,6 +336,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &ciphertext,
         );
@@ -331,6 +358,7 @@ mod tests {
             &context1,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -340,6 +368,7 @@ mod tests {
             &context2,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &ciphertext,
         );
@@ -359,6 +388,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -375,6 +405,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &tampered,
         );
@@ -394,6 +425,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -403,6 +435,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &ciphertext,
         )
@@ -422,6 +455,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &plaintext,
         )
@@ -431,6 +465,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &ciphertext,
         )
@@ -450,6 +485,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -469,6 +505,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             BlockId::new(1),
             plaintext,
         )
@@ -478,6 +515,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             BlockId::new(2),
             &ciphertext,
         );
@@ -497,6 +535,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -510,6 +549,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &truncated,
         );
@@ -527,6 +567,7 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             plaintext,
         )
@@ -536,11 +577,42 @@ mod tests {
             &TEST_NONCE_CONTEXT,
             &TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             block_id,
             &ciphertext,
         )
         .unwrap();
 
         assert_eq!(plaintext.as_slice(), decrypted.as_ref());
+    }
+
+    #[test]
+    fn test_wrong_volume_index_fails() {
+        let key = test_key();
+        let block_id = BlockId::new(1);
+        let plaintext = b"Secret data";
+
+        let ciphertext = encrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            0,
+            block_id,
+            plaintext,
+        )
+        .unwrap();
+
+        let result = decrypt_with_context(
+            &key,
+            &TEST_NONCE_CONTEXT,
+            &TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            1,
+            block_id,
+            &ciphertext,
+        );
+
+        assert!(result.is_err());
     }
 }

@@ -623,6 +623,7 @@ pub async fn write_checkpoint<W: StorageWriter>(
         &nonce_context,
         &archive_id,
         epoch_id,
+        volume_writer.volume_sequence() as u32,
         block_id,
         &checkpoint_bytes,
     )?;
@@ -727,6 +728,7 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
             &nonce_context,
             &archive_id,
             epoch_id,
+            volume_reader.header().volume_sequence() as u32,
             block_id,
             &encrypted_block.data,
         ) {

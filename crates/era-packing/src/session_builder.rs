@@ -32,7 +32,15 @@ use std::cell::Cell;
 /// ```ignore
 /// let session = KeySession::new(password, &salt, &params)?;
 /// let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
-/// let builder = SessionBlockBuilder::new(&session, &volume_key, nonce_context, compressor);
+/// let builder = SessionBlockBuilder::new(
+///     &session,
+///     &volume_key,
+///     nonce_context,
+///     archive_id,
+///     epoch_id,
+///     volume_index,
+///     compressor,
+/// );
 ///
 /// // Each block gets a unique key
 /// let block = builder.pack_chunks(chunks)?;
@@ -50,6 +58,7 @@ pub struct SessionBlockBuilder<'a> {
     nonce_context: [u8; 16],
     archive_id: [u8; 16],
     epoch_id: u32,
+    volume_index: u32,
     /// Next block ID (interior mutability for &self methods)
     next_block_id: Cell<u64>,
 }
@@ -68,6 +77,7 @@ impl<'a> SessionBlockBuilder<'a> {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        volume_index: u32,
         compressor: Box<dyn Compressor>,
     ) -> Self {
         Self {
@@ -78,6 +88,7 @@ impl<'a> SessionBlockBuilder<'a> {
             nonce_context,
             archive_id,
             epoch_id,
+            volume_index,
             next_block_id: Cell::new(0),
         }
     }
@@ -156,6 +167,7 @@ impl<'a> SessionBlockBuilder<'a> {
             &self.nonce_context,
             &self.archive_id,
             self.epoch_id,
+            self.volume_index,
             block_id,
             &compressed,
         )?;
@@ -222,15 +234,25 @@ impl<'a> SessionBlockUnpacker<'a> {
     }
 
     /// Decrypt and decompress a MacroBlock, returning raw data and index.
-    pub fn unpack(&self, block: &EncryptedMacroBlock) -> Result<crate::unpacker::UnpackedBlock> {
+    pub fn unpack(
+        &self,
+        block: &EncryptedMacroBlock,
+        volume_index: u32,
+    ) -> Result<crate::unpacker::UnpackedBlock> {
         let block_key = self.derive_block_key(block.block_id)?;
         let derived_key = block_key.to_derived_key()?;
+        let decrypt_context = crate::DecryptContext {
+            key: &derived_key,
+            nonce_context: &self.nonce_context,
+            block_context: crate::BlockContext {
+                archive_id: self.archive_id,
+                epoch_id: self.epoch_id,
+                volume_index,
+            },
+        };
 
         let (index, data) = crate::block_codec::decrypt_and_decompress(
-            &derived_key,
-            &self.nonce_context,
-            &self.archive_id,
-            self.epoch_id,
+            &decrypt_context,
             block.block_id,
             &block.data,
             self.compressor.as_ref(),
@@ -248,8 +270,12 @@ impl<'a> SessionBlockUnpacker<'a> {
     /// Returns a ChunkVec (SmallVec) which avoids heap allocation for blocks
     /// with up to 16 chunks. This provides significant performance improvement
     /// for extraction operations.
-    pub fn extract_all_chunks(&self, block: &EncryptedMacroBlock) -> Result<ChunkVec> {
-        let unpacked = self.unpack(block)?;
+    pub fn extract_all_chunks(
+        &self,
+        block: &EncryptedMacroBlock,
+        volume_index: u32,
+    ) -> Result<ChunkVec> {
+        let unpacked = self.unpack(block, volume_index)?;
         crate::block_codec::extract_all_chunks(&unpacked.index, &unpacked.data)
     }
 }
@@ -263,6 +289,7 @@ mod tests {
 
     const TEST_ARCHIVE_ID: [u8; 16] = [7u8; 16];
     const TEST_EPOCH_ID: u32 = 1;
+    const TEST_VOLUME_INDEX: u32 = 0;
 
     #[test]
     fn test_session_builder_pack_unpack_roundtrip() {
@@ -275,6 +302,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
 
@@ -293,7 +321,7 @@ mod tests {
             TEST_EPOCH_ID,
             crate::create_compressor(),
         );
-        let unpacked = unpacker.unpack(&encrypted).unwrap();
+        let unpacked = unpacker.unpack(&encrypted, TEST_VOLUME_INDEX).unwrap();
 
         assert_eq!(unpacked.chunk_count(), 1);
         let extracted = unpacked.get_chunk(0).unwrap();
@@ -311,6 +339,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
 
@@ -341,6 +370,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
 
@@ -360,7 +390,7 @@ mod tests {
         );
 
         // Decryption should fail with AEAD authentication error
-        let result = wrong_unpacker.unpack(&block);
+        let result = wrong_unpacker.unpack(&block, TEST_VOLUME_INDEX);
         assert!(result.is_err());
     }
 
@@ -396,6 +426,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         );
 
@@ -426,7 +457,7 @@ mod tests {
             TEST_EPOCH_ID,
             crate::create_compressor(),
         );
-        let unpacked = unpacker.unpack(&block).unwrap();
+        let unpacked = unpacker.unpack(&block, TEST_VOLUME_INDEX).unwrap();
 
         assert_eq!(unpacked.chunk_count(), 3);
         assert_eq!(unpacked.get_chunk(0).unwrap().as_ref(), &[1u8; 512]);
@@ -445,6 +476,7 @@ mod tests {
             TEST_NONCE_CONTEXT,
             TEST_ARCHIVE_ID,
             TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
             crate::create_compressor(),
         )
         .with_starting_block_id(100);

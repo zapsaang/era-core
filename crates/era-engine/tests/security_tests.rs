@@ -142,6 +142,7 @@ fn test_session_builder_per_block_keys() {
         TEST_NONCE_CONTEXT,
         TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        0,
         Box::new(ZstdCompressor::default()),
     );
 
@@ -167,8 +168,8 @@ fn test_session_builder_per_block_keys() {
         Box::new(ZstdCompressor::default()),
     );
 
-    let unpacked1 = unpacker.unpack(&block1).unwrap();
-    let unpacked2 = unpacker.unpack(&block2).unwrap();
+    let unpacked1 = unpacker.unpack(&block1, 0).unwrap();
+    let unpacked2 = unpacker.unpack(&block2, 0).unwrap();
 
     assert_eq!(unpacked1.get_chunk(0).unwrap().as_ref(), &data);
     assert_eq!(unpacked2.get_chunk(0).unwrap().as_ref(), &data);
@@ -191,6 +192,7 @@ fn test_volume_key_isolation_prevents_cross_decryption() {
         TEST_NONCE_CONTEXT,
         TEST_ARCHIVE_ID,
         TEST_EPOCH_ID,
+        0,
         Box::new(ZstdCompressor::default()),
     );
 
@@ -208,7 +210,7 @@ fn test_volume_key_isolation_prevents_cross_decryption() {
         Box::new(ZstdCompressor::default()),
     );
 
-    let result = wrong_unpacker.unpack(&block);
+    let result = wrong_unpacker.unpack(&block, 0);
     assert!(
         result.is_err(),
         "Decryption with wrong volume key should fail"
