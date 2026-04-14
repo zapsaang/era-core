@@ -1,11 +1,8 @@
 //! Gap coverage CLI integration tests for era-cli.
 //!
 //! Fills coverage gaps with 9 tests across 2 categories:
-//! - Large file tests (4 tests, all `#[ignore]`) — GB-scale roundtrips
+//! - Large file tests (4 tests) — GB-scale roundtrips (use --release profile)
 //! - Concurrent access tests (5 tests) — parallel CLI process spawning
-//!
-//! Large file tests are `#[ignore]` by default and require significant disk space.
-//! Run with: `cargo test -p era-cli --test cli_e2e_gap_tests -- --ignored`
 
 #![allow(deprecated, unused_imports)]
 
@@ -117,7 +114,7 @@ fn verify_large_deterministic_file(path: &Path, expected_size: u64) {
 }
 
 // ===========================================================================
-// Module 1: Large File Tests (all #[ignore])
+// Module 1: Large File Tests
 // ===========================================================================
 
 mod large_file_tests {
@@ -125,7 +122,6 @@ mod large_file_tests {
 
     /// Create a 1GB deterministic file, archive it, extract it, verify bit-exact.
     #[test]
-    #[ignore]
     fn test_large_file_1gb_roundtrip() {
         let temp = TempDir::new().unwrap();
         let input = temp.path().join("large1g.bin");
@@ -167,8 +163,8 @@ mod large_file_tests {
     }
 
     /// Create a 5GB deterministic file (exceeds u32 range), archive it, extract it, verify.
+    #[ignore] // 5GB test requires >10GB free disk; too large for constrained environments
     #[test]
-    #[ignore]
     fn test_large_file_5gb_roundtrip() {
         let temp = TempDir::new().unwrap();
         let input = temp.path().join("large5g.bin");
@@ -211,7 +207,6 @@ mod large_file_tests {
 
     /// Create a 1GB file, archive with 256MB max volume size, extract and verify.
     #[test]
-    #[ignore]
     fn test_large_file_1gb_multivolume() {
         let temp = TempDir::new().unwrap();
         let input = temp.path().join("large1g_mv.bin");
@@ -263,8 +258,9 @@ mod large_file_tests {
     }
 
     /// Create a 1GB file with erasure coding, corrupt a shard, repair, extract, verify.
-    #[test]
     #[ignore]
+    // PRE-EXISTING BUG: repair succeeds but verify fails with BlockHeader CRC error for large erasure-coded archives (unfixed)
+    #[test]
     fn test_large_file_1gb_repair_after_corruption() {
         let temp = TempDir::new().unwrap();
         let input = temp.path().join("large1g_ec.bin");

@@ -257,9 +257,10 @@ fn v12_f3c_from_memory_preserves_preexisting_pages() {
 // with a floor (1024) but no ceiling. Unbounded bloom filter sizing.
 
 #[test]
-#[ignore] // Outdated: bloom_expected_items now has both floor AND ceiling
-fn v12_f4a_bloom_expected_items_has_no_ceiling() {
-    // Source verification: bloom_expected_items has .max(1024) but no .min(MAX)
+fn v12_f4a_bloom_expected_items_has_floor_and_ceiling() {
+    // V12-F4 FIXED: bloom_expected_items now uses .clamp(1024, MAX_BLOOM_ITEMS)
+    // which provides BOTH a floor (1024) and a ceiling (MAX_BLOOM_ITEMS).
+    // This source-level audit verifies the fix is present.
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/builder.rs"),
     )
@@ -271,12 +272,8 @@ fn v12_f4a_bloom_expected_items_has_no_ceiling() {
     let fn_body = &source[fn_start..fn_start + 200];
 
     assert!(
-        fn_body.contains(".max(1024)"),
-        "bloom_expected_items has a floor of 1024"
-    );
-    assert!(
-        !fn_body.contains(".min("),
-        "bloom_expected_items has NO ceiling — unbounded"
+        fn_body.contains(".clamp(1024,"),
+        "bloom_expected_items must use .clamp(1024, MAX_BLOOM_ITEMS) for floor+ceiling"
     );
 }
 

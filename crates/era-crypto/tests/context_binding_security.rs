@@ -327,7 +327,7 @@ fn test_volume_uuid_affects_derived_keys() {
 // ============================================================================
 
 #[test]
-#[ignore] // Remove this attribute once we've confirmed the vulnerability exists
+#[ignore] // LEFT IGNORED: test premise is flawed — generate_and_wrap_volume_key uses OsRng so different VKs → different block keys; no vulnerability manifests. Real defense-in-depth (volume identity in AAD) is a format-breaking change requiring archive version bump.
 fn test_demonstrate_current_vulnerability() {
     // This test documents the CURRENT state before the fix.
     // It should PASS before the fix (showing the vulnerability exists)
