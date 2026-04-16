@@ -329,22 +329,8 @@ pub async fn repair_archive(
     let mut stats = RepairStats::default();
     let total_shards = erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
 
-    let (data_start, data_end) = volume_reader.data_region();
-    let erasure_data_end = volume_reader
-        .footer()
-        .map(|f| {
-            let mut bound = f.catalog_offset();
-            let idx_off = f.index_offset();
-            if idx_off > 0 && idx_off < bound {
-                bound = idx_off;
-            }
-            let ckpt_off = f.last_checkpoint_offset();
-            if ckpt_off > 0 && ckpt_off < bound {
-                bound = ckpt_off;
-            }
-            bound
-        })
-        .unwrap_or(data_end);
+    let (data_start, _) = volume_reader.data_region();
+    let erasure_data_end = crate::erasure_scan::erasure_data_end(&volume_reader);
 
     let mut offset = data_start;
     let mut block_index = 0u32;
@@ -359,27 +345,47 @@ pub async fn repair_archive(
         let mut corrupted_indices: Vec<usize> = Vec::new();
         let mut data_lengths: Vec<Option<u32>> = vec![None; erasure_config.data_shards as usize];
         let mut max_len: usize = 0;
-        let mut stripe_lengths: Option<Vec<u32>> = None;
+
+        // Pre-pass: collect all readable prefix copies for multi-copy reconciliation.
+        // We use header lengths for navigation so a corrupted prefix cannot cause drift.
+        let mut prefix_copies: Vec<Bytes> = Vec::with_capacity(total_shards);
+        let mut temp_offset = offset;
+        for _ in 0..total_shards {
+            if temp_offset >= erasure_data_end {
+                break;
+            }
+            let prefix_bytes = match volume_reader.read_raw(temp_offset, header_prefix_len).await {
+                Ok(bytes) if bytes.len() == header_prefix_len => bytes,
+                _ => break,
+            };
+            let header_bytes = match volume_reader
+                .read_raw(temp_offset + header_prefix_len as u64, ShardHeader::SIZE)
+                .await
+            {
+                Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                _ => break,
+            };
+            let shard_header = ShardHeader::from_bytes(&header_bytes);
+            let shard_len = shard_header.map_or(0, |h| h.length as usize);
+            prefix_copies.push(prefix_bytes);
+            temp_offset += header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+        }
+        let stripe_lengths = crate::erasure_scan::reconcile_stripe_prefixes(
+            &prefix_copies,
+            erasure_config.data_shards as usize,
+        );
 
         for shard_idx in 0..total_shards {
             let shard_header_offset = offset + header_prefix_len as u64;
 
-            let prefix_bytes = match volume_reader.read_raw(offset, header_prefix_len).await {
+            let _prefix_bytes = match volume_reader.read_raw(offset, header_prefix_len).await {
                 Ok(bytes) if bytes.len() == header_prefix_len => bytes,
                 _ => {
                     break 'stripe_loop;
                 }
             };
 
-            if stripe_lengths.is_none() {
-                let mut lengths = Vec::with_capacity(erasure_config.data_shards as usize);
-                for chunk in prefix_bytes.chunks_exact(4) {
-                    lengths.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                }
-                stripe_lengths = Some(lengths);
-            }
-
-            // Determine authoritative shard length from stripe prefix for data shards
+            // Determine authoritative shard length from reconciled stripe prefix for data shards
             let is_data_shard = shard_idx < erasure_config.data_shards as usize;
             let authoritative_len: Option<u32> = if is_data_shard {
                 stripe_lengths
@@ -419,15 +425,9 @@ pub async fn repair_archive(
                         h.length, MAX_SHARD_SIZE
                     )));
                 }
-                let max_stripe = stripe_lengths
-                    .as_ref()
-                    .and_then(|sl| sl.iter().copied().max())
-                    .unwrap_or(0);
-                let parity_bound = if max_stripe.is_multiple_of(2) {
-                    max_stripe
-                } else {
-                    max_stripe + 1
-                };
+                let parity_bound =
+                    crate::erasure_scan::parity_bound_from_lengths(stripe_lengths.as_deref())
+                        .unwrap_or(0);
                 // Harden against corrupted but in-range parity length that is too small.
                 // A valid parity shard should match the padded max stripe size.
                 if parity_bound > 0 && h.length < parity_bound {
@@ -446,15 +446,9 @@ pub async fn repair_archive(
             } else {
                 // No header and no authoritative length (parity with corrupt header):
                 // use padded max stripe length as best estimate
-                let max_stripe = stripe_lengths
-                    .as_ref()
-                    .and_then(|sl| sl.iter().copied().max())
-                    .unwrap_or(0);
-                let parity_estimate = if max_stripe.is_multiple_of(2) {
-                    max_stripe
-                } else {
-                    max_stripe + 1
-                };
+                let parity_estimate =
+                    crate::erasure_scan::parity_bound_from_lengths(stripe_lengths.as_deref())
+                        .unwrap_or(0);
                 if parity_estimate == 0 {
                     break 'stripe_loop;
                 }
@@ -520,19 +514,11 @@ pub async fn repair_archive(
             offset += header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
         }
 
-        if let Some(ref lengths) = stripe_lengths {
-            if let Some(stripe_max) = lengths.iter().copied().max() {
-                if stripe_max as usize > max_len {
-                    max_len = stripe_max as usize;
-                }
-            }
-
-            for (idx, len) in lengths.iter().enumerate() {
-                if idx < data_lengths.len() && data_lengths[idx].is_none() && *len > 0 {
-                    data_lengths[idx] = Some(*len);
-                }
-            }
-        }
+        crate::erasure_scan::normalize_data_lengths(
+            &mut data_lengths,
+            stripe_lengths.as_deref(),
+            &mut max_len,
+        );
 
         stats.blocks_scanned += 1;
 
@@ -559,11 +545,7 @@ pub async fn repair_archive(
                     )));
                 }
             } else {
-                let shard_size = if max_len.is_multiple_of(2) {
-                    max_len
-                } else {
-                    max_len + 1
-                };
+                let shard_size = crate::erasure_scan::even_aligned_shard_size(max_len);
 
                 let repaired = repair_shards_rs(
                     &shards,
@@ -999,26 +981,7 @@ pub async fn repair_archive_matrix(
 
     let data_ends: Vec<u64> = volume_readers
         .iter()
-        .map(|reader| {
-            let (_, end) = reader.data_region();
-            if let Some(f) = reader.footer() {
-                let mut limit = if f.has_catalog_location() {
-                    f.catalog_offset()
-                } else {
-                    end
-                };
-                if f.has_index() && f.index_offset() < limit {
-                    limit = f.index_offset();
-                }
-                let ckpt_off = f.last_checkpoint_offset();
-                if ckpt_off > 0 && ckpt_off < limit {
-                    limit = ckpt_off;
-                }
-                limit
-            } else {
-                end
-            }
-        })
+        .map(crate::erasure_scan::erasure_data_end)
         .collect();
 
     let header_prefix_len = erasure_config.data_shards as usize * 4;
@@ -1030,10 +993,50 @@ pub async fn repair_archive_matrix(
         let mut data_lengths: Vec<Option<u32>> = vec![None; erasure_config.data_shards as usize];
         let mut max_len: usize = 0;
         let mut any_shard_read = false;
-        let mut stripe_lengths: Option<Vec<u32>> = None;
+
+        // Pre-pass: collect all readable prefix copies for multi-copy reconciliation.
+        // We use header lengths for navigation so a corrupted prefix cannot cause drift.
+        let mut prefix_copies: Vec<Bytes> = Vec::with_capacity(total_shards);
+        let mut temp_offsets: Vec<u64> = volume_offsets.clone();
+        for shard_idx in 0..total_shards {
+            let vol_idx = distribution_strategy.calculate_volume(
+                shard_idx,
+                block_sequence,
+                total_volumes.max(1),
+            )?;
+            let reader_idx_opt = vol_index_map.get(vol_idx).copied().flatten();
+            if let Some(reader_idx) = reader_idx_opt {
+                let reader = &volume_readers[reader_idx];
+                let shard_offset = temp_offsets[reader_idx];
+                if shard_offset >= data_ends[reader_idx] {
+                    continue;
+                }
+                let prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len).await {
+                    Ok(bytes) if bytes.len() == header_prefix_len => bytes,
+                    _ => continue,
+                };
+                let header_bytes = match reader
+                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE)
+                    .await
+                {
+                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                    _ => continue,
+                };
+                let shard_header = ShardHeader::from_bytes(&header_bytes);
+                let shard_len = shard_header.map_or(0, |h| h.length as usize);
+                prefix_copies.push(prefix_bytes);
+                temp_offsets[reader_idx] = shard_offset
+                    + header_prefix_len as u64
+                    + ShardHeader::SIZE as u64
+                    + shard_len as u64;
+            }
+        }
+        let stripe_lengths = crate::erasure_scan::reconcile_stripe_prefixes(
+            &prefix_copies,
+            erasure_config.data_shards as usize,
+        );
 
         // Scan all shards across volumes using matrix distribution
-        // (V2-QUAL-06: Mirrors repair_archive single-volume shard scanning, adapted for per-volume offsets)
         for shard_idx in 0..total_shards {
             let vol_idx = distribution_strategy.calculate_volume(
                 shard_idx,
@@ -1055,7 +1058,7 @@ pub async fn repair_archive_matrix(
                     continue;
                 }
 
-                let prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len).await {
+                let _prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len).await {
                     Ok(bytes) if bytes.len() == header_prefix_len => bytes,
                     _ => {
                         if shard_idx == 0 {
@@ -1067,13 +1070,15 @@ pub async fn repair_archive_matrix(
                     }
                 };
 
-                if stripe_lengths.is_none() {
-                    let mut lengths = Vec::with_capacity(erasure_config.data_shards as usize);
-                    for chunk in prefix_bytes.chunks_exact(4) {
-                        lengths.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                    }
-                    stripe_lengths = Some(lengths);
-                }
+                // Determine authoritative shard length from reconciled stripe prefix for data shards
+                let is_data_shard = shard_idx < erasure_config.data_shards as usize;
+                let authoritative_len: Option<u32> = if is_data_shard {
+                    stripe_lengths
+                        .as_ref()
+                        .and_then(|sl| sl.get(shard_idx).copied())
+                } else {
+                    None
+                };
 
                 let header_bytes = match reader
                     .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE)
@@ -1088,16 +1093,6 @@ pub async fn repair_archive_matrix(
                         stats.corrupted_shards_found += 1;
                         continue;
                     }
-                };
-
-                // Determine authoritative shard length from stripe prefix for data shards
-                let is_data_shard = shard_idx < erasure_config.data_shards as usize;
-                let authoritative_len: Option<u32> = if is_data_shard {
-                    stripe_lengths
-                        .as_ref()
-                        .and_then(|sl| sl.get(shard_idx).copied())
-                } else {
-                    None
                 };
 
                 let shard_header = ShardHeader::from_bytes(&header_bytes);
@@ -1120,15 +1115,9 @@ pub async fn repair_archive_matrix(
                             h.length, MAX_SHARD_SIZE
                         )));
                     }
-                    let max_stripe = stripe_lengths
-                        .as_ref()
-                        .and_then(|sl| sl.iter().copied().max())
-                        .unwrap_or(0);
-                    let parity_bound = if max_stripe.is_multiple_of(2) {
-                        max_stripe
-                    } else {
-                        max_stripe + 1
-                    };
+                    let parity_bound =
+                        crate::erasure_scan::parity_bound_from_lengths(stripe_lengths.as_deref())
+                            .unwrap_or(0);
                     // Harden against corrupted but in-range parity length that is too small.
                     // A valid parity shard should match the padded max stripe size.
                     if parity_bound > 0 && h.length < parity_bound {
@@ -1153,15 +1142,9 @@ pub async fn repair_archive_matrix(
                 } else {
                     // No header and no authoritative length (parity with corrupt header):
                     // use padded max stripe length as best estimate
-                    let max_stripe = stripe_lengths
-                        .as_ref()
-                        .and_then(|sl| sl.iter().copied().max())
-                        .unwrap_or(0);
-                    let parity_estimate = if max_stripe.is_multiple_of(2) {
-                        max_stripe
-                    } else {
-                        max_stripe + 1
-                    };
+                    let parity_estimate =
+                        crate::erasure_scan::parity_bound_from_lengths(stripe_lengths.as_deref())
+                            .unwrap_or(0);
                     if parity_estimate == 0 {
                         // Cannot determine length — mark corrupted and skip
                         corrupted_indices.push(shard_idx);
@@ -1246,18 +1229,11 @@ pub async fn repair_archive_matrix(
             }
         }
 
-        if let Some(lengths) = stripe_lengths {
-            if let Some(stripe_max) = lengths.iter().copied().max() {
-                if stripe_max as usize > max_len {
-                    max_len = stripe_max as usize;
-                }
-            }
-            for (idx, len) in lengths.into_iter().enumerate() {
-                if idx < data_lengths.len() && data_lengths[idx].is_none() && len > 0 {
-                    data_lengths[idx] = Some(len);
-                }
-            }
-        }
+        crate::erasure_scan::normalize_data_lengths(
+            &mut data_lengths,
+            stripe_lengths.as_deref(),
+            &mut max_len,
+        );
 
         if !any_shard_read {
             break;
@@ -1288,11 +1264,7 @@ pub async fn repair_archive_matrix(
                     )));
                 }
             } else {
-                let shard_size = if max_len.is_multiple_of(2) {
-                    max_len
-                } else {
-                    max_len + 1
-                };
+                let shard_size = crate::erasure_scan::even_aligned_shard_size(max_len);
 
                 match repair_shards_rs(
                     &shards,

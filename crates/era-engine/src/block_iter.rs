@@ -283,29 +283,9 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
         for reader in volume_readers {
-            let (start, end) = reader.data_region();
-            let footer = reader.footer();
-            let mut limit = if let Some(f) = footer {
-                if f.has_catalog_location() {
-                    f.catalog_offset()
-                } else {
-                    end
-                }
-            } else {
-                end
-            };
-
-            if let Some(f) = footer {
-                if f.has_index() && f.index_offset() < limit {
-                    limit = f.index_offset();
-                }
-                let ckpt_off = f.last_checkpoint_offset();
-                if ckpt_off > 0 && ckpt_off < limit {
-                    limit = ckpt_off;
-                }
-            }
+            let (start, _) = reader.data_region();
             current_offsets.push(start);
-            data_ends.push(limit);
+            data_ends.push(crate::erasure_scan::erasure_data_end(reader));
         }
 
         let total_shards = data_shards as usize + parity_shards as usize;
@@ -787,32 +767,9 @@ impl<'a, R: era_storage::StorageReader> MultiVolumeSessionBlockIterator<'a, R> {
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
         for reader in volume_readers {
-            let (start, end) = reader.data_region();
-            let footer = reader.footer();
-
-            // Stop before catalog/index blocks (same logic as SessionErasureBlockIterator)
-            let mut limit = if let Some(f) = footer {
-                if f.has_catalog_location() {
-                    f.catalog_offset()
-                } else {
-                    end
-                }
-            } else {
-                end
-            };
-
-            if let Some(f) = footer {
-                if f.has_index() && f.index_offset() < limit {
-                    limit = f.index_offset();
-                }
-                let ckpt_off = f.last_checkpoint_offset();
-                if ckpt_off > 0 && ckpt_off < limit {
-                    limit = ckpt_off;
-                }
-            }
-
+            let (start, _) = reader.data_region();
             current_offsets.push(start);
-            data_ends.push(limit);
+            data_ends.push(crate::erasure_scan::erasure_data_end(reader));
         }
 
         let unpacker = SessionBlockUnpacker::new(
@@ -1048,29 +1005,9 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
         for reader in volume_readers {
-            let (start, end) = reader.data_region();
-            let footer = reader.footer();
-            let mut limit = if let Some(f) = footer {
-                if f.has_catalog_location() {
-                    f.catalog_offset()
-                } else {
-                    end
-                }
-            } else {
-                end
-            };
-
-            if let Some(f) = footer {
-                if f.has_index() && f.index_offset() < limit {
-                    limit = f.index_offset();
-                }
-                let ckpt_off = f.last_checkpoint_offset();
-                if ckpt_off > 0 && ckpt_off < limit {
-                    limit = ckpt_off;
-                }
-            }
+            let (start, _) = reader.data_region();
             current_offsets.push(start);
-            data_ends.push(limit);
+            data_ends.push(crate::erasure_scan::erasure_data_end(reader));
         }
 
         let total_shards = data_shards as usize + parity_shards as usize;
@@ -1162,10 +1099,79 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         let mut available_shards: Vec<VerifiedShard> = Vec::with_capacity(stripe_size);
         let mut data_lengths: Vec<Option<u32>> = vec![None; data_shards];
         let mut max_len: usize = 0;
-        let mut stripe_lengths: Option<Vec<u32>> = None;
         let header_prefix_len = data_shards * 4;
 
         let mut any_shard_seen = false;
+
+        // Pre-pass: collect all readable prefix copies for multi-copy reconciliation.
+        // We use header lengths for navigation so a corrupted prefix cannot cause drift.
+        let mut prefix_copies: Vec<Bytes> = Vec::with_capacity(stripe_size);
+        let mut temp_offsets: Vec<u64> = self.current_offsets.clone();
+        for shard_idx in 0..stripe_size {
+            let vol_idx = match self.distribution_strategy.calculate_volume(
+                shard_idx,
+                self.current_stripe_index as u64,
+                self.original_volume_count,
+            ) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+
+            let reader_idx_opt = self.vol_index_map.get(vol_idx).copied().flatten();
+            if let Some(idx) = reader_idx_opt {
+                let reader = &self.volume_readers[idx];
+
+                if temp_offsets[idx] >= self.data_ends[idx] {
+                    continue;
+                }
+
+                let prefix_bytes = match reader.read_raw(temp_offsets[idx], header_prefix_len).await
+                {
+                    Ok(bytes) if bytes.len() == header_prefix_len => bytes,
+                    Ok(_) => {
+                        temp_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                    Err(_) => {
+                        temp_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                };
+
+                let header_bytes = match reader
+                    .read_raw(
+                        temp_offsets[idx] + header_prefix_len as u64,
+                        ShardHeader::SIZE,
+                    )
+                    .await
+                {
+                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
+                    Ok(_) => {
+                        temp_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                    Err(_) => {
+                        temp_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                };
+
+                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
+                    Some(h) => h,
+                    None => {
+                        temp_offsets[idx] = self.data_ends[idx];
+                        continue;
+                    }
+                };
+
+                let shard_len = shard_header.length as usize;
+                prefix_copies.push(prefix_bytes);
+                temp_offsets[idx] +=
+                    header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+            }
+        }
+        let stripe_lengths =
+            crate::erasure_scan::reconcile_stripe_prefixes(&prefix_copies, data_shards);
 
         for shard_idx in 0..stripe_size {
             let vol_idx = match self.distribution_strategy.calculate_volume(
@@ -1185,7 +1191,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     continue;
                 }
 
-                let prefix_bytes = match reader
+                let _prefix_bytes = match reader
                     .read_raw(self.current_offsets[idx], header_prefix_len)
                     .await
                 {
@@ -1202,14 +1208,6 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         continue;
                     }
                 };
-
-                if stripe_lengths.is_none() {
-                    let mut lengths = Vec::with_capacity(data_shards);
-                    for chunk in prefix_bytes.chunks_exact(4) {
-                        lengths.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                    }
-                    stripe_lengths = Some(lengths);
-                }
 
                 let header_bytes = match reader
                     .read_raw(
@@ -1237,8 +1235,6 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     }
                 };
 
-                // For data shards, the stripe prefix length is authoritative.
-                // This prevents drift when the ShardHeader.length field is corrupted.
                 let is_data_shard = shard_idx < data_shards;
                 let authoritative_len: Option<u32> = if is_data_shard {
                     stripe_lengths
@@ -1311,19 +1307,11 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             }
         }
 
-        if let Some(ref lengths) = stripe_lengths {
-            if let Some(stripe_max) = lengths.iter().copied().max() {
-                if stripe_max as usize > max_len {
-                    max_len = stripe_max as usize;
-                }
-            }
-
-            for (idx, len) in lengths.iter().copied().enumerate().take(data_shards) {
-                if data_lengths[idx].is_none() && len > 0 {
-                    data_lengths[idx] = Some(len);
-                }
-            }
-        }
+        crate::erasure_scan::normalize_data_lengths(
+            &mut data_lengths,
+            stripe_lengths.as_deref(),
+            &mut max_len,
+        );
 
         if max_len == 0 {
             return if any_shard_seen {
@@ -1336,14 +1324,9 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
             };
         }
 
-        // Shard data must be even-aligned for RS recovery. If max_len is odd,
-        // pad to the next even boundary to ensure consistent shard sizes across
-        // encoding/decoding operations and to match write-path encoding conventions.
-        let shard_size = if max_len.is_multiple_of(2) {
-            max_len
-        } else {
-            max_len + 1
-        };
+        // Shard data must be even-aligned for RS recovery.
+        // even_aligned_shard_size uses is_multiple_of(2) to decide padding.
+        let shard_size = crate::erasure_scan::even_aligned_shard_size(max_len);
         let total_shards = data_shards + parity_shards;
         let mut shard_array: Vec<Option<Vec<u8>>> = vec![None; total_shards];
         let crc_failed_count = available_shards.iter().filter(|s| !s.crc_valid).count();

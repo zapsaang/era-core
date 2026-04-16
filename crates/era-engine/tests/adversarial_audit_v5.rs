@@ -321,16 +321,23 @@ async fn test_v5_advrs_01_non_session_shard_len_cap() {
         .unwrap();
     writer.finalize().await.unwrap();
 
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&archive)
-        .unwrap();
     use std::io::{Seek, SeekFrom, Write};
-    // Corrupt the stripe-prefix length (now authoritative for data shards)
-    // to verify the MAX_SHARD_SIZE cap still prevents unbounded allocation.
-    file.seek(SeekFrom::Start(4224u64)).unwrap();
-    file.write_all(&u32::MAX.to_le_bytes()).unwrap();
+    // Corrupt the stripe-prefix length on ALL volumes so that multi-copy
+    // reconciliation cannot recover a correct prefix, forcing the
+    // MAX_SHARD_SIZE cap to prevent unbounded allocation.
+    for vol_path in [
+        archive.clone(),
+        archive.with_extension("era.001"),
+        archive.with_extension("era.002"),
+    ] {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&vol_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(4224u64)).unwrap();
+        file.write_all(&u32::MAX.to_le_bytes()).unwrap();
+    }
 
     let out = temp.path().join("out");
     fs::create_dir_all(&out).unwrap();

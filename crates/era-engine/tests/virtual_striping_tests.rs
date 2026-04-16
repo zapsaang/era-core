@@ -1,5 +1,6 @@
 use era_common::{ArchiveConfig, CompressionAlgorithm, CompressionConfig, ErasureCodeConfig};
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
+use era_volume::DistributionCalculator;
 use std::fs;
 use tempfile::TempDir;
 
@@ -102,4 +103,80 @@ async fn test_virtual_striping_end_to_end() {
         let extracted = fs::read(extract_dir.join(name)).unwrap();
         assert_eq!(extracted, expected_data[i - 1]);
     }
+}
+
+#[tokio::test]
+async fn test_virtual_striping_reconciles_corrupted_first_prefix_copy() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("striped_prefix.era");
+    let password = "test_password";
+
+    let erasure_config = ErasureCodeConfig {
+        data_shards: 4,
+        parity_shards: 2,
+    };
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password(password)
+        .enable_erasure(true)
+        .erasure_config(erasure_config)
+        .volume_count(6)
+        .build()
+        .await
+        .unwrap();
+
+    let payload = vec![0xABu8; 256 * 1024];
+    writer.add_bytes("payload.bin", &payload).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    let strategy = era_common::MatrixDistributionStrategy::RotatingOffset;
+    let vol_idx = strategy.calculate_volume(0, 0, 6).unwrap();
+    let vol0_path = if vol_idx == 0 {
+        archive_path.clone()
+    } else {
+        archive_path.with_extension(format!("era.{:03}", vol_idx))
+    };
+
+    // Corrupt the prefix copy on the first readable shard to a bogus in-bounds length.
+    {
+        use era_storage::LocalStorageBackend;
+        use era_volume::VolumeReader;
+        use std::io::{Seek, SeekFrom, Write};
+        use std::path::Path;
+
+        let backend = LocalStorageBackend::new(vol0_path.parent().unwrap());
+        let filename = vol0_path.file_name().unwrap();
+        let reader = VolumeReader::open(&backend, Path::new(filename))
+            .await
+            .unwrap();
+        let (data_start, _) = reader.data_region();
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&vol0_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(data_start)).unwrap();
+        file.write_all(&1024u32.to_le_bytes()).unwrap();
+        file.flush().unwrap();
+    }
+
+    // Verify and extract must succeed because prefix reconciliation
+    // falls back to header lengths when the first prefix copy is corrupted.
+    let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    assert!(
+        verify_stats.is_ok(),
+        "must verify despite corrupted first prefix copy"
+    );
+
+    let extract_dir = temp_dir.path().join("extracted");
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .expect("Extraction failed");
+    assert_eq!(extract_stats.extracted, 1);
+
+    let extracted = fs::read(extract_dir.join("payload.bin")).unwrap();
+    assert_eq!(extracted, payload);
 }

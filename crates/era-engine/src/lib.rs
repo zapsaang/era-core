@@ -31,6 +31,7 @@ mod checkpoint;
 pub(crate) mod chunk_index;
 pub(crate) mod chunk_processor;
 mod encryption_context;
+mod erasure_scan;
 mod erasure_stage;
 mod index_stage;
 pub mod metrics_collector;

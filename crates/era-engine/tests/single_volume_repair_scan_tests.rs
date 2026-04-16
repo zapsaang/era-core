@@ -111,6 +111,24 @@ fn corrupt_byte_range(path: &Path, offset: u64, len: usize) {
     file.write_all(&bytes).unwrap();
 }
 
+async fn corrupt_single_volume_shard_prefix(archive_path: &Path, new_shard_0_length: u32) {
+    let backend = LocalStorageBackend::new(archive_path.parent().unwrap());
+    let volume_path = archive_path.file_name().unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(volume_path))
+        .await
+        .unwrap();
+    let (data_start, _) = reader.data_region();
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(archive_path)
+        .unwrap();
+    file.seek(SeekFrom::Start(data_start)).unwrap();
+    file.write_all(&new_shard_0_length.to_le_bytes()).unwrap();
+    file.flush().unwrap();
+}
+
 #[tokio::test]
 async fn test_single_volume_erasure_archive_stays_single_file() {
     let temp_dir = TempDir::new().unwrap();
@@ -332,6 +350,150 @@ async fn test_single_volume_repair_exact_offset_5000_release_style_repro() {
 
     let extract_dir = temp_dir.path().join("offset_5000_extract");
     repaired_reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .unwrap();
+    assert_eq!(fs::read(extract_dir.join("payload.bin")).unwrap(), payload);
+}
+
+#[tokio::test]
+async fn test_single_volume_repair_reconciles_corrupted_first_prefix_copy() {
+    let temp_dir = TempDir::new().unwrap();
+    let (archive_path, payload) =
+        create_erasure_archive(&temp_dir, "single_prefix.era", 128 * 1024, Some(1)).await;
+
+    // Corrupt the prefix copy on shard 0 to a bogus in-bounds length.
+    // The true length is larger; trusting this prefix would cause offset drift.
+    corrupt_single_volume_shard_prefix(&archive_path, 1024).await;
+
+    let repair_stats = repair_archive(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repair_stats.unrecoverable_blocks, 0,
+        "must not drift or report unrecoverable blocks"
+    );
+    assert!(
+        repair_stats.errors.is_empty(),
+        "no repair errors: {:?}",
+        repair_stats.errors
+    );
+
+    let second_pass = repair_archive(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        second_pass.unrecoverable_blocks, 0,
+        "second pass must also be clean"
+    );
+    assert!(
+        second_pass.errors.is_empty(),
+        "second pass errors: {:?}",
+        second_pass.errors
+    );
+
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    assert!(verify_stats.is_ok(), "must verify after repair");
+    assert!(!verify_stats.needs_repair(), "must not need repair");
+
+    let extract_dir = temp_dir.path().join("extract");
+    reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .unwrap();
+    assert_eq!(fs::read(extract_dir.join("payload.bin")).unwrap(), payload);
+}
+
+#[tokio::test]
+async fn test_single_volume_repair_does_not_trust_non_consensus_prefixes() {
+    let temp_dir = TempDir::new().unwrap();
+    let (archive_path, payload) = create_erasure_archive(
+        &temp_dir,
+        "single_prefix_consensus.era",
+        128 * 1024,
+        Some(1),
+    )
+    .await;
+
+    {
+        let backend = LocalStorageBackend::new(archive_path.parent().unwrap());
+        let volume_path = archive_path.file_name().unwrap();
+        let reader = VolumeReader::open(&backend, Path::new(volume_path))
+            .await
+            .unwrap();
+        let (data_start, _) = reader.data_region();
+        let header_prefix_len = ERASURE_4_PLUS_2.data_shards as u64 * 4;
+        let mut offset = data_start;
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive_path)
+            .unwrap();
+
+        for shard_idx in 0..(ERASURE_4_PLUS_2.data_shards + ERASURE_4_PLUS_2.parity_shards) {
+            file.seek(SeekFrom::Start(offset)).unwrap();
+            let bogus_len = 1024u32 * (shard_idx as u32 + 1);
+            file.write_all(&bogus_len.to_le_bytes()).unwrap();
+
+            let header_bytes = reader
+                .read_raw(offset + header_prefix_len, ShardHeader::SIZE)
+                .await
+                .unwrap();
+            let shard_header = ShardHeader::from_bytes(&header_bytes).expect("valid shard header");
+            offset += header_prefix_len + ShardHeader::SIZE as u64 + shard_header.length as u64;
+        }
+        file.flush().unwrap();
+    }
+
+    let repair_stats = repair_archive(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repair_stats.unrecoverable_blocks, 0,
+        "must fall back to headers and not drift"
+    );
+    assert!(
+        repair_stats.errors.is_empty(),
+        "no repair errors: {:?}",
+        repair_stats.errors
+    );
+
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    assert!(verify_stats.is_ok(), "must verify after repair");
+    assert!(!verify_stats.needs_repair(), "must not need repair");
+
+    let extract_dir = temp_dir.path().join("extract");
+    reader
         .extract_all(&ExtractOptions::new(&extract_dir))
         .await
         .unwrap();

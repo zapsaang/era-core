@@ -71,6 +71,24 @@ async fn corrupt_shard_header_field(volume_path: &Path, field_offset: u64, new_v
     file.flush().unwrap();
 }
 
+async fn corrupt_matrix_shard_prefix(volume_path: &Path, new_shard_0_length: u32) {
+    let backend = LocalStorageBackend::new(volume_path.parent().unwrap());
+    let filename = volume_path.file_name().unwrap();
+    let reader = VolumeReader::open(&backend, Path::new(filename))
+        .await
+        .unwrap();
+    let (data_start, _) = reader.data_region();
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(volume_path)
+        .unwrap();
+    file.seek(SeekFrom::Start(data_start)).unwrap();
+    file.write_all(&new_shard_0_length.to_le_bytes()).unwrap();
+    file.flush().unwrap();
+}
+
 #[tokio::test]
 async fn test_matrix_repair_with_checkpoint_boundary() {
     let temp_dir = TempDir::new().unwrap();
@@ -457,6 +475,135 @@ async fn test_matrix_repair_corrupted_parity_length_does_not_drift() {
     let verify_stats = reader.verify().await.unwrap();
     assert!(verify_stats.is_ok(), "archive should verify");
     assert!(!verify_stats.needs_repair(), "should not need repair");
+
+    let extract_dir = temp_dir.path().join("extract");
+    reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .unwrap();
+    assert_eq!(fs::read(extract_dir.join("payload.bin")).unwrap(), payload);
+}
+
+#[tokio::test]
+async fn test_matrix_repair_reconciles_corrupted_first_prefix_copy() {
+    let temp_dir = TempDir::new().unwrap();
+    let (archive_path, payload) =
+        create_matrix_archive(&temp_dir, "matrix_prefix.era", 256 * 1024, false).await;
+
+    let strategy = era_common::MatrixDistributionStrategy::RotatingOffset;
+    let vol_idx = strategy.calculate_volume(0, 0, 6).unwrap();
+    assert_eq!(vol_idx, 0, "block 0 shard 0 should be on volume 0");
+
+    let vol0 = &archive_path;
+    corrupt_matrix_shard_prefix(vol0, 1024).await;
+
+    let repair_stats = repair_archive_matrix(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repair_stats.unrecoverable_blocks, 0,
+        "must not drift or report unrecoverable blocks"
+    );
+    assert!(
+        repair_stats.errors.is_empty(),
+        "no repair errors: {:?}",
+        repair_stats.errors
+    );
+
+    let second_pass = repair_archive_matrix(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        second_pass.unrecoverable_blocks, 0,
+        "second pass must also be clean"
+    );
+    assert!(
+        second_pass.errors.is_empty(),
+        "second pass errors: {:?}",
+        second_pass.errors
+    );
+
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    assert!(verify_stats.is_ok(), "must verify after repair");
+    assert!(!verify_stats.needs_repair(), "must not need repair");
+
+    let extract_dir = temp_dir.path().join("extract");
+    reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .unwrap();
+    assert_eq!(fs::read(extract_dir.join("payload.bin")).unwrap(), payload);
+}
+
+#[tokio::test]
+async fn test_matrix_repair_does_not_trust_non_consensus_prefixes() {
+    let temp_dir = TempDir::new().unwrap();
+    let (archive_path, payload) =
+        create_matrix_archive(&temp_dir, "matrix_prefix_consensus.era", 256 * 1024, false).await;
+
+    let strategy = era_common::MatrixDistributionStrategy::RotatingOffset;
+    let total_volumes = 6;
+
+    for shard_idx in
+        0..(ERASURE_4_PLUS_2.data_shards as usize + ERASURE_4_PLUS_2.parity_shards as usize)
+    {
+        let vol_idx = strategy
+            .calculate_volume(shard_idx, 0, total_volumes)
+            .unwrap();
+        let vol_path = if vol_idx == 0 {
+            archive_path.clone()
+        } else {
+            archive_path.with_extension(format!("era.{:03}", vol_idx))
+        };
+        let bogus_len = 1024u32 * (shard_idx as u32 + 1);
+        corrupt_matrix_shard_prefix(&vol_path, bogus_len).await;
+    }
+
+    let repair_stats = repair_archive_matrix(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repair_stats.unrecoverable_blocks, 0,
+        "must fall back to headers and not drift"
+    );
+    assert!(
+        repair_stats.errors.is_empty(),
+        "no repair errors: {:?}",
+        repair_stats.errors
+    );
+
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    assert!(verify_stats.is_ok(), "must verify after repair");
+    assert!(!verify_stats.needs_repair(), "must not need repair");
 
     let extract_dir = temp_dir.path().join("extract");
     reader
