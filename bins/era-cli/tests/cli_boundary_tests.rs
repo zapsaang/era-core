@@ -10,83 +10,13 @@
 
 #![allow(deprecated, unused_imports, dead_code)]
 
-use assert_cmd::Command;
+mod common;
+
+use common::*;
 use predicates::prelude::*;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Seek, Write};
 use tempfile::TempDir;
-
-// ===========================================================================
-// Helpers
-// ===========================================================================
-
-fn era_cmd() -> Command {
-    Command::cargo_bin("era").unwrap()
-}
-
-fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
-    let path = dir.join(name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&path, content).unwrap();
-    path
-}
-
-fn create_large_test_file_streaming(dir: &Path, name: &str, size_bytes: usize) -> PathBuf {
-    let path = dir.join(name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    let mut file = fs::File::create(&path).unwrap();
-    let chunk_size = 1024 * 1024;
-    let mut written = 0usize;
-    while written < size_bytes {
-        let to_write = (size_bytes - written).min(chunk_size);
-        let mut data = vec![0u8; to_write];
-        for i in (0..to_write).step_by(8) {
-            let pos = (written + i) as u64;
-            let bytes = pos.to_le_bytes();
-            let end = (i + 8).min(to_write);
-            data[i..end].copy_from_slice(&bytes[..end - i]);
-        }
-        file.write_all(&data).unwrap();
-        written += to_write;
-    }
-    file.flush().unwrap();
-    path
-}
-
-fn count_volume_files(base: &Path) -> usize {
-    let mut count = 0;
-    if base.exists() {
-        count += 1;
-    }
-    let stem = base.with_extension("");
-    for seq in 1..=999u16 {
-        let vol = stem.with_extension(format!("era.{:03}", seq));
-        if vol.exists() {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-    count
-}
-
-fn get_volume_size(path: &Path) -> u64 {
-    fs::metadata(path).unwrap().len()
-}
-
-fn repo_tmp_dir() -> TempDir {
-    let repo_tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tmp");
-    fs::create_dir_all(&repo_tmp).unwrap();
-    tempfile::tempdir_in(&repo_tmp).unwrap()
-}
 
 // ===========================================================================
 // Category 1: Volume Count Boundary Tests

@@ -522,17 +522,37 @@ mod tests {
         )
         .unwrap();
 
-        // Same data, different block IDs -> different ciphertext
         let data = vec![42u8; 1024];
         let chunk1 = UniqueChunk::new(Bytes::from(data.clone()), ChunkHash::from_bytes([1u8; 32]));
-        let chunk2 = UniqueChunk::new(Bytes::from(data), ChunkHash::from_bytes([2u8; 32]));
+        let chunk2 = UniqueChunk::new(Bytes::from(data.clone()), ChunkHash::from_bytes([2u8; 32]));
 
-        let _block1 = builder1.pack_single(chunk1).unwrap();
-        let _block2 = builder2.pack_single(chunk2).unwrap();
+        // Verify at the pre-erasure level: inner encrypted blocks must differ
+        // because the chunk hash is included in the serialized index
+        let encrypted1 = builder1
+            .inner
+            .pack_single(UniqueChunk::new(
+                Bytes::from(vec![42u8; 1024]),
+                ChunkHash::from_bytes([1u8; 32]),
+            ))
+            .unwrap();
+        let encrypted2 = builder2
+            .inner
+            .pack_single(UniqueChunk::new(
+                Bytes::from(vec![42u8; 1024]),
+                ChunkHash::from_bytes([2u8; 32]),
+            ))
+            .unwrap();
+        assert_ne!(
+            encrypted1.data, encrypted2.data,
+            "Different chunk hashes must produce different encrypted blocks"
+        );
 
-        // TODO: This fails after Protobuf migration. Ciphertexts are identical despite different hashes.
-        // Requires deep investigation into why index variations aren't affecting ciphertext bits.
-        // assert_ne!(block1.shards[0], block2.shards[0]);
+        let block1 = builder1.pack_single(chunk1).unwrap();
+        let block2 = builder2.pack_single(chunk2).unwrap();
+        assert_ne!(
+            block1.shards, block2.shards,
+            "Different chunk hashes must produce different shard sets"
+        );
     }
 
     #[test]

@@ -2,15 +2,12 @@
 
 #![allow(deprecated)] // cargo_bin deprecation doesn't affect our use case
 
-use assert_cmd::Command;
+mod common;
+
+use common::*;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
-
-/// Get a command for the era binary
-fn era_cmd() -> Command {
-    Command::cargo_bin("era").unwrap()
-}
 
 #[test]
 fn test_verify_valid_archive() {

@@ -332,7 +332,18 @@ pub async fn repair_archive(
     let (data_start, data_end) = volume_reader.data_region();
     let erasure_data_end = volume_reader
         .footer()
-        .map(|f| f.catalog_offset())
+        .map(|f| {
+            let mut bound = f.catalog_offset();
+            let idx_off = f.index_offset();
+            if idx_off > 0 && idx_off < bound {
+                bound = idx_off;
+            }
+            let ckpt_off = f.last_checkpoint_offset();
+            if ckpt_off > 0 && ckpt_off < bound {
+                bound = ckpt_off;
+            }
+            bound
+        })
         .unwrap_or(data_end);
 
     let mut offset = data_start;
@@ -356,7 +367,6 @@ pub async fn repair_archive(
             let prefix_bytes = match volume_reader.read_raw(offset, header_prefix_len).await {
                 Ok(bytes) if bytes.len() == header_prefix_len => bytes,
                 _ => {
-                    // End of data region
                     break 'stripe_loop;
                 }
             };
@@ -369,41 +379,95 @@ pub async fn repair_archive(
                 stripe_lengths = Some(lengths);
             }
 
+            // Determine authoritative shard length from stripe prefix for data shards
+            let is_data_shard = shard_idx < erasure_config.data_shards as usize;
+            let authoritative_len: Option<u32> = if is_data_shard {
+                stripe_lengths
+                    .as_ref()
+                    .and_then(|sl| sl.get(shard_idx).copied())
+            } else {
+                None
+            };
+
             let header_bytes = match volume_reader
                 .read_raw(offset + header_prefix_len as u64, ShardHeader::SIZE)
                 .await
             {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 _ => {
-                    // End of data region
                     break 'stripe_loop;
                 }
             };
 
-            let shard_header = match ShardHeader::from_bytes(&header_bytes) {
-                Some(h) => h,
-                None => {
-                    debug!(
-                        "Invalid shard header at block {}, shard {}",
-                        block_index, shard_idx
-                    );
-                    corrupted_indices.push(shard_idx);
-                    continue;
+            let shard_header = ShardHeader::from_bytes(&header_bytes);
+
+            // Compute the shard length to use for reading and offset advancement
+            let shard_len: usize = if let Some(auth_len) = authoritative_len {
+                // Data shard: stripe prefix is authoritative
+                if auth_len as u64 > MAX_SHARD_SIZE {
+                    return Err(EraError::ErasureError(format!(
+                        "Stripe prefix length {} exceeds maximum allowed size {}",
+                        auth_len, MAX_SHARD_SIZE
+                    )));
                 }
+                auth_len as usize
+            } else if let Some(ref h) = shard_header {
+                // Parity shard: use header length, sanity-bounded by max stripe length
+                if h.length as u64 > MAX_SHARD_SIZE {
+                    return Err(EraError::ErasureError(format!(
+                        "Shard length {} exceeds maximum allowed size {}",
+                        h.length, MAX_SHARD_SIZE
+                    )));
+                }
+                let max_stripe = stripe_lengths
+                    .as_ref()
+                    .and_then(|sl| sl.iter().copied().max())
+                    .unwrap_or(0);
+                let parity_bound = if max_stripe.is_multiple_of(2) {
+                    max_stripe
+                } else {
+                    max_stripe + 1
+                };
+                if parity_bound > 0 && h.length > parity_bound {
+                    parity_bound as usize
+                } else {
+                    h.length as usize
+                }
+            } else {
+                // No header and no authoritative length (parity with corrupt header):
+                // use padded max stripe length as best estimate
+                let max_stripe = stripe_lengths
+                    .as_ref()
+                    .and_then(|sl| sl.iter().copied().max())
+                    .unwrap_or(0);
+                let parity_estimate = if max_stripe.is_multiple_of(2) {
+                    max_stripe
+                } else {
+                    max_stripe + 1
+                };
+                if parity_estimate == 0 {
+                    break 'stripe_loop;
+                }
+                parity_estimate as usize
             };
 
-            if shard_header.length as u64 > MAX_SHARD_SIZE {
-                return Err(EraError::ErasureError(format!(
-                    "Shard length {} exceeds maximum allowed size {}",
-                    shard_header.length, MAX_SHARD_SIZE
-                )));
+            if shard_header.is_none() {
+                debug!(
+                    "Invalid shard header at block {}, shard {}",
+                    block_index, shard_idx
+                );
+                corrupted_indices.push(shard_idx);
+                stats.corrupted_shards_found += 1;
+                // Advance offset even with corrupt header
+                offset += header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+                continue;
             }
+            let shard_header = shard_header.unwrap();
 
-            let shard_len = shard_header.length as usize;
             shard_offsets[shard_idx] = Some(shard_header_offset);
 
-            if shard_idx < data_lengths.len() {
-                data_lengths[shard_idx] = Some(shard_header.length);
+            if is_data_shard {
+                data_lengths[shard_idx] = authoritative_len.or(Some(shard_header.length));
             }
 
             if shard_len > max_len {
@@ -418,7 +482,15 @@ pub async fn repair_archive(
                 .await
             {
                 Ok(shard_data) => {
-                    if shard_header.verify(&shard_data) {
+                    // When using authoritative prefix length for data shards,
+                    // bypass ShardHeader.verify (which checks data.len() == header.length)
+                    // since the header length field may be corrupted
+                    let crc_valid = if authoritative_len.is_some() {
+                        compute_shard_crc(&shard_data) == shard_header.crc
+                    } else {
+                        shard_header.verify(&shard_data)
+                    };
+                    if crc_valid {
                         shards.push((shard_idx, shard_data));
                     } else {
                         debug!(
@@ -438,16 +510,16 @@ pub async fn repair_archive(
             offset += header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
         }
 
-        if let Some(lengths) = stripe_lengths {
+        if let Some(ref lengths) = stripe_lengths {
             if let Some(stripe_max) = lengths.iter().copied().max() {
                 if stripe_max as usize > max_len {
                     max_len = stripe_max as usize;
                 }
             }
 
-            for (idx, len) in lengths.into_iter().enumerate() {
-                if idx < data_lengths.len() && data_lengths[idx].is_none() && len > 0 {
-                    data_lengths[idx] = Some(len);
+            for (idx, len) in lengths.iter().enumerate() {
+                if idx < data_lengths.len() && data_lengths[idx].is_none() && *len > 0 {
+                    data_lengths[idx] = Some(*len);
                 }
             }
         }
@@ -1004,25 +1076,91 @@ pub async fn repair_archive_matrix(
                     }
                 };
 
-                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
-                    Some(h) => h,
-                    None => {
+                // Determine authoritative shard length from stripe prefix for data shards
+                let is_data_shard = shard_idx < erasure_config.data_shards as usize;
+                let authoritative_len: Option<u32> = if is_data_shard {
+                    stripe_lengths
+                        .as_ref()
+                        .and_then(|sl| sl.get(shard_idx).copied())
+                } else {
+                    None
+                };
+
+                let shard_header = ShardHeader::from_bytes(&header_bytes);
+
+                // Compute the shard length to use for reading and offset advancement
+                let shard_len: usize = if let Some(auth_len) = authoritative_len {
+                    // Data shard: stripe prefix is authoritative
+                    if auth_len as u64 > MAX_SHARD_SIZE {
+                        return Err(EraError::ErasureError(format!(
+                            "Stripe prefix length {} exceeds maximum allowed size {}",
+                            auth_len, MAX_SHARD_SIZE
+                        )));
+                    }
+                    auth_len as usize
+                } else if let Some(ref h) = shard_header {
+                    // Parity shard: use header length, sanity-bounded by max stripe length
+                    if h.length as u64 > MAX_SHARD_SIZE {
+                        return Err(EraError::ErasureError(format!(
+                            "Shard length {} exceeds maximum allowed size {}",
+                            h.length, MAX_SHARD_SIZE
+                        )));
+                    }
+                    let max_stripe = stripe_lengths
+                        .as_ref()
+                        .and_then(|sl| sl.iter().copied().max())
+                        .unwrap_or(0);
+                    let parity_bound = if max_stripe.is_multiple_of(2) {
+                        max_stripe
+                    } else {
+                        max_stripe + 1
+                    };
+                    if parity_bound > 0 && h.length > parity_bound {
+                        parity_bound as usize
+                    } else {
+                        h.length as usize
+                    }
+                } else {
+                    // No header and no authoritative length (parity with corrupt header):
+                    // use padded max stripe length as best estimate
+                    let max_stripe = stripe_lengths
+                        .as_ref()
+                        .and_then(|sl| sl.iter().copied().max())
+                        .unwrap_or(0);
+                    let parity_estimate = if max_stripe.is_multiple_of(2) {
+                        max_stripe
+                    } else {
+                        max_stripe + 1
+                    };
+                    if parity_estimate == 0 {
+                        // Cannot determine length — mark corrupted and skip
                         corrupted_indices.push(shard_idx);
                         stats.corrupted_shards_found += 1;
                         continue;
                     }
+                    parity_estimate as usize
                 };
 
-                if shard_header.length as u64 > MAX_SHARD_SIZE {
-                    return Err(EraError::ErasureError(format!(
-                        "Shard length {} exceeds maximum allowed size {}",
-                        shard_header.length, MAX_SHARD_SIZE
-                    )));
+                if shard_header.is_none() {
+                    debug!(
+                        "Invalid shard header at block {}, shard {}",
+                        block_sequence, shard_idx
+                    );
+                    corrupted_indices.push(shard_idx);
+                    stats.corrupted_shards_found += 1;
+                    // Advance offset even with corrupt header
+                    volume_offsets[reader_idx] = shard_offset
+                        + header_prefix_len as u64
+                        + ShardHeader::SIZE as u64
+                        + shard_len as u64;
+                    continue;
                 }
+                let shard_header = shard_header.unwrap();
 
-                let shard_len = shard_header.length as usize;
-                if shard_idx < data_lengths.len() {
-                    data_lengths[shard_idx] = Some(shard_header.length);
+                if is_data_shard {
+                    if let Some(slot) = data_lengths.get_mut(shard_idx) {
+                        *slot = authoritative_len.or(Some(shard_header.length));
+                    }
                 }
                 if shard_len > max_len {
                     max_len = shard_len;
@@ -1037,7 +1175,15 @@ pub async fn repair_archive_matrix(
                     .await
                 {
                     Ok(shard_data) => {
-                        if shard_header.verify(&shard_data) {
+                        // When using authoritative prefix length for data shards,
+                        // bypass ShardHeader.verify (which checks data.len() == header.length)
+                        // since the header length field may be corrupted
+                        let crc_valid = if authoritative_len.is_some() {
+                            compute_shard_crc(&shard_data) == shard_header.crc
+                        } else {
+                            shard_header.verify(&shard_data)
+                        };
+                        if crc_valid {
                             shards.push((shard_idx, shard_data));
                             shard_locations.push((
                                 shard_idx,

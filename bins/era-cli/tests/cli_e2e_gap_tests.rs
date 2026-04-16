@@ -6,112 +6,15 @@
 
 #![allow(deprecated, unused_imports)]
 
-use assert_cmd::Command;
+mod common;
+
+use common::*;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcCommand, Stdio};
 use std::thread;
 use tempfile::TempDir;
-
-// ===========================================================================
-// Shared helpers
-// ===========================================================================
-
-fn era_cmd() -> Command {
-    Command::cargo_bin("era").unwrap()
-}
-
-fn era_binary_path() -> PathBuf {
-    assert_cmd::cargo::cargo_bin("era")
-}
-
-fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
-    let path = dir.join(name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&path, content).unwrap();
-    path
-}
-
-fn generate_deterministic_data(size: usize) -> Vec<u8> {
-    (0..size).map(|i| (i % 251) as u8).collect()
-}
-
-fn corrupt_archive_shard(archive: &Path, offset: u64) {
-    use std::io::{Seek, SeekFrom};
-    let mut f = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(archive)
-        .unwrap();
-    f.seek(SeekFrom::Start(offset)).unwrap();
-    let mut buf = [0u8; 100];
-    let n = f.read(&mut buf).unwrap();
-    for b in buf[..n].iter_mut() {
-        *b = !*b;
-    }
-    f.seek(SeekFrom::Start(offset)).unwrap();
-    f.write_all(&buf[..n]).unwrap();
-    f.flush().unwrap();
-}
-
-fn count_volume_files(base: &Path) -> usize {
-    let mut count = 0;
-    if base.exists() {
-        count += 1;
-    }
-    let stem = base.with_extension("");
-    for seq in 1..=999u16 {
-        let vol = stem.with_extension(format!("era.{:03}", seq));
-        if vol.exists() {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-    count
-}
-
-/// Create a large deterministic file using streaming writes to avoid OOM.
-/// Writes 1MB chunks at a time.
-fn create_large_deterministic_file(path: &Path, size: u64) {
-    let mut f = fs::File::create(path).unwrap();
-    let chunk_size = 1024 * 1024; // 1MB chunks
-    let chunk: Vec<u8> = (0..chunk_size).map(|i| (i % 251) as u8).collect();
-    let mut remaining = size;
-    while remaining > 0 {
-        let write_size = remaining.min(chunk_size as u64) as usize;
-        f.write_all(&chunk[..write_size]).unwrap();
-        remaining -= write_size as u64;
-    }
-    f.flush().unwrap();
-}
-
-/// Verify a large deterministic file using streaming reads.
-fn verify_large_deterministic_file(path: &Path, expected_size: u64) {
-    let mut f = fs::File::open(path).unwrap();
-    let chunk_size = 1024 * 1024;
-    let expected_chunk: Vec<u8> = (0..chunk_size).map(|i| (i % 251) as u8).collect();
-    let mut buf = vec![0u8; chunk_size];
-    let mut total_read = 0u64;
-    loop {
-        let n = f.read(&mut buf).unwrap();
-        if n == 0 {
-            break;
-        }
-        let expected_slice = &expected_chunk[..n];
-        assert_eq!(
-            &buf[..n],
-            expected_slice,
-            "mismatch at offset {}",
-            total_read
-        );
-        total_read += n as u64;
-    }
-    assert_eq!(total_read, expected_size);
-}
 
 // ===========================================================================
 // Module 1: Large File Tests

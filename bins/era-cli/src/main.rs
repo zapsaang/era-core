@@ -257,9 +257,10 @@ enum Commands {
         Archives without erasure coding have limited repair options."
     )]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
-        era repair backup.era                     Analyze only (dry run)\n  \
-        era repair backup.era --force             Apply repairs\n  \
-        era repair backup.era --key private.pem   Certificate mode")]
+        era repair backup.era                        Analyze only (dry run)\n  \
+        era repair backup.era --force                Apply repairs\n  \
+        era repair backup.era --password s3cr3t      Apply repairs (password mode)\n  \
+        Note: Certificate-based repair (--key) is not supported. Use --password.")]
     Repair {
         /// Archive path
         archive: PathBuf,

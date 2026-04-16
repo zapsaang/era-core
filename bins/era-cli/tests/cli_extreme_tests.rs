@@ -7,7 +7,9 @@
 
 #![allow(deprecated, unused_imports, dead_code)]
 
-use assert_cmd::Command;
+mod common;
+
+use common::*;
 use predicates::prelude::*;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -17,127 +19,6 @@ use tempfile::TempDir;
 // ===========================================================================
 // Helpers
 // ===========================================================================
-
-fn era_cmd() -> Command {
-    Command::cargo_bin("era").unwrap()
-}
-
-fn create_test_file(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
-    let path = dir.join(name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(&path, content).unwrap();
-    path
-}
-
-/// Generate deterministic pseudo-random data. Prime modulus avoids alignment artifacts.
-fn generate_deterministic_data(size: usize) -> Vec<u8> {
-    (0..size).map(|i| (i % 251) as u8).collect()
-}
-
-fn create_large_test_file(dir: &Path, name: &str, size_bytes: usize) -> PathBuf {
-    let path = dir.join(name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    let data = generate_deterministic_data(size_bytes);
-    fs::write(&path, &data).unwrap();
-    path
-}
-
-fn corrupt_archive_shard(archive: &Path, offset: u64) {
-    let mut f = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(archive)
-        .unwrap();
-    f.seek(SeekFrom::Start(offset)).unwrap();
-    let mut buf = [0u8; 100];
-    let n = f.read(&mut buf).unwrap();
-    for b in buf[..n].iter_mut() {
-        *b = !*b;
-    }
-    f.seek(SeekFrom::Start(offset)).unwrap();
-    f.write_all(&buf[..n]).unwrap();
-    f.flush().unwrap();
-}
-
-fn count_volume_files(base: &Path) -> usize {
-    let mut count = 0;
-    if base.exists() {
-        count += 1;
-    }
-    let stem = base.with_extension("");
-    for seq in 1..=999u16 {
-        let vol = stem.with_extension(format!("era.{:03}", seq));
-        if vol.exists() {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-    count
-}
-
-fn get_volume_paths(base: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if base.exists() {
-        paths.push(base.to_path_buf());
-    }
-    let stem = base.with_extension("");
-    for seq in 1..=999u16 {
-        let vol = stem.with_extension(format!("era.{:03}", seq));
-        if vol.exists() {
-            paths.push(vol);
-        } else {
-            break;
-        }
-    }
-    paths
-}
-
-fn corrupt_footer(archive: &Path) {
-    let len = fs::metadata(archive).unwrap().len();
-    assert!(len > 128, "archive must be larger than 128 bytes");
-    corrupt_archive_shard(archive, len - 128);
-}
-
-fn corrupt_header_magic(archive: &Path) {
-    let mut f = fs::OpenOptions::new().write(true).open(archive).unwrap();
-    f.write_all(&[0u8; 8]).unwrap();
-    f.flush().unwrap();
-}
-
-fn generate_test_keypair(dir: &Path) -> (PathBuf, PathBuf) {
-    use era_crypto::pem_support::export_private_key_as_pem;
-    use era_crypto::{export_public_key_as_pem, EraKeyPair};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let keypair = EraKeyPair::generate().expect("keypair generation should succeed");
-    let cert_pem =
-        export_public_key_as_pem(&keypair.certificate()).expect("cert export should succeed");
-    let key_pem = export_private_key_as_pem(&keypair).expect("key export should succeed");
-
-    let pub_path = dir.join(format!("public_{}.pem", id));
-    let priv_path = dir.join(format!("private_{}.pem", id));
-    fs::write(&pub_path, cert_pem).expect("public pem should be written");
-    fs::write(&priv_path, key_pem).expect("private pem should be written");
-
-    (pub_path, priv_path)
-}
-
-/// Count all files recursively in directory.
-fn count_files_recursive(dir: &Path) -> usize {
-    walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .count()
-}
 
 /// Compare two directories: every file in `expected` must exist in `actual` with same content.
 fn assert_dirs_content_equal(expected: &Path, actual: &Path) {
@@ -167,15 +48,6 @@ fn assert_dirs_content_equal(expected: &Path, actual: &Path) {
             rel.display()
         );
     }
-}
-
-/// Corrupt data region of a specific volume file.
-/// Targets offset 5000 (well into data region past header 4096 + backup footer 128).
-fn corrupt_volume_data(volume_path: &Path) {
-    let len = fs::metadata(volume_path).unwrap().len();
-    // Data region starts at 4224 (4096 header + 128 backup footer)
-    let offset = if len > 6000 { 5000 } else { 4300 };
-    corrupt_archive_shard(volume_path, offset);
 }
 
 // ===========================================================================
@@ -3225,11 +3097,6 @@ mod header_footer_recovery_tests {
 
 mod truncated_volume_tests {
     use super::*;
-
-    fn truncate_file(path: &Path, new_size: u64) {
-        let f = fs::OpenOptions::new().write(true).open(path).unwrap();
-        f.set_len(new_size).unwrap();
-    }
 
     #[test]
     fn test_truncated_volume_below_header_size() {

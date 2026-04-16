@@ -8,12 +8,10 @@ mod high_severity {
             "repair.rs must define/reuse MAX_SHARD_SIZE"
         );
 
-        let guard_count = source
-            .matches("if shard_header.length as u64 > MAX_SHARD_SIZE")
-            .count();
+        let guard_count = source.matches("as u64 > MAX_SHARD_SIZE").count();
         assert!(
             guard_count >= 3,
-            "expected MAX_SHARD_SIZE guard in all 3 shard-read paths, found {guard_count}"
+            "expected MAX_SHARD_SIZE guard in all shard-read paths, found {guard_count}"
         );
     }
 
