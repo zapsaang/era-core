@@ -1164,6 +1164,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     }
                 };
 
+                if shard_header.length > MAX_SHARD_SIZE {
+                    temp_offsets[idx] = self.data_ends[idx];
+                    continue;
+                }
                 let shard_len = shard_header.length as usize;
                 prefix_copies.push(prefix_bytes);
                 temp_offsets[idx] +=
@@ -1244,8 +1248,28 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     None
                 };
 
+                let parity_bound =
+                    crate::erasure_scan::parity_bound_from_lengths(stripe_lengths.as_deref());
+
                 let shard_len: usize = if let Some(auth_len) = authoritative_len {
                     auth_len as usize
+                } else if !is_data_shard {
+                    let header_len = shard_header.length;
+                    if let Some(pb) = parity_bound {
+                        if pb > 0 && header_len < pb {
+                            self.stats.corrupted_shards += 1;
+                            self.current_offsets[idx] +=
+                                header_prefix_len as u64 + ShardHeader::SIZE as u64 + pb as u64;
+                            continue;
+                        }
+                        if pb > 0 && header_len > pb {
+                            pb as usize
+                        } else {
+                            header_len as usize
+                        }
+                    } else {
+                        header_len as usize
+                    }
                 } else {
                     shard_header.length as usize
                 };

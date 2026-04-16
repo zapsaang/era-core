@@ -49,7 +49,7 @@ pub(crate) fn parity_bound_from_lengths(stripe_lengths: Option<&[u32]>) -> Optio
     Some(if max_stripe.is_multiple_of(2) {
         max_stripe
     } else {
-        max_stripe + 1
+        max_stripe.checked_add(1)?
     })
 }
 
