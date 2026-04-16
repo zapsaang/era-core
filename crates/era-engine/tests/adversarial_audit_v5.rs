@@ -327,10 +327,10 @@ async fn test_v5_advrs_01_non_session_shard_len_cap() {
         .open(&archive)
         .unwrap();
     use std::io::{Seek, SeekFrom, Write};
-    for pos in [4224u64 + 8, 4224u64 + 12, 4224u64 + 16] {
-        file.seek(SeekFrom::Start(pos)).unwrap();
-        file.write_all(&u32::MAX.to_le_bytes()).unwrap();
-    }
+    // Corrupt the stripe-prefix length (now authoritative for data shards)
+    // to verify the MAX_SHARD_SIZE cap still prevents unbounded allocation.
+    file.seek(SeekFrom::Start(4224u64)).unwrap();
+    file.write_all(&u32::MAX.to_le_bytes()).unwrap();
 
     let out = temp.path().join("out");
     fs::create_dir_all(&out).unwrap();

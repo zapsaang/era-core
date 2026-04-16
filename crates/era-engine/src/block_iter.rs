@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig};
 use era_common::{
-    BlockHeader, BlockId, BlockLocation, BlockType, ChunkVec, EraError, ErasureBlockInfo,
-    MatrixDistributionStrategy, Result, ShardHeader, VerifiedShard,
+    compute_shard_crc, BlockHeader, BlockId, BlockLocation, BlockType, ChunkVec, EraError,
+    ErasureBlockInfo, MatrixDistributionStrategy, Result, ShardHeader, VerifiedShard,
 };
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker};
@@ -298,6 +298,10 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             if let Some(f) = footer {
                 if f.has_index() && f.index_offset() < limit {
                     limit = f.index_offset();
+                }
+                let ckpt_off = f.last_checkpoint_offset();
+                if ckpt_off > 0 && ckpt_off < limit {
+                    limit = ckpt_off;
                 }
             }
             current_offsets.push(start);
@@ -801,6 +805,10 @@ impl<'a, R: era_storage::StorageReader> MultiVolumeSessionBlockIterator<'a, R> {
                 if f.has_index() && f.index_offset() < limit {
                     limit = f.index_offset();
                 }
+                let ckpt_off = f.last_checkpoint_offset();
+                if ckpt_off > 0 && ckpt_off < limit {
+                    limit = ckpt_off;
+                }
             }
 
             current_offsets.push(start);
@@ -1056,6 +1064,10 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
                 if f.has_index() && f.index_offset() < limit {
                     limit = f.index_offset();
                 }
+                let ckpt_off = f.last_checkpoint_offset();
+                if ckpt_off > 0 && ckpt_off < limit {
+                    limit = ckpt_off;
+                }
             }
             current_offsets.push(start);
             data_ends.push(limit);
@@ -1225,14 +1237,30 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     }
                 };
 
-                let shard_len = shard_header.length as usize;
-                if shard_header.length > MAX_SHARD_SIZE {
+                // For data shards, the stripe prefix length is authoritative.
+                // This prevents drift when the ShardHeader.length field is corrupted.
+                let is_data_shard = shard_idx < data_shards;
+                let authoritative_len: Option<u32> = if is_data_shard {
+                    stripe_lengths
+                        .as_ref()
+                        .and_then(|sl| sl.get(shard_idx).copied())
+                } else {
+                    None
+                };
+
+                let shard_len: usize = if let Some(auth_len) = authoritative_len {
+                    auth_len as usize
+                } else {
+                    shard_header.length as usize
+                };
+
+                if shard_len as u32 > MAX_SHARD_SIZE {
                     return Some(Err(EraError::InvalidFormat(
                         "Shard size exceeds maximum".into(),
                     )));
                 }
                 if let Some(slot) = data_lengths.get_mut(shard_idx) {
-                    *slot = Some(shard_header.length);
+                    *slot = authoritative_len.or(Some(shard_header.length));
                 }
                 if shard_len > max_len {
                     max_len = shard_len;
@@ -1255,7 +1283,13 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     }
                 };
 
-                if shard_header.verify(&shard_data) {
+                let crc_valid = if authoritative_len.is_some() {
+                    compute_shard_crc(&shard_data) == shard_header.crc
+                } else {
+                    shard_header.verify(&shard_data)
+                };
+
+                if crc_valid {
                     available_shards.push(VerifiedShard {
                         index: shard_idx,
                         data: shard_data,

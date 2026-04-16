@@ -260,7 +260,7 @@ enum Commands {
         era repair backup.era                        Analyze only (dry run)\n  \
         era repair backup.era --force                Apply repairs\n  \
         era repair backup.era --password s3cr3t      Apply repairs (password mode)\n  \
-        Note: Certificate-based repair (--key) is not supported. Use --password.")]
+        Note: Certificate-based repair is not supported. Use --password.")]
     Repair {
         /// Archive path
         archive: PathBuf,
@@ -270,7 +270,7 @@ enum Commands {
         password: Option<String>,
 
         /// Private key file for certificate mode (PEM format)
-        #[arg(short = 'k', long)]
+        #[arg(short = 'k', long, hide = true)]
         key: Option<PathBuf>,
 
         /// Apply repairs or discard an interrupted-create checkpoint

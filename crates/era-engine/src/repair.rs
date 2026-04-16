@@ -428,6 +428,16 @@ pub async fn repair_archive(
                 } else {
                     max_stripe + 1
                 };
+                // Harden against corrupted but in-range parity length that is too small.
+                // A valid parity shard should match the padded max stripe size.
+                if parity_bound > 0 && h.length < parity_bound {
+                    corrupted_indices.push(shard_idx);
+                    stats.corrupted_shards_found += 1;
+                    shard_offsets[shard_idx] = Some(shard_header_offset);
+                    offset +=
+                        header_prefix_len as u64 + ShardHeader::SIZE as u64 + parity_bound as u64;
+                    continue;
+                }
                 if parity_bound > 0 && h.length > parity_bound {
                     parity_bound as usize
                 } else {
@@ -1000,6 +1010,10 @@ pub async fn repair_archive_matrix(
                 if f.has_index() && f.index_offset() < limit {
                     limit = f.index_offset();
                 }
+                let ckpt_off = f.last_checkpoint_offset();
+                if ckpt_off > 0 && ckpt_off < limit {
+                    limit = ckpt_off;
+                }
                 limit
             } else {
                 end
@@ -1115,6 +1129,22 @@ pub async fn repair_archive_matrix(
                     } else {
                         max_stripe + 1
                     };
+                    // Harden against corrupted but in-range parity length that is too small.
+                    // A valid parity shard should match the padded max stripe size.
+                    if parity_bound > 0 && h.length < parity_bound {
+                        corrupted_indices.push(shard_idx);
+                        stats.corrupted_shards_found += 1;
+                        shard_locations.push((
+                            shard_idx,
+                            reader_idx,
+                            shard_offset + header_prefix_len as u64,
+                        ));
+                        volume_offsets[reader_idx] = shard_offset
+                            + header_prefix_len as u64
+                            + ShardHeader::SIZE as u64
+                            + parity_bound as u64;
+                        continue;
+                    }
                     if parity_bound > 0 && h.length > parity_bound {
                         parity_bound as usize
                     } else {
