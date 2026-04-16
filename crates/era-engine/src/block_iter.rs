@@ -415,16 +415,22 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             // Advance past header
             self.current_offsets[reader_idx] += ShardHeader::SIZE as u64;
 
-            let shard_len = shard_header.length as usize;
-            if shard_header.length > MAX_SHARD_SIZE {
+            let is_parity_shard = shard_idx >= self.data_shards as usize;
+            let bounded_len = if is_parity_shard {
+                shard_header.length.min(original_len)
+            } else {
+                shard_header.length
+            };
+            if bounded_len > MAX_SHARD_SIZE {
                 self.stats.blocks_failed += 1;
                 return Some(Err(EraError::InvalidFormat(
                     "Shard size exceeds maximum".into(),
                 )));
             }
+            let shard_len = bounded_len as usize;
 
             if first_shard_size == 0 {
-                first_shard_size = shard_header.length;
+                first_shard_size = bounded_len;
             }
 
             // Read shard data

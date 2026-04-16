@@ -219,6 +219,12 @@ mod tests {
     }
 
     #[test]
+    fn test_parity_bound_from_lengths_does_not_overflow_on_u32_max() {
+        assert_eq!(parity_bound_from_lengths(Some(&[u32::MAX])), None);
+        assert_eq!(parity_bound_from_lengths(Some(&[100, u32::MAX])), None);
+    }
+
+    #[test]
     fn test_even_aligned_shard_size() {
         assert_eq!(even_aligned_shard_size(100), 100);
         assert_eq!(even_aligned_shard_size(101), 102);

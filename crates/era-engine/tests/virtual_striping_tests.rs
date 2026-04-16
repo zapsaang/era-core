@@ -317,3 +317,70 @@ async fn test_virtual_striping_clamps_inflated_parity_length() {
         assert_eq!(extracted, expected_data[i - 1]);
     }
 }
+
+#[tokio::test]
+async fn test_virtual_striping_multi_volume_corrupted_parity_length_recovers() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("striped_parity_multi.era");
+    let password = "test_password";
+
+    let erasure_config = ErasureCodeConfig {
+        data_shards: 2,
+        parity_shards: 1,
+    };
+
+    let config = ArchiveConfig {
+        compression: CompressionConfig {
+            algorithm: CompressionAlgorithm::None,
+            level: 0,
+        },
+        ..Default::default()
+    };
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password(password)
+        .config(config)
+        .enable_erasure(true)
+        .erasure_config(erasure_config)
+        .target_block_size(1024)
+        .enable_small_file_packing(false)
+        .volume_count(3)
+        .build()
+        .await
+        .unwrap();
+
+    let mut expected_data = Vec::new();
+    for i in 1..=5 {
+        let content = vec![i as u8; 1024];
+        let name = format!("file_{}.bin", i);
+        writer.add_bytes(&name, &content).await.unwrap();
+        expected_data.push(content);
+    }
+
+    writer.finalize().await.unwrap();
+
+    let parity_vol_path = archive_path.with_extension("era.002");
+    assert!(parity_vol_path.exists(), "parity volume 2 should exist");
+
+    corrupt_shard_header_length(&parity_vol_path, 2, 2, 1).await;
+
+    let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    assert!(
+        verify_stats.is_ok(),
+        "must verify despite corrupted parity length in multi-volume layout"
+    );
+
+    let extract_dir = temp_dir.path().join("extracted");
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .expect("Extraction failed");
+    assert_eq!(extract_stats.extracted, 5);
+
+    for i in 1..=5 {
+        let name = format!("file_{}.bin", i);
+        let extracted = fs::read(extract_dir.join(name)).unwrap();
+        assert_eq!(extracted, expected_data[i - 1]);
+    }
+}
