@@ -121,7 +121,7 @@ async fn test_matrix_repair_with_checkpoint_boundary() {
 
     assert!(
         repair_stats.corrupted_shards_found > 0,
-        "repair should detect injected crc corruption"
+        "repair should detect injected corruption"
     );
     assert_eq!(
         repair_stats.unrecoverable_blocks, 0,
@@ -152,7 +152,7 @@ async fn test_matrix_repair_with_checkpoint_boundary() {
 #[tokio::test]
 async fn test_matrix_repair_corrupted_data_shard_header_length_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
-    let (archive_path, _payload) =
+    let (archive_path, payload) =
         create_matrix_archive(&temp_dir, "matrix_header.era", 256 * 1024, false).await;
 
     let strategy = era_common::MatrixDistributionStrategy::RotatingOffset;
@@ -223,7 +223,201 @@ async fn test_matrix_repair_corrupted_data_shard_header_length_roundtrip() {
         .extract_all(&ExtractOptions::new(&extract_dir))
         .await
         .unwrap();
-    assert_eq!(fs::read(extract_dir.join("payload.bin")).unwrap(), _payload);
+    assert_eq!(fs::read(extract_dir.join("payload.bin")).unwrap(), payload);
+}
+
+#[tokio::test]
+async fn test_matrix_repair_large_layout_payload_corruption_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("matrix_large.era");
+    let payload = deterministic_payload(16 * 1024 * 1024);
+
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+        .password(PASSWORD)
+        .enable_erasure(true)
+        .erasure_config(ERASURE_4_PLUS_2)
+        .volume_count(6)
+        .build()
+        .await
+        .unwrap();
+
+    writer.add_bytes("payload.bin", &payload).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    let strategy = era_common::MatrixDistributionStrategy::RotatingOffset;
+    let vol_idx = strategy.calculate_volume(0, 0, 6).unwrap();
+    let vol0_path = if vol_idx == 0 {
+        archive_path.clone()
+    } else {
+        archive_path.with_extension(format!("era.{:03}", vol_idx))
+    };
+
+    let backend = LocalStorageBackend::new(vol0_path.parent().unwrap());
+    let reader = VolumeReader::open(&backend, Path::new(vol0_path.file_name().unwrap()))
+        .await
+        .unwrap();
+    let (data_start, _) = reader.data_region();
+    let header_prefix_len = ERASURE_4_PLUS_2.data_shards as u64 * 4;
+
+    let header_bytes = reader
+        .read_raw(
+            data_start + header_prefix_len,
+            era_common::ShardHeader::SIZE,
+        )
+        .await
+        .unwrap();
+    let shard_header = era_common::ShardHeader::from_bytes(&header_bytes).unwrap();
+
+    let payload_offset = data_start + header_prefix_len + era_common::ShardHeader::SIZE as u64;
+    let payload_len = shard_header.length as u64;
+
+    let original_bytes = reader
+        .read_raw(payload_offset, payload_len.min(1024) as usize)
+        .await
+        .unwrap();
+
+    let corrupt_offset = payload_offset + (payload_len / 2);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&vol0_path)
+        .unwrap();
+    file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+    let mut byte = [0u8; 1];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0xFF;
+    file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.flush().unwrap();
+    drop(file);
+
+    let repair_stats = repair_archive_matrix(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        repair_stats.corrupted_shards_found > 0,
+        "repair should detect injected corruption"
+    );
+    assert_eq!(
+        repair_stats.unrecoverable_blocks, 0,
+        "archive should be fully recoverable"
+    );
+
+    let backend_after = LocalStorageBackend::new(vol0_path.parent().unwrap());
+    let reader_after =
+        VolumeReader::open(&backend_after, Path::new(vol0_path.file_name().unwrap()))
+            .await
+            .unwrap();
+    let repaired_bytes = reader_after
+        .read_raw(payload_offset, payload_len.min(1024) as usize)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repaired_bytes, original_bytes,
+        "repaired bytes should exactly match original"
+    );
+
+    let mut archive_reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let verify_stats = archive_reader.verify().await.unwrap();
+    assert!(verify_stats.is_ok(), "archive should verify after repair");
+    assert!(!verify_stats.needs_repair(), "should not need repair");
+
+    let extract_dir = temp_dir.path().join("extract");
+    archive_reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(extract_dir.join("payload.bin")).unwrap(),
+        payload,
+        "extracted payload should match original"
+    );
+}
+
+#[tokio::test]
+async fn test_matrix_repair_cli_style_offset_5000_corruption() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("matrix_cli.era");
+    let payload = deterministic_payload(128 * 1024 * 1024);
+
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+        .password(PASSWORD)
+        .enable_erasure(true)
+        .erasure_config(ERASURE_4_PLUS_2)
+        .volume_count(6)
+        .build()
+        .await
+        .unwrap();
+
+    writer.add_bytes("payload.bin", &payload).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    let vol0_path = &archive_path;
+
+    let backend = LocalStorageBackend::new(vol0_path.parent().unwrap());
+    let reader = VolumeReader::open(&backend, Path::new(vol0_path.file_name().unwrap()))
+        .await
+        .unwrap();
+    drop(reader);
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(vol0_path)
+        .unwrap();
+    file.seek(SeekFrom::Start(5000)).unwrap();
+    let mut buf = vec![0u8; 100];
+    let n = file.read(&mut buf).unwrap();
+    for b in &mut buf[..n] {
+        *b = !*b;
+    }
+    file.seek(SeekFrom::Start(5000)).unwrap();
+    file.write_all(&buf[..n]).unwrap();
+    file.flush().unwrap();
+    drop(file);
+
+    let repair_stats = repair_archive_matrix(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            dry_run: false,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repair_stats.unrecoverable_blocks, 0,
+        "archive should be fully recoverable"
+    );
+
+    let mut archive_reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let verify_stats = archive_reader.verify().await.unwrap();
+    assert!(verify_stats.is_ok(), "archive should verify after repair");
+    assert!(!verify_stats.needs_repair(), "should not need repair");
+
+    let extract_dir = temp_dir.path().join("extract");
+    archive_reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(extract_dir.join("payload.bin")).unwrap(),
+        payload,
+        "extracted payload should match original"
+    );
 }
 
 #[tokio::test]
