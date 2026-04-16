@@ -422,6 +422,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - [ ] Incremental backup support
 - [ ] Streaming extraction API
 - [ ] Python bindings (PyO3)
+- [ ] Bit-level volume integrity scan — detect and report every corrupted bit across all volumes (see [`doc_gen/TODO/BIT_LEVEL_VOLUME_INTEGRITY_SCAN.md`](doc_gen/TODO/BIT_LEVEL_VOLUME_INTEGRITY_SCAN.md))
 
 ### Long-term (2027+)
 
