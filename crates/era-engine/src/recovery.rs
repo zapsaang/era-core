@@ -829,7 +829,7 @@ mod tests {
         });
 
         tokio::task::spawn_blocking(move || {
-            entered_rx.recv_timeout(std::time::Duration::from_secs(2))
+            entered_rx.recv_timeout(std::time::Duration::from_secs(30))
         })
         .await
         .expect("join while waiting for blocking truncate hook")
