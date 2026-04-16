@@ -269,10 +269,6 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Private key file for certificate mode (PEM format)
-        #[arg(short = 'k', long, hide = true)]
-        key: Option<PathBuf>,
-
         /// Apply repairs or discard an interrupted-create checkpoint
         #[arg(short = 'f', long)]
         force: bool,
@@ -453,19 +449,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Repair {
             archive,
             password,
-            key,
             force,
             verbose,
-        } => {
-            commands::repair(
-                &archive,
-                password.as_deref(),
-                key.as_deref(),
-                force,
-                verbose,
-            )
-            .await
-        }
+        } => commands::repair(&archive, password.as_deref(), force, verbose).await,
 
         Commands::Repack {
             input,

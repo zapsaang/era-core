@@ -3010,7 +3010,7 @@ mod repair_tests {
         );
         corrupt_archive_shard(&archive, 10000);
 
-        let assert_result = era_cmd()
+        era_cmd()
             .args([
                 "repair",
                 archive.to_str().unwrap(),
@@ -3018,14 +3018,12 @@ mod repair_tests {
                 priv_key.to_str().unwrap(),
                 "--force",
             ])
-            .assert();
-
-        let stderr = String::from_utf8_lossy(&assert_result.get_output().stderr);
-        assert!(
-            !assert_result.get_output().status.success() || stderr.contains("password"),
-            "repair with --key should fail or mention password: {}",
-            stderr
-        );
+            .assert()
+            .failure()
+            .stderr(
+                predicates::str::contains("unexpected argument")
+                    .or(predicates::str::contains("error: unknown option")),
+            );
     }
 }
 

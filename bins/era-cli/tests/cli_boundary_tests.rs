@@ -448,6 +448,31 @@ threshold = 2
             "CLI help should show --certificate option"
         );
     }
+
+    #[test]
+    fn test_repair_help_does_not_show_key() {
+        let repair_help = era_cmd().args(["repair", "--help"]).assert();
+        let repair_output = repair_help.get_output();
+        let repair_stdout = String::from_utf8_lossy(&repair_output.stdout);
+        let repair_stderr = String::from_utf8_lossy(&repair_output.stderr);
+        let repair_combined = format!("{}\n{}", repair_stdout, repair_stderr);
+
+        assert!(
+            !repair_combined.contains("--key"),
+            "repair --help should NOT show --key option"
+        );
+
+        let extract_help = era_cmd().args(["extract", "--help"]).assert();
+        let extract_output = extract_help.get_output();
+        let extract_stdout = String::from_utf8_lossy(&extract_output.stdout);
+        let extract_stderr = String::from_utf8_lossy(&extract_output.stderr);
+        let extract_combined = format!("{}\n{}", extract_stdout, extract_stderr);
+
+        assert!(
+            extract_combined.contains("--key"),
+            "extract --help should still show --key option"
+        );
+    }
 }
 
 // ===========================================================================

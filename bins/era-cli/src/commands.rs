@@ -698,7 +698,6 @@ pub async fn verify(
 pub async fn repair(
     archive: &Path,
     password: Option<&str>,
-    key_path: Option<&Path>,
     force: bool,
     verbose: bool,
 ) -> Result<()> {
@@ -751,19 +750,10 @@ pub async fn repair(
         info!("Archive appears complete. Running verification...");
         info!("");
 
-        let mut reader = if let Some(kp_path) = key_path {
-            info!("Loading private key: {}", kp_path.display());
-            let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
-                .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
-            ArchiveReader::open_with_keypair(archive, &keypair)
-                .await
-                .context("Failed to open archive with key")?
-        } else {
-            let password = get_password(password, "Enter decryption password: ")?;
-            ArchiveReader::open(archive, &password)
-                .await
-                .context("Failed to open archive")?
-        };
+        let password = get_password(password, "Enter decryption password: ")?;
+        let mut reader = ArchiveReader::open(archive, &password)
+            .await
+            .context("Failed to open archive")?;
 
         // Check if erasure coding is enabled
         let header = reader.header();
@@ -864,12 +854,6 @@ pub async fn repair(
         }
 
         if erasure_enabled {
-            if key_path.is_some() {
-                anyhow::bail!(
-                    "Reed-Solomon repair requires password mode. Re-run with --password instead of --key."
-                );
-            }
-            let password = get_password(password, "Enter decryption password: ")?;
             info!("Attempting repair using Reed-Solomon erasure coding...");
             info!("");
 
@@ -1439,7 +1423,7 @@ mod tests {
     async fn repair_returns_error_for_missing_expected_volume() {
         let (_temp_dir, archive_path) = create_missing_volume_archive("repair_missing", 1).await;
 
-        let err = repair(&archive_path, Some("test_password"), None, false, false)
+        let err = repair(&archive_path, Some("test_password"), false, false)
             .await
             .expect_err("missing volume should not report healthy repair status");
 
