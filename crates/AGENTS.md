@@ -27,7 +27,7 @@
 
 ```
 era-engine → era-{common,crypto,codec,storage,volume,packing,ingest,index}
-era-index  → era-{common,crypto,codec,storage,volume}
+era-index  → era-{common,crypto,storage,volume}
 era-packing → era-{common,crypto,codec}
 era-ingest → era-{common,crypto,codec}
 era-volume → era-{common,storage}

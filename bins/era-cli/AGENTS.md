@@ -33,4 +33,17 @@ cargo run --manifest-path bins/era-cli/Cargo.toml -- --help
 cargo test -p era-cli
 ```
 
+## STRUCTURE
+
+```
+era-cli/src/
+├── main.rs      # Clap CLI entry, tokio runtime
+├── commands.rs  # 7 command implementations
+└── progress.rs  # Progress display
+```
+
+## TESTS
+
+- `tests/AGENTS.md` — CLI integration test surface (9 test files)
+
 See root `AGENTS.md` for workspace rules and anti-patterns.

@@ -9,6 +9,7 @@ Security primitives — all cryptographic operations and secure memory for the 3
 | `lib.rs` | — | Crate facade. Re-exports AEAD, KDF, certificate, secure-memory, timestamp, and key-session entrypoints. |
 | `key_session.rs` | 662 | 3-layer envelope (MK→IK→VK→BK). HKDF derivation, VK wrap/unwrap, per-block key derivation, Shamir split/reconstruct. |
 | `certificate.rs` | 816 | Hybrid KEM (X25519 + Kyber-768). PEM I/O, key encapsulation/decapsulation, timestamp validation. |
+| `secure_memory.rs` | — | `SecureBuffer<N>`: mlock + Zeroize on Drop. Core dump prevention (prctl/ptrace). |
 | `aead.rs` | — | XChaCha20-Poly1305 encrypt/decrypt. Fresh 24-byte nonce per operation via OsRng. |
 | `aead_context.rs` | — | Context-bound AEAD cipher. Binds archive_id ‖ epoch_id ‖ volume_index ‖ block_index as AAD. |
 | `kdf.rs` | — | Argon2id password → MK derivation. Configurable memory/time cost. |

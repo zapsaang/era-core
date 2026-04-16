@@ -1,7 +1,7 @@
 # ERA-CORE KNOWLEDGE BASE
 
-**Generated:** 2026-03-31
-**Commit:** 63e940b
+**Generated:** 2026-04-16
+**Commit:** 3d2d233
 **Branch:** feat_fly
 
 Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing.
@@ -54,11 +54,11 @@ L0: era-crypto, era-common
 |------|-------|
 | Disk format change | `era-volume/src/header.rs`, `era-volume/src/footer.rs` |
 | Crypto primitives | `era-crypto/src/{aead,kdf,key_session}.rs` |
-| Pipeline write path | `era-engine/src/writer.rs` (2544 lines) |
-| Pipeline read path | `era-engine/src/reader.rs` (2241 lines) |
+| Pipeline write path | `era-engine/src/writer.rs` (2554 lines) |
+| Pipeline read path | `era-engine/src/reader.rs` (2313 lines) |
 | Dedup index | `era-index/src/{builder,reader,store}.rs` |
 | Chunking | `era-ingest/src/chunker*.rs` |
-| Packing | `era-packing/src/macro_block.rs` |
+| Packing | `era-packing/src/builder.rs` |
 | Compression | `era-codec/src/compression.rs` |
 | Erasure coding | `era-codec/src/erasure.rs` |
 | Auth (password/cert/threshold) | `era-engine/src/auth.rs` |
@@ -67,13 +67,14 @@ L0: era-crypto, era-common
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `era-engine/src/writer.rs` | 2544 | Archive creation pipeline |
-| `era-engine/src/reader.rs` | 2241 | Archive extraction pipeline |
-| `era-engine/src/block_iter.rs` | 1657 | 4 iterator types, virtual striping |
+| `era-engine/src/writer.rs` | 2554 | Archive creation pipeline |
+| `era-engine/src/reader.rs` | 2313 | Archive extraction pipeline |
+| `era-engine/src/block_iter.rs` | 1699 | 4 iterator types, virtual striping |
+| `era-engine/src/repair.rs` | 1451 | RS-based shard recovery |
+| `era-index/src/reader.rs` | 1269 | Bloom + L1/L2 index lookup |
 | `era-volume/src/header.rs` | 1225 | SuperHeader, RecipientSlot, KeyWrap |
-| `era-volume/src/volume_pool.rs` | 1192 | Volume rotation, matrix distribution |
+| `era-volume/src/volume_pool.rs` | 1199 | Volume rotation, matrix distribution |
 | `era-engine/src/checkpoint.rs` | 927 | WAL-based binary checkpoints (v2.2+) |
-| `era-engine/src/repair.rs` | 889 | RS-based shard recovery |
 
 ## TEST ORG
 
@@ -90,8 +91,8 @@ L0: era-crypto, era-common
 ## COMMANDS
 
 ```bash
-# Full CI check
-cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --workspace
+# Full CI check (matches ci.yml exactly)
+cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --release --workspace
 
 # Per-crate
 cargo test -p era-engine
@@ -100,6 +101,7 @@ cargo bench -p era-crypto
 
 # CLI
 cargo run --manifest-path bins/era-cli/Cargo.toml -- --help
+cargo test --release -p era-cli
 
 # Fuzz (nightly, separate workspace — NOT present in repo)
 cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
@@ -110,8 +112,9 @@ cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 - `crates/AGENTS.md` — crate map + dependency graph
 - `crates/*/AGENTS.md` — crate boundary docs
 - `crates/*/src/AGENTS.md` — source-tree maps + file inventory
-- `crates/*/tests/AGENTS.md` — test surface docs (era-engine, era-index, era-volume)
+- `crates/*/tests/AGENTS.md` — test surface docs
 - `bins/era-cli/AGENTS.md` — CLI layer
+- `bins/era-cli/tests/AGENTS.md` — CLI integration tests
 
 ## NOTES
 

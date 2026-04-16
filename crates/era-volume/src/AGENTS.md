@@ -8,10 +8,10 @@ Physical volume format v8.1 and multi-volume management. L2.
 |------|-------|---------|
 | `header.rs` | 1225 | SuperHeader (4096B), RecipientSlot, EncryptedVolumeKey, KeyWrapAlgorithm |
 | `footer.rs` | 835 | Footer (128B), FOOTER_MAGIC, Blake3 checksum, block count, index location |
-| `reader.rs` | 700 | VolumeReader — async read with SECURITY: length validation against MAX_SHARD_SIZE (4 locations) |
-| `writer.rs` | 889 | VolumeWriter — async write with padding |
+| `reader.rs` | 700 | VolumeReader — async read with length validation against MAX_SHARD_SIZE |
+| `writer.rs` | 895 | VolumeWriter — async write with padding |
 | `multi_volume.rs` | 671 | MultiVolumeReader, MultiVolumeWriter — multi-disk coordination |
-| `volume_pool.rs` | 1192 | Volume pool — rotation state machine, matrix shard distribution, space tracking |
+| `volume_pool.rs` | 1199 | Volume pool — rotation state machine, matrix shard distribution, space tracking |
 
 ## VOLUME FORMAT v8.1
 
