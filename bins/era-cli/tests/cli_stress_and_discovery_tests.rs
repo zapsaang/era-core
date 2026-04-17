@@ -78,7 +78,6 @@ fn create_multivolume_archive_with_data(
 mod large_file_stress {
     use super::*;
 
-    #[ignore]
     #[test]
     fn test_stress_large_file_128mb_roundtrip_single_volume() {
         let temp = TempDir::new().unwrap();
@@ -119,7 +118,6 @@ mod large_file_stress {
         verify_large_deterministic_file(&out_dir.join("large_128mb.bin"), size);
     }
 
-    #[ignore]
     #[test]
     fn test_stress_large_file_128mb_repair_after_corruption_release_regression() {
         let temp = TempDir::new().unwrap();

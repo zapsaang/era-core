@@ -161,8 +161,6 @@ mod large_file_tests {
     }
 
     /// Create a 1GB file with erasure coding, corrupt a shard, repair, extract, verify.
-    #[ignore]
-    // PRE-EXISTING BUG: repair succeeds but verify fails with BlockHeader CRC error for large erasure-coded archives (unfixed)
     #[test]
     fn test_large_file_1gb_repair_after_corruption() {
         let temp = TempDir::new().unwrap();
