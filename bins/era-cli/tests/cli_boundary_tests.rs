@@ -339,13 +339,9 @@ mod volume_size_boundary_tests {
 mod threshold_mode_cli_tests {
     use super::*;
 
-    /// Test that threshold (T-of-N) mode is NOT exposed in CLI.
-    ///
-    /// This test verifies that threshold/shares arguments are missing from CLI.
-    /// If they ARE found, this test will fail - which is GOOD because it means
-    /// the missing feature has been implemented.
+    /// Test that threshold (T-of-N) mode IS exposed in CLI.
     #[test]
-    fn test_threshold_mode_not_exposed_in_cli_help() {
+    fn test_threshold_mode_exposed_in_cli_help() {
         let binding = era_cmd().args(["create", "--help"]).assert();
         let output = binding.get_output();
 
@@ -353,23 +349,14 @@ mod threshold_mode_cli_tests {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let combined = format!("{}\n{}", stdout, stderr);
 
-        // These terms should NOT appear if threshold mode is not implemented
-        let has_threshold = combined.to_lowercase().contains("threshold");
-        let has_shares = combined.to_lowercase().contains("shares");
-        let has_t_of_n = combined.to_lowercase().contains("t-of-n")
-            || combined.to_lowercase().contains("t of n");
-
-        if has_threshold || has_shares || has_t_of_n {
-            // If these appear, threshold mode IS implemented - great!
-            eprintln!("PASS: Threshold mode appears to be implemented in CLI");
-        } else {
-            // Threshold mode is NOT implemented - this test documents the gap
-            // The test passes because it's checking for a missing feature
-            eprintln!("INFO: Threshold T-of-N mode is NOT exposed in CLI help text");
-            eprintln!(
-                "      This is a known limitation - threshold mode requires config file setup"
-            );
-        }
+        assert!(
+            combined.to_lowercase().contains("threshold"),
+            "CLI help should show --threshold option"
+        );
+        assert!(
+            combined.to_lowercase().contains("shares"),
+            "CLI help should show --shares option"
+        );
     }
 
     /// Test that threshold mode can be configured via config file.
@@ -432,6 +419,46 @@ threshold = 2
         }
     }
 
+    #[test]
+    fn test_create_help_shows_hybrid_certificate_threshold_and_shares_flags() {
+        let binding = era_cmd().args(["create", "--help"]).assert();
+        let output = binding.get_output();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}\n{}", stdout, stderr);
+
+        assert!(
+            combined.contains("--hybrid-certificate"),
+            "CLI help should show --hybrid-certificate option"
+        );
+        assert!(
+            combined.contains("--threshold"),
+            "CLI help should show --threshold option"
+        );
+        assert!(
+            combined.contains("--shares"),
+            "CLI help should show --shares option"
+        );
+    }
+
+    #[test]
+    fn test_certificate_flag_remains_legacy_and_hybrid_is_opt_in() {
+        let binding = era_cmd().args(["create", "--help"]).assert();
+        let output = binding.get_output();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}\n{}", stdout, stderr);
+
+        assert!(
+            combined.contains("--certificate"),
+            "CLI help should still show legacy --certificate option"
+        );
+        assert!(
+            combined.contains("--hybrid-certificate"),
+            "CLI help should show new --hybrid-certificate option"
+        );
+    }
+
     /// Test that --help shows certificate-based options (baseline).
     /// This verifies our help text parsing is working correctly.
     #[test]
@@ -450,7 +477,7 @@ threshold = 2
     }
 
     #[test]
-    fn test_repair_help_does_not_show_key() {
+    fn test_repair_help_shows_key() {
         let repair_help = era_cmd().args(["repair", "--help"]).assert();
         let repair_output = repair_help.get_output();
         let repair_stdout = String::from_utf8_lossy(&repair_output.stdout);
@@ -458,8 +485,8 @@ threshold = 2
         let repair_combined = format!("{}\n{}", repair_stdout, repair_stderr);
 
         assert!(
-            !repair_combined.contains("--key"),
-            "repair --help should NOT show --key option"
+            repair_combined.contains("--key"),
+            "repair --help should show --key option"
         );
 
         let extract_help = era_cmd().args(["extract", "--help"]).assert();

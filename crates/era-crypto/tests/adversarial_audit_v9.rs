@@ -3,6 +3,7 @@
 //! Tests targeting: panic paths, key material leakage, memory safety,
 //! and coding standard violations in the cryptographic layer.
 
+use era_crypto::hybrid_certificate::HybridKeyPair;
 use era_crypto::hybrid_kem::{decapsulate, encapsulate, generate_keypair};
 use era_crypto::*;
 
@@ -453,4 +454,45 @@ fn v9_c13a_derive_block_key_stack_residue_documented() {
         &[0u8; 32],
         "V9-C13a: Block key should not be all zeros"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Hybrid certificate adapter roundtrip
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn hybrid_certificate_wraps_and_unwraps_master_key_roundtrip() {
+    let keypair = HybridKeyPair::generate();
+    let cert = keypair.certificate();
+    let master_key = [0xABu8; 32];
+
+    let (params, encrypted_master_key) =
+        HybridKeyPair::encapsulate_for(&cert, &master_key).unwrap();
+
+    assert_eq!(params.len(), 1120);
+    assert!(!encrypted_master_key.is_empty());
+
+    let decrypted = keypair.decapsulate(&params, &encrypted_master_key).unwrap();
+    assert_eq!(
+        decrypted, master_key,
+        "Hybrid certificate adapter must preserve master key roundtrip"
+    );
+}
+
+#[test]
+fn hybrid_certificate_pem_roundtrip() {
+    let keypair = HybridKeyPair::generate();
+    let cert = keypair.certificate();
+
+    let public_pem = era_crypto::pem_support::export_hybrid_public_key_as_pem(&cert).unwrap();
+    let private_pem = era_crypto::pem_support::export_hybrid_private_key_as_pem(&keypair).unwrap();
+
+    let combined_pem = format!("{}\n{}", public_pem, private_pem);
+    let loaded =
+        era_crypto::pem_support::load_hybrid_private_key_from_pem_string(&combined_pem).unwrap();
+
+    let master_key = [0xCDu8; 32];
+    let (params, encrypted) = HybridKeyPair::encapsulate_for(&cert, &master_key).unwrap();
+    let decrypted = loaded.decapsulate(&params, &encrypted).unwrap();
+    assert_eq!(decrypted, master_key);
 }

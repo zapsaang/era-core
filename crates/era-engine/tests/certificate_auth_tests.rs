@@ -365,3 +365,269 @@ async fn test_key_encapsulation_roundtrip() {
     writer.add_file(&test_file).await.unwrap();
     writer.finalize().await.unwrap();
 }
+
+/// Test full roundtrip with hybrid KEM certificate mode.
+#[tokio::test]
+async fn test_hybrid_kem_certificate_mode_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("hybrid.era");
+    let input_dir = temp_dir.path().join("input");
+    let output_dir = temp_dir.path().join("output");
+
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+
+    let test_file = input_dir.join("file.txt");
+    fs::write(&test_file, b"Hybrid PQ content").unwrap();
+
+    let keypair = era_engine::HybridKeyPair::generate();
+    let cert = keypair.certificate();
+
+    // Create archive with hybrid certificate
+    {
+        let mut writer = ArchiveWriterBuilder::new(&archive_path)
+            .hybrid_certificate(cert)
+            .config(test_config_no_ec())
+            .build()
+            .await
+            .unwrap();
+
+        writer.add_file(&test_file).await.unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    // Extract with hybrid keypair
+    {
+        let mut reader = ArchiveReader::open_with_hybrid_keypair(&archive_path, &keypair)
+            .await
+            .expect("Failed to open hybrid archive");
+
+        reader.load_catalog().await.unwrap();
+        let options = era_engine::ExtractOptions::new(&output_dir);
+        let stats = reader.extract_all(&options).await.unwrap();
+        assert_eq!(stats.extracted, 1);
+    }
+
+    let extracted = output_dir.join("file.txt");
+    assert!(extracted.exists());
+    assert_eq!(fs::read(&extracted).unwrap(), b"Hybrid PQ content");
+}
+
+/// Test that hybrid provider returns None for wrong key.
+#[test]
+fn test_hybrid_provider_wrong_key_returns_none() {
+    use era_engine::auth::{AuthProvider, HybridCertificateProvider};
+    use era_volume::RecipientSlot;
+
+    let keypair1 = era_engine::HybridKeyPair::generate();
+    let cert1 = keypair1.certificate();
+    let keypair2 = era_engine::HybridKeyPair::generate();
+
+    let master_key = [0xABu8; 32];
+    let (params, encrypted_mk) =
+        era_engine::HybridKeyPair::encapsulate_for(&cert1, &master_key).unwrap();
+
+    let slot = RecipientSlot::new(RecipientType::HybridKem, None, params, encrypted_mk);
+
+    let provider = HybridCertificateProvider::new(keypair2);
+    let result = provider.try_unlock(&slot);
+    assert!(
+        result.is_err() || result.unwrap().is_none(),
+        "Wrong hybrid key should fail to unlock"
+    );
+}
+
+/// Test that legacy X25519 archives still open after hybrid support lands.
+#[tokio::test]
+async fn test_legacy_x25519_archive_still_opens_after_hybrid_support() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("legacy.era");
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir(&output_dir).unwrap();
+
+    let test_file = temp_dir.path().join("legacy.txt");
+    fs::write(&test_file, b"Legacy content").unwrap();
+
+    let keypair = EraKeyPair::generate().unwrap();
+    let cert = keypair.certificate();
+
+    {
+        let mut writer = ArchiveWriterBuilder::new(&archive_path)
+            .certificate(cert)
+            .config(test_config_no_ec())
+            .build()
+            .await
+            .unwrap();
+        writer.add_file(&test_file).await.unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    let mut reader = ArchiveReader::open_with_keypair(&archive_path, &keypair)
+        .await
+        .unwrap();
+    reader.load_catalog().await.unwrap();
+    let options = era_engine::ExtractOptions::new(&output_dir);
+    let stats = reader.extract_all(&options).await.unwrap();
+    assert_eq!(stats.extracted, 1);
+    assert_eq!(
+        fs::read(output_dir.join("legacy.txt")).unwrap(),
+        b"Legacy content"
+    );
+}
+
+/// Test that repair with private key unlocks hybrid archive.
+#[tokio::test]
+async fn test_repair_archive_with_private_key_unlocks_hybrid_archive() {
+    // Skip if no erasure coding (repair requires EC)
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("hybrid_ec.era");
+
+    let kp = era_engine::HybridKeyPair::generate();
+    let cert = kp.certificate();
+
+    let mut config = test_config_no_ec();
+    config.erasure = Some(era_common::ErasureCodeConfig {
+        data_shards: 2,
+        parity_shards: 1,
+    });
+
+    {
+        let mut writer = ArchiveWriterBuilder::new(&archive_path)
+            .hybrid_certificate(cert)
+            .config(config)
+            .build()
+            .await
+            .unwrap();
+        let test_file = temp_dir.path().join("data.txt");
+        fs::write(&test_file, b"repair me").unwrap();
+        writer.add_file(&test_file).await.unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    let keypairs = vec![era_crypto::EitherKeyPair::Hybrid(Box::new(kp))];
+    let options = era_engine::RepairOptions::default();
+    let result =
+        era_engine::repair_archive_with_private_keys(&archive_path, &keypairs, options).await;
+    assert!(
+        result.is_ok(),
+        "Hybrid key repair should succeed: {:?}",
+        result
+    );
+}
+
+/// Test that repack with private keys preserves hybrid access.
+#[tokio::test]
+async fn test_repack_archive_with_private_keys_preserves_hybrid_access() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("hybrid_src.era");
+    let repacked_path = temp_dir.path().join("hybrid_repacked.era");
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir(&output_dir).unwrap();
+
+    let kp = era_engine::HybridKeyPair::generate();
+
+    {
+        let mut writer = ArchiveWriterBuilder::new(&archive_path)
+            .hybrid_certificate(kp.certificate())
+            .config(test_config_no_ec())
+            .build()
+            .await
+            .unwrap();
+        let test_file = temp_dir.path().join("data.txt");
+        fs::write(&test_file, b"repack me").unwrap();
+        writer.add_file(&test_file).await.unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    let keypairs = vec![era_crypto::EitherKeyPair::Hybrid(Box::new(kp.clone()))];
+    let result = era_engine::repack_archive_with_private_keys(
+        &archive_path,
+        &repacked_path,
+        &keypairs,
+        test_config_no_ec(),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "Repack with hybrid key should succeed: {:?}",
+        result
+    );
+
+    let mut reader = ArchiveReader::open_with_hybrid_keypair(&repacked_path, &kp)
+        .await
+        .unwrap();
+    reader.load_catalog().await.unwrap();
+    let stats = reader
+        .extract_all(&era_engine::ExtractOptions::new(&output_dir))
+        .await
+        .unwrap();
+    assert_eq!(stats.extracted, 1);
+    assert_eq!(fs::read(output_dir.join("data.txt")).unwrap(), b"repack me");
+}
+
+/// Test that repack with private keys preserves threshold hybrid certificate access.
+#[tokio::test]
+async fn test_repack_archive_with_private_keys_preserves_threshold_hybrid_access() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("hybrid_thresh_src.era");
+    let repacked_path = temp_dir.path().join("hybrid_thresh_repacked.era");
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir(&output_dir).unwrap();
+
+    let kp1 = era_engine::HybridKeyPair::generate();
+    let kp2 = era_engine::HybridKeyPair::generate();
+
+    {
+        let mut writer = ArchiveWriterBuilder::new(&archive_path)
+            .hybrid_certificate(kp1.certificate())
+            .add_hybrid_certificate(kp2.certificate())
+            .access_policy(era_volume::AccessPolicy::Threshold(2))
+            .config(test_config_no_ec())
+            .build()
+            .await
+            .unwrap();
+        let test_file = temp_dir.path().join("data.txt");
+        fs::write(&test_file, b"repack threshold hybrid").unwrap();
+        writer.add_file(&test_file).await.unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    let keypairs = vec![
+        era_crypto::EitherKeyPair::Hybrid(Box::new(kp1.clone())),
+        era_crypto::EitherKeyPair::Hybrid(Box::new(kp2.clone())),
+    ];
+    let result = era_engine::repack_archive_with_private_keys(
+        &archive_path,
+        &repacked_path,
+        &keypairs,
+        test_config_no_ec(),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "Repack with threshold hybrid keys should succeed: {:?}",
+        result
+    );
+
+    let providers: Vec<Box<dyn era_engine::auth::AuthProvider>> = vec![
+        Box::new(era_engine::auth::HybridCertificateProvider::new(
+            kp1.clone(),
+        )),
+        Box::new(era_engine::auth::HybridCertificateProvider::new(
+            kp2.clone(),
+        )),
+    ];
+    let mut reader = ArchiveReader::open_with_providers(&repacked_path, providers)
+        .await
+        .unwrap();
+    reader.load_catalog().await.unwrap();
+    let stats = reader
+        .extract_all(&era_engine::ExtractOptions::new(&output_dir))
+        .await
+        .unwrap();
+    assert_eq!(stats.extracted, 1);
+    assert_eq!(
+        fs::read(output_dir.join("data.txt")).unwrap(),
+        b"repack threshold hybrid"
+    );
+}

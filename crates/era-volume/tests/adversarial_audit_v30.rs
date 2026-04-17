@@ -505,6 +505,7 @@ fn test_v30_22_all_recipient_types_accepted() {
         RecipientType::Argon2idPassword,
         RecipientType::X25519PubKey,
         RecipientType::Fido2Hmac,
+        RecipientType::HybridKem,
     ];
 
     for rt in &types {
@@ -523,6 +524,50 @@ fn test_v30_22_all_recipient_types_accepted() {
             rt
         );
     }
+}
+
+/// HybridKem recipient slots enforce the same size bounds as other types.
+#[test]
+fn test_hybrid_kem_malformed_params_fail_closed() {
+    // params too large
+    let oversized = RecipientSlot::new(
+        RecipientType::HybridKem,
+        Some([0x11; 8]),
+        vec![0x22; era_volume::HEADER_SIZE + 1],
+        vec![0x33; 48],
+    );
+    let result = SuperHeader::new(
+        ArchiveId::new(),
+        vec![oversized],
+        ArchiveConfig::default(),
+        [0u8; 16],
+        test_evk(),
+        AccessPolicy::AnyOfN,
+    );
+    assert!(
+        result.is_err(),
+        "Oversized HybridKem params must be rejected"
+    );
+
+    // encrypted_master_key too short
+    let short_key = RecipientSlot::new(
+        RecipientType::HybridKem,
+        Some([0x11; 8]),
+        vec![0x22; 32],
+        vec![0x33; 23],
+    );
+    let result = SuperHeader::new(
+        ArchiveId::new(),
+        vec![short_key],
+        ArchiveConfig::default(),
+        [0u8; 16],
+        test_evk(),
+        AccessPolicy::AnyOfN,
+    );
+    assert!(
+        result.is_err(),
+        "Short HybridKem encrypted_master_key must be rejected"
+    );
 }
 
 /// V30-01: SuperHeader salt accessor returns the exact salt provided at construction.

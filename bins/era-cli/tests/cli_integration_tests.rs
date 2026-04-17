@@ -2057,7 +2057,7 @@ fn test_cert_verify_wrong_key_fails() {
 }
 
 #[test]
-fn test_cert_repair_rejects_key_mode() {
+fn test_cert_repair_succeeds_with_key() {
     let temp = TempDir::new().unwrap();
     let input = create_test_file(temp.path(), "repair_cert2.bin", &vec![0xEE; 256 * 1024]);
     let archive = temp.path().join("repair_cert2.era");
@@ -2073,6 +2073,8 @@ fn test_cert_repair_rejects_key_mode() {
             pub_cert.to_str().unwrap(),
             "--erasure",
             "4:2",
+            "--volumes",
+            "1",
             "--no-compression",
         ])
         .assert()
@@ -2092,11 +2094,7 @@ fn test_cert_repair_rejects_key_mode() {
             "--force",
         ])
         .assert()
-        .failure()
-        .stderr(
-            predicates::str::contains("unexpected argument")
-                .or(predicates::str::contains("error: unknown option")),
-        );
+        .success();
 }
 
 #[test]

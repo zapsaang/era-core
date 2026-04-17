@@ -7,17 +7,18 @@
 //!
 //! ## Authentication Modes
 //!
-//! ERA supports two authentication modes:
+//! ERA supports multiple authentication modes:
 //!
 //! - **Password mode**: Traditional Argon2id key derivation (~50-300ms overhead).
-//! - **Certificate mode**: Hybrid KEM (X25519 + Kyber-768) for post-quantum key encapsulation.
+//! - **Legacy Certificate mode**: X25519 key exchange (~0.05ms overhead).
+//! - **Hybrid KEM Certificate mode**: X25519 + Kyber-768 for post-quantum key encapsulation.
+//! - **Multi-recipient (OR) mode**: Password and certificate (legacy or hybrid) as separate
+//!   recipient slots under AnyOfN. Either credential can unlock the archive.
+//! - **Threshold mode**: T-of-N Shamir secret sharing across passwords or hybrid certificates.
 //!
-//! **Caution**: While Certificate mode provides high-performance key exchange (~0.05ms overhead),
-//! the current engine implementation has known trust boundary limitations for automated
-//! identity verification. It is currently suitable only for scenarios where the underlying
-//! transport or storage layer provides its own authentication, or where the certificate
-//! trust is managed externally. Full hybrid/PQ certificate validation within the engine
-//! pipeline is a planned enhancement.
+//! **Caution**: Certificate modes provide high-performance key exchange, but the engine
+//! does not perform automated identity verification. Certificate trust should be managed
+//! externally or via the underlying transport/storage layer.
 //!
 //! ## Chunk Index Backend
 //!
@@ -56,11 +57,20 @@ pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_V
 pub use era_crypto::KeySession;
 // Re-export certificate types for convenient access
 pub use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
+pub use era_crypto::hybrid_certificate::{HybridCertificate, HybridKeyPair};
+pub use era_volume::AccessPolicy;
+pub use era_volume::{RecipientSlot, RecipientType};
 pub use reader::{ArchiveHealthStatus, ArchiveReader, ExtractOptions, ExtractStats, VerifyStats};
 pub use recovery::{
     RecoverableWriter, RecoveryManager, RecoveryOptions, RecoveryStatus, RecoveryStrategy,
 };
-pub use repack::{repack_archive, repack_archive_with_keypair, RepackStats};
-pub use repair::{repair_archive, repair_archive_matrix, RepairOptions, RepairStats};
+pub use repack::{
+    repack_archive, repack_archive_with_builder, repack_archive_with_keypair,
+    repack_archive_with_passwords, repack_archive_with_private_keys, RepackStats,
+};
+pub use repair::{
+    repair_archive, repair_archive_matrix, repair_archive_with_passwords,
+    repair_archive_with_private_keys, repair_archive_with_providers, RepairOptions, RepairStats,
+};
 pub use writer::generic::{GenericArchiveWriter, GenericArchiveWriterBuilder};
 pub use writer::{ArchiveWriter, ArchiveWriterBuilder, AuthMode};

@@ -1295,7 +1295,7 @@ mod repair_key_limitation {
     use super::*;
 
     #[test]
-    fn test_repair_with_certificate_key_reports_password_only_limitation() {
+    fn test_repair_with_certificate_key_succeeds() {
         let temp = TempDir::new().unwrap();
         let input = create_test_file(temp.path(), "repair_key_limit.bin", &vec![0xEE; 256 * 1024]);
         let archive = temp.path().join("repair_key_limit.era");
@@ -1303,12 +1303,9 @@ mod repair_key_limitation {
 
         create_archive_with_cert(&input, &archive, &public_cert);
 
-        let truncated_volume = archive.with_extension("era.002");
-        assert!(
-            truncated_volume.exists(),
-            "expected secondary volume for repair limitation test"
-        );
-        truncate_file(&truncated_volume, 100);
+        let vol2 = archive.with_extension("era.002");
+        assert!(vol2.exists(), "expected secondary volume for repair test");
+        corrupt_volume_data(&vol2);
 
         era_cmd()
             .args([
@@ -1319,11 +1316,6 @@ mod repair_key_limitation {
                 "--force",
             ])
             .assert()
-            .failure()
-            .stderr(
-                predicate::str::contains("password")
-                    .or(predicate::str::contains("key"))
-                    .or(predicate::str::contains("unsupported")),
-            );
+            .success();
     }
 }

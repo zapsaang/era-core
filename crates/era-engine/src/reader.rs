@@ -479,6 +479,17 @@ impl ArchiveReader {
         Self::open_with_providers(path, vec![provider]).await
     }
 
+    /// Open an archive using a hybrid keypair.
+    ///
+    /// This unlocks archives created with `--hybrid-certificate`.
+    pub async fn open_with_hybrid_keypair(
+        path: &Path,
+        keypair: &era_crypto::HybridKeyPair,
+    ) -> Result<Self> {
+        let provider = Box::new(crate::auth::HybridCertificateProvider::new(keypair.clone()));
+        Self::open_with_providers(path, vec![provider]).await
+    }
+
     /// Create a fresh compressor based on configuration.
     fn create_compressor(&self) -> Box<dyn era_codec::Compressor> {
         match self.compression_algorithm {

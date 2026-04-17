@@ -13,7 +13,7 @@ An encrypted archival storage engine written in Rust, featuring 3-layer envelope
 ## Features
 
 - **3-Layer Envelope Encryption**: Master Key (MK) → Intermediate Key (IK) → Volume Key (VK) hierarchy with randomized key wrapping (XChaCha20-Poly1305 AEAD)
-- **Hybrid KEM Support**: Codebase supports Hybrid KEM (X25519 + Kyber-768) for post-quantum key encapsulation (Password and Threshold modes)
+- **Hybrid KEM Support**: Hybrid KEM (X25519 + Kyber-768) for post-quantum key encapsulation, supporting standalone, password-combined, and threshold modes
 - **Multi-Party Access Control**: Any-of-N (OR) and T-of-N threshold (AND) policies via Shamir's Secret Sharing
 - **Instant Key Rotation**: Re-wrap volume keys without rewriting data — millisecond MK rotation for petabyte archives
 - **Erasure Coding**: Reed-Solomon (4+2 default) with strict shard validation for data redundancy
@@ -94,8 +94,17 @@ era create --output archive.era --password "secret" --level 12 /path/to/files
 era create --output archive.era --password "secret" --no-compression /path/to/files
 
 # Certificate-based encryption (X25519-based)
-era create --output archive.era --certificate public.pem /path/to/files
+ era create --output archive.era --certificate public.pem /path/to/files
+ era extract --input archive.era --output /restored --key private.pem
+
+Note: passphrase-protected private keys are not yet supported. Use unencrypted PEM keys.
+
+# Post-quantum hybrid certificate encryption (X25519 + Kyber-768)
+era create --output archive.era --hybrid-certificate pub.pem /path/to/files
 era extract --input archive.era --output /restored --key private.pem
+
+# Multi-recipient (OR) authentication: certificate and password as separate slots
+era create --output archive.era --certificate public.pem --password "secret" /path/to/files
 
 # Multi-volume archive with size limit
 era create --output archive.era --password "secret" \
@@ -277,7 +286,7 @@ ERA Core has undergone multiple rounds of adversarial security auditing (279+ te
 | `adversarial_audit_v2` | 53 | Skeptical baseline verification (all fixed) |
 | `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
 
-Workspace verification recorded 2049 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Certificate mode currently uses X25519; hybrid KEM for certificates is deferred to a future engineering slice.
+Workspace verification recorded 2049 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + Kyber-768) certificate mode are supported via CLI.
 
 ## Development
 
@@ -317,7 +326,7 @@ March 2026 workspace verification recorded 2049 passed, 0 failed, 18 ignored acr
 - Memory hygiene, zeroization, and debug redaction tests
 - Context-bound AEAD verification (cross-archive splicing prevention)
 - Path traversal and bounded allocation tests
-- CLI integration tests (16 tests including roundtrip create/extract)
+- CLI integration tests (130+ tests covering auth modes, repack, repair, roundtrip, and edge cases)
 
 ```bash
 cargo test --workspace                        # Full workspace suite

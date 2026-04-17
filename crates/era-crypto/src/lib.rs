@@ -15,6 +15,7 @@ mod aead_context;
 pub mod certificate;
 mod hash;
 mod hkdf_utils;
+pub mod hybrid_certificate;
 pub mod hybrid_kem;
 mod kdf;
 mod key;
@@ -34,6 +35,7 @@ pub use aead_context::{AeadContext, CiphertextPacket, XChaCha20Poly1305Context, 
 pub use certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 pub use hash::{hash, hash_reader, Hasher};
 pub use hkdf_utils::{derive_key_hkdf, derive_key_hkdf_32};
+pub use hybrid_certificate::{HybridCertificate, HybridKeyPair};
 pub use kdf::{derive_key, generate_password_verification_tag, verify_password_tag, KdfParams};
 pub use key::{DerivedKey, Salt};
 pub use key_session::{
@@ -41,8 +43,10 @@ pub use key_session::{
     IntermediateKey, KeySession, KeySessionBuilder, VolumeKey, WrappedVolumeKey,
 };
 pub use pem_support::{
-    export_public_key_as_pem, load_private_key_from_pem, load_private_key_from_pem_string,
-    load_public_key_from_pem, load_public_key_from_pem_string, PemFormat,
+    export_hybrid_private_key_as_pem, export_hybrid_public_key_as_pem, export_public_key_as_pem,
+    load_any_private_key_from_pem, load_hybrid_private_key_from_pem,
+    load_hybrid_public_key_from_pem, load_private_key_from_pem, load_private_key_from_pem_string,
+    load_public_key_from_pem, load_public_key_from_pem_string, EitherKeyPair, PemFormat,
 };
 pub use secure_memory::{
     check_security_features, disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64,

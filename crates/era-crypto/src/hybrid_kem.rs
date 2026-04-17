@@ -40,7 +40,7 @@
 
 use hkdf::Hkdf;
 use pqcrypto_mlkem::mlkem768;
-use pqcrypto_traits::kem::{Ciphertext, PublicKey, SharedSecret};
+use pqcrypto_traits::kem::{Ciphertext, PublicKey, SecretKey, SharedSecret};
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::Zeroize;
@@ -74,9 +74,9 @@ pub struct HybridPublicKey {
 /// zeroize the x25519 key.
 pub struct HybridSecretKey {
     /// X25519 secret key (32 bytes, zeroized on drop)
-    x25519: StaticSecret,
+    pub(crate) x25519: StaticSecret,
     /// Kyber-768 secret key (2400 bytes, zeroized on drop via FFI)
-    kyber: mlkem768::SecretKey,
+    pub(crate) kyber: mlkem768::SecretKey,
 }
 
 impl Drop for HybridSecretKey {
@@ -118,6 +118,41 @@ impl HybridPublicKey {
 
         let kyber = mlkem768::PublicKey::from_bytes(&bytes[32..]).map_err(|e| {
             EraError::Deserialization(format!("Failed to parse Kyber public key: {}", e))
+        })?;
+
+        Ok(Self { x25519, kyber })
+    }
+}
+
+impl HybridSecretKey {
+    /// Serialize the secret key to bytes
+    ///
+    /// Format: [X25519 SK: 32 bytes][Kyber SK: 2400 bytes]
+    /// Total: 2432 bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(32 + mlkem768::secret_key_bytes());
+        bytes.extend_from_slice(self.x25519.as_bytes());
+        bytes.extend_from_slice(self.kyber.as_bytes());
+        bytes
+    }
+
+    /// Deserialize a secret key from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != 32 + mlkem768::secret_key_bytes() {
+            return Err(EraError::Deserialization(format!(
+                "Invalid hybrid secret key length: expected {}, got {}",
+                32 + mlkem768::secret_key_bytes(),
+                bytes.len()
+            )));
+        }
+
+        let x25519_bytes: [u8; 32] = bytes[..32]
+            .try_into()
+            .map_err(|_| EraError::Deserialization("Failed to parse X25519 secret key".into()))?;
+        let x25519 = StaticSecret::from(x25519_bytes);
+
+        let kyber = mlkem768::SecretKey::from_bytes(&bytes[32..]).map_err(|e| {
+            EraError::Deserialization(format!("Failed to parse Kyber secret key: {}", e))
         })?;
 
         Ok(Self { x25519, kyber })

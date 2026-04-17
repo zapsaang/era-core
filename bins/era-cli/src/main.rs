@@ -54,13 +54,20 @@ enum Commands {
         Directories are walked recursively. By default, archives use Zstd level 3\n\
         compression and 4:2 Reed-Solomon erasure coding for redundancy.\n\n\
         Provide --password on the command line or omit it to be prompted interactively.\n\
-        Use --certificate for key-based access without sharing a password."
+        Use --certificate for key-based access without sharing a password.\n\
+        Use --hybrid-certificate for post-quantum key-based access.\n\
+        To combine certificate with password protection, provide both --certificate and --password.\n\
+        To combine a hybrid certificate with password protection, provide both --hybrid-certificate and --password.\n\
+        Use --threshold and --shares for T-of-N Shamir secret sharing."
     )]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
         era create -o backup.era ./my-files\n  \
         era create -o backup.era -p secret ./docs ./photos\n  \
         era create -o backup.era --compact ./data\n  \
         era create -o backup.era --certificate public.pem ./data\n  \
+        era create -o backup.era --hybrid-certificate pub.pem ./data\n  \
+        era create -o backup.era --certificate pub.pem -p secret ./data\n  \
+        era create -o backup.era -p pw1 -p pw2 --threshold 2 --shares 2 ./data\n  \
         era create -o backup.era --erasure 6:3 --volumes 9 ./data\n  \
         era create -o backup.era -C config.toml ./data\n  \
         era create -o backup.era --no-compression ./videos")]
@@ -79,13 +86,26 @@ enum Commands {
         config: Option<PathBuf>,
 
         /// Public key certificate (PEM format, optional for password mode)
-        /// Use era-keygen to generate a keypair and certificate
         #[arg(short, long)]
         certificate: Option<PathBuf>,
 
+        /// Hybrid post-quantum public key certificate (PEM format)
+        /// Repeatable for threshold mode
+        #[arg(long)]
+        hybrid_certificate: Vec<PathBuf>,
+
         /// Encryption password (will prompt if not provided)
+        /// Repeatable for threshold mode
         #[arg(short, long)]
-        password: Option<String>,
+        password: Vec<String>,
+
+        /// Threshold T for T-of-N Shamir secret sharing (requires --shares)
+        #[arg(long, requires = "shares")]
+        threshold: Option<usize>,
+
+        /// Total shares N for T-of-N Shamir secret sharing (requires --threshold)
+        #[arg(long, requires = "threshold")]
+        shares: Option<usize>,
 
         /// Compression level (1-22, default: 3). Set to 0 to disable compression.
         #[arg(short = 'l', long)]
@@ -162,12 +182,15 @@ enum Commands {
         output: PathBuf,
 
         /// Encryption password (will prompt if not provided)
+        /// Repeatable for threshold archives
         #[arg(short, long)]
-        password: Option<String>,
+        password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
+        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
-        key: Option<PathBuf>,
+        key: Vec<PathBuf>,
 
         /// Overwrite existing files
         #[arg(short = 'f', long)]
@@ -186,12 +209,15 @@ enum Commands {
         archive: PathBuf,
 
         /// Encryption password (will prompt if not provided)
+        /// Repeatable for threshold archives
         #[arg(short, long)]
-        password: Option<String>,
+        password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
+        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
-        key: Option<PathBuf>,
+        key: Vec<PathBuf>,
 
         /// Show sizes and chunk IDs for each file
         #[arg(short, long)]
@@ -212,12 +238,15 @@ enum Commands {
         archive: PathBuf,
 
         /// Encryption password (will prompt if not provided)
+        /// Repeatable for threshold archives
         #[arg(short, long)]
-        password: Option<String>,
+        password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
+        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
-        key: Option<PathBuf>,
+        key: Vec<PathBuf>,
     },
 
     /// Verify integrity of an ERA archive
@@ -236,12 +265,15 @@ enum Commands {
         archive: PathBuf,
 
         /// Encryption password (will prompt if not provided)
+        /// Repeatable for threshold archives
         #[arg(short, long)]
-        password: Option<String>,
+        password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
+        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
-        key: Option<PathBuf>,
+        key: Vec<PathBuf>,
 
         /// Show detailed error information
         #[arg(long)]
@@ -260,14 +292,21 @@ enum Commands {
         era repair backup.era                        Analyze only (dry run)\n  \
         era repair backup.era --force                Apply repairs\n  \
         era repair backup.era --password s3cr3t      Apply repairs (password mode)\n  \
-        Note: Certificate-based repair is not supported. Use --password.")]
+        era repair backup.era --key private.pem      Apply repairs (certificate mode)")]
     Repair {
         /// Archive path
         archive: PathBuf,
 
         /// Encryption password (will prompt if not provided)
+        /// Repeatable for threshold archives
         #[arg(short, long)]
-        password: Option<String>,
+        password: Vec<String>,
+
+        /// Private key file for certificate mode (PEM format)
+        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Repeatable for threshold archives; auto-detects legacy vs hybrid
+        #[arg(short = 'k', long)]
+        key: Vec<PathBuf>,
 
         /// Apply repairs or discard an interrupted-create checkpoint
         #[arg(short = 'f', long)]
@@ -287,7 +326,10 @@ enum Commands {
     #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
         era repack -i old.era -o new.era -p secret --compact\n  \
         era repack -i old.era -o new.era -p secret --level 19 --erasure 6:3\n  \
-        era repack -i old.era -o new.era --key private.pem --no-compression")]
+        era repack -i old.era -o new.era --key private.pem --no-compression\n  \
+        era repack -i old.era -o new.era --key priv.pem --hybrid-certificate pub.pem\n  \
+        era repack -i old.era -o new.era -p srcpwd --certificate dest.pem --dest-password destpwd
+        era repack -i old.era -o new.era -p srcpwd --dest-password dp1 --dest-password dp2 --threshold 2 --shares 2")]
     Repack {
         /// Input archive path
         #[arg(short, long)]
@@ -297,13 +339,38 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Encryption password (will prompt if not provided)
+        /// Encryption password for source archive (will prompt if not provided)
+        /// Repeatable for threshold archives
         #[arg(short, long)]
-        password: Option<String>,
+        password: Vec<String>,
 
-        /// Private key file for certificate mode (PEM format)
+        /// Private key file for source archive certificate mode (PEM format)
+        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
-        key: Option<PathBuf>,
+        key: Vec<PathBuf>,
+
+        /// Encryption password for destination archive
+        /// Repeatable for threshold password destinations
+        #[arg(long)]
+        dest_password: Vec<String>,
+
+        /// Public key certificate for destination archive (legacy X25519, PEM format)
+        #[arg(long)]
+        certificate: Option<PathBuf>,
+
+        /// Hybrid post-quantum public key certificate for destination archive (PEM format)
+        /// Repeatable for threshold mode
+        #[arg(long)]
+        hybrid_certificate: Vec<PathBuf>,
+
+        /// Threshold T for T-of-N Shamir secret sharing on destination (requires --shares)
+        #[arg(long, requires = "shares")]
+        threshold: Option<usize>,
+
+        /// Total shares N for T-of-N Shamir secret sharing on destination (requires --threshold)
+        #[arg(long, requires = "threshold")]
+        shares: Option<usize>,
 
         /// Use compact preset: Zstd-19, 16 MB blocks, k=32 (high compression, slower writes)
         #[arg(long)]
@@ -382,7 +449,10 @@ async fn main() -> anyhow::Result<()> {
             output,
             config,
             certificate,
+            hybrid_certificate,
             password,
+            threshold,
+            shares,
             level,
             no_compression,
             erasure,
@@ -401,7 +471,10 @@ async fn main() -> anyhow::Result<()> {
                 output: &output,
                 config_path: config.as_deref(),
                 certificate_path: certificate.as_deref(),
-                password: password.as_deref(),
+                hybrid_certificate_paths: &hybrid_certificate,
+                passwords: &password,
+                threshold,
+                shares,
                 compression_level: level,
                 no_compression,
                 erasure: erasure.as_deref(),
@@ -424,40 +497,46 @@ async fn main() -> anyhow::Result<()> {
             password,
             key,
             force,
-        } => commands::extract(&input, &output, password.as_deref(), key.as_deref(), force).await,
+        } => commands::extract(&input, &output, &password, &key, force).await,
 
         Commands::List {
             archive,
             password,
             key,
             long,
-        } => commands::list(&archive, password.as_deref(), key.as_deref(), long).await,
+        } => commands::list(&archive, &password, &key, long).await,
 
         Commands::Info {
             archive,
             password,
             key,
-        } => commands::info(&archive, password.as_deref(), key.as_deref()).await,
+        } => commands::info(&archive, &password, &key).await,
 
         Commands::Verify {
             archive,
             password,
             key,
             verbose,
-        } => commands::verify(&archive, password.as_deref(), key.as_deref(), verbose).await,
+        } => commands::verify(&archive, &password, &key, verbose).await,
 
         Commands::Repair {
             archive,
             password,
+            key,
             force,
             verbose,
-        } => commands::repair(&archive, password.as_deref(), force, verbose).await,
+        } => commands::repair(&archive, &password, &key, force, verbose).await,
 
         Commands::Repack {
             input,
             output,
             password,
             key,
+            dest_password,
+            certificate,
+            hybrid_certificate,
+            threshold,
+            shares,
             compact,
             level,
             no_compression,
@@ -472,8 +551,13 @@ async fn main() -> anyhow::Result<()> {
             commands::repack(commands::RepackArgs {
                 input: &input,
                 output: &output,
-                password: password.as_deref(),
-                key_path: key.as_deref(),
+                passwords: &password,
+                key_paths: &key,
+                dest_password: &dest_password,
+                certificate_path: certificate.as_deref(),
+                hybrid_certificate_paths: &hybrid_certificate,
+                threshold,
+                shares,
                 compact,
                 compression_level: level,
                 no_compression,

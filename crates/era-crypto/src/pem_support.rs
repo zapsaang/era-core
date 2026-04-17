@@ -7,11 +7,13 @@
 //!
 //! ### Private Keys
 //! - PKCS#8 (DER or PEM)
-//! - OpenSSH
+//! - OpenSSH (unencrypted only; passphrase-protected keys are not yet supported)
+//! - ERA HYBRID PRIVATE KEY / ERA HYBRID PUBLIC KEY pairs
 //!
 //! ### Public Keys
 //! - SubjectPublicKeyInfo (SPKI) - DER or PEM
 //! - X.509 Certificates
+//! - ERA HYBRID PUBLIC KEY
 //!
 //! ## Example
 //!
@@ -19,16 +21,21 @@
 //! use era_crypto::pem_support::{PemFormat, load_private_key_from_pem, load_public_key_from_pem};
 //!
 //! // Load private key
-//! let keypair = load_private_key_from_pem("my_key.pem", Some("password"))?;
+//! let keypair = load_private_key_from_pem("my_key.pem", None)?;
 //!
 //! // Load public key
 //! let cert = load_public_key_from_pem("my_cert.pem")?;
 //! ```
 
 use crate::certificate::{EraCertificate, EraKeyPair, KEY_LEN};
+use crate::hybrid_certificate::{HybridCertificate, HybridKeyPair};
 use era_common::{EraError, Result};
+use spki::ObjectIdentifier;
 use ssh_key::PrivateKey as SshPrivateKey;
 use std::path::Path;
+
+/// X25519 OID: 1.3.101.110
+const X25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.110");
 
 /// PEM format type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +192,104 @@ pub fn export_public_key_as_pem(cert: &EraCertificate) -> Result<String> {
     encode_spki_public_key(cert.public_key())
 }
 
+/// Export hybrid public key as custom PEM
+pub fn export_hybrid_public_key_as_pem(cert: &HybridCertificate) -> Result<String> {
+    let pem = pem::Pem::new("ERA HYBRID PUBLIC KEY", cert.to_bytes());
+    Ok(pem::encode(&pem))
+}
+
+/// Export hybrid private key as custom PEM (includes public key block for reconstruction).
+pub fn export_hybrid_private_key_as_pem(keypair: &HybridKeyPair) -> Result<String> {
+    let private_pem = pem::Pem::new("ERA HYBRID PRIVATE KEY", keypair.secret_key_bytes());
+    let public_pem = pem::Pem::new("ERA HYBRID PUBLIC KEY", keypair.public_key_bytes());
+    Ok(format!(
+        "{}\n{}",
+        pem::encode(&private_pem),
+        pem::encode(&public_pem)
+    ))
+}
+
+/// Load a hybrid public key from a PEM file
+pub fn load_hybrid_public_key_from_pem<P: AsRef<Path>>(path: P) -> Result<HybridCertificate> {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| EraError::InvalidFormat(format!("Failed to read PEM file: {}", e)))?;
+    load_hybrid_public_key_from_pem_string(&content)
+}
+
+/// Load a hybrid public key from PEM content
+pub fn load_hybrid_public_key_from_pem_string(pem_content: &str) -> Result<HybridCertificate> {
+    let pem_blocks = extract_pem_blocks(pem_content)?;
+    for (tag, contents) in pem_blocks {
+        if tag == "ERA HYBRID PUBLIC KEY" {
+            return HybridCertificate::from_bytes(&contents);
+        }
+    }
+    Err(EraError::InvalidFormat(
+        "No ERA HYBRID PUBLIC KEY block found in PEM file".into(),
+    ))
+}
+
+/// Load a hybrid private key from a PEM file
+pub fn load_hybrid_private_key_from_pem<P: AsRef<Path>>(path: P) -> Result<HybridKeyPair> {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| EraError::InvalidFormat(format!("Failed to read PEM file: {}", e)))?;
+    load_hybrid_private_key_from_pem_string(&content)
+}
+
+/// Load a hybrid private key from PEM content
+pub fn load_hybrid_private_key_from_pem_string(pem_content: &str) -> Result<HybridKeyPair> {
+    let pem_blocks = extract_pem_blocks(pem_content)?;
+    let mut secret_bytes: Option<Vec<u8>> = None;
+    let mut public_bytes: Option<Vec<u8>> = None;
+    for (tag, contents) in pem_blocks {
+        if tag == "ERA HYBRID PRIVATE KEY" {
+            secret_bytes = Some(contents);
+        } else if tag == "ERA HYBRID PUBLIC KEY" {
+            public_bytes = Some(contents);
+        }
+    }
+    match (secret_bytes, public_bytes) {
+        (Some(sec), Some(pub_)) => HybridKeyPair::from_secret_and_public_bytes(&sec, &pub_),
+        (Some(_sec), None) => Err(EraError::InvalidFormat(
+            "Hybrid private key PEM requires an accompanying ERA HYBRID PUBLIC KEY block".into(),
+        )),
+        _ => Err(EraError::InvalidFormat(
+            "No ERA HYBRID PRIVATE KEY block found in PEM file".into(),
+        )),
+    }
+}
+
+/// Load any supported private key from a PEM file (legacy or hybrid).
+pub fn load_any_private_key_from_pem<P: AsRef<Path>>(
+    path: P,
+    password: Option<&str>,
+) -> Result<EitherKeyPair> {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| EraError::InvalidFormat(format!("Failed to read PEM file: {}", e)))?;
+    load_any_private_key_from_pem_string(&content, password)
+}
+
+/// Load any supported private key from PEM content (legacy or hybrid).
+pub fn load_any_private_key_from_pem_string(
+    pem_content: &str,
+    password: Option<&str>,
+) -> Result<EitherKeyPair> {
+    // Try hybrid first (explicit tag avoids ambiguity)
+    if let Ok(hybrid) = load_hybrid_private_key_from_pem_string(pem_content) {
+        return Ok(EitherKeyPair::Hybrid(Box::new(hybrid)));
+    }
+    // Fall back to legacy X25519/Ed25519
+    let legacy = load_private_key_from_pem_string(pem_content, password)?;
+    Ok(EitherKeyPair::Legacy(legacy))
+}
+
+/// Either a legacy X25519 keypair or a post-quantum hybrid keypair.
+#[derive(Debug)]
+pub enum EitherKeyPair {
+    Legacy(EraKeyPair),
+    Hybrid(Box<HybridKeyPair>),
+}
+
 /// Extract all PEM blocks from content
 fn extract_pem_blocks(content: &str) -> Result<Vec<(String, Vec<u8>)>> {
     // Use the pem crate to parse all blocks
@@ -222,51 +327,12 @@ fn decode_openssh_private_key(data: &[u8], _password: Option<&str>) -> Result<Er
     let ssh_key = SshPrivateKey::from_bytes(data)
         .map_err(|e| EraError::InvalidFormat(format!("Failed to parse OpenSSH key: {}", e)))?;
 
-    // Support ed25519 keys
     match ssh_key.algorithm() {
-        ssh_key::Algorithm::Ed25519 => {
-            // Extract key material from OpenSSH format.
-            // ssh-key KeypairData is Bytes, so we parse directly.
-            let private_bytes = data;
-
-            // OpenSSH Ed25519 format: magic | cipher_name | kdf_name | kdf_options | ...
-            // | keytype | public_key | private_key_blob | ...
-            // private_key_blob contains: checkint | keytype | public_key | private_key (64 bytes) | comment | ...
-
-            // Simplified handling: Ed25519 private keys usually contain a 32-byte seed.
-            // Attempt to recover it by scanning the blob.
-            const OPENSSH_MAGIC: &[u8; 15] = b"openssh-key-v1\0";
-            if private_bytes.len() < 15 || &private_bytes[0..15] != OPENSSH_MAGIC {
-                return Err(EraError::InvalidFormat("Invalid OpenSSH key format".into()));
-            }
-
-            // Search for public/private key data after the "ssh-ed25519" marker
-            if let Some(pos) = private_bytes.windows(11).position(|w| w == b"ssh-ed25519") {
-                // Skip key type name length and content
-                let mut search_pos = pos + 11;
-
-                // Look for a 32-byte public key followed by 64-byte private key blob
-                while search_pos + 64 < private_bytes.len() {
-                    // Attempt to extract a 32-byte seed (first half of the private key)
-                    let candidate = &private_bytes[search_pos..search_pos + KEY_LEN];
-
-                    // Validate not all zeros
-                    if candidate.iter().any(|&b| b != 0) {
-                        let mut secret_bytes = [0u8; KEY_LEN];
-                        secret_bytes.copy_from_slice(candidate);
-                        return EraKeyPair::from_bytes(&secret_bytes);
-                    }
-
-                    search_pos += 1;
-                }
-            }
-
-            Err(EraError::InvalidKey(
-                "Could not extract Ed25519 key from OpenSSH format".into(),
-            ))
-        }
-        _ => Err(EraError::InvalidFormat(
-            "Only Ed25519 OpenSSH keys are supported".into(),
+        ssh_key::Algorithm::Ed25519 => Err(EraError::InvalidKey(
+            "Unsupported OpenSSH key algorithm: Ed25519 is not X25519".into(),
+        )),
+        _ => Err(EraError::InvalidKey(
+            "Unsupported OpenSSH key algorithm: only X25519 is supported".into(),
         )),
     }
 }
@@ -289,6 +355,14 @@ fn decode_x509_certificate(der_bytes: &[u8]) -> Result<EraCertificate> {
 
     // Extract SubjectPublicKeyInfo
     let spki = &cert.tbs_certificate.subject_public_key_info;
+
+    // Validate algorithm is X25519
+    if spki.algorithm.oid != X25519_OID {
+        return Err(EraError::InvalidKey(format!(
+            "Unsupported certificate algorithm OID: expected X25519 ({}), got {}",
+            X25519_OID, spki.algorithm.oid
+        )));
+    }
 
     // Extract public key data
     let public_key_bytes = spki.subject_public_key.raw_bytes();
@@ -315,10 +389,7 @@ fn decode_x509_certificate(der_bytes: &[u8]) -> Result<EraCertificate> {
 /// Encode public key as SPKI (spki crate)
 fn encode_spki_public_key(public_key: &[u8; KEY_LEN]) -> Result<String> {
     use der::Encode;
-    use spki::{AlgorithmIdentifierOwned, ObjectIdentifier, SubjectPublicKeyInfoOwned};
-
-    // X25519 OID: 1.3.101.110
-    const X25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.110");
+    use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 
     // Build AlgorithmIdentifier
     let algorithm = AlgorithmIdentifierOwned {
@@ -363,6 +434,13 @@ fn extract_private_key_from_pkcs8(der_bytes: &[u8]) -> Result<EraKeyPair> {
     let private_key_info = PrivateKeyInfo::try_from(der_bytes)
         .map_err(|e| EraError::InvalidFormat(format!("Failed to parse PKCS#8: {}", e)))?;
 
+    if private_key_info.algorithm.oid != X25519_OID {
+        return Err(EraError::InvalidKey(format!(
+            "Unsupported private key algorithm OID: expected X25519 ({}), got {}",
+            X25519_OID, private_key_info.algorithm.oid
+        )));
+    }
+
     // Extract private key data (OCTET STRING payload)
     let mut private_key_bytes = private_key_info.private_key;
 
@@ -393,6 +471,14 @@ fn extract_public_key_from_spki(der_bytes: &[u8]) -> Result<EraCertificate> {
     // Parse SubjectPublicKeyInfo via spki
     let spki = SubjectPublicKeyInfoRef::try_from(der_bytes)
         .map_err(|e| EraError::InvalidFormat(format!("Failed to parse SPKI: {}", e)))?;
+
+    // Validate algorithm is X25519
+    if spki.algorithm.oid != X25519_OID {
+        return Err(EraError::InvalidKey(format!(
+            "Unsupported public key algorithm OID: expected X25519 ({}), got {}",
+            X25519_OID, spki.algorithm.oid
+        )));
+    }
 
     // Extract public key bytes (BIT STRING payload)
     let public_key_bytes = spki.subject_public_key.raw_bytes();
@@ -450,5 +536,69 @@ mod tests {
         // Load from PEM
         let loaded_cert = load_public_key_from_pem_string(&pem_str).unwrap();
         assert_eq!(loaded_cert.public_key(), cert.public_key());
+    }
+
+    #[test]
+    fn test_load_private_key_rejects_ed25519_pkcs8() {
+        use std::process::Command;
+        let temp =
+            std::env::temp_dir().join(format!("era_ed25519_pkcs8_{}.pem", std::process::id()));
+        let output = Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "ed25519",
+                "-out",
+                temp.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl genpkey ed25519 failed");
+
+        let err = load_private_key_from_pem(&temp, None).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Unsupported private key algorithm"),
+            "Expected unsupported algorithm error, got: {}",
+            msg
+        );
+
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    #[test]
+    fn test_load_private_key_rejects_ed25519_openssh() {
+        use std::process::Command;
+        let temp_dir =
+            std::env::temp_dir().join(format!("era_ed25519_openssh_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let openssh_key = temp_dir.join("key");
+
+        let output = Command::new("ssh-keygen")
+            .args([
+                "-t",
+                "ed25519",
+                "-f",
+                openssh_key.to_str().unwrap(),
+                "-N",
+                "",
+                "-C",
+                "test",
+            ])
+            .output()
+            .expect("ssh-keygen should be available");
+        assert!(output.status.success(), "ssh-keygen ed25519 failed");
+
+        let err = load_private_key_from_pem(&openssh_key, None).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Unsupported OpenSSH key algorithm"),
+            "Expected unsupported algorithm error, got: {}",
+            msg
+        );
+
+        let _ = std::fs::remove_file(&openssh_key);
+        let _ = std::fs::remove_file(openssh_key.with_extension("pub"));
+        let _ = std::fs::remove_dir(&temp_dir);
     }
 }

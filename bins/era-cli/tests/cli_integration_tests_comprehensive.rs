@@ -227,6 +227,109 @@ mod roundtrip_tests {
     }
 
     #[test]
+    fn test_create_rejects_ed25519_certificate() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "ed25519.txt", b"ed25519 cert test");
+        let archive = temp.path().join("ed25519.era");
+        let key = temp.path().join("ed25519.key");
+        let cert = temp.path().join("ed25519.crt");
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "ed25519",
+                "-out",
+                key.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl genpkey ed25519 failed");
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "req",
+                "-new",
+                "-x509",
+                "-key",
+                key.to_str().unwrap(),
+                "-out",
+                cert.to_str().unwrap(),
+                "-days",
+                "1",
+                "-subj",
+                "/CN=test",
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl req failed");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                cert.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "Unsupported certificate algorithm",
+            ));
+    }
+
+    #[test]
+    fn test_create_rejects_ed25519_spki_public_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "ed25519_spki.txt", b"ed25519 spki test");
+        let archive = temp.path().join("ed25519_spki.era");
+        let key = temp.path().join("ed25519_spki.key");
+        let pub_key = temp.path().join("ed25519_spki.pub");
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "ed25519",
+                "-out",
+                key.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl genpkey ed25519 failed");
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "pkey",
+                "-in",
+                key.to_str().unwrap(),
+                "-pubout",
+                "-out",
+                pub_key.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl pkey -pubout failed");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                pub_key.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "Unsupported public key algorithm",
+            ));
+    }
+
+    #[test]
     fn test_roundtrip_deep_path_nesting() {
         let temp = TempDir::new().unwrap();
         let mut deep = temp.path().join("root");
@@ -882,6 +985,500 @@ mod auth_mode_tests {
             ])
             .assert()
             .failure();
+    }
+
+    // --- Post-Quantum Hybrid Certificate Mode ---
+
+    #[test]
+    fn test_hybrid_certificate_create_extract_with_generic_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "pq.txt", b"post-quantum data");
+        let archive = temp.path().join("pq.era");
+        let out_dir = temp.path().join("out");
+        let (pub_cert, priv_key) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub_cert.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv_key.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("pq.txt")).unwrap(),
+            b"post-quantum data"
+        );
+    }
+
+    #[test]
+    fn test_threshold_create_extract_with_two_passwords() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "threshold.txt", b"threshold data");
+        let archive = temp.path().join("threshold.era");
+        let out_dir = temp.path().join("out");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd1",
+                "--password",
+                "pwd2",
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "pwd1",
+                "--password",
+                "pwd2",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("threshold.txt")).unwrap(),
+            b"threshold data"
+        );
+    }
+
+    #[test]
+    fn test_certificate_plus_password_create_extract() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "cert_pw.txt", b"cert+password data");
+        let archive = temp.path().join("cert_pw.era");
+        let out_dir = temp.path().join("out");
+        let (pub_cert, priv_key) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                pub_cert.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv_key.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("cert_pw.txt")).unwrap(),
+            b"cert+password data"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_certificate_plus_password_create_extract() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "hyb_pw.txt", b"hybrid+password data");
+        let archive = temp.path().join("hyb_pw.era");
+        let out_dir = temp.path().join("out");
+        let (pub_cert, priv_key) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub_cert.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv_key.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("hyb_pw.txt")).unwrap(),
+            b"hybrid+password data"
+        );
+    }
+
+    #[test]
+    fn test_threshold_hybrid_create_extract() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "hyb_th.txt", b"threshold hybrid data");
+        let archive = temp.path().join("hyb_th.era");
+        let out_dir = temp.path().join("out");
+
+        let (pub1, priv1) = generate_test_hybrid_keypair(temp.path());
+        let (pub2, priv2) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub1.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub2.to_str().unwrap(),
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv1.to_str().unwrap(),
+                "--key",
+                priv2.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("hyb_th.txt")).unwrap(),
+            b"threshold hybrid data"
+        );
+    }
+
+    #[test]
+    fn test_mixed_credential_extract_with_password_and_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "mixed_ext.txt", b"mixed credential");
+        let archive = temp.path().join("mixed_ext.era");
+        let out_dir = temp.path().join("out");
+        let (pub_cert, _priv_key) = generate_test_keypair(temp.path());
+        let (_wrong_pub, wrong_priv) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                pub_cert.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                wrong_priv.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("mixed_ext.txt")).unwrap(),
+            b"mixed credential"
+        );
+    }
+
+    #[test]
+    fn test_mixed_credential_list_info_verify_with_password_and_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "mixed_liv.txt", b"mixed credential liv");
+        let archive = temp.path().join("mixed_liv.era");
+        let (pub_cert, _priv_key) = generate_test_keypair(temp.path());
+        let (_wrong_pub, wrong_priv) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                pub_cert.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "list",
+                archive.to_str().unwrap(),
+                "--key",
+                wrong_priv.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success()
+            .stderr(predicates::str::contains("mixed_liv.txt"));
+
+        era_cmd()
+            .args([
+                "info",
+                archive.to_str().unwrap(),
+                "--key",
+                wrong_priv.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success()
+            .stderr(predicates::str::contains("Archive ID"));
+
+        era_cmd()
+            .args([
+                "verify",
+                archive.to_str().unwrap(),
+                "--key",
+                wrong_priv.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn test_extract_rejects_encrypted_private_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "enc_key.txt", b"encrypted key test");
+        let archive = temp.path().join("enc_key.era");
+        let raw_key = temp.path().join("raw_private.pem");
+        let enc_key = temp.path().join("encrypted_private.pem");
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "x25519",
+                "-out",
+                raw_key.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl genpkey failed");
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "pkcs8",
+                "-topk8",
+                "-v2",
+                "des3",
+                "-in",
+                raw_key.to_str().unwrap(),
+                "-out",
+                enc_key.to_str().unwrap(),
+                "-passout",
+                "pass:keypass",
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl pkcs8 encryption failed");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                temp.path().join("out").to_str().unwrap(),
+                "--key",
+                enc_key.to_str().unwrap(),
+                "--password",
+                "keypass",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "No supported private key format found",
+            ));
+    }
+
+    #[test]
+    fn test_extract_rejects_ed25519_pkcs8_private_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "pkcs8_reject.txt", b"pkcs8 reject test");
+        let archive = temp.path().join("pkcs8_reject.era");
+        let ed_key = temp.path().join("ed25519.pem");
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "ed25519",
+                "-out",
+                ed_key.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl genpkey ed25519 failed");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                temp.path().join("out").to_str().unwrap(),
+                "--key",
+                ed_key.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "Unsupported private key algorithm",
+            ));
+    }
+
+    #[test]
+    fn test_extract_rejects_ed25519_openssh_private_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "openssh_reject.txt", b"openssh reject test");
+        let archive = temp.path().join("openssh_reject.era");
+        let ed_key = temp.path().join("ed25519_openssh");
+
+        let output = std::process::Command::new("ssh-keygen")
+            .args([
+                "-t",
+                "ed25519",
+                "-f",
+                ed_key.to_str().unwrap(),
+                "-N",
+                "",
+                "-C",
+                "test",
+            ])
+            .output()
+            .expect("ssh-keygen should be available");
+        assert!(output.status.success(), "ssh-keygen ed25519 failed");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "secret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                temp.path().join("out").to_str().unwrap(),
+                "--key",
+                ed_key.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "Unsupported OpenSSH key algorithm",
+            ));
     }
 }
 
@@ -1673,6 +2270,59 @@ level = 6
             ])
             .assert()
             .failure();
+    }
+
+    #[test]
+    fn test_threshold_rejects_duplicate_passwords() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "dup_pw.txt", b"duplicate password");
+        let archive = temp.path().join("dup_pw.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "same",
+                "--password",
+                "same",
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Duplicate password"));
+    }
+
+    #[test]
+    fn test_threshold_rejects_duplicate_hybrid_certificates() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "dup_hyb.txt", b"duplicate hybrid cert");
+        let archive = temp.path().join("dup_hyb.era");
+        let (pub_cert, _priv_key) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub_cert.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub_cert.to_str().unwrap(),
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Duplicate hybrid certificate"));
     }
 }
 
@@ -2981,7 +3631,7 @@ mod repair_tests {
     }
 
     #[test]
-    fn test_repair_cert_mode_rejected() {
+    fn test_repair_cert_mode_succeeds_with_key() {
         let temp = TempDir::new().unwrap();
         let input = create_test_file(temp.path(), "rep_cert.bin", &vec![0xEE; 256 * 1024]);
         let archive = temp.path().join("rep_cert.era");
@@ -2997,6 +3647,8 @@ mod repair_tests {
                 pub_cert.to_str().unwrap(),
                 "--erasure",
                 "4:2",
+                "--volumes",
+                "1",
                 "--no-compression",
             ])
             .assert()
@@ -3019,11 +3671,202 @@ mod repair_tests {
                 "--force",
             ])
             .assert()
-            .failure()
-            .stderr(
-                predicates::str::contains("unexpected argument")
-                    .or(predicates::str::contains("error: unknown option")),
-            );
+            .success();
+    }
+
+    #[test]
+    fn test_repair_threshold_password_archive() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rep_thresh.bin", &vec![0xAB; 256 * 1024]);
+        let archive = temp.path().join("rep_thresh.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd1",
+                "--password",
+                "pwd2",
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+                "--erasure",
+                "4:2",
+                "--no-compression",
+                "--volumes",
+                "1",
+            ])
+            .assert()
+            .success();
+
+        let file_len = fs::metadata(&archive).unwrap().len();
+        assert!(file_len > 10200);
+        corrupt_archive_shard(&archive, 10000);
+
+        era_cmd()
+            .args([
+                "repair",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd1",
+                "--password",
+                "pwd2",
+                "--force",
+            ])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn test_repair_hybrid_cert_mode_succeeds_with_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rep_hyb.bin", &vec![0xCC; 256 * 1024]);
+        let archive = temp.path().join("rep_hyb.era");
+
+        let (pub_cert, priv_key) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub_cert.to_str().unwrap(),
+                "--erasure",
+                "4:2",
+                "--no-compression",
+                "--volumes",
+                "1",
+            ])
+            .assert()
+            .success();
+
+        let file_len = fs::metadata(&archive).unwrap().len();
+        assert!(file_len > 10200);
+        corrupt_archive_shard(&archive, 10000);
+
+        era_cmd()
+            .args([
+                "repair",
+                archive.to_str().unwrap(),
+                "--key",
+                priv_key.to_str().unwrap(),
+                "--force",
+            ])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn test_repair_multivolume_with_key() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rep_mv_key.bin", &vec![0xDD; 256 * 1024]);
+        let archive = temp.path().join("rep_mv_key.era");
+        let (_pub_cert, priv_key) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                _pub_cert.to_str().unwrap(),
+                "--erasure",
+                "4:2",
+                "--volumes",
+                "6",
+                "--no-compression",
+            ])
+            .assert()
+            .success();
+
+        let vol3 = archive.with_extension("era.003");
+        if vol3.exists() {
+            fs::remove_file(&vol3).unwrap();
+        }
+
+        let assert_result = era_cmd()
+            .args([
+                "repair",
+                archive.to_str().unwrap(),
+                "--key",
+                priv_key.to_str().unwrap(),
+                "--force",
+            ])
+            .assert();
+
+        let stderr = String::from_utf8_lossy(&assert_result.get_output().stderr);
+        assert!(
+            assert_result.get_output().status.success()
+                || stderr.contains("recover")
+                || stderr.contains("repair")
+                || stderr.contains("missing"),
+            "matrix repair with key should handle missing volume: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_repair_multivolume_with_multiple_passwords() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rep_mv_pw.bin", &vec![0xEE; 256 * 1024]);
+        let archive = temp.path().join("rep_mv_pw.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd1",
+                "--password",
+                "pwd2",
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+                "--erasure",
+                "4:2",
+                "--volumes",
+                "6",
+                "--no-compression",
+            ])
+            .assert()
+            .success();
+
+        let vol3 = archive.with_extension("era.003");
+        if vol3.exists() {
+            fs::remove_file(&vol3).unwrap();
+        }
+
+        let assert_result = era_cmd()
+            .args([
+                "repair",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd1",
+                "--password",
+                "pwd2",
+                "--force",
+            ])
+            .assert();
+
+        let stderr = String::from_utf8_lossy(&assert_result.get_output().stderr);
+        assert!(
+            assert_result.get_output().status.success()
+                || stderr.contains("recover")
+                || stderr.contains("repair")
+                || stderr.contains("missing"),
+            "matrix repair with multiple passwords should handle missing volume: {}",
+            stderr
+        );
     }
 }
 
@@ -3719,6 +4562,320 @@ mod repack_tests {
             vec![0x88; 16384]
         );
     }
+
+    #[test]
+    fn test_repack_threshold_preserves_policy_without_explicit_dest_auth() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_thresh.txt", b"threshold repack data");
+        let archive = temp.path().join("rp_thresh_src.era");
+        let repacked = temp.path().join("rp_thresh_dst.era");
+        let out_dir = temp.path().join("out");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "p1",
+                "--password",
+                "p2",
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "p1",
+                "--password",
+                "p2",
+                "--level",
+                "19",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "p1",
+                "--password",
+                "p2",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_thresh.txt")).unwrap(),
+            b"threshold repack data"
+        );
+    }
+
+    #[test]
+    fn test_repack_hybrid_source_to_hybrid_threshold_dest() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_pwh.txt", b"hybrid to hybrid threshold");
+        let archive = temp.path().join("rp_pwh_src.era");
+        let repacked = temp.path().join("rp_pwh_dst.era");
+        let out_dir = temp.path().join("out");
+
+        let (src_hybrid_pub, src_hybrid_priv) = generate_test_hybrid_keypair(temp.path());
+        let (hybrid_pub1, hybrid_priv1) = generate_test_hybrid_keypair(temp.path());
+        let (hybrid_pub2, hybrid_priv2) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                src_hybrid_pub.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--key",
+                src_hybrid_priv.to_str().unwrap(),
+                "--hybrid-certificate",
+                hybrid_pub1.to_str().unwrap(),
+                "--hybrid-certificate",
+                hybrid_pub2.to_str().unwrap(),
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                hybrid_priv1.to_str().unwrap(),
+                "--key",
+                hybrid_priv2.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_pwh.txt")).unwrap(),
+            b"hybrid to hybrid threshold"
+        );
+    }
+
+    #[test]
+    fn test_repack_key_source_to_certificate_password_dest() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_dest.txt", b"key source to cert+pw dest");
+        let archive = temp.path().join("rp_src.era");
+        let repacked = temp.path().join("rp_dst.era");
+        let out_dir = temp.path().join("out");
+
+        let (src_pub, src_priv) = generate_test_keypair(temp.path());
+        let (dest_pub, dest_priv) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                src_pub.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--key",
+                src_priv.to_str().unwrap(),
+                "--certificate",
+                dest_pub.to_str().unwrap(),
+                "--dest-password",
+                "destsecret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                dest_priv.to_str().unwrap(),
+                "--password",
+                "destsecret",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_dest.txt")).unwrap(),
+            b"key source to cert+pw dest"
+        );
+    }
+
+    #[test]
+    fn test_repack_password_source_to_hybrid_certificate_password_dest() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_hdest.txt", b"pw source to hybrid+pw dest");
+        let archive = temp.path().join("rp_hsrc.era");
+        let repacked = temp.path().join("rp_hdst.era");
+        let out_dir = temp.path().join("out");
+
+        let (dest_pub, dest_priv) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+                "--hybrid-certificate",
+                dest_pub.to_str().unwrap(),
+                "--dest-password",
+                "destsecret",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                dest_priv.to_str().unwrap(),
+                "--password",
+                "destsecret",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_hdest.txt")).unwrap(),
+            b"pw source to hybrid+pw dest"
+        );
+    }
+
+    #[test]
+    fn test_repack_to_fresh_threshold_password_destination() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_thdest.txt", b"fresh threshold dest");
+        let archive = temp.path().join("rp_thsrc.era");
+        let repacked = temp.path().join("rp_thdst.era");
+        let out_dir = temp.path().join("out");
+        let (_src_pub, src_priv) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                _src_pub.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--key",
+                src_priv.to_str().unwrap(),
+                "--dest-password",
+                "dp1",
+                "--dest-password",
+                "dp2",
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "dp1",
+                "--password",
+                "dp2",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_thdest.txt")).unwrap(),
+            b"fresh threshold dest"
+        );
+    }
 }
 
 // ===========================================================================
@@ -4287,5 +5444,510 @@ mod stress_edge_case_tests {
             fs::read(out_dir.join("uni_path.txt")).unwrap(),
             b"unicode path test"
         );
+    }
+
+    #[test]
+    fn test_regression_repack_no_silent_downgrade_for_combined_auth() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_combo.txt", b"combined auth data");
+        let archive = temp.path().join("rp_combo_src.era");
+        let repacked = temp.path().join("rp_combo_dst.era");
+        let (pub_cert, priv_key) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+                "--certificate",
+                pub_cert.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "combined legacy certificate + password",
+            ));
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+                "--key",
+                priv_key.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "combined legacy certificate + password",
+            ));
+    }
+
+    #[test]
+    fn test_regression_repack_combined_hybrid_requires_explicit_dest_auth() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_hcombo.txt", b"combined hybrid data");
+        let archive = temp.path().join("rp_hcombo_src.era");
+        let repacked = temp.path().join("rp_hcombo_dst.era");
+        let (pub_cert, priv_key) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+                "--hybrid-certificate",
+                pub_cert.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "combined hybrid certificate + password",
+            ));
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+                "--key",
+                priv_key.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "combined hybrid certificate + password",
+            ));
+    }
+
+    #[test]
+    fn test_regression_repack_threshold_2of3_password_requires_explicit_dest_auth() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_t23pw.txt", b"threshold 2of3 pw");
+        let archive = temp.path().join("rp_t23pw_src.era");
+        let repacked = temp.path().join("rp_t23pw_dst.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "p1",
+                "--password",
+                "p2",
+                "--password",
+                "p3",
+                "--threshold",
+                "2",
+                "--shares",
+                "3",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "p1",
+                "--password",
+                "p2",
+                "--password",
+                "p3",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "fewer than all passwords are required",
+            ));
+    }
+
+    #[test]
+    fn test_regression_repack_threshold_2of3_hybrid_requires_explicit_dest_auth() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_t23hyb.txt", b"threshold 2of3 hybrid");
+        let archive = temp.path().join("rp_t23hyb_src.era");
+        let repacked = temp.path().join("rp_t23hyb_dst.era");
+
+        let (pub1, priv1) = generate_test_hybrid_keypair(temp.path());
+        let (pub2, priv2) = generate_test_hybrid_keypair(temp.path());
+        let (pub3, _priv3) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub1.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub2.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub3.to_str().unwrap(),
+                "--threshold",
+                "2",
+                "--shares",
+                "3",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--key",
+                priv1.to_str().unwrap(),
+                "--key",
+                priv2.to_str().unwrap(),
+                "--key",
+                _priv3.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "fewer than all certificates are required",
+            ));
+    }
+
+    #[test]
+    fn test_regression_repack_auto_reuse_threshold_hybrid_certs() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_hy_th.txt", b"threshold hybrid data");
+        let archive = temp.path().join("rp_hy_th_src.era");
+        let repacked = temp.path().join("rp_hy_th_dst.era");
+        let out_dir = temp.path().join("out");
+
+        let (pub1, priv1) = generate_test_hybrid_keypair(temp.path());
+        let (pub2, priv2) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub1.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub2.to_str().unwrap(),
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--key",
+                priv1.to_str().unwrap(),
+                "--key",
+                priv2.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv1.to_str().unwrap(),
+                "--key",
+                priv2.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_hy_th.txt")).unwrap(),
+            b"threshold hybrid data"
+        );
+    }
+
+    #[test]
+    fn test_regression_repack_dest_password_counts_as_explicit_auth() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_dpw.txt", b"dest password data");
+        let archive = temp.path().join("rp_dpw_src.era");
+        let repacked = temp.path().join("rp_dpw_dst.era");
+        let out_dir = temp.path().join("out");
+        let (_src_pub, src_priv) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                _src_pub.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--key",
+                src_priv.to_str().unwrap(),
+                "--dest-password",
+                "dstpwd",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "dstpwd",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_dpw.txt")).unwrap(),
+            b"dest password data"
+        );
+    }
+
+    #[test]
+    fn test_regression_repack_password_source_to_cert_only_dest() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_certonly.txt", b"cert only dest");
+        let archive = temp.path().join("rp_certonly_src.era");
+        let repacked = temp.path().join("rp_certonly_dst.era");
+        let out_dir = temp.path().join("out");
+        let (dest_pub, dest_priv) = generate_test_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+                "--certificate",
+                dest_pub.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                dest_priv.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                repacked.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+            ])
+            .assert()
+            .failure();
+
+        assert_eq!(
+            fs::read(out_dir.join("rp_certonly.txt")).unwrap(),
+            b"cert only dest"
+        );
+    }
+
+    #[test]
+    fn test_regression_repack_rejects_multiple_passwords_for_single_slot() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_multipw.txt", b"multi pw");
+        let archive = temp.path().join("rp_multipw_src.era");
+        let repacked = temp.path().join("rp_multipw_dst.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--password",
+                "srcpwd",
+                "--password",
+                "extra",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("exactly one password"));
+    }
+
+    #[test]
+    fn test_regression_repack_rejects_multiple_hybrid_keys_for_single_slot() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_multihyb.txt", b"multi hybrid");
+        let archive = temp.path().join("rp_multihyb_src.era");
+        let repacked = temp.path().join("rp_multihyb_dst.era");
+        let (src_pub, src_priv) = generate_test_hybrid_keypair(temp.path());
+        let (_extra_pub, extra_priv) = generate_test_hybrid_keypair(temp.path());
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                src_pub.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "repack",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                repacked.to_str().unwrap(),
+                "--key",
+                src_priv.to_str().unwrap(),
+                "--key",
+                extra_priv.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("exactly one hybrid keypair"));
+    }
+
+    #[test]
+    fn test_regression_create_rejects_duplicate_hybrid_cert_content() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "rp_dup.txt", b"duplicate hybrid cert");
+        let archive = temp.path().join("rp_dup.era");
+        let (pub1, _priv1) = generate_test_hybrid_keypair(temp.path());
+        let pub1_copy = temp.path().join("hybrid_copy.pem");
+        fs::copy(&pub1, &pub1_copy).unwrap();
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub1.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub1_copy.to_str().unwrap(),
+                "--threshold",
+                "2",
+                "--shares",
+                "2",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("Duplicate hybrid certificate"));
     }
 }

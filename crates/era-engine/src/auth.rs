@@ -1,5 +1,6 @@
 use era_common::{EraError, Result};
 use era_crypto::certificate::{EraKeyPair, KeyEncapsulation};
+use era_crypto::hybrid_certificate::HybridKeyPair;
 use era_crypto::{AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_crypto::{KdfParams, Salt};
 use era_volume::{RecipientSlot, RecipientType};
@@ -129,6 +130,33 @@ impl AuthProvider for CertificateProvider {
 
         match self.keypair.decapsulate(&encapsulation) {
             Ok(dk) => Ok(Some(dk.as_bytes().to_vec())),
+            Err(EraError::Decryption(_)) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+}
+
+pub struct HybridCertificateProvider {
+    keypair: HybridKeyPair,
+}
+
+impl HybridCertificateProvider {
+    pub fn new(keypair: HybridKeyPair) -> Self {
+        Self { keypair }
+    }
+}
+
+impl AuthProvider for HybridCertificateProvider {
+    fn try_unlock(&self, slot: &RecipientSlot) -> Result<Option<Vec<u8>>> {
+        if slot.r_type() != RecipientType::HybridKem {
+            return Ok(None);
+        }
+
+        match self
+            .keypair
+            .decapsulate(slot.params(), slot.encrypted_master_key())
+        {
+            Ok(mk) => Ok(Some(mk)),
             Err(EraError::Decryption(_)) => Ok(None),
             Err(other) => Err(other),
         }

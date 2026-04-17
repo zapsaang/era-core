@@ -301,16 +301,15 @@ mod low_severity {
     fn test_v3_qual_02_repair_preserves_map_err_context() {
         let source = include_str!("../src/repair.rs");
 
-        let contextual_count = source
-            .matches("Invalid master key length: expected 32, got {}")
-            .count();
         assert!(
-            contextual_count >= 2,
-            "repair must preserve master key length context in both map_err sites"
+            source.contains("fn try_unlock_with_providers")
+                && source.contains("Result<[u8; 32]>")
+                && source.contains("Invalid master key length"),
+            "repair must centralize master key conversion with preserved error context"
         );
         assert!(
-            source.contains("map_err(|e: Vec<u8>|"),
-            "repair map_err should capture conversion error payload for context"
+            !source.contains("map_err(|e: Vec<u8>|"),
+            "repair should no longer duplicate Vec<u8> conversion at call sites"
         );
     }
 

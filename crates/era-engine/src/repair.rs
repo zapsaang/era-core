@@ -31,6 +31,7 @@ use std::sync::{
     Arc,
 };
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
 
@@ -138,9 +139,63 @@ pub struct RepairStats {
     pub archive_health: ArchiveHealthStatus,
 }
 
-async fn preflight_metadata_recovery(path: &Path, password: &str) -> Result<()> {
-    let mut reader = ArchiveReader::open(path, password).await?;
+async fn preflight_metadata_recovery_with_providers(
+    path: &Path,
+    providers: Vec<Box<dyn crate::auth::AuthProvider>>,
+) -> Result<()> {
+    let mut reader = ArchiveReader::open_with_providers(path, providers).await?;
     reader.preflight_metadata_recovery().await
+}
+
+fn try_unlock_with_providers(
+    header: &era_volume::SuperHeader,
+    providers: &[Box<dyn crate::auth::AuthProvider>],
+) -> Result<[u8; 32]> {
+    match header.access_policy() {
+        era_volume::AccessPolicy::AnyOfN => {
+            let mut master_key = None;
+            'outer: for slot in header.recipients() {
+                for provider in providers {
+                    if let Ok(Some(mk)) = provider.try_unlock(slot) {
+                        master_key = Some(mk);
+                        break 'outer;
+                    }
+                }
+            }
+            let mut mk =
+                master_key.ok_or(EraError::InvalidKey("No valid credentials found".into()))?;
+            let result: [u8; 32] = mk
+                .as_slice()
+                .try_into()
+                .map_err(|_| EraError::InvalidKey("Invalid master key length".into()))?;
+            mk.zeroize();
+            Ok(result)
+        }
+        era_volume::AccessPolicy::Threshold(t) => {
+            if t < 2 {
+                return Err(EraError::InvalidConfig("Threshold must be >= 2".into()));
+            }
+            let mut shares = Vec::new();
+            for slot in header.recipients() {
+                for provider in providers {
+                    if let Ok(Some(share)) = provider.try_unlock(slot) {
+                        shares.push(share);
+                        break;
+                    }
+                }
+            }
+            if (shares.len() as u32) < t {
+                return Err(EraError::ThresholdNotMet {
+                    required: t,
+                    provided: shares.len() as u32,
+                });
+            }
+            let result = era_crypto::reconstruct_master_key(&shares, t as u8);
+            shares.iter_mut().for_each(|s| s.zeroize());
+            result
+        }
+        _ => Err(EraError::InvalidConfig("Unsupported access policy".into())),
+    }
 }
 
 /// Helper to read and verify a single shard at the given offset
@@ -252,6 +307,47 @@ pub async fn repair_archive(
     password: &str,
     options: RepairOptions,
 ) -> Result<RepairStats> {
+    let provider = Box::new(crate::auth::PasswordProvider::new(password.to_string()));
+    repair_archive_with_providers(path, vec![provider], options).await
+}
+
+pub async fn repair_archive_with_passwords(
+    path: &Path,
+    passwords: &[&str],
+    options: RepairOptions,
+) -> Result<RepairStats> {
+    let providers: Vec<Box<dyn crate::auth::AuthProvider>> = passwords
+        .iter()
+        .map(|p| Box::new(crate::auth::PasswordProvider::new(p.to_string())) as _)
+        .collect();
+    repair_archive_with_providers(path, providers, options).await
+}
+
+pub async fn repair_archive_with_private_keys(
+    path: &Path,
+    keypairs: &[era_crypto::EitherKeyPair],
+    options: RepairOptions,
+) -> Result<RepairStats> {
+    let mut providers: Vec<Box<dyn crate::auth::AuthProvider>> = Vec::new();
+    for kp in keypairs {
+        match kp {
+            era_crypto::EitherKeyPair::Legacy(k) => {
+                providers.push(Box::new(crate::auth::CertificateProvider::new(k.clone())) as _);
+            }
+            era_crypto::EitherKeyPair::Hybrid(k) => {
+                providers
+                    .push(Box::new(crate::auth::HybridCertificateProvider::new(*k.clone())) as _);
+            }
+        }
+    }
+    repair_archive_with_providers(path, providers, options).await
+}
+
+pub async fn repair_archive_with_providers(
+    path: &Path,
+    providers: Vec<Box<dyn crate::auth::AuthProvider>>,
+    options: RepairOptions,
+) -> Result<RepairStats> {
     let cancel_flag = Arc::new(AtomicBool::new(false));
     info!("Starting archive repair: {}", path.display());
 
@@ -270,7 +366,10 @@ pub async fn repair_archive(
 
     // If the archive is multi-volume, use matrix-aware repair
     if header.total_volumes() > 1 {
-        return Box::pin(repair_archive_matrix(path, password, options)).await;
+        return Box::pin(repair_archive_matrix_with_providers(
+            path, providers, options,
+        ))
+        .await;
     }
 
     info!(
@@ -278,30 +377,14 @@ pub async fn repair_archive(
         erasure_config.data_shards, erasure_config.parity_shards
     );
 
-    // Create key session using PasswordProvider
-    // Requires crate::auth::AuthProvider and crate::auth::PasswordProvider
-    let provider = crate::auth::PasswordProvider::new(password.to_string());
-
-    let mut master_key = None;
-    for slot in header.recipients() {
-        use crate::auth::AuthProvider;
-        if let Ok(Some(mk)) = provider.try_unlock(slot) {
-            master_key = Some(mk);
-            break;
-        }
-    }
-
-    let master_key = master_key.ok_or(EraError::InvalidKey("Incorrect password".into()))?;
-    let mk_array: [u8; 32] = master_key.try_into().map_err(|e: Vec<u8>| {
-        EraError::InvalidKey(format!(
-            "Invalid master key length: expected 32, got {}",
-            e.len()
-        ))
-    })?;
-    let _session = KeySession::from_master_key(&mk_array)?;
+    let mk_array = try_unlock_with_providers(header, &providers)?;
+    let session_result = KeySession::from_master_key(&mk_array);
+    let mut mk_array = mk_array;
+    mk_array.zeroize();
+    let _session = session_result?;
 
     // Metadata-first preflight: restore embedded LSM and catalog before repair
-    preflight_metadata_recovery(path, password).await?;
+    preflight_metadata_recovery_with_providers(path, providers).await?;
 
     // Create compressor (kept for future decode-based validation if needed)
     let _compressor: Box<dyn era_codec::Compressor> =
@@ -784,14 +867,20 @@ pub async fn repair_archive_matrix(
     password: &str,
     options: RepairOptions,
 ) -> Result<RepairStats> {
+    let provider = Box::new(crate::auth::PasswordProvider::new(password.to_string()));
+    repair_archive_matrix_with_providers(path, vec![provider], options).await
+}
+
+async fn repair_archive_matrix_with_providers(
+    path: &Path,
+    providers: Vec<Box<dyn crate::auth::AuthProvider>>,
+    options: RepairOptions,
+) -> Result<RepairStats> {
     let cancel_flag = Arc::new(AtomicBool::new(false));
     info!(
         "Starting matrix-distributed archive repair: {}",
         path.display()
     );
-
-    // Metadata-first preflight: restore embedded LSM and catalog before repair
-    preflight_metadata_recovery(path, password).await?;
 
     let parent_dir = path.parent().unwrap_or(Path::new("."));
     let backend = LocalStorageBackend::new(parent_dir);
@@ -900,26 +989,15 @@ pub async fn repair_archive_matrix(
         erasure_config.data_shards, erasure_config.parity_shards, volume_count, total_shards
     );
 
-    // Create key session
-    let provider = crate::auth::PasswordProvider::new(password.to_string());
+    // Unlock master key before consuming providers in preflight
+    let mk_array = try_unlock_with_providers(&header, &providers)?;
+    let session_result = KeySession::from_master_key(&mk_array);
+    let mut mk_array = mk_array;
+    mk_array.zeroize();
+    let _session = session_result?;
 
-    let mut master_key = None;
-    for slot in header.recipients() {
-        use crate::auth::AuthProvider;
-        if let Ok(Some(mk)) = provider.try_unlock(slot) {
-            master_key = Some(mk);
-            break;
-        }
-    }
-
-    let master_key = master_key.ok_or(EraError::InvalidKey("Incorrect password".into()))?;
-    let mk_array: [u8; 32] = master_key.try_into().map_err(|e: Vec<u8>| {
-        EraError::InvalidKey(format!(
-            "Invalid master key length: expected 32, got {}",
-            e.len()
-        ))
-    })?;
-    let _session = KeySession::from_master_key(&mk_array)?;
+    // Metadata-first preflight now that providers are no longer needed for unlock
+    preflight_metadata_recovery_with_providers(path, providers).await?;
 
     let _compressor: Box<dyn era_codec::Compressor> =
         Box::new(ZstdCompressor::new(header.config().compression.level));

@@ -122,10 +122,12 @@ impl EncryptedVolumeKey {
 pub enum RecipientType {
     /// Password-based: Argon2id KDF derives the Master Key.
     Argon2idPassword,
-    /// Public-key: X25519 (+ Kyber-768 hybrid KEM) encapsulates the Master Key.
+    /// Public-key: X25519 ECDH encapsulates the Master Key.
     X25519PubKey,
     /// Hardware token: FIDO2 HMAC-secret extension derives the Master Key.
     Fido2Hmac,
+    /// Post-quantum public-key: X25519 + Kyber-768 hybrid KEM encapsulates the Master Key.
+    HybridKem,
 }
 
 /// A recipient slot containing an encrypted master key
@@ -438,6 +440,9 @@ impl SuperHeader {
                         RecipientType::Fido2Hmac => {
                             proto::recipient_slot::RecipientType::Fido2Hmac.into()
                         }
+                        RecipientType::HybridKem => {
+                            proto::recipient_slot::RecipientType::HybridKem.into()
+                        }
                     },
                     key_id: s.key_id.map(|k| k.to_vec()).unwrap_or_default(),
                     params: s.params.clone(),
@@ -678,8 +683,8 @@ impl From<RecipientSlot> for proto::RecipientSlot {
                 RecipientType::X25519PubKey => {
                     proto::recipient_slot::RecipientType::X25519Pubkey.into()
                 }
-
                 RecipientType::Fido2Hmac => proto::recipient_slot::RecipientType::Fido2Hmac.into(),
+                RecipientType::HybridKem => proto::recipient_slot::RecipientType::HybridKem.into(),
             },
             key_id: slot.key_id.map(|k| k.to_vec()).unwrap_or_default(),
             params: slot.params,
@@ -740,6 +745,7 @@ impl TryFrom<proto::RecipientSlot> for RecipientSlot {
                 }
                 proto::recipient_slot::RecipientType::X25519Pubkey => RecipientType::X25519PubKey,
                 proto::recipient_slot::RecipientType::Fido2Hmac => RecipientType::Fido2Hmac,
+                proto::recipient_slot::RecipientType::HybridKem => RecipientType::HybridKem,
             },
             key_id,
             params: proto.params,

@@ -8,46 +8,213 @@ use era_common::{
     MatrixDistributionStrategy,
 };
 use era_engine::{
-    repack_archive, repack_archive_with_keypair, repair_archive, repair_archive_matrix,
     ArchiveHealthStatus, ArchiveReader, ArchiveWriter, AuthMode, ExtractOptions, RecoveryManager,
     RepairOptions,
 };
 use indicatif::{HumanBytes, HumanDuration, ProgressStyle};
-use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info, warn};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Get password from user with a professional prompt
 ///
 /// If password is provided via CLI argument, use it directly (for scripting).
 /// Otherwise, prompt the user with a styled password input.
-fn get_password(password: Option<&str>, prompt: &str) -> Result<String> {
-    if let Some(p) = password {
-        Ok(p.to_string())
-    } else {
-        Password::with_theme(&ColorfulTheme::default())
+fn prompt_for_passwords() -> Result<Vec<String>> {
+    let mut passwords = Vec::new();
+    loop {
+        let prompt = if passwords.is_empty() {
+            "Enter decryption password"
+        } else {
+            "Enter additional decryption password (empty to finish)"
+        };
+        let pw = Password::with_theme(&ColorfulTheme::default())
             .with_prompt(prompt)
+            .allow_empty_password(true)
             .interact()
-            .context("Failed to read password")
+            .context("Failed to read password")?;
+        if pw.is_empty() {
+            break;
+        }
+        passwords.push(pw);
     }
+    Ok(passwords)
 }
 
 /// Get password with confirmation for new archives
 ///
 /// This ensures users don't accidentally mistype their password when creating
 /// an archive. If password is provided via CLI, skip confirmation (for scripting).
-fn get_password_with_confirmation(password: Option<&str>) -> Result<String> {
-    if let Some(p) = password {
-        Ok(p.to_string())
+/// Collect creation passwords, confirming the first one when interactive.
+fn get_passwords_with_confirmation(
+    passwords: &[String],
+    shares: Option<usize>,
+) -> Result<Vec<String>> {
+    if !passwords.is_empty() {
+        return Ok(passwords.to_vec());
+    }
+    if let Some(n) = shares {
+        let mut result = Vec::with_capacity(n);
+        let p = Password::with_theme(&ColorfulTheme::default())
+            .with_prompt("Enter encryption password 1/".to_string() + &n.to_string())
+            .with_confirmation("Confirm password", "Passwords do not match")
+            .interact()
+            .context("Failed to read password")?;
+        result.push(p);
+        for i in 1..n {
+            let p = Password::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Enter encryption password {}/{}", i + 1, n))
+                .interact()
+                .context("Failed to read password")?;
+            result.push(p);
+        }
+        Ok(result)
     } else {
-        Password::with_theme(&ColorfulTheme::default())
+        let p = Password::with_theme(&ColorfulTheme::default())
             .with_prompt("Enter encryption password")
             .with_confirmation("Confirm password", "Passwords do not match")
             .interact()
-            .context("Failed to read password")
+            .context("Failed to read password")?;
+        Ok(vec![p])
     }
+}
+
+/// Load private keys from PEM files, auto-detecting legacy vs hybrid.
+fn load_private_keys(
+    key_paths: &[PathBuf],
+    password: Option<&str>,
+) -> Result<Vec<era_crypto::EitherKeyPair>> {
+    let mut keys = Vec::new();
+    for path in key_paths {
+        let kp = era_crypto::load_any_private_key_from_pem(path, password)
+            .map_err(|e| anyhow::anyhow!("Failed to load private key {}: {}", path.display(), e))?;
+        keys.push(kp);
+    }
+    Ok(keys)
+}
+
+/// Load hybrid public key certificates from PEM files.
+fn load_hybrid_certificates(paths: &[PathBuf]) -> Result<Vec<era_crypto::HybridCertificate>> {
+    let mut certs = Vec::new();
+    for path in paths {
+        let cert = era_crypto::load_hybrid_public_key_from_pem(path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load hybrid certificate {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+        certs.push(cert);
+    }
+    Ok(certs)
+}
+
+/// Build auth providers from passwords and/or key paths.
+/// Prompts for password interactively if neither is provided.
+fn build_auth_providers(
+    passwords: &[String],
+    key_paths: &[PathBuf],
+) -> Result<Vec<Box<dyn era_engine::auth::AuthProvider>>> {
+    let mut providers: Vec<Box<dyn era_engine::auth::AuthProvider>> = Vec::new();
+
+    if !key_paths.is_empty() {
+        let keypairs = load_private_keys(key_paths, passwords.first().map(|s| s.as_str()))?;
+        for kp in keypairs {
+            match kp {
+                era_crypto::EitherKeyPair::Legacy(k) => {
+                    providers.push(Box::new(era_engine::auth::CertificateProvider::new(k)));
+                }
+                era_crypto::EitherKeyPair::Hybrid(k) => {
+                    providers.push(Box::new(era_engine::auth::HybridCertificateProvider::new(
+                        *k,
+                    )));
+                }
+            }
+        }
+    }
+
+    if passwords.len() > 1 {
+        for p in passwords {
+            providers.push(Box::new(era_engine::auth::PasswordProvider::new(p.clone())));
+        }
+    } else if !passwords.is_empty() {
+        providers.push(Box::new(era_engine::auth::PasswordProvider::new(
+            passwords[0].clone(),
+        )));
+    } else if key_paths.is_empty() {
+        let pws = prompt_for_passwords()?;
+        for pw in pws {
+            providers.push(Box::new(era_engine::auth::PasswordProvider::new(pw)));
+        }
+    }
+
+    Ok(providers)
+}
+
+fn check_threshold_duplicates(
+    passwords: &[String],
+    hybrid_certs: &[era_crypto::HybridCertificate],
+) -> Result<()> {
+    let mut seen_passwords = std::collections::HashSet::new();
+    for pw in passwords {
+        if !seen_passwords.insert(pw.clone()) {
+            anyhow::bail!("Duplicate password detected in threshold credentials");
+        }
+    }
+    let mut seen_certs = std::collections::HashSet::new();
+    for cert in hybrid_certs {
+        let bytes = cert.to_bytes();
+        if !seen_certs.insert(bytes) {
+            anyhow::bail!("Duplicate hybrid certificate detected in threshold credentials");
+        }
+    }
+    Ok(())
+}
+
+/// Validate threshold/shares arguments and credential counts.
+fn validate_threshold_args(
+    threshold: Option<usize>,
+    shares: Option<usize>,
+    password_count: usize,
+    hybrid_cert_count: usize,
+    legacy_cert_present: bool,
+) -> Result<()> {
+    let (t, n) = match (threshold, shares) {
+        (Some(t), Some(n)) => (t, n),
+        (None, None) => return Ok(()),
+        _ => anyhow::bail!("--threshold and --shares must be specified together"),
+    };
+
+    if t < 2 {
+        anyhow::bail!("--threshold must be >= 2");
+    }
+    if n < t {
+        anyhow::bail!("--shares ({}) must be >= --threshold ({})", n, t);
+    }
+
+    if password_count > 0 && hybrid_cert_count > 0 {
+        anyhow::bail!("Mixed threshold (password + hybrid certificate) is not supported");
+    }
+    if legacy_cert_present && (password_count > 0 || hybrid_cert_count > 0) {
+        anyhow::bail!("Threshold with legacy certificate is not supported");
+    }
+
+    let provided_count = if password_count > 0 {
+        password_count
+    } else {
+        hybrid_cert_count
+    };
+    if provided_count != n {
+        anyhow::bail!(
+            "--shares {} requires exactly {} credentials, got {}",
+            n,
+            n,
+            provided_count
+        );
+    }
+
+    Ok(())
 }
 
 /// Parse erasure config from string format "data:parity" (e.g., "4:2")
@@ -165,7 +332,10 @@ pub struct CreateArgs<'a> {
     pub output: &'a Path,
     pub config_path: Option<&'a Path>,
     pub certificate_path: Option<&'a Path>,
-    pub password: Option<&'a str>,
+    pub hybrid_certificate_paths: &'a [PathBuf],
+    pub passwords: &'a [String],
+    pub threshold: Option<usize>,
+    pub shares: Option<usize>,
     pub compression_level: Option<i32>,
     pub no_compression: bool,
     pub erasure: Option<&'a str>,
@@ -204,7 +374,10 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         output,
         config_path,
         certificate_path,
-        password,
+        hybrid_certificate_paths,
+        passwords,
+        threshold,
+        shares,
         compression_level,
         no_compression,
         erasure,
@@ -262,7 +435,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     }
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
-    // Load public certificate
+    // Load certificates
     let certificate = if let Some(path) = certificate_path {
         info!("Loading certificate: {}", path.display());
         let cert = era_crypto::load_public_key_from_pem(path)
@@ -273,35 +446,88 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         None
     };
 
-    let user_supplied_password = password.is_some();
+    let hybrid_certificates = load_hybrid_certificates(hybrid_certificate_paths)?;
 
-    // Get password with confirmation (only if not using certificate mode)
-    let password = if certificate.is_some() {
-        if let Some(p) = password {
-            info!("Hybrid mode: certificate + password");
-            p.to_string()
+    if certificate.is_some() && !hybrid_certificates.is_empty() {
+        anyhow::bail!("--certificate and --hybrid-certificate cannot be mixed");
+    }
+
+    let passwords =
+        if passwords.is_empty() && certificate.is_none() && hybrid_certificates.is_empty() {
+            get_passwords_with_confirmation(passwords, shares)?
         } else {
-            let mut random_pw = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut random_pw);
-            let pw = hex::encode(random_pw);
-            random_pw.zeroize();
-            info!("Certificate-only mode: archive will be decryptable only with the private key");
-            pw
+            passwords.to_vec()
+        };
+
+    validate_threshold_args(
+        threshold,
+        shares,
+        passwords.len(),
+        hybrid_certificates.len(),
+        certificate.is_some(),
+    )?;
+    check_threshold_duplicates(&passwords, &hybrid_certificates)?;
+
+    if threshold.is_none() && passwords.len() > 1 {
+        anyhow::bail!("Multiple --password values require --threshold and --shares");
+    }
+    if threshold.is_none() && hybrid_certificates.len() > 1 {
+        anyhow::bail!("Multiple --hybrid-certificate values require --threshold and --shares");
+    }
+
+    let mut builder = ArchiveWriter::builder(output).config(config.clone());
+
+    if let Some(t) = threshold {
+        builder = builder.access_policy(era_engine::AccessPolicy::Threshold(t as u32));
+    }
+
+    match (
+        certificate,
+        hybrid_certificates.len(),
+        passwords.len(),
+        threshold,
+    ) {
+        (Some(cert), 0, 1, None) => {
+            info!("Multi-recipient mode: certificate + password");
+            builder = builder.auth_mode(AuthMode::Hybrid {
+                password: Zeroizing::new(passwords[0].clone()),
+                certificate: cert,
+            });
         }
-    } else {
-        get_password_with_confirmation(password)?
-    };
-
-    let mut builder = ArchiveWriter::builder(output).config(config.clone()); // Use our resolved config
-
-    builder = match (certificate, user_supplied_password) {
-        (Some(cert), true) => builder.auth_mode(AuthMode::Hybrid {
-            password: Zeroizing::new(password),
-            certificate: cert,
-        }),
-        (Some(cert), false) => builder.certificate(cert),
-        (None, _) => builder.password(&password),
-    };
+        (Some(cert), 0, 0, None) => {
+            info!("Certificate-only mode: archive will be decryptable only with the private key");
+            builder = builder.certificate(cert);
+        }
+        (None, 1, 1, None) => {
+            builder = builder.auth_mode(AuthMode::HybridKemWithPassword {
+                password: Zeroizing::new(passwords[0].clone()),
+                certificate: hybrid_certificates[0].clone(),
+            });
+        }
+        (None, 1, 0, None) => {
+            builder = builder.hybrid_certificate(hybrid_certificates[0].clone());
+        }
+        (None, 0, 1, None) => {
+            builder = builder.password(&passwords[0]);
+        }
+        (None, 0, n, Some(_)) if n >= 1 => {
+            builder = builder.password(&passwords[0]);
+            for pw in &passwords[1..] {
+                builder = builder.add_password(pw);
+            }
+        }
+        (None, n, 0, Some(_)) if n >= 1 => {
+            builder = builder.hybrid_certificate(hybrid_certificates[0].clone());
+            for cert in &hybrid_certificates[1..] {
+                builder = builder.add_hybrid_certificate(cert.clone());
+            }
+        }
+        _ => {
+            anyhow::bail!(
+                "Invalid auth combination. Supported: password-only, cert-only, hybrid-cert-only, cert+password, hybrid-cert+password, threshold passwords, or threshold hybrid certs."
+            );
+        }
+    }
 
     // Handle Volume Count Override for Matrix
     // The builder will use config.erasure and config.distribution
@@ -414,25 +640,16 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
 pub async fn extract(
     input: &Path,
     output: &Path,
-    password: Option<&str>,
-    key_path: Option<&Path>,
+    passwords: &[String],
+    key_paths: &[PathBuf],
     force: bool,
 ) -> Result<()> {
     info!("Opening archive: {}", input.display());
 
-    let mut reader = if let Some(kp_path) = key_path {
-        info!("Loading private key: {}", kp_path.display());
-        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
-            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
-        ArchiveReader::open_with_keypair(input, &keypair)
-            .await
-            .context("Failed to open archive with key")?
-    } else {
-        let password = get_password(password, "Enter decryption password: ")?;
-        ArchiveReader::open(input, &password)
-            .await
-            .context("Failed to open archive")?
-    };
+    let providers = build_auth_providers(passwords, key_paths)?;
+    let mut reader = ArchiveReader::open_with_providers(input, providers)
+        .await
+        .context("Failed to open archive")?;
 
     let options = ExtractOptions::new(output).overwrite(force);
 
@@ -456,26 +673,26 @@ pub async fn extract(
     Ok(())
 }
 
+/// Open an archive with the provided credentials.
+async fn open_archive(
+    archive: &Path,
+    passwords: &[String],
+    key_paths: &[PathBuf],
+) -> Result<ArchiveReader> {
+    let providers = build_auth_providers(passwords, key_paths)?;
+    ArchiveReader::open_with_providers(archive, providers)
+        .await
+        .context("Failed to open archive")
+}
+
 /// List contents of an ERA archive
 pub async fn list(
     archive: &Path,
-    password: Option<&str>,
-    key_path: Option<&Path>,
+    passwords: &[String],
+    key_paths: &[PathBuf],
     long_format: bool,
 ) -> Result<()> {
-    let mut reader = if let Some(kp_path) = key_path {
-        info!("Loading private key: {}", kp_path.display());
-        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
-            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
-        ArchiveReader::open_with_keypair(archive, &keypair)
-            .await
-            .context("Failed to open archive with key")?
-    } else {
-        let password = get_password(password, "Enter decryption password: ")?;
-        ArchiveReader::open(archive, &password)
-            .await
-            .context("Failed to open archive")?
-    };
+    let mut reader = open_archive(archive, passwords, key_paths).await?;
 
     let files = reader
         .list_files()
@@ -515,20 +732,8 @@ pub async fn list(
 }
 
 /// Show information about an ERA archive
-pub async fn info(archive: &Path, password: Option<&str>, key_path: Option<&Path>) -> Result<()> {
-    let mut reader = if let Some(kp_path) = key_path {
-        info!("Loading private key: {}", kp_path.display());
-        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
-            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
-        ArchiveReader::open_with_keypair(archive, &keypair)
-            .await
-            .context("Failed to open archive with key")?
-    } else {
-        let password = get_password(password, "Enter decryption password: ")?;
-        ArchiveReader::open(archive, &password)
-            .await
-            .context("Failed to open archive")?
-    };
+pub async fn info(archive: &Path, passwords: &[String], key_paths: &[PathBuf]) -> Result<()> {
+    let mut reader = open_archive(archive, passwords, key_paths).await?;
 
     let header = reader.header().clone();
     let catalog = reader
@@ -579,26 +784,14 @@ pub async fn info(archive: &Path, password: Option<&str>, key_path: Option<&Path
 /// Verify integrity of an ERA archive
 pub async fn verify(
     archive: &Path,
-    password: Option<&str>,
-    key_path: Option<&Path>,
+    passwords: &[String],
+    key_paths: &[PathBuf],
     verbose: bool,
 ) -> Result<()> {
     info!("Verifying archive: {}", archive.display());
     info!("");
 
-    let mut reader = if let Some(kp_path) = key_path {
-        info!("Loading private key: {}", kp_path.display());
-        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
-            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
-        ArchiveReader::open_with_keypair(archive, &keypair)
-            .await
-            .context("Failed to open archive with key")?
-    } else {
-        let password = get_password(password, "Enter decryption password: ")?;
-        ArchiveReader::open(archive, &password)
-            .await
-            .context("Failed to open archive")?
-    };
+    let mut reader = open_archive(archive, passwords, key_paths).await?;
 
     let start_time = Instant::now();
     let pb = progress::spinner();
@@ -697,14 +890,14 @@ pub async fn verify(
 /// Repair a damaged or incomplete ERA archive
 pub async fn repair(
     archive: &Path,
-    password: Option<&str>,
+    passwords: &[String],
+    key_paths: &[PathBuf],
     force: bool,
     verbose: bool,
 ) -> Result<()> {
     info!("Analyzing archive: {}", archive.display());
     info!("");
 
-    // First, check recovery status
     let status = RecoveryManager::analyze(archive)
         .await
         .context("Failed to analyze archive")?;
@@ -750,12 +943,8 @@ pub async fn repair(
         info!("Archive appears complete. Running verification...");
         info!("");
 
-        let password = get_password(password, "Enter decryption password: ")?;
-        let mut reader = ArchiveReader::open(archive, &password)
-            .await
-            .context("Failed to open archive")?;
+        let mut reader = open_archive(archive, passwords, key_paths).await?;
 
-        // Check if erasure coding is enabled
         let header = reader.header();
         let erasure_enabled = header.config().erasure.is_some();
         if erasure_enabled {
@@ -857,24 +1046,15 @@ pub async fn repair(
             info!("Attempting repair using Reed-Solomon erasure coding...");
             info!("");
 
-            // Create repair options
             let repair_options = RepairOptions {
                 create_backup: true,
-                dry_run: !force, // Only actually repair if --force is specified
+                dry_run: !force,
                 continue_on_error: true,
             };
 
-            // Check for multi-volume archive (matrix distribution)
-            let base_path = archive.with_extension("");
-            let vol1_path = base_path.with_extension("era.001");
-            let is_multi_volume = vol1_path.exists();
-
-            let repair_result = if is_multi_volume {
-                info!("Detected multi-volume archive, using matrix-distributed repair...");
-                repair_archive_matrix(archive, &password, repair_options).await
-            } else {
-                repair_archive(archive, &password, repair_options).await
-            };
+            let providers = build_auth_providers(passwords, key_paths)?;
+            let repair_result =
+                era_engine::repair_archive_with_providers(archive, providers, repair_options).await;
 
             match repair_result {
                 Ok(repair_stats) => {
@@ -935,7 +1115,6 @@ pub async fn repair(
         anyhow::bail!("Archive has errors. Use 'era extract --force' to recover what's possible.");
     }
 
-    // Recovery is needed - we have a checkpoint from interrupted creation
     info!("Recovery checkpoint found from interrupted archive creation.");
     info!("");
 
@@ -947,7 +1126,6 @@ pub async fn repair(
         return Ok(());
     }
 
-    // Force flag: delete checkpoint and let user start fresh
     info!("Discarding checkpoint due to --force flag...");
 
     let manager = RecoveryManager::new(archive)
@@ -964,8 +1142,13 @@ pub async fn repair(
 pub struct RepackArgs<'a> {
     pub input: &'a Path,
     pub output: &'a Path,
-    pub password: Option<&'a str>,
-    pub key_path: Option<&'a Path>,
+    pub passwords: &'a [String],
+    pub key_paths: &'a [PathBuf],
+    pub dest_password: &'a [String],
+    pub certificate_path: Option<&'a Path>,
+    pub hybrid_certificate_paths: &'a [PathBuf],
+    pub threshold: Option<usize>,
+    pub shares: Option<usize>,
     pub compact: bool,
     pub compression_level: Option<i32>,
     pub no_compression: bool,
@@ -983,8 +1166,13 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
     let RepackArgs {
         input,
         output,
-        password,
-        key_path,
+        passwords,
+        key_paths,
+        dest_password,
+        certificate_path,
+        hybrid_certificate_paths,
+        threshold,
+        shares,
         compact,
         compression_level,
         no_compression,
@@ -997,7 +1185,6 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
         block_target_size,
     } = args;
 
-    // 1. Build base config
     let mut config = if compact {
         info!("Using compact preset (Zstd-19, 16MB blocks, k=32)");
         ArchiveConfig::compact_preset()
@@ -1038,20 +1225,284 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
 
     let start_time = Instant::now();
 
-    // 3. Dispatch to engine based on auth mode
-    let stats = if let Some(kp_path) = key_path {
-        info!("Loading private key: {}", kp_path.display());
-        let keypair = era_crypto::load_private_key_from_pem(kp_path, password)
-            .map_err(|e| anyhow::anyhow!("Failed to load private key: {}", e))?;
-        repack_archive_with_keypair(input, output, &keypair, config)
-            .await
-            .context("Failed to repack archive with keypair")?
+    let effective_passwords: Vec<String> = if passwords.is_empty() && key_paths.is_empty() {
+        prompt_for_passwords()?
     } else {
-        let password = get_password_with_confirmation(password)?;
-        repack_archive(input, output, &password, config)
-            .await
-            .context("Failed to repack archive")?
+        passwords.to_vec()
     };
+
+    let source_providers = build_auth_providers(&effective_passwords, key_paths)?;
+    let reader = ArchiveReader::open_with_providers(input, source_providers)
+        .await
+        .context("Failed to open source archive")?;
+    let source_access_policy = reader.header().access_policy();
+    let source_recipients = reader.header().recipients().to_vec();
+    drop(reader);
+
+    let source_providers = build_auth_providers(&effective_passwords, key_paths)?;
+
+    let dest_certificate = if let Some(path) = certificate_path {
+        let cert = era_crypto::load_public_key_from_pem(path)
+            .map_err(|e| anyhow::anyhow!("Failed to load certificate: {}", e))?;
+        Some(cert)
+    } else {
+        None
+    };
+
+    let dest_hybrid_certs = load_hybrid_certificates(hybrid_certificate_paths)?;
+
+    if dest_certificate.is_some() && !dest_hybrid_certs.is_empty() {
+        anyhow::bail!("--certificate and --hybrid-certificate cannot be mixed");
+    }
+
+    let has_explicit_dest_auth = dest_certificate.is_some()
+        || !dest_hybrid_certs.is_empty()
+        || threshold.is_some()
+        || !dest_password.is_empty();
+
+    let mut writer_builder = ArchiveWriter::builder(output).config(config.clone());
+
+    if !has_explicit_dest_auth {
+        let keypairs = if !key_paths.is_empty() {
+            load_private_keys(key_paths, effective_passwords.first().map(|s| s.as_str()))?
+        } else {
+            Vec::new()
+        };
+
+        match source_access_policy {
+            era_engine::AccessPolicy::AnyOfN => {
+                let password_slots: Vec<_> = source_recipients
+                    .iter()
+                    .filter(|r| matches!(r.r_type(), era_engine::RecipientType::Argon2idPassword))
+                    .collect();
+                let legacy_slots: Vec<_> = source_recipients
+                    .iter()
+                    .filter(|r| matches!(r.r_type(), era_engine::RecipientType::X25519PubKey))
+                    .collect();
+                let hybrid_slots: Vec<_> = source_recipients
+                    .iter()
+                    .filter(|r| matches!(r.r_type(), era_engine::RecipientType::HybridKem))
+                    .collect();
+
+                if password_slots.len() == 1 && legacy_slots.len() == 1 && hybrid_slots.is_empty() {
+                    anyhow::bail!(
+                        "Source archive uses combined legacy certificate + password authentication, which cannot be automatically preserved during repack. Use explicit destination auth options (--certificate, --dest-password)."
+                    );
+                } else if password_slots.len() == 1
+                    && hybrid_slots.len() == 1
+                    && legacy_slots.is_empty()
+                {
+                    anyhow::bail!(
+                        "Source archive uses combined hybrid certificate + password authentication, which cannot be automatically preserved during repack. Use explicit destination auth options (--hybrid-certificate, --dest-password)."
+                    );
+                } else if password_slots.len() == 1
+                    && legacy_slots.is_empty()
+                    && hybrid_slots.is_empty()
+                {
+                    if effective_passwords.len() != 1 {
+                        anyhow::bail!(
+                            "Source archive requires exactly one password for repack. Use explicit destination auth options."
+                        );
+                    }
+                    writer_builder = writer_builder.password(&effective_passwords[0]);
+                } else if legacy_slots.len() == 1
+                    && password_slots.is_empty()
+                    && hybrid_slots.is_empty()
+                {
+                    let key_id = legacy_slots[0].key_id().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Source certificate slot missing key_id; cannot auto-determine destination auth. Use explicit destination auth options."
+                        )
+                    })?;
+                    let matched = keypairs.iter().find(|kp| {
+                        if let era_crypto::EitherKeyPair::Legacy(k) = kp {
+                            k.certificate().key_id().get(..8) == Some(key_id.as_slice())
+                        } else {
+                            false
+                        }
+                    });
+                    if let Some(era_crypto::EitherKeyPair::Legacy(k)) = matched {
+                        writer_builder = writer_builder.certificate(k.certificate());
+                    } else {
+                        anyhow::bail!(
+                            "Source archive requires a matching legacy keypair for repack. Use explicit destination auth options."
+                        );
+                    }
+                } else if hybrid_slots.len() == 1
+                    && password_slots.is_empty()
+                    && legacy_slots.is_empty()
+                {
+                    let hybrid_keypairs: Vec<_> = keypairs
+                        .iter()
+                        .filter_map(|kp| match kp {
+                            era_crypto::EitherKeyPair::Hybrid(k) => Some(k),
+                            _ => None,
+                        })
+                        .collect();
+                    if hybrid_keypairs.len() != 1 {
+                        anyhow::bail!(
+                            "Source archive requires exactly one hybrid keypair for repack. Use explicit destination auth options."
+                        );
+                    }
+                    writer_builder =
+                        writer_builder.hybrid_certificate(hybrid_keypairs[0].certificate());
+                } else {
+                    anyhow::bail!(
+                        "Source archive has an auth configuration that cannot be automatically preserved during repack. Use explicit destination auth options (--certificate, --hybrid-certificate, --dest-password, --threshold, --shares)."
+                    );
+                }
+            }
+            era_engine::AccessPolicy::Threshold(t) => {
+                let password_slots: Vec<_> = source_recipients
+                    .iter()
+                    .filter(|r| matches!(r.r_type(), era_engine::RecipientType::Argon2idPassword))
+                    .collect();
+                let hybrid_slots: Vec<_> = source_recipients
+                    .iter()
+                    .filter(|r| matches!(r.r_type(), era_engine::RecipientType::HybridKem))
+                    .collect();
+                let legacy_slots: Vec<_> = source_recipients
+                    .iter()
+                    .filter(|r| matches!(r.r_type(), era_engine::RecipientType::X25519PubKey))
+                    .collect();
+
+                if !legacy_slots.is_empty() {
+                    anyhow::bail!(
+                        "Source archive uses legacy certificate threshold mode which cannot be automatically preserved during repack. Use explicit destination auth options."
+                    );
+                }
+
+                if !password_slots.is_empty() && hybrid_slots.is_empty() {
+                    if (t as usize) < password_slots.len() {
+                        anyhow::bail!(
+                            "Source archive uses a threshold password policy where fewer than all passwords are required to unlock. Auto-preservation is disabled for security; use explicit destination auth options."
+                        );
+                    }
+                    if effective_passwords.len() != password_slots.len() {
+                        anyhow::bail!(
+                            "Source archive uses threshold password mode with {} passwords, but {} were provided. Use explicit destination auth options.",
+                            password_slots.len(),
+                            effective_passwords.len()
+                        );
+                    }
+                    writer_builder = writer_builder.password(&effective_passwords[0]);
+                    for pw in &effective_passwords[1..] {
+                        writer_builder = writer_builder.add_password(pw);
+                    }
+                    writer_builder =
+                        writer_builder.access_policy(era_engine::AccessPolicy::Threshold(t));
+                } else if !hybrid_slots.is_empty() && password_slots.is_empty() {
+                    if (t as usize) < hybrid_slots.len() {
+                        anyhow::bail!(
+                            "Source archive uses a threshold hybrid certificate policy where fewer than all certificates are required to unlock. Auto-preservation is disabled for security; use explicit destination auth options."
+                        );
+                    }
+                    let hybrid_keypairs: Vec<_> = keypairs
+                        .iter()
+                        .filter_map(|kp| match kp {
+                            era_crypto::EitherKeyPair::Hybrid(k) => Some(k),
+                            _ => None,
+                        })
+                        .collect();
+                    if hybrid_keypairs.len() != hybrid_slots.len() {
+                        anyhow::bail!(
+                            "Source archive uses threshold hybrid certificate mode with {} certificates, but {} hybrid keypairs were provided. Use explicit destination auth options.",
+                            hybrid_slots.len(),
+                            hybrid_keypairs.len()
+                        );
+                    }
+                    writer_builder =
+                        writer_builder.hybrid_certificate(hybrid_keypairs[0].certificate());
+                    for k in &hybrid_keypairs[1..] {
+                        writer_builder = writer_builder.add_hybrid_certificate(k.certificate());
+                    }
+                    writer_builder =
+                        writer_builder.access_policy(era_engine::AccessPolicy::Threshold(t));
+                } else {
+                    anyhow::bail!(
+                        "Source archive has a mixed threshold auth configuration that cannot be automatically preserved during repack. Use explicit destination auth options."
+                    );
+                }
+            }
+            _ => anyhow::bail!("Unsupported source access policy for repack"),
+        }
+    } else {
+        let dest_pw_source = if !dest_password.is_empty() {
+            dest_password.to_vec()
+        } else if dest_certificate.is_some() || !dest_hybrid_certs.is_empty() {
+            Vec::new()
+        } else if !effective_passwords.is_empty() {
+            effective_passwords.clone()
+        } else {
+            Vec::new()
+        };
+
+        validate_threshold_args(
+            threshold,
+            shares,
+            dest_pw_source.len(),
+            dest_hybrid_certs.len(),
+            dest_certificate.is_some(),
+        )?;
+        check_threshold_duplicates(&dest_pw_source, &dest_hybrid_certs)?;
+
+        if let Some(t) = threshold {
+            writer_builder =
+                writer_builder.access_policy(era_engine::AccessPolicy::Threshold(t as u32));
+        }
+
+        match (
+            dest_certificate,
+            dest_hybrid_certs.len(),
+            dest_pw_source.len(),
+            threshold,
+        ) {
+            (Some(cert), 0, 1, None) => {
+                writer_builder = writer_builder.auth_mode(era_engine::AuthMode::Hybrid {
+                    password: Zeroizing::new(dest_pw_source[0].clone()),
+                    certificate: cert,
+                });
+            }
+            (Some(cert), 0, 0, None) => {
+                writer_builder = writer_builder.certificate(cert);
+            }
+            (None, 1, 1, None) => {
+                writer_builder =
+                    writer_builder.auth_mode(era_engine::AuthMode::HybridKemWithPassword {
+                        password: Zeroizing::new(dest_pw_source[0].clone()),
+                        certificate: dest_hybrid_certs[0].clone(),
+                    });
+            }
+            (None, 1, 0, None) => {
+                writer_builder = writer_builder.hybrid_certificate(dest_hybrid_certs[0].clone());
+            }
+            (None, 0, 1, None) => {
+                writer_builder = writer_builder.password(&dest_pw_source[0]);
+            }
+            (None, 0, n, Some(_)) if n >= 1 => {
+                writer_builder = writer_builder.password(&dest_pw_source[0]);
+                for pw in &dest_pw_source[1..] {
+                    writer_builder = writer_builder.add_password(pw);
+                }
+            }
+            (None, n, 0, Some(_)) if n >= 1 => {
+                writer_builder = writer_builder.hybrid_certificate(dest_hybrid_certs[0].clone());
+                for cert in &dest_hybrid_certs[1..] {
+                    writer_builder = writer_builder.add_hybrid_certificate(cert.clone());
+                }
+            }
+            _ => {
+                anyhow::bail!(
+                    "Invalid destination auth combination. Supported explicit destination modes: cert-only, hybrid-cert-only, password-only, cert+password, hybrid-cert+password, threshold passwords, or threshold hybrid certs. Use --dest-password for the destination password when combining with a destination certificate."
+                );
+            }
+        }
+    }
+
+    let stats =
+        era_engine::repack_archive_with_builder(input, output, source_providers, writer_builder)
+            .await
+            .context("Failed to repack archive")?;
 
     info!("");
     info!(
@@ -1307,7 +1758,10 @@ mod tests {
             output: &archive,
             config_path: None,
             certificate_path: Some(cert_path.as_path()),
-            password: Some("hybrid_password"),
+            hybrid_certificate_paths: &[],
+            passwords: &["hybrid_password".to_string()],
+            threshold: None,
+            shares: None,
             compression_level: None,
             no_compression: false,
             erasure: None,
@@ -1348,7 +1802,10 @@ mod tests {
             output: &output,
             config_path: None,
             certificate_path: None,
-            password: Some("test_password"),
+            hybrid_certificate_paths: &[],
+            passwords: &["test_password".to_string()],
+            threshold: None,
+            shares: None,
             compression_level: None,
             no_compression: false,
             erasure: Some("4:2"),
@@ -1381,7 +1838,10 @@ mod tests {
             output: &output,
             config_path: None,
             certificate_path: None,
-            password: Some("test_password"),
+            hybrid_certificate_paths: &[],
+            passwords: &["test_password".to_string()],
+            threshold: None,
+            shares: None,
             compression_level: None,
             no_compression: false,
             erasure: Some("4:2"),
@@ -1408,9 +1868,14 @@ mod tests {
     async fn verify_returns_error_for_missing_expected_volume() {
         let (_temp_dir, archive_path) = create_missing_volume_archive("verify_missing", 2).await;
 
-        let err = verify(&archive_path, Some("test_password"), None, false)
-            .await
-            .expect_err("missing volume should degrade verify result");
+        let err = verify(
+            &archive_path,
+            &["test_password".to_string()],
+            &[] as &[PathBuf],
+            false,
+        )
+        .await
+        .expect_err("missing volume should degrade verify result");
 
         assert!(
             err.to_string().contains("Archive verification degraded")
@@ -1423,9 +1888,15 @@ mod tests {
     async fn repair_returns_error_for_missing_expected_volume() {
         let (_temp_dir, archive_path) = create_missing_volume_archive("repair_missing", 1).await;
 
-        let err = repair(&archive_path, Some("test_password"), false, false)
-            .await
-            .expect_err("missing volume should not report healthy repair status");
+        let err = repair(
+            &archive_path,
+            &["test_password".to_string()],
+            &[] as &[PathBuf],
+            false,
+            false,
+        )
+        .await
+        .expect_err("missing volume should not report healthy repair status");
 
         assert!(
             err.to_string().contains("missing expected volume files"),

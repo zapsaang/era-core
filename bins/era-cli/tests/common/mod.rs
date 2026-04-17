@@ -241,6 +241,30 @@ pub fn count_files_recursive(dir: &Path) -> usize {
         .count()
 }
 
+/// Returns (public_cert_path, private_key_path) for hybrid KEM keys.
+pub fn generate_test_hybrid_keypair(dir: &Path) -> (PathBuf, PathBuf) {
+    use era_crypto::export_hybrid_public_key_as_pem;
+    use era_crypto::pem_support::export_hybrid_private_key_as_pem;
+    use era_crypto::HybridKeyPair;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let keypair = HybridKeyPair::generate();
+    let cert_pem = export_hybrid_public_key_as_pem(&keypair.certificate())
+        .expect("hybrid cert export should succeed");
+    let key_pem =
+        export_hybrid_private_key_as_pem(&keypair).expect("hybrid key export should succeed");
+
+    let pub_path = dir.join(format!("hybrid_public_{}.pem", id));
+    let priv_path = dir.join(format!("hybrid_private_{}.pem", id));
+    fs::write(&pub_path, cert_pem).expect("hybrid public pem should be written");
+    fs::write(&priv_path, key_pem).expect("hybrid private pem should be written");
+
+    (pub_path, priv_path)
+}
+
 pub fn create_test_config(dir: &Path, content: &str) -> PathBuf {
     let path = dir.join("config.toml");
     fs::write(&path, content).unwrap();

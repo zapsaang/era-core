@@ -21,6 +21,7 @@ use era_common::{
     MatrixDistributionStrategy, Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
+use era_crypto::hybrid_certificate::{HybridCertificate, HybridKeyPair};
 use era_crypto::Nonce;
 use era_crypto::{AeadContext, XChaCha20Poly1305Context};
 use era_crypto::{KdfParams, KeySession, Salt};
@@ -65,11 +66,21 @@ pub enum AuthMode {
     /// The archive can be decrypted by anyone with the corresponding private key.
     Certificate(EraCertificate),
 
-    /// Hybrid mode: both password AND certificate required
-    /// Provides defense-in-depth for high-security scenarios.
+    /// Multi-recipient mode with a password slot and a legacy X25519 certificate slot.
+    /// Under the default AnyOfN policy, either credential can unlock the archive.
     Hybrid {
         password: Zeroizing<String>,
         certificate: EraCertificate,
+    },
+
+    /// Post-quantum certificate authentication using X25519 + Kyber-768 hybrid KEM.
+    HybridKemCertificate(HybridCertificate),
+
+    /// Multi-recipient mode with a password slot and a hybrid certificate slot.
+    /// Under the default AnyOfN policy, either credential can unlock the archive.
+    HybridKemWithPassword {
+        password: Zeroizing<String>,
+        certificate: HybridCertificate,
     },
 }
 
@@ -80,6 +91,15 @@ impl std::fmt::Debug for AuthMode {
             AuthMode::Certificate(cert) => f.debug_tuple("Certificate").field(cert).finish(),
             AuthMode::Hybrid { certificate, .. } => f
                 .debug_struct("Hybrid")
+                .field("password", &"[REDACTED]")
+                .field("certificate", certificate)
+                .finish(),
+            AuthMode::HybridKemCertificate(_) => f
+                .debug_tuple("HybridKemCertificate")
+                .field(&"[REDACTED]")
+                .finish(),
+            AuthMode::HybridKemWithPassword { certificate, .. } => f
+                .debug_struct("HybridKemWithPassword")
                 .field("password", &"[REDACTED]")
                 .field("certificate", certificate)
                 .finish(),
@@ -141,6 +161,8 @@ pub struct ArchiveWriterBuilder {
     access_policy: era_volume::AccessPolicy,
     /// Additional passwords for threshold mode
     additional_passwords: Vec<String>,
+    /// Additional hybrid certificates for threshold mode
+    additional_hybrid_certificates: Vec<HybridCertificate>,
 }
 
 impl ArchiveWriterBuilder {
@@ -164,6 +186,7 @@ impl ArchiveWriterBuilder {
             append_existing: false,
             access_policy: era_volume::AccessPolicy::AnyOfN,
             additional_passwords: Vec::new(),
+            additional_hybrid_certificates: Vec::new(),
         }
     }
 
@@ -193,6 +216,14 @@ impl ArchiveWriterBuilder {
     /// ```
     pub fn certificate(mut self, cert: EraCertificate) -> Self {
         self.auth_mode = AuthMode::Certificate(cert);
+        self
+    }
+
+    /// Set the recipient hybrid certificate (post-quantum certificate mode).
+    ///
+    /// This uses X25519 + Kyber-768 hybrid KEM for post-quantum security.
+    pub fn hybrid_certificate(mut self, cert: HybridCertificate) -> Self {
+        self.auth_mode = AuthMode::HybridKemCertificate(cert);
         self
     }
 
@@ -329,6 +360,16 @@ impl ArchiveWriterBuilder {
         self
     }
 
+    /// Add an additional hybrid certificate for threshold mode.
+    ///
+    /// The primary hybrid certificate is set via `.hybrid_certificate()`.
+    /// Additional hybrid certificates are added here.
+    /// For `Threshold(t)`, you need at least `t` total hybrid certificates.
+    pub fn add_hybrid_certificate(mut self, cert: HybridCertificate) -> Self {
+        self.additional_hybrid_certificates.push(cert);
+        self
+    }
+
     /// Build the archive writer
     pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
@@ -340,7 +381,8 @@ impl ArchiveWriterBuilder {
         let password_to_validate = match &self.auth_mode {
             AuthMode::Password(password) => Some(password.as_str()),
             AuthMode::Hybrid { password, .. } => Some(password.as_str()),
-            AuthMode::Certificate(_) => None,
+            AuthMode::HybridKemWithPassword { password, .. } => Some(password.as_str()),
+            AuthMode::Certificate(_) | AuthMode::HybridKemCertificate(_) => None,
         };
         if let Some(password) = password_to_validate {
             if password.is_empty() {
@@ -534,11 +576,21 @@ impl ArchiveWriterBuilder {
 
         // 1. Password Mode (adds password recipient(s))
         if !skip_auth_setup {
-            if let AuthMode::Password(ref pwd)
-            | AuthMode::Hybrid {
-                password: ref pwd, ..
-            } = self.auth_mode
-            {
+            let has_password = matches!(
+                self.auth_mode,
+                AuthMode::Password(_)
+                    | AuthMode::Hybrid { .. }
+                    | AuthMode::HybridKemWithPassword { .. }
+            );
+
+            if has_password {
+                let pwd = match &self.auth_mode {
+                    AuthMode::Password(p) => p,
+                    AuthMode::Hybrid { password, .. } => password,
+                    AuthMode::HybridKemWithPassword { password, .. } => password,
+                    _ => unreachable!(),
+                };
+
                 let kdf_params = KdfParams {
                     memory_cost: config.encryption.kdf_memory_cost,
                     time_cost: config.encryption.kdf_time_cost,
@@ -566,6 +618,14 @@ impl ArchiveWriterBuilder {
                         if t < 2 {
                             return Err(era_common::EraError::InvalidConfig(
                                 "Threshold must be >= 2".into(),
+                            ));
+                        }
+
+                        // Reject mixed threshold families in this iteration
+                        if !self.additional_hybrid_certificates.is_empty() {
+                            return Err(era_common::EraError::InvalidConfig(
+                                "Mixed threshold (password + hybrid certificate) is not supported"
+                                    .into(),
                             ));
                         }
 
@@ -641,24 +701,17 @@ impl ArchiveWriterBuilder {
                             combined,
                         ));
                     }
-                    _ => {
-                        return Err(era_common::EraError::InvalidConfig(
-                            "Unsupported access policy".into(),
-                        ));
-                    }
+                    _ => unreachable!(),
                 }
             }
 
-            // 2. Certificate Mode (adds a certificate recipient)
+            // 2. Legacy Certificate Mode (adds a certificate recipient)
             if let AuthMode::Certificate(ref cert)
             | AuthMode::Hybrid {
                 certificate: ref cert,
                 ..
             } = self.auth_mode
             {
-                // Create ephemeral copy of MK for encapsulation (which might zeroize it, but we need it for session)
-                // Encapsulate takes generic key slice, checking signature?
-                // EraKeyPair::encapsulate_for(cert, &master_key)
                 let encapsulation = EraKeyPair::encapsulate_for(cert, &*master_key)?;
                 key_encapsulation = Some(encapsulation.clone());
 
@@ -672,6 +725,68 @@ impl ArchiveWriterBuilder {
                     encapsulation.ephemeral_public.to_vec(),
                     encapsulation.encrypted_master_key,
                 ));
+            }
+
+            // 3. Hybrid KEM Certificate Mode (adds a post-quantum certificate recipient)
+            let maybe_hybrid_cert = match &self.auth_mode {
+                AuthMode::HybridKemCertificate(c) => Some(c),
+                AuthMode::HybridKemWithPassword { certificate: c, .. } => Some(c),
+                _ => None,
+            };
+
+            if let Some(cert) = maybe_hybrid_cert {
+                match self.access_policy {
+                    era_volume::AccessPolicy::Threshold(t) => {
+                        let mut all_certs = vec![cert.clone()];
+                        all_certs.extend(self.additional_hybrid_certificates.iter().cloned());
+                        let n = all_certs.len();
+
+                        if (n as u32) < t {
+                            return Err(era_common::EraError::InvalidConfig(format!(
+                                "Threshold({}) requires at least {} hybrid certificates, got {}",
+                                t, t, n
+                            )));
+                        }
+                        if t < 2 {
+                            return Err(era_common::EraError::InvalidConfig(
+                                "Threshold must be >= 2".into(),
+                            ));
+                        }
+
+                        // Reject mixed threshold families in this iteration
+                        if !self.additional_passwords.is_empty() {
+                            return Err(era_common::EraError::InvalidConfig(
+                                "Mixed threshold (password + hybrid certificate) is not supported"
+                                    .into(),
+                            ));
+                        }
+
+                        // Split MK into N shares with threshold T
+                        let shares = era_crypto::split_master_key(&master_key, t as u8, n as u8)?;
+
+                        for (cert, share) in all_certs.iter().zip(shares.iter()) {
+                            let (params, encrypted_share) =
+                                HybridKeyPair::encapsulate_for(cert, share)?;
+                            recipients.push(RecipientSlot::new(
+                                RecipientType::HybridKem,
+                                None,
+                                params,
+                                encrypted_share,
+                            ));
+                        }
+                    }
+                    era_volume::AccessPolicy::AnyOfN => {
+                        let (params, encrypted_mk) =
+                            HybridKeyPair::encapsulate_for(cert, &*master_key)?;
+                        recipients.push(RecipientSlot::new(
+                            RecipientType::HybridKem,
+                            None,
+                            params,
+                            encrypted_mk,
+                        ));
+                    }
+                    _ => unreachable!(),
+                }
             }
         }
 

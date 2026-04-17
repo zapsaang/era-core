@@ -1230,3 +1230,82 @@ fn crypto_reject_degenerate_ciphertext() {
         "32-byte ciphertext (no auth tag) must be rejected"
     );
 }
+
+/// Hybrid KEM threshold requires exactly T keypairs to unlock.
+#[tokio::test]
+async fn behavioral_hybrid_kem_threshold_requires_two_keys() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("hybrid_threshold.era");
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir(&output_dir).unwrap();
+
+    let test_file = temp_dir.path().join("secret.txt");
+    fs::write(&test_file, b"threshold hybrid data").unwrap();
+
+    let kp1 = era_engine::HybridKeyPair::generate();
+    let kp2 = era_engine::HybridKeyPair::generate();
+    let kp3 = era_engine::HybridKeyPair::generate();
+
+    // Create 2-of-3 hybrid threshold archive
+    {
+        let mut writer = era_engine::ArchiveWriterBuilder::new(&archive_path)
+            .hybrid_certificate(kp1.certificate())
+            .add_hybrid_certificate(kp2.certificate())
+            .add_hybrid_certificate(kp3.certificate())
+            .access_policy(era_volume::AccessPolicy::Threshold(2))
+            .config(era_common::ArchiveConfig {
+                erasure: None,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        writer.add_file(&test_file).await.unwrap();
+        writer.finalize().await.unwrap();
+    }
+
+    // Extract with any 2 keypairs should succeed
+    {
+        let p1 = Box::new(era_engine::auth::HybridCertificateProvider::new(
+            kp1.clone(),
+        ));
+        let p2 = Box::new(era_engine::auth::HybridCertificateProvider::new(
+            kp2.clone(),
+        ));
+        let mut reader =
+            era_engine::ArchiveReader::open_with_providers(&archive_path, vec![p1, p2])
+                .await
+                .unwrap();
+        reader.load_catalog().await.unwrap();
+        let stats = reader
+            .extract_all(&era_engine::ExtractOptions::new(&output_dir))
+            .await
+            .unwrap();
+        assert_eq!(stats.extracted, 1);
+    }
+}
+
+/// Mixed threshold families (password + hybrid cert) are rejected.
+#[tokio::test]
+async fn behavioral_mixed_threshold_rejected() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("mixed_threshold.era");
+
+    let kp = era_engine::HybridKeyPair::generate();
+
+    let result = era_engine::ArchiveWriterBuilder::new(&archive_path)
+        .password("secret")
+        .add_hybrid_certificate(kp.certificate())
+        .access_policy(era_volume::AccessPolicy::Threshold(2))
+        .config(era_common::ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        })
+        .build()
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Mixed threshold (password + hybrid certificate) must be rejected"
+    );
+}
