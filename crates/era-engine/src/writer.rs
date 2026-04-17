@@ -1324,6 +1324,39 @@ impl ArchiveWriter {
             .map_err(era_common::EraError::Io)?;
         let file_size = metadata.len();
 
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let permissions = if metadata.permissions().readonly() {
+            0o444
+        } else {
+            0o644
+        };
+
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        #[cfg(unix)]
+        let xattrs = {
+            let mut map = std::collections::BTreeMap::new();
+            if let Ok(names) = xattr::list(disk_path) {
+                for name in names {
+                    if let Ok(Some(value)) = xattr::get(disk_path, &name) {
+                        map.insert(name.to_string_lossy().into_owned(), value);
+                    }
+                }
+            }
+            map
+        };
+        #[cfg(not(unix))]
+        let xattrs = std::collections::BTreeMap::new();
+
         let relative_path = stored_path.to_path_buf();
 
         // Small file path: buffer for packing (but not empty files)
@@ -1346,6 +1379,9 @@ impl ArchiveWriter {
                 path: relative_path,
                 data,
                 hash: chunk_hash,
+                permissions,
+                mtime,
+                xattrs: xattrs.clone(),
             }) {
                 self.flush_packed_files_batch(entries_to_flush).await?;
             }
@@ -1356,10 +1392,12 @@ impl ArchiveWriter {
         // Large file path: process immediately
         if self.enable_cdc {
             // Use CDC chunking for large files
-            self.add_file_chunked(disk_path, relative_path).await
+            self.add_file_chunked(disk_path, relative_path, permissions, mtime, xattrs)
+                .await
         } else {
             // Non-CDC mode: single chunk per file
-            self.add_file_single(disk_path, relative_path).await
+            self.add_file_single(disk_path, relative_path, permissions, mtime, xattrs)
+                .await
         }
     }
 
@@ -1435,7 +1473,14 @@ impl ArchiveWriter {
     }
 
     /// Add a file as a single chunk (legacy mode)
-    async fn add_file_single(&mut self, path: &Path, relative_path: PathBuf) -> Result<()> {
+    async fn add_file_single(
+        &mut self,
+        path: &Path,
+        relative_path: PathBuf,
+        permissions: u32,
+        mtime: Option<u64>,
+        xattrs: std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
         // Read the file as a single chunk
         let chunk = self.file_reader.read_file(path).await?;
         let hash = chunk.hash;
@@ -1453,14 +1498,24 @@ impl ArchiveWriter {
         let chunk_len = u32::try_from(size)
             .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
         let chunk_ref = era_ingest::ChunkRef::new(hash, 0, chunk_len);
-        let entry = FileEntry::file(relative_path, size).with_chunks(vec![chunk_ref]);
+        let mut entry = FileEntry::file(relative_path, size).with_chunks(vec![chunk_ref]);
+        entry.permissions = permissions;
+        entry.mtime = mtime;
+        entry.xattrs = xattrs;
         self.catalog.add(entry);
 
         Ok(())
     }
 
     /// Add a file with CDC chunking
-    async fn add_file_chunked(&mut self, path: &Path, relative_path: PathBuf) -> Result<()> {
+    async fn add_file_chunked(
+        &mut self,
+        path: &Path,
+        relative_path: PathBuf,
+        permissions: u32,
+        mtime: Option<u64>,
+        xattrs: std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
         // Read and chunk the file via stream to avoid huge memory usage
         let mut stream = self.file_reader.read_file_chunked_stream(path).await?;
 
@@ -1493,27 +1548,10 @@ impl ArchiveWriter {
             chunk_refs.len()
         );
 
-        if chunk_refs.len() == 1 {
-            // Handle single chunk specially if needed, but with_chunks works too.
-            // Original code handled it for legacy format.
-            // If we have single chunk, we can use with_hash?
-            // But valid UniqueChunk is fine.
-            // Let's stick to with_chunks for unification or check count.
-            // let chunk_ref = &chunk_refs[0];
-            // If legacy format requires FileEntry::file(...).with_hash(hash).
-            // But with_chunks is preferred for ERA 8.1.
-            // I'll stick to logic closer to original if possible but using chunk_refs is generally fine.
-            // Original:
-            /*
-               if chunk_count == 1 {
-                   let entry = FileEntry::file(relative_path, total_size).with_hash(hash);
-                   self.catalog.add(entry);
-               }
-            */
-            // I'll keep generic logic.
-        }
-
-        let entry = FileEntry::file(relative_path, total_size).with_chunks(chunk_refs);
+        let mut entry = FileEntry::file(relative_path, total_size).with_chunks(chunk_refs);
+        entry.permissions = permissions;
+        entry.mtime = mtime;
+        entry.xattrs = xattrs;
         self.catalog.add(entry);
 
         Ok(())
@@ -1694,8 +1732,11 @@ impl ArchiveWriter {
                 packed_file_count,
             );
 
-            let catalog_entry = FileEntry::file(entry.path.clone(), entry.data.len() as u64)
+            let mut catalog_entry = FileEntry::file(entry.path.clone(), entry.data.len() as u64)
                 .with_chunks(vec![chunk_ref]);
+            catalog_entry.permissions = entry.permissions;
+            catalog_entry.mtime = entry.mtime;
+            catalog_entry.xattrs = entry.xattrs.clone();
 
             self.catalog.add(catalog_entry);
         }

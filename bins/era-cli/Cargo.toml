@@ -34,3 +34,5 @@ tempfile = { workspace = true }
 era-crypto = { workspace = true }
 era-storage = { workspace = true }
 era-volume = { workspace = true }
+filetime = "0.2"
+xattr = "1"

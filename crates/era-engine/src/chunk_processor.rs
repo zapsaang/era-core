@@ -104,6 +104,7 @@ impl ExtractionContext {
                     debug!("Extracted (packed): {}", output_path.display());
                     stats.extracted += 1;
                     stats.bytes_written += file_data.len() as u64;
+                    stats.extracted_paths.push(output_path);
                 }
             }
 
@@ -119,6 +120,7 @@ impl ExtractionContext {
                     debug!("Extracted: {}", output_path.display());
                     stats.extracted += 1;
                     stats.bytes_written += data.len() as u64;
+                    stats.extracted_paths.push(output_path);
                 }
             }
 
@@ -159,6 +161,7 @@ impl ExtractionContext {
                             debug!("Extracted (chunked): {}", state.output_path.display());
                             stats.extracted += 1;
                             stats.bytes_written += state.expected_size;
+                            stats.extracted_paths.push(state.output_path.clone());
 
                             // Remove completed file from tracking
                             self.multi_chunk_files.remove(&file_idx);
@@ -258,6 +261,8 @@ pub struct ExtractStats {
     pub skipped: u64,
     /// Total bytes written
     pub bytes_written: u64,
+    /// Paths of files that were actually written (for metadata restoration)
+    pub extracted_paths: Vec<PathBuf>,
 }
 
 /// Context for verification

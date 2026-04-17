@@ -47,6 +47,9 @@ zeroize = { workspace = true }
 uuid = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+xattr = "1"
+
 [dev-dependencies]
 criterion = { workspace = true }
 rand = "0.8"

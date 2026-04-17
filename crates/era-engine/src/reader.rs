@@ -1539,7 +1539,95 @@ impl ArchiveReader {
             stats.extracted, stats.bytes_written
         );
 
+        Self::apply_extracted_metadata(catalog, &options.output_dir, &stats.extracted_paths).await;
+
         Ok(stats)
+    }
+
+    async fn apply_extracted_metadata(
+        catalog: &Catalog,
+        output_dir: &Path,
+        extracted_paths: &[PathBuf],
+    ) {
+        let entries: Vec<FileEntry> = catalog
+            .entries
+            .iter()
+            .filter(|e| e.file_type == era_ingest::FileType::File)
+            .cloned()
+            .collect();
+        let output_dir = output_dir.to_path_buf();
+        let extracted_set: std::collections::HashSet<PathBuf> =
+            extracted_paths.iter().cloned().collect();
+
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            for entry in &entries {
+                let expected_path = output_dir.join(&entry.path);
+                if !extracted_set.contains(&expected_path) {
+                    continue;
+                }
+                let output_path = expected_path;
+
+                // Restore mtime and xattrs BEFORE permissions, because a read-only
+                // mode (e.g. 0444) would prevent subsequent write operations.
+                if let Some(mtime_secs) = entry.mtime {
+                    let target_time = std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(mtime_secs);
+                    match std::fs::File::options().write(true).open(&output_path) {
+                        Ok(file) => {
+                            let times = std::fs::FileTimes::new().set_modified(target_time);
+                            if let Err(e) = file.set_times(times) {
+                                warn!(
+                                    "Failed to restore mtime for {}: {}",
+                                    output_path.display(),
+                                    e
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to open file for mtime restoration {}: {}",
+                                output_path.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+
+                #[cfg(unix)]
+                {
+                    for (key, value) in &entry.xattrs {
+                        if let Err(e) = xattr::set(&output_path, key, value) {
+                            warn!(
+                                "Failed to restore xattr {} for {}: {}",
+                                key,
+                                output_path.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = entry.permissions & 0o777;
+                    if mode != 0 {
+                        let perms = std::fs::Permissions::from_mode(mode);
+                        if let Err(e) = std::fs::set_permissions(&output_path, perms) {
+                            warn!(
+                                "Failed to restore permissions for {}: {}",
+                                output_path.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        {
+            warn!("Metadata restoration task failed: {}", e);
+        }
     }
 
     async fn cleanup_partial_files(paths: &[PathBuf]) -> Result<()> {

@@ -5,6 +5,7 @@
 //! directories with many small files.
 
 use era_common::ChunkHash;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Entry for a small file waiting to be packed
@@ -16,6 +17,12 @@ pub struct SmallFileEntry {
     pub data: Vec<u8>,
     /// Content hash for deduplication
     pub hash: ChunkHash,
+    /// POSIX permissions
+    pub permissions: u32,
+    /// Modification time (Unix seconds)
+    pub mtime: Option<u64>,
+    /// Extended attributes
+    pub xattrs: BTreeMap<String, Vec<u8>>,
 }
 
 /// Buffers small files for efficient packing.
@@ -129,6 +136,9 @@ mod tests {
             path: PathBuf::from(path),
             data: vec![0u8; size],
             hash: ChunkHash([0u8; 32]),
+            permissions: 0o644,
+            mtime: None,
+            xattrs: BTreeMap::new(),
         }
     }
 
