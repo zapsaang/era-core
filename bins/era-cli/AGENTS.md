@@ -13,10 +13,11 @@ CLI binary (`era` command) for encrypted archival storage. L5 — top of stack, 
 | `verify` | Verify archive integrity |
 | `repair` | Repair damaged archive using Reed-Solomon recovery |
 | `repack` | Repack archive with new parameters |
+| `keygen` | Generate X25519 or hybrid X25519+Kyber-768 keypair |
 
 ## ARCHITECTURE
 
-- **clap** for argument parsing (7 subcommands)
+- **clap** for argument parsing (8 subcommands)
 - **tokio** async runtime for all I/O
 - All archive operations delegate to `era_engine` — no direct crate access
 
@@ -38,7 +39,7 @@ cargo test -p era-cli
 ```
 era-cli/src/
 ├── main.rs      # Clap CLI entry, tokio runtime
-├── commands.rs  # 7 command implementations
+├── commands.rs  # 8 command implementations
 └── progress.rs  # Progress display
 ```
 

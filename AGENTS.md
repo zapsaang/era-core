@@ -1,7 +1,7 @@
 # ERA-CORE KNOWLEDGE BASE
 
-**Generated:** 2026-04-16
-**Commit:** 3d2d233
+**Generated:** 2026-04-17
+**Commit:** 8e59232
 **Branch:** feat_fly
 
 Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing.
@@ -10,7 +10,7 @@ Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encrypt
 
 ```
 era-core/
-├── bins/era-cli/          CLI (era create/extract/list/info/verify/repair/repack)
+├── bins/era-cli/          CLI (era create/extract/list/info/verify/repair/repack/keygen)
 ├── crates/
 │   ├── era-engine/        L4: Archive orchestration, async pipeline
 │   ├── era-packing/       L3: k-Bounded Best-Fit MacroBlock packing
@@ -56,12 +56,14 @@ L0: era-crypto, era-common
 | Crypto primitives | `era-crypto/src/{aead,kdf,key_session}.rs` |
 | Pipeline write path | `era-engine/src/writer.rs` (2554 lines) |
 | Pipeline read path | `era-engine/src/reader.rs` (2313 lines) |
+| Erasure scan / prefix reconciliation | `era-engine/src/erasure_scan.rs` |
 | Dedup index | `era-index/src/{builder,reader,store}.rs` |
 | Chunking | `era-ingest/src/chunker*.rs` |
 | Packing | `era-packing/src/builder.rs` |
 | Compression | `era-codec/src/compression.rs` |
 | Erasure coding | `era-codec/src/erasure.rs` |
 | Auth (password/cert/threshold) | `era-engine/src/auth.rs` |
+| Hybrid KEM / certificates | `era-crypto/src/{hybrid_certificate,hybrid_kem,pem_support}.rs` |
 
 ## LARGE FILES (>1000 lines)
 

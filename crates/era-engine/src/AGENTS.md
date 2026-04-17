@@ -16,6 +16,7 @@ Orchestration layer for archive create/extract/verify/repair/repack. This file o
 | `write_pipeline.rs` | 681 | Pipeline orchestration: encryption→erasure buffering→volume→index stages. |
 | `chunk_processor.rs` | 590 | Shared extraction/verification logic: MultiChunkState, path containment enforcement. |
 | `repack.rs` | 103 | Extract-to-tempdir then re-create with new config. Password and keypair auth modes. |
+| `erasure_scan.rs` | 251 | Shared erasure stripe prefix parsing and multi-copy reconciliation. |
 
 ## PIPELINE
 

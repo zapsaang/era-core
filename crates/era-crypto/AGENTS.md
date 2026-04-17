@@ -3,7 +3,7 @@
 Cryptographic primitives, key lifecycle, secure memory, and certificate/KEM helpers. L0.
 
 ## SURFACES
-- `src/AGENTS.md` — AEAD, KDF, `KeySession`, PEM, secure memory, and timestamp internals
+- `src/AGENTS.md` — AEAD, KDF, `KeySession`, hybrid KEM, PEM support, secure memory, and timestamp internals
 - `tests/AGENTS.md` — adversarial envelope, context-binding, and key-generation coverage
 - `benches/crypto_bench.rs` — throughput for AEAD/KDF/KEM hot paths
 - `examples/key_exchange_bench.rs` — standalone key exchange exercise

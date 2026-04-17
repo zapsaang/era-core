@@ -79,6 +79,11 @@ era repair archive.era --password "your-secret"
 
 # Repack an archive with new parameters
 era repack --input archive.era --output repacked.era --password "your-secret" --compact
+
+# Generate a keypair for certificate-based encryption
+era keygen
+era keygen -t x25519 -f ./my_key
+era keygen -t hybrid -f ./my_key
 ```
 
 ### Advanced Usage
@@ -470,7 +475,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 | Security Audit Tests | 279+ across multiple suites |
 | Fuzz Targets | 5 (combined 65M+ runs, 0 crashes) |
 | Crates | 8 library + 1 binary |
-| CLI Commands | 7 (create, extract, list, info, verify, repair, repack) |
+| CLI Commands | 8 (create, extract, list, info, verify, repair, repack, keygen) |
 | Edition | 2021, resolver v2 |
 | Build Profile | LTO + codegen-units=1 + opt-level=3 (release) |
 

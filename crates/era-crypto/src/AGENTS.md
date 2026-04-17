@@ -6,14 +6,16 @@ Security primitives — all cryptographic operations and secure memory for the 3
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `lib.rs` | — | Crate facade. Re-exports AEAD, KDF, certificate, secure-memory, timestamp, and key-session entrypoints. |
+| `lib.rs` | — | Crate facade. Re-exports AEAD, KDF, certificate, hybrid KEM, PEM support, secure-memory, timestamp, and key-session entrypoints. |
 | `key_session.rs` | 662 | 3-layer envelope (MK→IK→VK→BK). HKDF derivation, VK wrap/unwrap, per-block key derivation, Shamir split/reconstruct. |
-| `certificate.rs` | 816 | Hybrid KEM (X25519 + Kyber-768). PEM I/O, key encapsulation/decapsulation, timestamp validation. |
+| `certificate.rs` | 816 | X25519 certificate key exchange. PEM I/O, key encapsulation/decapsulation, timestamp validation. |
+| `hybrid_certificate.rs` | — | Post-quantum hybrid certificate (X25519 + Kyber-768) with PEM I/O. |
+| `hybrid_kem.rs` | — | Hybrid KEM encapsulation/decapsulation combining X25519 and Kyber-768. |
+| `pem_support.rs` | — | PEM loading/export for X25519 and hybrid keypairs. |
 | `secure_memory.rs` | — | `SecureBuffer<N>`: mlock + Zeroize on Drop. Core dump prevention (prctl/ptrace). |
 | `aead.rs` | — | XChaCha20-Poly1305 encrypt/decrypt. Fresh 24-byte nonce per operation via OsRng. |
 | `aead_context.rs` | — | Context-bound AEAD cipher. Binds archive_id ‖ epoch_id ‖ volume_index ‖ block_index as AAD. |
 | `kdf.rs` | — | Argon2id password → MK derivation. Configurable memory/time cost. |
-| `secure_memory.rs` | — | `SecureBuffer<N>`: mlock + Zeroize on Drop. Core dump prevention (prctl/ptrace). |
 
 ## KEY LIFECYCLE
 
