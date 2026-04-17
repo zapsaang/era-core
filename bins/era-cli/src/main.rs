@@ -412,6 +412,25 @@ enum Commands {
         #[arg(long, help_heading = "Geek Parameters")]
         block_target_size: Option<usize>,
     },
+
+    /// Generate an X25519 or hybrid X25519+Kyber-768 keypair
+    #[command(long_about = "Generate an X25519 or hybrid X25519+Kyber-768 keypair.")]
+    #[command(
+        after_help = "\x1b[1mExamples:\x1b[0m\n  era keygen\n  era keygen -t x25519\n  era keygen -f ./my_key"
+    )]
+    Keygen {
+        /// Key type: x25519 or hybrid (post-quantum)
+        #[arg(short = 't', long, default_value = "hybrid")]
+        key_type: String,
+
+        /// Output file path for the private key (public key will be <file>.pub)
+        #[arg(short = 'f', long)]
+        output: Option<PathBuf>,
+
+        /// Overwrite existing files without prompting
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -571,5 +590,11 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
+
+        Commands::Keygen {
+            key_type,
+            output,
+            force,
+        } => commands::keygen(key_type.as_str(), output.as_deref(), force).await,
     }
 }

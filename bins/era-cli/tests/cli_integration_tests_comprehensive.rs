@@ -5951,3 +5951,267 @@ mod stress_edge_case_tests {
             .stderr(predicates::str::contains("Duplicate hybrid certificate"));
     }
 }
+
+// ===========================================================================
+// 10: KEYGEN TESTS
+// ===========================================================================
+
+mod keygen_tests {
+    use super::*;
+
+    #[test]
+    fn test_keygen_hybrid_default_interactive() {
+        let temp = TempDir::new().unwrap();
+        let priv_path = temp.path().join("era_hybrid_key");
+        let pub_path = temp.path().join("era_hybrid_key.pub");
+
+        era_cmd()
+            .current_dir(temp.path())
+            .arg("keygen")
+            .write_stdin("\n")
+            .assert()
+            .success();
+
+        assert!(priv_path.exists(), "private key should exist");
+        assert!(pub_path.exists(), "public key should exist");
+
+        let priv_content = fs::read_to_string(&priv_path).unwrap();
+        assert!(priv_content.contains("ERA HYBRID PRIVATE KEY"));
+        assert!(priv_content.contains("ERA HYBRID PUBLIC KEY"));
+
+        let pub_content = fs::read_to_string(&pub_path).unwrap();
+        assert!(pub_content.contains("ERA HYBRID PUBLIC KEY"));
+    }
+
+    #[test]
+    fn test_keygen_x25519_explicit() {
+        let temp = TempDir::new().unwrap();
+        let priv_path = temp.path().join("x25519_key");
+        let pub_path = temp.path().join("x25519_key.pub");
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-t", "x25519", "-f", priv_path.to_str().unwrap()])
+            .assert()
+            .success();
+
+        assert!(priv_path.exists());
+        assert!(pub_path.exists());
+
+        let priv_content = fs::read_to_string(&priv_path).unwrap();
+        assert!(priv_content.contains("BEGIN PRIVATE KEY"));
+        assert!(priv_content.contains("END PRIVATE KEY"));
+
+        let pub_content = fs::read_to_string(&pub_path).unwrap();
+        assert!(pub_content.contains("BEGIN PUBLIC KEY"));
+        assert!(pub_content.contains("END PUBLIC KEY"));
+    }
+
+    #[test]
+    fn test_keygen_custom_output() {
+        let temp = TempDir::new().unwrap();
+        let priv_path = temp.path().join("custom_key");
+        let pub_path = temp.path().join("custom_key.pub");
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .assert()
+            .success();
+
+        assert!(priv_path.exists());
+        assert!(pub_path.exists());
+    }
+
+    #[test]
+    fn test_keygen_refuse_overwrite_interactive() {
+        let temp = TempDir::new().unwrap();
+        let priv_path = temp.path().join("existing_key");
+        let pub_path = temp.path().join("existing_key.pub");
+
+        fs::write(&priv_path, b"existing private").unwrap();
+        fs::write(&pub_path, b"existing public").unwrap();
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .write_stdin("n\n")
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("Key generation aborted"));
+
+        assert_eq!(fs::read_to_string(&priv_path).unwrap(), "existing private");
+        assert_eq!(fs::read_to_string(&pub_path).unwrap(), "existing public");
+    }
+
+    #[test]
+    fn test_keygen_force_overwrite() {
+        let temp = TempDir::new().unwrap();
+        let priv_path = temp.path().join("existing_key");
+        let pub_path = temp.path().join("existing_key.pub");
+
+        fs::write(&priv_path, b"existing private").unwrap();
+        fs::write(&pub_path, b"existing public").unwrap();
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-f", priv_path.to_str().unwrap(), "--force"])
+            .assert()
+            .success();
+
+        let priv_content = fs::read_to_string(&priv_path).unwrap();
+        assert!(priv_content.contains("ERA HYBRID PRIVATE KEY"));
+    }
+
+    #[test]
+    fn test_keygen_generated_hybrid_key_is_usable() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "keygen_hybrid.txt", b"hybrid roundtrip");
+        let archive = temp.path().join("keygen_hybrid.era");
+        let out_dir = temp.path().join("out");
+        let priv_path = temp.path().join("hybrid_key");
+        let pub_path = temp.path().join("hybrid_key.pub");
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("keygen_hybrid.txt")).unwrap(),
+            b"hybrid roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_keygen_generated_x25519_key_is_usable() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "keygen_x25519.txt", b"x25519 roundtrip");
+        let archive = temp.path().join("keygen_x25519.era");
+        let out_dir = temp.path().join("out");
+        let priv_path = temp.path().join("x25519_key");
+        let pub_path = temp.path().join("x25519_key.pub");
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-t", "x25519", "-f", priv_path.to_str().unwrap()])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--certificate",
+                pub_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("keygen_x25519.txt")).unwrap(),
+            b"x25519 roundtrip"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_keygen_private_key_permissions_are_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().unwrap();
+        let priv_path = temp.path().join("restricted_key");
+        let pub_path = temp.path().join("restricted_key.pub");
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .assert()
+            .success();
+
+        let priv_meta = fs::metadata(&priv_path).unwrap();
+        let priv_mode = priv_meta.permissions().mode() & 0o777;
+        assert_eq!(
+            priv_mode, 0o600,
+            "private key should be readable only by owner, got {:o}",
+            priv_mode
+        );
+
+        let pub_meta = fs::metadata(&pub_path).unwrap();
+        let pub_mode = pub_meta.permissions().mode() & 0o777;
+        assert!(
+            pub_mode & 0o444 != 0,
+            "public key should be readable by others, got {:o}",
+            pub_mode
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_keygen_overwrite_resets_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().unwrap();
+        let priv_path = temp.path().join("loose_key");
+        let pub_path = temp.path().join("loose_key.pub");
+
+        fs::write(&priv_path, b"old private").unwrap();
+        fs::write(&pub_path, b"old public").unwrap();
+        let mut loose = fs::metadata(&priv_path).unwrap().permissions();
+        loose.set_mode(0o644);
+        fs::set_permissions(&priv_path, loose).unwrap();
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-f", priv_path.to_str().unwrap(), "--force"])
+            .assert()
+            .success();
+
+        let priv_meta = fs::metadata(&priv_path).unwrap();
+        let priv_mode = priv_meta.permissions().mode() & 0o777;
+        assert_eq!(
+            priv_mode, 0o600,
+            "overwritten private key should be reset to owner-only, got {:o}",
+            priv_mode
+        );
+    }
+}

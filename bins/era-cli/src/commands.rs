@@ -1,8 +1,8 @@
 //! CLI command implementations
 
 use crate::progress;
-use anyhow::{Context, Result};
-use dialoguer::{theme::ColorfulTheme, Password};
+use anyhow::{bail, Context, Result};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 use era_common::{
     ArchiveConfig, CompressionAlgorithm, ErasureCodeConfig, MatrixDistributionConfig,
     MatrixDistributionStrategy,
@@ -77,6 +77,53 @@ fn get_passwords_with_confirmation(
             .interact()
             .context("Failed to read password")?;
         Ok(vec![p])
+    }
+}
+
+/// Prompt for a text input, falling back to plain stdin when not a TTY.
+/// This allows scripted/testing environments to pipe answers.
+fn prompt_for_input(prompt: &str, default: &str) -> Result<String> {
+    use std::io::{stdin, BufRead, IsTerminal};
+    if stdin().is_terminal() {
+        let value: String = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt)
+            .default(default.to_string())
+            .interact()
+            .context("Failed to read input")?;
+        Ok(value)
+    } else {
+        let mut line = String::new();
+        stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("Failed to read input from stdin")?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            Ok(default.to_string())
+        } else {
+            Ok(trimmed.to_string())
+        }
+    }
+}
+
+/// Prompt for a yes/no confirmation, falling back to plain stdin when not a TTY.
+fn prompt_for_confirm(prompt: &str) -> Result<bool> {
+    use std::io::{stdin, BufRead, IsTerminal};
+    if stdin().is_terminal() {
+        let value = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt)
+            .default(false)
+            .interact()
+            .context("Failed to read confirmation")?;
+        Ok(value)
+    } else {
+        let mut line = String::new();
+        stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("Failed to read confirmation from stdin")?;
+        let trimmed = line.trim().to_lowercase();
+        Ok(matches!(trimmed.as_str(), "y" | "yes"))
     }
 }
 
@@ -1516,6 +1563,92 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
         HumanBytes(stats.repacked_total_size)
     );
     info!("  Blocks written: {}", stats.blocks_written);
+
+    Ok(())
+}
+
+/// Generate a certificate keypair and write it to PEM files.
+pub async fn keygen(key_type: &str, output: Option<&Path>, force: bool) -> Result<()> {
+    if key_type != "x25519" && key_type != "hybrid" {
+        bail!("Invalid key type: {}. Supported: x25519, hybrid", key_type);
+    }
+
+    let default_name = if key_type == "hybrid" {
+        "era_hybrid_key"
+    } else {
+        "era_x25519_key"
+    };
+
+    let priv_path = match output {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let default_path = format!("./{}", default_name);
+            let path_str = prompt_for_input("Enter file in which to save the key", &default_path)?;
+            PathBuf::from(path_str)
+        }
+    };
+
+    let pub_path = PathBuf::from(format!("{}.pub", priv_path.display()));
+
+    if (priv_path.exists() || pub_path.exists()) && !force {
+        let overwrite = prompt_for_confirm("File already exists. Overwrite?")?;
+        if !overwrite {
+            bail!("Key generation aborted");
+        }
+    }
+
+    let (priv_pem, pub_pem) = if key_type == "hybrid" {
+        let keypair = era_crypto::HybridKeyPair::generate();
+        let pub_pem = era_crypto::export_hybrid_public_key_as_pem(&keypair.certificate())?;
+        let priv_pem = era_crypto::pem_support::export_hybrid_private_key_as_pem(&keypair)?;
+        (priv_pem, pub_pem)
+    } else {
+        let keypair = era_crypto::EraKeyPair::generate()?;
+        let pub_pem = era_crypto::export_public_key_as_pem(&keypair.certificate())?;
+        let priv_pem = era_crypto::pem_support::export_private_key_as_pem(&keypair)?;
+        (priv_pem, pub_pem)
+    };
+
+    // Write private key with owner-only permissions (critical for unencrypted PEM)
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&priv_path)
+            .with_context(|| format!("Failed to open private key {}", priv_path.display()))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", priv_path.display()))?;
+        file.write_all(priv_pem.as_bytes())
+            .with_context(|| format!("Failed to write private key to {}", priv_path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&priv_path, priv_pem)
+            .with_context(|| format!("Failed to write private key to {}", priv_path.display()))?;
+    }
+
+    std::fs::write(&pub_path, pub_pem)
+        .with_context(|| format!("Failed to write public key to {}", pub_path.display()))?;
+
+    println!(
+        "Generated {} keypair:",
+        if key_type == "hybrid" {
+            "hybrid (X25519+Kyber-768)"
+        } else {
+            "X25519"
+        }
+    );
+    println!("  Private key: {}", priv_path.display());
+    println!("  Public key:  {}", pub_path.display());
+    println!(
+        "\nKeep your private key secure. It is the only way to decrypt archives created with this key."
+    );
 
     Ok(())
 }
