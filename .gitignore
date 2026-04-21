@@ -37,3 +37,6 @@ fuzz/
 .sisyphus/
 .tmp*
 tmp*
+logs/
+*.log
+settings.json
