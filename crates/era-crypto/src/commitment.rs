@@ -14,12 +14,12 @@
 use blake3::Hasher;
 
 /// Domain separation key for catalog commitment.
-/// 32 bytes, padded with underscores for alignment.
-pub const CATALOG_COMMITMENT_DOMAIN: &[u8; 32] = b"ERA-CAT-COMMIT-v1_______________";
+/// 32 bytes, required by blake3::Hasher::new_keyed.
+pub(crate) const CATALOG_COMMITMENT_DOMAIN: &[u8; 32] = b"ERA-CAT-COMMIT-v1_______________";
 
 /// Domain separation key for index commitment.
-/// 32 bytes, padded with underscores for alignment.
-pub const INDEX_COMMITMENT_DOMAIN: &[u8; 32] = b"ERA-IDX-COMMIT-v1_______________";
+/// 32 bytes, required by blake3::Hasher::new_keyed.
+pub(crate) const INDEX_COMMITMENT_DOMAIN: &[u8; 32] = b"ERA-IDX-COMMIT-v1_______________";
 
 /// Compute the cryptographic commitment of catalog plaintext.
 ///
@@ -64,7 +64,8 @@ pub fn verify_catalog_commitment(
     expected: &[u8; 32],
 ) -> crate::Result<()> {
     let computed = compute_catalog_commitment(catalog_plaintext);
-    if computed != *expected {
+    use subtle::ConstantTimeEq;
+    if computed.ct_eq(expected).unwrap_u8() == 0 {
         return Err(crate::EraError::CatalogCommitmentMismatch);
     }
     Ok(())
@@ -77,7 +78,8 @@ pub fn verify_catalog_commitment(
 /// Pass `expected = [0u8; 32]` to verify that no index exists.
 pub fn verify_index_commitment(index_plaintext: &[u8], expected: &[u8; 32]) -> crate::Result<()> {
     let computed = compute_index_commitment(index_plaintext);
-    if computed != *expected {
+    use subtle::ConstantTimeEq;
+    if computed.ct_eq(expected).unwrap_u8() == 0 {
         return Err(crate::EraError::IndexCommitmentMismatch);
     }
     Ok(())
@@ -140,6 +142,13 @@ mod tests {
         let data = b"index";
         let wrong = [0xFFu8; 32];
         assert!(verify_index_commitment(data, &wrong).is_err());
+    }
+
+    #[test]
+    fn verify_index_commitment_empty_ok() {
+        let commitment = compute_index_commitment(b"");
+        assert_eq!(commitment, [0u8; 32]);
+        assert!(verify_index_commitment(b"", &commitment).is_ok());
     }
 
     #[test]

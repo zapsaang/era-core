@@ -32,7 +32,7 @@ pub use era_common::{EraError, Result};
 
 pub use commitment::{
     compute_catalog_commitment, compute_index_commitment, verify_catalog_commitment,
-    verify_index_commitment, CATALOG_COMMITMENT_DOMAIN, INDEX_COMMITMENT_DOMAIN,
+    verify_index_commitment,
 };
 
 pub use aead::TAG_SIZE;

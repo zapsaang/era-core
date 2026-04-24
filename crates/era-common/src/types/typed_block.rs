@@ -16,7 +16,8 @@ pub enum TypedBlockKind {
     Manifest,
     /// File catalog — file entries and block locations
     Catalog,
-    /// Deduplication index — Bloom + L1/L2 pages
+    /// Deduplication index — Bloom + L1/L2 pages.
+    /// Maps to [`BlockType::IndexManifest`] (not [`BlockType::IndexPage`]).
     Index,
 }
 

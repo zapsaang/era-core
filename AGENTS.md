@@ -1,7 +1,7 @@
 # ERA-CORE KNOWLEDGE BASE
 
 **Generated:** 2026-04-17
-**Commit:** 8e59232
+**Commit:** d157ae5
 **Branch:** feat_fly
 
 Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing.
@@ -17,7 +17,8 @@ era-core/
 │   ├── era-ingest/        L3: FastCDC chunking (16KB-64KB-256KB)
 │   ├── era-index/         L3: V2.1 embedded dedup (Bloom + L1/L2)
 │   ├── era-codec/         L2: Zstd/LZ4 compression, Reed-Solomon (4+2)
-│   ├── era-volume/        L2: Volume format v8.1, SuperHeader (4096B), Footer (128B)
+│   ├── era-volume/        L2: Volume format v8.2, SuperHeader (4096B), Footer (128B), ArchiveManifest
+│   │                       L2: Typed blocks (Manifest, Catalog, IndexManifest), BlockHeader (16B)
 │   ├── era-storage/       L1: StorageBackend trait (Local/Memory)
 │   ├── era-crypto/        L0: XChaCha20-Poly1305, Kyber-768, HKDF, Argon2id, SecureBuffer
 │   └── era-common/        L0: EraError, Result, protobuf, config types
@@ -64,6 +65,10 @@ L0: era-crypto, era-common
 | Erasure coding | `era-codec/src/erasure.rs` |
 | Auth (password/cert/threshold) | `era-engine/src/auth.rs` |
 | Hybrid KEM / certificates | `era-crypto/src/{hybrid_certificate,hybrid_kem,pem_support}.rs` |
+| Archive manifest (v8.2) | `era-common/src/types/manifest.rs` |
+| Typed blocks / BlockHeader | `era-common/src/types/{typed_block,block}.rs` |
+| Sequence / finalize tracking | `era-engine/src/sequence.rs` |
+| Cryptographic commitments | `era-crypto/src/commitment.rs` |
 
 ## LARGE FILES (>1000 lines)
 
@@ -122,7 +127,7 @@ cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 
 - Fuzz workspace (`fuzz/`) documented but NOT present in repo
 - Current archive unlock uses X25519 even though hybrid KEM (X25519+Kyber-768) exists in codebase
-- Volume format: v8.1, magic `ERA\x08\x01`
+- Volume format: v8.2, magic `ERA\x08\x02`
 - Release profile: LTO, codegen-units=1, opt-level=3
 
 # Project Review Rules

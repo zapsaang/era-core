@@ -174,7 +174,7 @@ impl FileEntry {
         path: &std::path::Path,
         relative_to: &std::path::Path,
     ) -> std::io::Result<Self> {
-        let metadata = std::fs::metadata(path)?;
+        let metadata = std::fs::symlink_metadata(path)?;
         let relative_path = path.strip_prefix(relative_to).unwrap_or(path).to_path_buf();
 
         let file_type = if metadata.is_file() {
@@ -341,6 +341,7 @@ pub struct Catalog {
     /// For non-erasure archives: length = block_count
     /// For erasure archives: length = logical block count (= stripe_count)
     ///     BlockLocation.shard_layout::Erasure already contains all shard metadata.
+    #[serde(default)]
     pub block_locations: Vec<era_common::BlockLocation>,
     /// Total size of all files
     pub total_size: u64,
@@ -364,9 +365,13 @@ impl Catalog {
 
     /// Add an entry to the catalog
     pub fn add(&mut self, entry: FileEntry) {
-        match entry.file_type {
+        // Push first so that if allocation panics, counters remain consistent.
+        let file_type = entry.file_type;
+        let size = entry.size;
+        self.entries.push(entry);
+        match file_type {
             FileType::File => {
-                self.total_size += entry.size;
+                self.total_size += size;
                 self.file_count += 1;
             }
             FileType::Directory => {
@@ -376,7 +381,6 @@ impl Catalog {
                 self.file_count += 1;
             }
         }
-        self.entries.push(entry);
     }
 
     /// Reserve capacity for at least `additional` more entries
@@ -385,6 +389,7 @@ impl Catalog {
     /// reducing the number of reallocations.
     pub fn reserve(&mut self, additional: usize) {
         self.entries.reserve(additional);
+        self.block_locations.reserve(additional);
     }
 
     /// Serialize the catalog to bytes
@@ -396,10 +401,11 @@ impl Catalog {
     /// Deserialize a catalog from bytes
     ///
     /// Uses safe deserialization with size limits to prevent DoS attacks.
+    /// Maximum catalog size: 1 GB.
     pub fn from_bytes(data: &[u8]) -> era_common::Result<Self> {
-        let proto = ProtoCatalog::decode(data).map_err(|e| {
-            era_common::EraError::Deserialization(format!("Failed to decode catalog: {}", e))
-        })?;
+        const MAX_CATALOG_SIZE: u64 = 1024 * 1024 * 1024;
+        let proto = era_common::deserialize_proto_with_limit::<ProtoCatalog>(data, MAX_CATALOG_SIZE)
+            .map_err(|e| era_common::EraError::Deserialization(format!("Failed to decode catalog: {}", e)))?;
         proto.try_into()
     }
 }
@@ -420,6 +426,24 @@ impl TryFrom<ProtoCatalog> for Catalog {
     type Error = era_common::EraError;
 
     fn try_from(p: ProtoCatalog) -> Result<Self, Self::Error> {
+        const MAX_ENTRIES: usize = 10_000_000;
+        const MAX_BLOCK_LOCATIONS: usize = 10_000_000;
+
+        if p.entries.len() > MAX_ENTRIES {
+            return Err(era_common::EraError::Deserialization(format!(
+                "Catalog contains {} entries, exceeding maximum {}",
+                p.entries.len(),
+                MAX_ENTRIES
+            )));
+        }
+        if p.block_locations.len() > MAX_BLOCK_LOCATIONS {
+            return Err(era_common::EraError::Deserialization(format!(
+                "Catalog contains {} block_locations, exceeding maximum {}",
+                p.block_locations.len(),
+                MAX_BLOCK_LOCATIONS
+            )));
+        }
+
         let block_locations = p
             .block_locations
             .into_iter()

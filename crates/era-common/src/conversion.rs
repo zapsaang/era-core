@@ -253,10 +253,16 @@ impl TryFrom<proto::BlockLocation> for BlockLocation {
 
         let shard_layout = match proto.erasure_info {
             None => crate::types::ShardLayout::Single,
-            Some(ei) => crate::types::ShardLayout::Erasure {
-                info: ei.try_into()?,
-                shard_offsets: proto.shard_offsets,
-                shard_volumes: proto
+            Some(ei) => {
+                const MAX_SHARDS: usize = 256;
+                if proto.shard_offsets.len() > MAX_SHARDS {
+                    return Err(crate::EraError::Deserialization(format!(
+                        "shard_offsets length ({}) exceeds maximum {}",
+                        proto.shard_offsets.len(),
+                        MAX_SHARDS
+                    )));
+                }
+                let shard_volumes: Vec<u16> = proto
                     .shard_volumes
                     .into_iter()
                     .map(|v| {
@@ -267,8 +273,27 @@ impl TryFrom<proto::BlockLocation> for BlockLocation {
                             ))
                         })
                     })
-                    .collect::<Result<Vec<_>, _>>()?,
-            },
+                    .collect::<Result<Vec<_>, _>>()?;
+                if shard_volumes.len() > MAX_SHARDS {
+                    return Err(crate::EraError::Deserialization(format!(
+                        "shard_volumes length ({}) exceeds maximum {}",
+                        shard_volumes.len(),
+                        MAX_SHARDS
+                    )));
+                }
+                if proto.shard_offsets.len() != shard_volumes.len() {
+                    return Err(crate::EraError::Deserialization(format!(
+                        "shard_offsets length ({}) must equal shard_volumes length ({})",
+                        proto.shard_offsets.len(),
+                        shard_volumes.len()
+                    )));
+                }
+                crate::types::ShardLayout::Erasure {
+                    info: ei.try_into()?,
+                    shard_offsets: proto.shard_offsets,
+                    shard_volumes,
+                }
+            }
         };
 
         Ok(Self {

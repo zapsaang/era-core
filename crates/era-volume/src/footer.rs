@@ -457,6 +457,17 @@ impl Footer {
             footer.index_size,
             footer.data_end_offset,
         )?;
+        // D10-01: Cross-field validation — manifest offset must be contained
+        // within the data region when present (manifest size is in its BlockHeader).
+        if footer.manifest_offset != 0
+            && footer.data_end_offset != 0
+            && footer.manifest_offset > footer.data_end_offset
+        {
+            return Err(EraError::CorruptedFooter(format!(
+                "manifest region offset {} exceeds data_end_offset {}",
+                footer.manifest_offset, footer.data_end_offset
+            )));
+        }
 
         Ok(footer)
     }

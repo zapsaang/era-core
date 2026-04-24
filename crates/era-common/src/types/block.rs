@@ -448,7 +448,8 @@ impl BlockType {
 
 #[cfg(test)]
 mod tests {
-    use super::BlockType;
+    use super::{BlockHeader, BlockType};
+    use crate::compute_shard_crc;
 
     #[test]
     fn manifest_block_type_round_trips_and_is_metadata() {
@@ -465,7 +466,45 @@ mod tests {
         assert!(BlockType::Catalog.is_metadata_block());
         assert!(BlockType::IndexPage.is_metadata_block());
         assert!(BlockType::IndexManifest.is_metadata_block());
+        assert!(BlockType::Manifest.is_metadata_block());
         assert!(!BlockType::Data.is_metadata_block());
+    }
+
+    #[test]
+    fn block_header_roundtrip() {
+        let header = BlockHeader::new(BlockType::Catalog, 1024, 0xDEADBEEF);
+        let bytes = header.to_bytes();
+        let parsed = BlockHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.version, BlockHeader::VERSION);
+        assert_eq!(parsed.block_type, BlockType::Catalog);
+        assert_eq!(parsed.length, 1024);
+        assert_eq!(parsed.crc, 0xDEADBEEF);
+    }
+
+    #[test]
+    fn block_header_rejects_unknown_version() {
+        let mut bytes = BlockHeader::new(BlockType::Data, 100, 0).to_bytes();
+        bytes[0] = 0xFF; // unknown version
+        assert!(BlockHeader::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn block_header_rejects_short_buffer() {
+        assert!(BlockHeader::from_bytes(&[0u8; 15]).is_none());
+    }
+
+    #[test]
+    fn block_header_verify_matches() {
+        let data = b"test payload";
+        let crc = compute_shard_crc(data);
+        let header = BlockHeader::new(BlockType::Data, data.len() as u32, crc);
+        assert!(header.verify(data));
+    }
+
+    #[test]
+    fn block_header_verify_mismatched_length() {
+        let header = BlockHeader::new(BlockType::Data, 10, 0);
+        assert!(!header.verify(b"short"));
     }
 }
 
@@ -524,6 +563,9 @@ impl BlockHeader {
             return None;
         }
         let version = buf[0];
+        if version != Self::VERSION {
+            return None;
+        }
         let block_type = BlockType::from_u8(buf[1])?;
         let reserved = [buf[2], buf[3]];
         let length = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);

@@ -69,7 +69,7 @@ fn test_block(id: u64, size: usize) -> EncryptedMacroBlock {
 // P0-1: Footer field-range validation (Defect #6)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// V26 P0-1: Valid footer roundtrip preserves all fields including catalog and index.
+/// V26 P0-1: Valid footer roundtrip preserves all fields including catalog, index, and manifest.
 #[test]
 fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
     let footer = Footer::with_catalog(
@@ -81,12 +81,12 @@ fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
         3,     // catalog_block_id
         6000,  // last_checkpoint_offset
         5,     // last_checkpoint_block_id
-        0,     // manifest_block_id
+        8,     // manifest_block_id
         7000,  // index_offset
         2048,  // index_size
         10,    // index_block_id
         4224,  // backup_header_offset
-        0,     // manifest_offset
+        8000,  // manifest_offset
     );
 
     let bytes = footer.to_bytes().unwrap();
@@ -103,10 +103,12 @@ fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
     assert_eq!(restored.catalog_block_id(), 3);
     assert_eq!(restored.last_checkpoint_offset(), 6000);
     assert_eq!(restored.last_checkpoint_block_id(), 5);
+    assert_eq!(restored.manifest_block_id(), 8);
     assert_eq!(restored.index_offset(), 7000);
     assert_eq!(restored.index_size(), 2048);
     assert_eq!(restored.index_block_id(), 10);
     assert_eq!(restored.backup_header_offset(), 4224);
+    assert_eq!(restored.manifest_offset(), 8000);
     assert!(restored.verify_checksum());
 }
 
@@ -851,4 +853,78 @@ async fn test_v26_writer_counters_track_correctly() {
     assert_eq!(writer.raw_bytes_written(), 64);
 
     writer.finalize().await.unwrap();
+}
+
+/// V26: manifest_offset below HEADER_SIZE must be rejected (non-zero).
+#[test]
+fn test_v26_f1_footer_manifest_offset_below_header_rejected() {
+    let valid = Footer::builder(8192, 1, 1)
+        .manifest(HEADER_SIZE as u64, 1)
+        .build();
+    let mut bytes = valid.to_bytes().unwrap();
+    // Patch manifest_offset at offset 88..96 to a value below HEADER_SIZE
+    let bad_offset = 1u64.to_le_bytes();
+    bytes[88..96].copy_from_slice(&bad_offset);
+    // Recompute checksum
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ERAFv1-footer\0");
+    hasher.update(&bytes[0..96]);
+    let checksum = hasher.finalize();
+    bytes[96..128].copy_from_slice(checksum.as_bytes());
+
+    let result = Footer::from_bytes(&bytes);
+    assert!(
+        result.is_err(),
+        "manifest_offset below HEADER_SIZE must be rejected"
+    );
+}
+
+/// V26: manifest_offset beyond data_end_offset must be rejected.
+#[test]
+fn test_v26_f1_footer_manifest_offset_beyond_data_end_rejected() {
+    let valid = Footer::builder(8192, 1, 1)
+        .manifest(4096, 1)
+        .build();
+    let mut bytes = valid.to_bytes().unwrap();
+    // Patch manifest_offset to exceed data_end_offset
+    let bad_offset = 9000u64.to_le_bytes();
+    bytes[88..96].copy_from_slice(&bad_offset);
+    // Recompute checksum
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ERAFv1-footer\0");
+    hasher.update(&bytes[0..96]);
+    let checksum = hasher.finalize();
+    bytes[96..128].copy_from_slice(checksum.as_bytes());
+
+    let result = Footer::from_bytes(&bytes);
+    assert!(
+        result.is_err(),
+        "manifest_offset beyond data_end_offset must be rejected"
+    );
+}
+
+/// V26: Legacy footer (manifest_block_id=0, manifest_offset=0) parses with has_manifest==false.
+#[test]
+fn test_v26_legacy_footer_manifest_fields_zero() {
+    let footer = Footer::with_catalog(
+        16384,
+        42,
+        7,
+        5000,
+        1024,
+        3,
+        6000,
+        5,
+        0, // manifest_block_id
+        7000,
+        2048,
+        10,
+        4224,
+        0, // manifest_offset
+    );
+    let bytes = footer.to_bytes().unwrap();
+    let restored = Footer::from_bytes(&bytes).unwrap();
+    assert!(!restored.has_manifest());
+    assert_eq!(restored.manifest_block_id(), 0);
+    assert_eq!(restored.manifest_offset(), 0);
 }

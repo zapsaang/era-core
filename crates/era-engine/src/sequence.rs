@@ -9,7 +9,7 @@ use era_common::ArchiveManifest;
 /// Trait for types that can extract a sequence number for redundancy selection.
 ///
 /// Implement this for ArchiveManifest (and potentially other future types)
-/// to enable generic `load_typed_block_with_redundancy`.
+/// to enable generic manifest loading with redundancy resolution.
 pub trait SequenceSelector {
     /// Returns the sequence number for redundancy selection.
     /// Higher values indicate newer versions.
@@ -27,13 +27,14 @@ pub const INITIAL_FINALIZE_SEQUENCE: u64 = 1;
 
 /// Compute the next finalize sequence.
 ///
-/// # Panics
-/// Panics if sequence would overflow u64 (practically impossible:
-/// even at 1 finalize per second, overflow takes ~5.8 billion years).
-pub fn next_finalize_sequence(current: u64) -> u64 {
+/// # Errors
+/// Returns `EraError::InvalidConfig` if sequence would overflow u64.
+pub fn next_finalize_sequence(current: u64) -> era_common::Result<u64> {
     current
         .checked_add(1)
-        .expect("finalize_sequence overflow: u64 exhausted")
+        .ok_or_else(|| era_common::EraError::InvalidConfig(
+            "finalize_sequence overflow: u64 exhausted".into()
+        ))
 }
 
 #[cfg(test)]
@@ -47,15 +48,15 @@ mod tests {
 
     #[test]
     fn next_sequence_increments() {
-        assert_eq!(next_finalize_sequence(1), 2);
-        assert_eq!(next_finalize_sequence(100), 101);
-        assert_eq!(next_finalize_sequence(u64::MAX - 1), u64::MAX);
+        assert_eq!(next_finalize_sequence(1).unwrap(), 2);
+        assert_eq!(next_finalize_sequence(100).unwrap(), 101);
+        assert_eq!(next_finalize_sequence(u64::MAX - 1).unwrap(), u64::MAX);
     }
 
     #[test]
-    #[should_panic(expected = "finalize_sequence overflow")]
-    fn next_sequence_overflow_panics() {
-        next_finalize_sequence(u64::MAX);
+    fn next_sequence_overflow_returns_err() {
+        let result = next_finalize_sequence(u64::MAX);
+        assert!(result.is_err());
     }
 
     #[test]

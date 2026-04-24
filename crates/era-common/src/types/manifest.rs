@@ -4,42 +4,41 @@
 //! cryptographically authenticated global state snapshot of an archive.
 //! It is stored as BlockType::Manifest in all volumes (full replica redundancy).
 
-use prost::Message;
 use serde::{Deserialize, Serialize};
 
-/// Archive 的密码学认证全局状态快照。
+/// Cryptographically authenticated global state snapshot of an archive.
 ///
-/// 作为 AEAD 加密的 typed block 存储（BlockType::Manifest）。
-/// 使用 BLOCK_KEY_DOMAIN 派生加密密钥（不引入专用密钥派生域）。
+/// Stored as an AEAD-encrypted typed block (BlockType::Manifest).
+/// Uses BLOCK_KEY_DOMAIN to derive the encryption key (no dedicated key derivation domain).
 ///
-/// 序列化格式：protobuf（与 SuperHeader 一致）
-/// 加密方式：XChaCha20-Poly1305，AAD = archive_id ‖ epoch_id ‖ "MANIFEST" ‖ block_id
-/// 存储方式：typed block，写入所有 volume（全副本冗余）
+/// Serialization format: protobuf (same as SuperHeader)
+/// Encryption: XChaCha20-Poly1305, AAD = archive_id ‖ epoch_id ‖ "MANIFEST" ‖ block_id
+/// Storage: typed block, written to all volumes (full replica redundancy)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveManifest {
-    /// 单调递增代 ID（与 SuperHeader.epoch_id 一致）。
-    /// 用于跨 archive 一致性验证和版本协商。
+    /// Monotonically increasing epoch ID (matches SuperHeader.epoch_id).
+    /// Used for cross-archive consistency verification and version negotiation.
     pub epoch_id: u32,
 
-    /// 认证世代号（单调递增）。
-    /// 用于防止重放攻击：Reader 从所有 volume 加载 Manifest，
-    /// 选择 finalize_sequence 最大的副本。
-    /// 每次成功 finalize 后递增。
+    /// Authenticated generation number (monotonically increasing).
+    /// Used for replay attack prevention: the Reader loads Manifest from all volumes
+    /// and selects the copy with the highest finalize_sequence.
+    /// Incremented after each successful finalize.
     pub finalize_sequence: u64,
 
-    /// 逻辑提交边界（绝对字节偏移）。
-    /// 超出此边界的数据视为未提交，Reader 必须忽略。
-    /// 替代 recovery.rs 中的物理截断（file.set_len()）。
+    /// Logical commit boundary (absolute byte offset).
+    /// Data beyond this boundary is considered uncommitted and must be ignored by the Reader.
+    /// Replaces physical truncation in recovery.rs (file.set_len()).
     pub committed_horizon: u64,
 
-    /// Catalog 内容的域分离密码学承诺。
-    /// = blake3::keyed_hash("ERA-CAT-COMMIT-v1___________", &catalog_plaintext)
-    /// 对序列化后的明文计算，提供语义绑定。
+    /// Domain-separated cryptographic commitment of Catalog contents.
+    /// = blake3::keyed_hash("ERA-CAT-COMMIT-v1_______________", &catalog_plaintext)
+    /// Computed over serialized plaintext for semantic binding.
     pub catalog_commitment: [u8; 32],
 
-    /// Index 内容的域分离密码学承诺。
-    /// = blake3::keyed_hash("ERA-IDX-COMMIT-v1___________", &index_plaintext)
-    /// 如 Index 不存在，则为全零 [0u8; 32]。
+    /// Domain-separated cryptographic commitment of Index contents.
+    /// = blake3::keyed_hash("ERA-IDX-COMMIT-v1_______________", &index_plaintext)
+    /// If no Index exists, set to all zeros [0u8; 32].
     pub index_commitment: [u8; 32],
 }
 
@@ -68,10 +67,12 @@ impl ArchiveManifest {
     }
 
     /// Deserialize a manifest from protobuf bytes.
+    ///
+    /// Enforces a maximum size limit of 16 MB to prevent DoS attacks
+    /// from malicious inputs.
     pub fn from_bytes(data: &[u8]) -> crate::Result<Self> {
-        let proto = crate::proto::ArchiveManifest::decode(data).map_err(|e| {
-            crate::EraError::Deserialization(format!("Failed to decode manifest: {}", e))
-        })?;
+        let proto = crate::serde::deserialize_proto::<crate::proto::ArchiveManifest>(data)
+            .map_err(|e| crate::EraError::Deserialization(format!("Failed to decode manifest: {}", e)))?;
         proto.try_into()
     }
 
