@@ -996,10 +996,12 @@ fn test_footer_checksum_rejects_tampered_index_fields() {
         5,    // catalog_block_id
         0,    // checkpoint_offset
         0,    // checkpoint_block_id
+        0,    // manifest_block_id
         6000, // index_offset (must be >= HEADER_SIZE = 4096)
         300,  // index_size
         8,    // index_block_id
         7000, // backup_header_offset
+        0,    // manifest_offset
     );
 
     let bytes = footer.to_bytes().unwrap();

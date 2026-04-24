@@ -142,6 +142,57 @@ pub enum EraError {
     #[error("Threshold not met: need {required} shares, got {provided}")]
     ThresholdNotMet { required: u32, provided: u32 },
 
+    // v8.2 Errors
+    #[error("Read beyond commit horizon: offset={offset}, horizon={horizon}")]
+    BeyondCommitHorizon { offset: u64, horizon: u64 },
+
+    #[error("Catalog commitment mismatch: computed commitment does not match manifest")]
+    CatalogCommitmentMismatch,
+
+    #[error("Index commitment mismatch: computed commitment does not match manifest")]
+    IndexCommitmentMismatch,
+
+    #[error(
+        "Volume {volume} space exhausted: required={required}, available={available}: {message}"
+    )]
+    VolumeSpaceExhausted {
+        volume: usize,
+        required: u64,
+        available: u64,
+        message: String,
+    },
+
+    #[error("Manifest load error: {0}")]
+    ManifestLoadError(String),
+
+    #[error("Footer inconsistency: field={field}, expected={expected}, actual={actual}")]
+    FooterInconsistency {
+        field: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("All {kind} copies corrupted across {volume_count} volumes")]
+    AllTypedBlockCopiesCorrupted {
+        kind: String,
+        volume_count: usize,
+        warnings: Vec<String>,
+    },
+
+    #[error("Typed block not found: {0}")]
+    TypedBlockNotFound(String),
+
+    #[error("Repair verification failed for {kind} on volume {volume_idx}: expected_crc={expected_crc}, actual_crc={actual_crc}")]
+    RepairVerificationFailed {
+        kind: String,
+        volume_idx: usize,
+        expected_crc: u32,
+        actual_crc: u32,
+    },
+
+    #[error("Unsupported archive format: {0}")]
+    UnsupportedFormat(String),
+
     // Generic Errors
     #[error("{0}")]
     Other(String),
@@ -201,5 +252,81 @@ impl EraError {
     /// Create a new security violation error
     pub fn security(msg: impl Into<String>) -> Self {
         Self::Security(msg.into())
+    }
+
+    pub fn beyond_commit_horizon(offset: u64, horizon: u64) -> Self {
+        Self::BeyondCommitHorizon { offset, horizon }
+    }
+
+    pub fn catalog_commitment_mismatch() -> Self {
+        Self::CatalogCommitmentMismatch
+    }
+
+    pub fn index_commitment_mismatch() -> Self {
+        Self::IndexCommitmentMismatch
+    }
+
+    pub fn volume_space_exhausted(
+        volume: usize,
+        required: u64,
+        available: u64,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::VolumeSpaceExhausted {
+            volume,
+            required,
+            available,
+            message: message.into(),
+        }
+    }
+
+    pub fn manifest_load_error(msg: impl Into<String>) -> Self {
+        Self::ManifestLoadError(msg.into())
+    }
+
+    pub fn footer_inconsistency(
+        field: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::FooterInconsistency {
+            field: field.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
+
+    pub fn all_typed_block_copies_corrupted(
+        kind: impl Into<String>,
+        volume_count: usize,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self::AllTypedBlockCopiesCorrupted {
+            kind: kind.into(),
+            volume_count,
+            warnings,
+        }
+    }
+
+    pub fn typed_block_not_found(msg: impl Into<String>) -> Self {
+        Self::TypedBlockNotFound(msg.into())
+    }
+
+    pub fn repair_verification_failed(
+        kind: impl Into<String>,
+        volume_idx: usize,
+        expected_crc: u32,
+        actual_crc: u32,
+    ) -> Self {
+        Self::RepairVerificationFailed {
+            kind: kind.into(),
+            volume_idx,
+            expected_crc,
+            actual_crc,
+        }
+    }
+
+    pub fn unsupported_format(msg: impl Into<String>) -> Self {
+        Self::UnsupportedFormat(msg.into())
     }
 }

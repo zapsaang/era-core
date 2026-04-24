@@ -48,12 +48,12 @@ const FOOTER_CHECKSUM_SIZE: usize = 32;
 /// | 44     | 4    | catalog_block_id         |
 /// | 48     | 8    | last_checkpoint_offset   |
 /// | 56     | 4    | last_checkpoint_block_id |
-/// | 60     | 4    | reserved3                |
+/// | 60     | 4    | manifest_block_id        |
 /// | 64     | 8    | index_offset             |
 /// | 72     | 4    | index_size               |
 /// | 76     | 4    | index_block_id           |
 /// | 80     | 8    | backup_header_offset     |
-/// | 88     | 8    | reserved4                |
+/// | 88     | 8    | manifest_offset          |
 /// | 96     | 32   | checksum (Blake3)        |
 /// | **128**|      | **Total**                |
 ///
@@ -82,6 +82,10 @@ pub struct Footer {
     last_checkpoint_offset: u64,
     /// Block ID of the last checkpoint (for direct decryption)
     last_checkpoint_block_id: u32,
+    /// Block ID of the manifest typed block (for AEAD decryption).
+    /// v8.2: Reuses reserved3 (binary offset 60, 4 bytes).
+    /// Zero when no manifest exists (v8.1 footer).
+    manifest_block_id: u32,
     /// Offset of the index block
     index_offset: u64,
     /// Size of the index block
@@ -90,6 +94,10 @@ pub struct Footer {
     index_block_id: u32,
     /// Offset of the backup header (for redundancy layout)
     backup_header_offset: u64,
+    /// Absolute byte offset of the manifest typed block.
+    /// v8.2: Reuses reserved4 (binary offset 88, 8 bytes).
+    /// Zero when no manifest exists (v8.1 footer).
+    manifest_offset: u64,
     /// Blake3 checksum of the footer (excluding this field)
     checksum: [u8; 32],
 }
@@ -109,7 +117,9 @@ impl Footer {
             0,
             0,
             0,
+            0,
             0, // backup_header_offset
+            0,
         )
     }
 
@@ -127,10 +137,12 @@ impl Footer {
         catalog_block_id: u32,
         last_checkpoint_offset: u64,
         last_checkpoint_block_id: u32,
+        manifest_block_id: u32,
         index_offset: u64,
         index_size: u32,
         index_block_id: u32,
         backup_header_offset: u64,
+        manifest_offset: u64,
     ) -> Self {
         let mut footer = Self {
             magic: FOOTER_MAGIC,
@@ -144,10 +156,12 @@ impl Footer {
             catalog_block_id,
             last_checkpoint_offset,
             last_checkpoint_block_id,
+            manifest_block_id,
             index_offset,
             index_size,
             index_block_id,
             backup_header_offset,
+            manifest_offset,
             checksum: [0u8; 32],
         };
 
@@ -168,10 +182,12 @@ impl Footer {
             catalog_block_id: 0,
             last_checkpoint_offset: 0,
             last_checkpoint_block_id: 0,
+            manifest_block_id: 0,
             index_offset: 0,
             index_size: 0,
             index_block_id: 0,
             backup_header_offset: 0,
+            manifest_offset: 0,
         }
     }
 
@@ -185,6 +201,15 @@ impl Footer {
     #[must_use]
     pub fn has_index(&self) -> bool {
         self.index_offset > 0 && self.index_size > 0
+    }
+
+    /// Check if manifest location is available (v8.2 indicator).
+    ///
+    /// Uses `manifest_offset != 0` rather than `manifest_block_id > 0`
+    /// because `BlockId::new(0)` is valid — block_id can be 0.
+    #[must_use]
+    pub fn has_manifest(&self) -> bool {
+        self.manifest_offset != 0
     }
 
     /// Update the checksum field (domain-separated Blake3)
@@ -244,8 +269,8 @@ impl Footer {
         buf[48..56].copy_from_slice(&self.last_checkpoint_offset.to_le_bytes());
         // Offset 56: last_checkpoint_block_id (4 bytes)
         buf[56..60].copy_from_slice(&self.last_checkpoint_block_id.to_le_bytes());
-        // Offset 60: reserved3 (4 bytes)
-        buf[60..64].copy_from_slice(&0u32.to_le_bytes());
+        // Offset 60: manifest_block_id (4 bytes)
+        buf[60..64].copy_from_slice(&self.manifest_block_id.to_le_bytes());
         // Offset 64: index_offset (8 bytes)
         buf[64..72].copy_from_slice(&self.index_offset.to_le_bytes());
         // Offset 72: index_size (4 bytes)
@@ -254,8 +279,8 @@ impl Footer {
         buf[76..80].copy_from_slice(&self.index_block_id.to_le_bytes());
         // Offset 80: backup_header_offset (8 bytes)
         buf[80..88].copy_from_slice(&self.backup_header_offset.to_le_bytes());
-        // Offset 88: reserved4 (8 bytes)
-        buf[88..96].copy_from_slice(&0u64.to_le_bytes());
+        // Offset 88: manifest_offset (8 bytes)
+        buf[88..96].copy_from_slice(&self.manifest_offset.to_le_bytes());
     }
 
     /// Read fields from a buffer (excluding checksum)
@@ -294,6 +319,9 @@ impl Footer {
             last_checkpoint_block_id: u32::from_le_bytes(buf[56..60].try_into().map_err(|_| {
                 EraError::CorruptedFooter("invalid footer last_checkpoint_block_id slice".into())
             })?),
+            manifest_block_id: u32::from_le_bytes(buf[60..64].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer manifest_block_id slice".into())
+            })?),
             index_offset: u64::from_le_bytes(buf[64..72].try_into().map_err(|_| {
                 EraError::CorruptedFooter("invalid footer index_offset slice".into())
             })?),
@@ -305,6 +333,9 @@ impl Footer {
             })?),
             backup_header_offset: u64::from_le_bytes(buf[80..88].try_into().map_err(|_| {
                 EraError::CorruptedFooter("invalid footer backup_header_offset slice".into())
+            })?),
+            manifest_offset: u64::from_le_bytes(buf[88..96].try_into().map_err(|_| {
+                EraError::CorruptedFooter("invalid footer manifest_offset slice".into())
             })?),
             checksum: [0u8; 32], // Will be filled separately
         })
@@ -408,6 +439,7 @@ impl Footer {
             footer.last_checkpoint_offset,
         )?;
         Self::validate_offset_above_header("backup_header_offset", footer.backup_header_offset)?;
+        Self::validate_offset_above_header("manifest_offset", footer.manifest_offset)?;
 
         // D10-01: Cross-field validation — catalog region must not overflow
         // and must be contained within the data region when present.
@@ -531,6 +563,31 @@ impl Footer {
         self.last_checkpoint_block_id
     }
 
+    /// Offset of the manifest typed block.
+    /// Returns 0 if no manifest exists (v8.1 footer).
+    #[must_use]
+    pub fn manifest_offset(&self) -> u64 {
+        self.manifest_offset
+    }
+
+    /// Block ID of the manifest typed block.
+    /// Returns 0 if no manifest exists (v8.1 footer).
+    #[must_use]
+    pub fn manifest_block_id(&self) -> u32 {
+        self.manifest_block_id
+    }
+
+    /// Returns the manifest location as a tuple (offset, block_id).
+    /// Returns None if no manifest exists.
+    #[must_use]
+    pub fn manifest_location(&self) -> Option<(u64, u32)> {
+        if self.has_manifest() {
+            Some((self.manifest_offset, self.manifest_block_id))
+        } else {
+            None
+        }
+    }
+
     /// Offset of the index block
     #[must_use]
     pub fn index_offset(&self) -> u64 {
@@ -582,7 +639,7 @@ impl Footer {
 
 /// Builder for constructing a Footer with named fields.
 ///
-/// Replaces the 12-argument `Footer::with_catalog` for better readability.
+/// Replaces the 14-argument `Footer::with_catalog` for better readability.
 #[must_use]
 pub struct FooterBuilder {
     data_end_offset: u64,
@@ -593,10 +650,12 @@ pub struct FooterBuilder {
     catalog_block_id: u32,
     last_checkpoint_offset: u64,
     last_checkpoint_block_id: u32,
+    manifest_block_id: u32,
     index_offset: u64,
     index_size: u32,
     index_block_id: u32,
     backup_header_offset: u64,
+    manifest_offset: u64,
 }
 
 impl FooterBuilder {
@@ -612,6 +671,13 @@ impl FooterBuilder {
     pub fn checkpoint(mut self, offset: u64, block_id: u32) -> Self {
         self.last_checkpoint_offset = offset;
         self.last_checkpoint_block_id = block_id;
+        self
+    }
+
+    /// Sets the manifest location (offset and block ID).
+    pub fn manifest(mut self, offset: u64, block_id: u32) -> Self {
+        self.manifest_offset = offset;
+        self.manifest_block_id = block_id;
         self
     }
 
@@ -640,10 +706,12 @@ impl FooterBuilder {
             self.catalog_block_id,
             self.last_checkpoint_offset,
             self.last_checkpoint_block_id,
+            self.manifest_block_id,
             self.index_offset,
             self.index_size,
             self.index_block_id,
             self.backup_header_offset,
+            self.manifest_offset,
         )
     }
 }
@@ -692,10 +760,12 @@ mod tests {
             0xFFFF_FFFF,           // catalog_block_id
             0xFFFF_FFFF_FFFF_FFFF, // last_checkpoint_offset
             0xFFFF_FFFF,           // last_checkpoint_block_id
+            0xFFFF_FFFF,           // manifest_block_id
             index_offset,
             index_size,
             0xFFFF_FFFF,           // index_block_id
             0xFFFF_FFFF_FFFF_FFFF, // backup_header_offset
+            0xFFFF_FFFF_FFFF_FFFF, // manifest_offset
         );
 
         // Must still serialize to exactly 128 bytes even with max values
@@ -711,6 +781,8 @@ mod tests {
         assert_eq!(restored.block_count(), 0xFFFF_FFFF);
         assert_eq!(restored.catalog_offset(), catalog_offset);
         assert_eq!(restored.catalog_size(), catalog_size);
+        assert_eq!(restored.manifest_block_id(), 0xFFFF_FFFF);
+        assert_eq!(restored.manifest_offset(), 0xFFFF_FFFF_FFFF_FFFF);
         assert_eq!(restored.index_offset(), index_offset);
         assert_eq!(restored.index_size(), index_size);
     }
@@ -724,6 +796,8 @@ mod tests {
             1,
             0xFFFF_FFFF_FFFF_FFFF, // catalog_offset = max
             1,                     // catalog_size = 1 → overflows
+            0,
+            0,
             0,
             0,
             0,
@@ -748,7 +822,7 @@ mod tests {
             10_000, // data_end_offset
             1, 1, 9_000, // catalog_offset
             2_000, // catalog_size → end = 11_000 > data_end_offset
-            0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
         );
         let bytes = footer.to_bytes().unwrap();
         let err = Footer::from_bytes(&bytes).unwrap_err();
@@ -764,9 +838,9 @@ mod tests {
         // index region extends past data_end_offset
         let footer = Footer::with_catalog(
             10_000, // data_end_offset
-            1, 1, 0, 0, 0, 0, 0, 9_000, // index_offset
+            1, 1, 0, 0, 0, 0, 0, 0, 9_000, // index_offset
             2_000, // index_size → end = 11_000 > data_end_offset
-            0, 0,
+            0, 0, 0,
         );
         let bytes = footer.to_bytes().unwrap();
         let err = Footer::from_bytes(&bytes).unwrap_err();
@@ -820,7 +894,8 @@ mod tests {
         let footer = Footer::new(1024, 5, 1);
         assert!(!footer.has_catalog_location());
 
-        let footer_with_catalog = Footer::with_catalog(1024, 5, 1, 2048, 512, 1, 0, 0, 0, 0, 0, 0);
+        let footer_with_catalog =
+            Footer::with_catalog(1024, 5, 1, 2048, 512, 1, 0, 0, 0, 0, 0, 0, 0, 0);
         assert!(footer_with_catalog.has_catalog_location());
     }
 
@@ -829,7 +904,76 @@ mod tests {
         let footer = Footer::new(1024, 5, 1);
         assert!(!footer.has_index());
 
-        let footer_with_index = Footer::with_catalog(1024, 5, 1, 0, 0, 0, 0, 0, 4096, 1024, 2, 0);
+        let footer_with_index =
+            Footer::with_catalog(1024, 5, 1, 0, 0, 0, 0, 0, 0, 4096, 1024, 2, 0, 0);
         assert!(footer_with_index.has_index());
+    }
+
+    #[test]
+    fn footer_manifest_fields_default_zero() {
+        let footer = Footer::builder(4096, 0, 0)
+            .catalog(0, 0, 0)
+            .backup_header(0)
+            .build();
+        assert_eq!(footer.manifest_block_id(), 0);
+        assert_eq!(footer.manifest_offset(), 0);
+        assert!(!footer.has_manifest());
+    }
+
+    #[test]
+    fn footer_with_manifest_roundtrip() {
+        let footer = Footer::builder(10000, 5, 1)
+            .catalog(5000, 200, 3)
+            .manifest(8000, 7)
+            .index(6000, 300, 4)
+            .backup_header(9000)
+            .build();
+        assert_eq!(footer.manifest_offset(), 8000);
+        assert_eq!(footer.manifest_block_id(), 7);
+        assert!(footer.has_manifest());
+
+        let bytes = footer.to_bytes().unwrap();
+        let footer2 = Footer::from_bytes(&bytes).unwrap();
+        assert_eq!(footer2.manifest_offset(), 8000);
+        assert_eq!(footer2.manifest_block_id(), 7);
+        assert!(footer2.has_manifest());
+    }
+
+    #[test]
+    fn footer_has_manifest_uses_offset_not_block_id() {
+        // BlockId 0 is valid, so has_manifest checks offset != 0
+        let footer = Footer::builder(10000, 5, 1)
+            .catalog(5000, 200, 3)
+            .manifest(4096, 0)
+            .backup_header(9000)
+            .build();
+        assert!(footer.has_manifest());
+    }
+
+    #[test]
+    fn footer_no_manifest_when_offset_zero() {
+        let footer = Footer::builder(10000, 5, 1)
+            .catalog(5000, 200, 3)
+            .manifest(0, 5)
+            .backup_header(9000)
+            .build();
+        assert!(!footer.has_manifest());
+    }
+
+    #[test]
+    fn footer_manifest_location() {
+        let footer = Footer::builder(10000, 5, 1)
+            .catalog(5000, 200, 3)
+            .manifest(8000, 7)
+            .backup_header(9000)
+            .build();
+        let loc = footer.manifest_location();
+        assert_eq!(loc, Some((8000, 7)));
+
+        let footer_no_manifest = Footer::builder(10000, 5, 1)
+            .catalog(5000, 200, 3)
+            .backup_header(9000)
+            .build();
+        assert_eq!(footer_no_manifest.manifest_location(), None);
     }
 }

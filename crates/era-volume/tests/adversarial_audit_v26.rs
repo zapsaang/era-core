@@ -81,10 +81,12 @@ fn test_v26_f1_footer_roundtrip_preserves_all_fields() {
         3,     // catalog_block_id
         6000,  // last_checkpoint_offset
         5,     // last_checkpoint_block_id
+        0,     // manifest_block_id
         7000,  // index_offset
         2048,  // index_size
         10,    // index_block_id
         4224,  // backup_header_offset
+        0,     // manifest_offset
     );
 
     let bytes = footer.to_bytes().unwrap();
@@ -153,6 +155,8 @@ fn test_v26_f1_footer_catalog_offset_below_header() {
         0,
         0,
         0,
+        0,
+        0,
     );
     let mut bytes = valid.to_bytes().unwrap();
     // Patch catalog_offset (offset 32..40) to 100 (below HEADER_SIZE=4096)
@@ -184,9 +188,11 @@ fn test_v26_f1_footer_index_offset_below_header() {
         0,
         0,
         0,
+        0,
         HEADER_SIZE as u64,
         512,
         2, // index at HEADER_SIZE (valid)
+        0,
         0,
     );
     let mut bytes = valid.to_bytes().unwrap();
@@ -553,6 +559,8 @@ async fn test_v26_f7_open_append_data_end_beyond_file_size() {
         real_footer.data_end_offset() + 999_999, // far beyond actual file
         real_footer.block_count(),
         real_footer.sequence_number(),
+        0,
+        0,
         0,
         0,
         0,

@@ -481,8 +481,9 @@ proptest! {
             data_end, 0, 0,
             0, 0, 0,
             0, 0,
-            0, 0, 0,
             0,
+            0, 0, 0,
+            0, 0,
         );
         let bytes = bad_footer.to_bytes().expect("serialize");
         let result = Footer::from_bytes(&bytes);
@@ -500,8 +501,9 @@ proptest! {
             min_data_end + 100_000, 0, 0,
             cat_off, 100, 0,
             0, 0,
-            0, 0, 0,
             0,
+            0, 0, 0,
+            0, 0,
         );
         let bytes = bad_footer.to_bytes().expect("serialize");
         let result = Footer::from_bytes(&bytes);

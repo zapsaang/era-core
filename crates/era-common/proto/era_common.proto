@@ -263,6 +263,7 @@ message Catalog {
   uint64 total_size = 2;
   uint64 file_count = 3;
   uint64 dir_count = 4;
+  repeated BlockLocation block_locations = 5;
 }
 
 message ChunkIndexEntry {
@@ -312,4 +313,13 @@ message EraCertificate {
   int64 created_at = 3;
   optional int64 expires_at = 4;
   optional string label = 5;
+}
+
+// ArchiveManifest: cryptographically authenticated global state snapshot (v8.2)
+message ArchiveManifest {
+  uint32 epoch_id = 1;
+  uint64 finalize_sequence = 2;
+  uint64 committed_horizon = 3;
+  bytes catalog_commitment = 4; // exactly 32 bytes
+  bytes index_commitment = 5; // exactly 32 bytes, or all zeros if no index
 }

@@ -124,3 +124,126 @@ cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 - Current archive unlock uses X25519 even though hybrid KEM (X25519+Kyber-768) exists in codebase
 - Volume format: v8.1, magic `ERA\x08\x01`
 - Release profile: LTO, codegen-units=1, opt-level=3
+
+# Project Review Rules
+
+This repository uses structured multi-agent review for non-trivial code changes.
+
+## Review Objectives
+
+When reviewing a change, prefer evidence over advice and concrete risk over generic best practice language.
+
+Default review dimensions:
+
+- spec compliance
+- code quality
+- security
+- performance
+- concurrency & consistency
+
+For substantial changes, run these dimensions independently and then perform an arbiter pass that deduplicates and validates findings.
+
+## Output Rules
+
+Every review finding must:
+
+- be anchored to concrete `file:line` locations whenever possible
+- explain why the issue matters
+- distinguish fact from inference
+- include enough evidence to be auditable by a human reviewer
+- avoid style-only nitpicks unless they materially affect correctness, maintainability, security, latency, throughput, or consistency
+
+## Severity
+
+Use:
+
+- critical
+- high
+- medium
+- low
+
+Use `informational` only for notable but non-actionable observations.
+
+## Performance Claims
+
+Performance claims must be classified as one of:
+
+- provable regression
+- likely regression
+- benchmark-needed
+
+Do not present speculative performance concerns as confirmed facts.
+
+## Security Claims
+
+Security findings must include:
+
+- threat scenario
+- trust boundary involved
+- exploit preconditions
+- likely impact
+
+Do not report vague “possible vulnerability” statements without code-based evidence.
+
+## Concurrency & Consistency Claims
+
+Concurrency findings must state which category applies:
+
+- race condition
+- atomicity violation
+- ordering issue
+- idempotency gap
+- retry amplification
+- deadlock / lock contention
+- stale read / lost update
+- distributed inconsistency
+
+## Spec Compliance Claims
+
+Spec findings should check against, when available:
+
+- PR description
+- issue / ticket
+- API contract
+- schema contract
+- tests
+- migration notes
+- docs
+
+If the spec source is missing, explicitly state that confidence is limited.
+
+## Arbiter Rules
+
+The arbiter must:
+
+- merge duplicates
+- reject weak or repetitive claims
+- separate confirmed findings from plausible-but-unproven findings
+- preserve the original review dimension labels
+- sort confirmed findings by severity, then confidence
+
+## Change Safety
+
+When a change touches any of the following, raise review rigor:
+
+- authentication / authorization
+- payment or billing logic
+- data migration
+- cache invalidation
+- locking / shared mutable state
+- retries / queues / async workflows
+- distributed writes
+- public API contracts
+- feature flags / rollout logic / rollback paths
+
+## Practical Bias
+
+Prefer catching:
+
+- correctness regressions
+- silent behavior drift
+- compatibility breaks
+- consistency violations
+- operational risk
+
+over cosmetic concerns.

@@ -174,6 +174,8 @@ async fn test_open_append_forged_data_end_offset() {
         0,
         0,
         0,
+        0,
+        0,
     );
 
     // open_append will truncate to this offset — this extends the file

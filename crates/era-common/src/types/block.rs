@@ -400,6 +400,8 @@ pub enum BlockType {
     LsmManifest = 0x05,
     /// Checkpoint block for crash recovery (WAL)
     Checkpoint = 0x06,
+    /// Archive manifest (v8.2) — authenticated global metadata
+    Manifest = 0x07,
     /// Reserved for future use
     Reserved = 0xFF,
 }
@@ -419,6 +421,7 @@ impl BlockType {
             0x04 => Some(Self::Catalog),
             0x05 => Some(Self::LsmManifest),
             0x06 => Some(Self::Checkpoint),
+            0x07 => Some(Self::Manifest),
             0xFF => Some(Self::Reserved),
             _ => None,
         }
@@ -427,6 +430,42 @@ impl BlockType {
     /// Check if this block type is an index-related block
     pub fn is_index_block(self) -> bool {
         matches!(self, Self::IndexPage | Self::IndexManifest)
+    }
+
+    /// Check if this block type is a manifest block (v8.2)
+    pub fn is_manifest_block(self) -> bool {
+        matches!(self, Self::Manifest)
+    }
+
+    /// Check if this block type is a metadata block (Catalog, Index, or Manifest)
+    pub fn is_metadata_block(self) -> bool {
+        matches!(
+            self,
+            Self::Catalog | Self::IndexPage | Self::IndexManifest | Self::Manifest
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlockType;
+
+    #[test]
+    fn manifest_block_type_round_trips_and_is_metadata() {
+        let block_type = BlockType::from_u8(0x07).expect("manifest block type should parse");
+
+        assert_eq!(block_type, BlockType::Manifest);
+        assert!(block_type.is_manifest_block());
+        assert!(block_type.is_metadata_block());
+        assert!(!block_type.is_index_block());
+    }
+
+    #[test]
+    fn metadata_helper_matches_existing_metadata_blocks() {
+        assert!(BlockType::Catalog.is_metadata_block());
+        assert!(BlockType::IndexPage.is_metadata_block());
+        assert!(BlockType::IndexManifest.is_metadata_block());
+        assert!(!BlockType::Data.is_metadata_block());
     }
 }
 

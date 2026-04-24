@@ -336,6 +336,12 @@ impl TryFrom<ProtoFileEntry> for FileEntry {
 pub struct Catalog {
     /// All file entries
     pub entries: Vec<FileEntry>,
+    /// Physical location of each block in the archive.
+    /// block_locations[i] corresponds to logical block index i.
+    /// For non-erasure archives: length = block_count
+    /// For erasure archives: length = logical block count (= stripe_count)
+    ///     BlockLocation.shard_layout::Erasure already contains all shard metadata.
+    pub block_locations: Vec<era_common::BlockLocation>,
     /// Total size of all files
     pub total_size: u64,
     /// Number of files
@@ -349,6 +355,7 @@ impl Catalog {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            block_locations: Vec::new(),
             total_size: 0,
             file_count: 0,
             dir_count: 0,
@@ -401,6 +408,7 @@ impl From<&Catalog> for ProtoCatalog {
     fn from(c: &Catalog) -> Self {
         Self {
             entries: c.entries.iter().map(|e| e.into()).collect(),
+            block_locations: c.block_locations.iter().cloned().map(Into::into).collect(),
             total_size: c.total_size,
             file_count: c.file_count,
             dir_count: c.dir_count,
@@ -412,12 +420,19 @@ impl TryFrom<ProtoCatalog> for Catalog {
     type Error = era_common::EraError;
 
     fn try_from(p: ProtoCatalog) -> Result<Self, Self::Error> {
+        let block_locations = p
+            .block_locations
+            .into_iter()
+            .map(|loc| loc.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Self {
             entries: p
                 .entries
                 .into_iter()
                 .map(|e| e.try_into())
                 .collect::<Result<_, _>>()?,
+            block_locations,
             total_size: p.total_size,
             file_count: p.file_count,
             dir_count: p.dir_count,

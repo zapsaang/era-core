@@ -319,10 +319,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 self.last_catalog_block_id,
                 self.last_checkpoint_offset,
                 self.last_checkpoint_block_id,
+                0,
                 self.last_index_offset,
                 self.last_index_size,
                 self.last_index_block_id,
                 backup_header_offset,
+                0,
             );
 
             let footer_bytes = footer.to_bytes()?;
@@ -343,9 +345,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 self.last_catalog_block_id,
                 self.last_checkpoint_offset,
                 self.last_checkpoint_block_id,
+                0,
                 self.last_index_offset,
                 self.last_index_size,
                 self.last_index_block_id,
+                0,
                 0,
             );
 
@@ -639,10 +643,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
             catalog_block_id,
             self.last_checkpoint_offset,
             self.last_checkpoint_block_id,
+            0,
             index_offset,
             index_size,
             index_block_id,
             backup_header_offset,
+            0,
         );
         let footer_bytes = footer.to_bytes()?;
 

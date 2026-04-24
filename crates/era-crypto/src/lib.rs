@@ -13,6 +13,7 @@
 mod aead;
 mod aead_context;
 pub mod certificate;
+pub mod commitment;
 mod hash;
 mod hkdf_utils;
 pub mod hybrid_certificate;
@@ -28,6 +29,11 @@ mod security_check;
 
 // Re-exports for common types used in error handling
 pub use era_common::{EraError, Result};
+
+pub use commitment::{
+    compute_catalog_commitment, compute_index_commitment, verify_catalog_commitment,
+    verify_index_commitment, CATALOG_COMMITMENT_DOMAIN, INDEX_COMMITMENT_DOMAIN,
+};
 
 pub use aead::TAG_SIZE;
 pub use aead::{decrypt_with_context, encrypt_with_context, AeadCipher, AeadKey, Nonce};

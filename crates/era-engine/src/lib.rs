@@ -41,6 +41,7 @@ mod reader;
 mod recovery;
 mod repack;
 mod repair;
+pub mod sequence;
 mod small_file_packer;
 mod volume_stage;
 mod write_pipeline;
