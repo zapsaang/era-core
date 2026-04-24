@@ -882,9 +882,7 @@ fn test_v26_f1_footer_manifest_offset_below_header_rejected() {
 /// V26: manifest_offset beyond data_end_offset must be rejected.
 #[test]
 fn test_v26_f1_footer_manifest_offset_beyond_data_end_rejected() {
-    let valid = Footer::builder(8192, 1, 1)
-        .manifest(4096, 1)
-        .build();
+    let valid = Footer::builder(8192, 1, 1).manifest(4096, 1).build();
     let mut bytes = valid.to_bytes().unwrap();
     // Patch manifest_offset to exceed data_end_offset
     let bad_offset = 9000u64.to_le_bytes();
@@ -907,20 +905,8 @@ fn test_v26_f1_footer_manifest_offset_beyond_data_end_rejected() {
 #[test]
 fn test_v26_legacy_footer_manifest_fields_zero() {
     let footer = Footer::with_catalog(
-        16384,
-        42,
-        7,
-        5000,
-        1024,
-        3,
-        6000,
-        5,
-        0, // manifest_block_id
-        7000,
-        2048,
-        10,
-        4224,
-        0, // manifest_offset
+        16384, 42, 7, 5000, 1024, 3, 6000, 5, 0, // manifest_block_id
+        7000, 2048, 10, 4224, 0, // manifest_offset
     );
     let bytes = footer.to_bytes().unwrap();
     let restored = Footer::from_bytes(&bytes).unwrap();

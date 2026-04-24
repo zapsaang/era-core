@@ -72,7 +72,9 @@ impl ArchiveManifest {
     /// from malicious inputs.
     pub fn from_bytes(data: &[u8]) -> crate::Result<Self> {
         let proto = crate::serde::deserialize_proto::<crate::proto::ArchiveManifest>(data)
-            .map_err(|e| crate::EraError::Deserialization(format!("Failed to decode manifest: {}", e)))?;
+            .map_err(|e| {
+                crate::EraError::Deserialization(format!("Failed to decode manifest: {}", e))
+            })?;
         proto.try_into()
     }
 

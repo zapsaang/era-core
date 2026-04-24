@@ -404,8 +404,14 @@ impl Catalog {
     /// Maximum catalog size: 1 GB.
     pub fn from_bytes(data: &[u8]) -> era_common::Result<Self> {
         const MAX_CATALOG_SIZE: u64 = 1024 * 1024 * 1024;
-        let proto = era_common::deserialize_proto_with_limit::<ProtoCatalog>(data, MAX_CATALOG_SIZE)
-            .map_err(|e| era_common::EraError::Deserialization(format!("Failed to decode catalog: {}", e)))?;
+        let proto =
+            era_common::deserialize_proto_with_limit::<ProtoCatalog>(data, MAX_CATALOG_SIZE)
+                .map_err(|e| {
+                    era_common::EraError::Deserialization(format!(
+                        "Failed to decode catalog: {}",
+                        e
+                    ))
+                })?;
         proto.try_into()
     }
 }

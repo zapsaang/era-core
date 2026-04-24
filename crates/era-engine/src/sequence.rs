@@ -30,11 +30,9 @@ pub const INITIAL_FINALIZE_SEQUENCE: u64 = 1;
 /// # Errors
 /// Returns `EraError::InvalidConfig` if sequence would overflow u64.
 pub fn next_finalize_sequence(current: u64) -> era_common::Result<u64> {
-    current
-        .checked_add(1)
-        .ok_or_else(|| era_common::EraError::InvalidConfig(
-            "finalize_sequence overflow: u64 exhausted".into()
-        ))
+    current.checked_add(1).ok_or_else(|| {
+        era_common::EraError::InvalidConfig("finalize_sequence overflow: u64 exhausted".into())
+    })
 }
 
 #[cfg(test)]

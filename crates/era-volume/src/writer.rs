@@ -318,28 +318,21 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.writer.sync_data().await?;
 
             let backup_header_offset = pad_target;
-            let footer = crate::Footer::builder(
-                self.position,
-                self.block_count,
-                self.sequence,
-            )
-            .catalog(
-                self.last_catalog_offset,
-                self.last_catalog_size,
-                self.last_catalog_block_id,
-            )
-            .checkpoint(
-                self.last_checkpoint_offset,
-                self.last_checkpoint_block_id,
-            )
-            .manifest(self.last_manifest_offset, self.last_manifest_block_id)
-            .index(
-                self.last_index_offset,
-                self.last_index_size,
-                self.last_index_block_id,
-            )
-            .backup_header(backup_header_offset)
-            .build();
+            let footer = crate::Footer::builder(self.position, self.block_count, self.sequence)
+                .catalog(
+                    self.last_catalog_offset,
+                    self.last_catalog_size,
+                    self.last_catalog_block_id,
+                )
+                .checkpoint(self.last_checkpoint_offset, self.last_checkpoint_block_id)
+                .manifest(self.last_manifest_offset, self.last_manifest_block_id)
+                .index(
+                    self.last_index_offset,
+                    self.last_index_size,
+                    self.last_index_block_id,
+                )
+                .backup_header(backup_header_offset)
+                .build();
 
             let footer_bytes = footer.to_bytes()?;
             let footer_offset = backup_header_offset + HEADER_SIZE as u64;
@@ -350,28 +343,21 @@ impl<W: StorageWriter> VolumeWriter<W> {
         } else {
             self.writer.sync_data().await?;
 
-            let footer = crate::Footer::builder(
-                self.position,
-                self.block_count,
-                self.sequence,
-            )
-            .catalog(
-                self.last_catalog_offset,
-                self.last_catalog_size,
-                self.last_catalog_block_id,
-            )
-            .checkpoint(
-                self.last_checkpoint_offset,
-                self.last_checkpoint_block_id,
-            )
-            .manifest(self.last_manifest_offset, self.last_manifest_block_id)
-            .index(
-                self.last_index_offset,
-                self.last_index_size,
-                self.last_index_block_id,
-            )
-            .backup_header(0)
-            .build();
+            let footer = crate::Footer::builder(self.position, self.block_count, self.sequence)
+                .catalog(
+                    self.last_catalog_offset,
+                    self.last_catalog_size,
+                    self.last_catalog_block_id,
+                )
+                .checkpoint(self.last_checkpoint_offset, self.last_checkpoint_block_id)
+                .manifest(self.last_manifest_offset, self.last_manifest_block_id)
+                .index(
+                    self.last_index_offset,
+                    self.last_index_size,
+                    self.last_index_block_id,
+                )
+                .backup_header(0)
+                .build();
 
             let footer_bytes = footer.to_bytes()?;
             self.writer

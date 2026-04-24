@@ -1024,24 +1024,15 @@ fn test_footer_checksum_rejects_tampered_index_fields() {
 #[test]
 fn test_footer_checksum_rejects_tampered_manifest_fields() {
     let footer = Footer::with_catalog(
-        8192,
-        10,
-        1,
-        5000,
-        500,
-        5,
-        0,
-        0,
-        9,    // manifest_block_id
-        6000,
-        300,
-        8,
-        7000,
-        5500, // manifest_offset
+        8192, 10, 1, 5000, 500, 5, 0, 0, 9, // manifest_block_id
+        6000, 300, 8, 7000, 5500, // manifest_offset
     );
 
     let bytes = footer.to_bytes().unwrap();
-    assert!(Footer::from_bytes(&bytes).is_ok(), "Valid footer must parse");
+    assert!(
+        Footer::from_bytes(&bytes).is_ok(),
+        "Valid footer must parse"
+    );
 
     // Tamper with manifest_block_id (bytes 60-63)
     let mut tampered = bytes;
