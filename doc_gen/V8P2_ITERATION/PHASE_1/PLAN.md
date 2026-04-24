@@ -1430,7 +1430,7 @@ Task 1.8 (构建验证)
 | 文件 | 内容 | 大小（预估） |
 |------|------|------------|
 | `crates/era-common/src/types/manifest.rs` | ArchiveManifest 结构定义 + Protobuf 转换 | ~150 行 |
-| `crates/era-common/src/commitment.rs` | 承诺计算函数 | ~80 行 |
+| `crates/era-crypto/src/commitment.rs` | 承诺计算函数 | ~80 行 |
 
 ### 5.2 修改文件
 
@@ -1438,7 +1438,7 @@ Task 1.8 (构建验证)
 |------|---------|---------|
 | `crates/era-common/src/types/block.rs` | BlockType::Manifest 添加 | 全 workspace（BlockType 广泛使用） |
 | `crates/era-common/src/types/mod.rs` | 导出 manifest 模块 | era-common |
-| `crates/era-common/src/lib.rs` | 导出 commitment 模块 | era-common |
+| `crates/era-crypto/src/lib.rs` | 导出 commitment 模块 | era-crypto |
 | `crates/era-common/src/error.rs` | 新增错误变体 | 全 workspace |
 | `crates/era-ingest/src/entry.rs` | Catalog 扩展 block_locations | era-ingest, era-engine |
 | `crates/era-common/proto/era_common.proto` | ArchiveManifest message, Catalog 扩展 | 全 workspace（protobuf 生成） |

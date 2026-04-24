@@ -257,6 +257,26 @@ impl<W: StorageWriter> VolumeWriter<W> {
         Ok(())
     }
 
+    /// Update the last manifest location info (v8.2).
+    ///
+    /// Manifest size is not stored in the footer; it is derived from the
+    /// typed block's `BlockHeader` at read time.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if the offset exceeds the current write position.
+    pub fn set_manifest_info(&mut self, offset: u64, block_id: u32) -> era_common::Result<()> {
+        self.validate_offset_in_bounds("manifest", offset)?;
+        self.last_manifest_offset = offset;
+        self.last_manifest_block_id = block_id;
+        debug_assert!(
+            self.last_manifest_offset == 0 || self.last_manifest_offset <= self.position,
+            "manifest postcondition violated: offset {} > position {}",
+            self.last_manifest_offset,
+            self.position
+        );
+        Ok(())
+    }
+
     /// Internal helper to pad the volume with random data up to target_size.
     ///
     /// Uses a 16KB stack buffer filled with `OsRng` for padding. The chunked approach is
