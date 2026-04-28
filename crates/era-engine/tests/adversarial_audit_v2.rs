@@ -16,11 +16,13 @@ use zeroize::Zeroizing;
 #[test]
 fn v2_sec_01_aead_aad_includes_archive_epoch_volume_block() {
     let source = include_str!("../../era-crypto/src/aead_context.rs");
-    assert!(source.contains("let mut aad = [0u8; 32]"));
-    assert!(source.contains("copy_from_slice(archive_id)"));
+    assert!(source.contains("let mut aad = Vec::with_capacity"));
+    assert!(source.contains("extend_from_slice(archive_id)"));
     assert!(source.contains("epoch_id.to_le_bytes"));
     assert!(source.contains("volume_index.to_le_bytes"));
     assert!(source.contains("block_id.sequence().to_le_bytes"));
+    assert!(source.contains("block_type"));
+    assert!(source.contains("extend_from_slice(type_id)"));
 }
 
 #[test]
