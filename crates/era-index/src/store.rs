@@ -24,7 +24,7 @@ use crate::IndexEntry;
 use crate::MAX_BLOOM_ITEMS;
 
 /// Bloom filter false positive rate (1%)
-const BLOOM_FP_RATE: f64 = 0.01;
+pub(crate) const BLOOM_FP_RATE: f64 = 0.01;
 
 /// Maximum number of entries allowed in sorted operations to prevent OOM (V7-F6)
 pub const MAX_SORTED_ENTRIES: usize = 2_000_000;

@@ -248,7 +248,13 @@ impl IndexBuilder {
             Ok(())
         })?;
 
-        let bloom_bytes = super::serialize_bloom(self.store.bloom())?;
+        // Use a right-sized bloom filter based on actual entry count for accurate
+        // disk size estimation, avoiding oversized estimates from default sizing.
+        let entry_count = self.store.entry_count();
+        let right_sized_bloom =
+            Bloom::new_for_fp_rate(entry_count.max(1024), crate::store::BLOOM_FP_RATE)
+                .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let bloom_bytes = super::serialize_bloom(&right_sized_bloom)?;
         meta.set_bloom_filter(bloom_bytes)?;
         let meta_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
             .map_err(|e| EraError::Serialization(e.to_string()))?;
