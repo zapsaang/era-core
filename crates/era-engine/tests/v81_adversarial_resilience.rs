@@ -498,7 +498,7 @@ async fn test_v81_volume_layout_structure() -> Result<(), Box<dyn std::error::Er
     // not at raw offset 0. We need to look for the magic pattern within the header region.
 
     // Look for magic bytes pattern within the first 100 bytes (protobuf header region)
-    let magic_pattern: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00]; // "ERA\x08\x01\x00\x00\x00"
+    let magic_pattern: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x02, 0x00, 0x00, 0x00]; // "ERA\x08\x02\x00\x00\x00"
     let header_region = &file_data[0..100.min(file_data.len())];
     let magic_found_in_header = header_region.windows(8).any(|w| w == magic_pattern);
     assert!(

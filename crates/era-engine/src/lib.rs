@@ -73,5 +73,9 @@ pub use repair::{
     repair_archive, repair_archive_matrix, repair_archive_with_passwords,
     repair_archive_with_private_keys, repair_archive_with_providers, RepairOptions, RepairStats,
 };
+#[deprecated(
+    since = "0.2.0",
+    note = "Use ArchiveWriter instead. GenericArchiveWriter does not support multi-volume, manifest tracking, or V8.2 format features."
+)]
 pub use writer::generic::{GenericArchiveWriter, GenericArchiveWriterBuilder};
 pub use writer::{ArchiveWriter, ArchiveWriterBuilder, AuthMode};

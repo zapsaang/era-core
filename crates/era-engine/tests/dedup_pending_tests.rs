@@ -3,6 +3,8 @@
 //! Verifies that identical chunks are deduplicated even when still buffered
 //! in the packing stage. Observable via verify (no errors) and archive size.
 
+#![allow(deprecated)]
+
 use era_common::ArchiveConfig;
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
 use era_storage::MemoryStorageBackend;

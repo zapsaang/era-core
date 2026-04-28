@@ -318,7 +318,7 @@ fn test_v30_14_superheader_accessors() {
 
     assert_eq!(
         *header.magic(),
-        [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00]
+        [0x45, 0x52, 0x41, 0x08, 0x02, 0x00, 0x00, 0x00]
     );
     assert_eq!(header.version(), era_volume::HEADER_VERSION);
     assert_eq!(header.volume_sequence(), 0);

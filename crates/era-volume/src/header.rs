@@ -17,8 +17,8 @@ fn unix_timestamp_now() -> era_common::Result<i64> {
     .map_err(|_| era_common::EraError::InvalidConfig("creation_time exceeds i64::MAX".into()))
 }
 
-/// Magic bytes for ERA format: "ERA\x08\x01\x00\x00\x00"
-pub const MAGIC: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00];
+/// Magic bytes for ERA format: "ERA\x08\x02\x00\x00\x00"
+pub const MAGIC: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x02, 0x00, 0x00, 0x00];
 
 /// Current header version
 pub const HEADER_VERSION: u16 = 3;

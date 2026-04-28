@@ -28,6 +28,8 @@
 //! ### 🚨 RV11 — Header access_policy not covered by AEAD — downgrade undetected
 //! ### 🚨 RV12 — open_with_session allows threshold bypass without error/enforcement
 
+#![allow(deprecated)]
+
 use era_common::{ArchiveConfig, ArchiveId};
 use era_crypto::{
     reconstruct_master_key, split_master_key, wrap_volume_key, IntermediateKey, KeySession,

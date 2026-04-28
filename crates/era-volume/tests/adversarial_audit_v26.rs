@@ -780,7 +780,7 @@ fn test_v26_data_region_start_is_correct() {
 /// V26: MAGIC bytes match expected format.
 #[test]
 fn test_v26_magic_bytes_match() {
-    assert_eq!(MAGIC, [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00]);
+    assert_eq!(MAGIC, [0x45, 0x52, 0x41, 0x08, 0x02, 0x00, 0x00, 0x00]);
     // "ERA" prefix
     assert_eq!(&MAGIC[0..3], b"ERA");
 }

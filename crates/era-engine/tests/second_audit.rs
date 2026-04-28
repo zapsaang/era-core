@@ -55,7 +55,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 // MAGIC is not publicly exported from era_volume, so we define it here for tests
-const MAGIC: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x01, 0x00, 0x00, 0x00];
+const MAGIC: [u8; 8] = [0x45, 0x52, 0x41, 0x08, 0x02, 0x00, 0x00, 0x00];
 
 // ============================================================================
 // HELPERS
