@@ -126,6 +126,7 @@ mod volume_size_boundary_tests {
     /// The archive output is ~6GB even with --no-compression due to Reed-Solomon
     /// encoding (4+2 = 1.5x overhead). This is skipped in normal CI.
     #[test]
+    #[ignore = "requires ~10GB disk space"]
     fn test_volume_rotation_at_4gb_boundary() {
         let temp = repo_tmp_dir();
         // Create a 4.5GB file (4GB + 512MB)
@@ -202,6 +203,7 @@ mod volume_size_boundary_tests {
     /// IGNORED: Same disk space requirement as test_volume_rotation_at_4gb_boundary.
     /// See that test for details on disk space calculation.
     #[test]
+    #[ignore = "requires ~10GB disk space"]
     fn test_volume_rotation_at_exact_4gb() {
         let temp = repo_tmp_dir();
         let size = 4_294_967_296usize; // Exactly 4GB
