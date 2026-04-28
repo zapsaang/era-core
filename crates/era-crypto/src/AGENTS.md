@@ -28,7 +28,7 @@ MK (32B, OsRng) → HKDF(info="ERA_KeyWrap_v1") → IK (memory-only)
 ## DOMAIN SEPARATION CONSTANTS
 
 - `IK_DOMAIN = b"ERA_KeyWrap_v1"` — MK → IK derivation
-- `VK_WRAP_AAD = b"ERA_VK_WRAP_v8.1"` — VK wrapping AAD
+- `VK_WRAP_AAD = b"ERA_VK_WRAP_v8.2"` — VK wrapping AAD
 - `BLOCK_KEY_DOMAIN = b"ERA_BlockKey_v1"` — VK → BK derivation
 
 ## SECURITY RULES

@@ -7,7 +7,9 @@
 
 use bloomfilter::Bloom;
 
-use era_common::{BlockType, ChunkHash, EncryptedMacroBlock, EraError, Result};
+use era_common::{
+    BlockHeader, BlockId, BlockType, ChunkHash, EncryptedMacroBlock, EraError, Result,
+};
 use era_crypto::{KeySession, VolumeKey};
 use era_storage::StorageWriter;
 
@@ -208,6 +210,58 @@ impl IndexBuilder {
         self.store.read_sorted_pages()
     }
 
+    /// Estimate the per-volume disk footprint of the finalized embedded index.
+    ///
+    /// The estimate serializes the same IndexPage and MetaIndex payloads that
+    /// `finalize_with_starting_block_id` will encrypt later, then adds the AEAD
+    /// nonce/tag and typed block header overhead. It does not mutate or consume
+    /// the staged Redb entries beyond flushing buffered writes.
+    pub fn estimated_finalized_disk_size(&mut self) -> Result<u64> {
+        self.flush_buffer()?;
+
+        let mut meta = super::MetaIndex::new();
+        let mut total = 0u64;
+        self.store.for_each_sorted_page(|page, _page_block_id| {
+            let page_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&page)
+                .map_err(|e| EraError::Serialization(e.to_string()))?;
+            let encrypted_size = page_bytes
+                .len()
+                .checked_add(era_crypto::NONCE_SIZE)
+                .and_then(|n| n.checked_add(era_crypto::TAG_SIZE))
+                .ok_or_else(|| EraError::IndexError("IndexPage size overflow".into()))?;
+            total = total
+                .checked_add(BlockHeader::SIZE as u64)
+                .and_then(|n| n.checked_add(encrypted_size as u64))
+                .ok_or_else(|| EraError::IndexError("index disk size overflow".into()))?;
+
+            meta.add_page(
+                *page.min_hash(),
+                *page.max_hash(),
+                BlockId::new(0),
+                0,
+                u32::try_from(encrypted_size).map_err(|_| {
+                    EraError::IndexError("estimated IndexPage size exceeds u32::MAX".into())
+                })?,
+            )?;
+            Ok(())
+        })?;
+
+        let bloom_bytes = super::serialize_bloom(self.store.bloom())?;
+        meta.set_bloom_filter(bloom_bytes)?;
+        let meta_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
+            .map_err(|e| EraError::Serialization(e.to_string()))?;
+        let encrypted_meta_size = meta_bytes
+            .len()
+            .checked_add(era_crypto::NONCE_SIZE)
+            .and_then(|n| n.checked_add(era_crypto::TAG_SIZE))
+            .ok_or_else(|| EraError::IndexError("MetaIndex size overflow".into()))?;
+
+        total
+            .checked_add(BlockHeader::SIZE as u64)
+            .and_then(|n| n.checked_add(encrypted_meta_size as u64))
+            .ok_or_else(|| EraError::IndexError("index disk size overflow".into()))
+    }
+
     /// Flush any buffered entries and process sorted pages one at a time via callback.
     ///
     /// Memory usage is O(ENTRIES_PER_PAGE) per callback invocation, avoiding
@@ -300,12 +354,13 @@ impl IndexBuilder {
                 let block_key =
                     session.derive_block_key(volume_key, block_id.sequence(), &idx_nonce)?;
                 let derived_key = block_key.to_derived_key()?;
-                let encrypted_data = era_crypto::encrypt_with_context(
+                let encrypted_data = era_crypto::encrypt_with_context_for_type(
                     &derived_key,
                     &idx_nonce,
                     &self.archive_id,
                     self.epoch_id,
                     volume_index,
+                    BlockType::IndexPage,
                     block_id,
                     &page_bytes,
                 )?;
@@ -375,12 +430,13 @@ impl IndexBuilder {
             &index_nonce_context,
         )?;
         let manifest_derived_key = manifest_key.to_derived_key()?;
-        let encrypted_manifest = era_crypto::encrypt_with_context(
+        let encrypted_manifest = era_crypto::encrypt_with_context_for_type(
             &manifest_derived_key,
             &index_nonce_context,
             &self.archive_id,
             self.epoch_id,
             volume_index,
+            BlockType::IndexManifest,
             manifest_block_id,
             &meta_bytes,
         )?;

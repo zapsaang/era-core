@@ -122,6 +122,29 @@ impl EncryptionContext {
         self.next_block_id.load(Ordering::Acquire)
     }
 
+    /// Advance the block ID counter by `n` without consuming keys.
+    ///
+    /// Used when typed blocks (catalog, index, manifest) are encrypted
+    /// outside the normal pipeline but still consume logical block IDs.
+    pub fn advance_block_id(&self, n: u64) -> era_common::Result<()> {
+        self.next_block_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let new = current.saturating_add(n);
+                if new <= MAX_BLOCK_INDEX {
+                    Some(new)
+                } else {
+                    None
+                }
+            })
+            .map_err(|current| {
+                EraError::IntegrityError(format!(
+                    "Block index {} + {} exceeds maximum u32 capacity ({})",
+                    current, n, MAX_BLOCK_INDEX
+                ))
+            })?;
+        Ok(())
+    }
+
     /// Get a reference to the key session.
     #[allow(dead_code)]
     pub fn session(&self) -> &KeySession {

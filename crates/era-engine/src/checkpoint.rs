@@ -374,6 +374,7 @@ impl CheckpointManager {
     ///
     /// **NEW API:** Requires VolumeWriter to write checkpoint block.
     /// The old `commit()` method that wrote sidecar files is removed.
+    #[allow(clippy::too_many_arguments)]
     pub async fn commit_to_volume<W: StorageWriter>(
         &self,
         volume_writer: &mut era_volume::VolumeWriter<W>,
@@ -382,6 +383,7 @@ impl CheckpointManager {
         nonce_context: [u8; 16],
         archive_id: [u8; 16],
         epoch_id: u32,
+        block_id: u64,
     ) -> Result<u64> {
         write_checkpoint(
             volume_writer,
@@ -390,6 +392,7 @@ impl CheckpointManager {
             nonce_context,
             archive_id,
             epoch_id,
+            block_id,
             &self.checkpoint,
         )
         .await
@@ -598,6 +601,7 @@ impl CheckpointManager {
 /// The checkpoint is encrypted and written as `BlockType::Checkpoint`.
 /// The volume footer's `last_checkpoint_offset` field is updated to point
 /// to this checkpoint, creating a linked list of checkpoints for recovery.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_checkpoint<W: StorageWriter>(
     volume_writer: &mut era_volume::VolumeWriter<W>,
     session: &KeySession,
@@ -605,6 +609,7 @@ pub async fn write_checkpoint<W: StorageWriter>(
     nonce_context: [u8; 16],
     archive_id: [u8; 16],
     epoch_id: u32,
+    block_id: u64,
     checkpoint: &Checkpoint,
 ) -> Result<u64> {
     use era_common::{BlockId, EncryptedMacroBlock};
@@ -612,18 +617,18 @@ pub async fn write_checkpoint<W: StorageWriter>(
     // Serialize checkpoint
     let checkpoint_bytes = checkpoint.to_bytes()?;
 
-    // Derive block ID (use current block count as sequence)
-    let block_id = BlockId::new(volume_writer.block_count() as u64);
+    let block_id = BlockId::new(block_id);
 
     // Encrypt checkpoint data
     let block_key = session.derive_block_key(volume_key, block_id.sequence(), &nonce_context)?;
     let derived_key = block_key.to_derived_key()?;
-    let encrypted_data = era_crypto::encrypt_with_context(
+    let encrypted_data = era_crypto::encrypt_with_context_for_type(
         &derived_key,
         &nonce_context,
         &archive_id,
         epoch_id,
         volume_writer.volume_sequence() as u32,
+        BlockType::Checkpoint,
         block_id,
         &checkpoint_bytes,
     )?;
@@ -723,12 +728,13 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
             session.derive_block_key(volume_key, block_id.sequence(), &nonce_context)?;
         let derived_key = block_key.to_derived_key()?;
 
-        if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
+        if let Ok(decrypted_data) = era_crypto::decrypt_with_context_for_type(
             &derived_key,
             &nonce_context,
             &archive_id,
             epoch_id,
             volume_reader.header().volume_sequence() as u32,
+            BlockType::Checkpoint,
             block_id,
             &encrypted_block.data,
         ) {

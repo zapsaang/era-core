@@ -1,6 +1,6 @@
 # era-volume crate
 
-On-disk format, multi-volume coordination, footer/header validation, and volume-pool rotation. L2.
+On-disk format v8.2, multi-volume coordination, footer/header validation, and volume-pool rotation. L2.
 
 ## SURFACES
 - `src/AGENTS.md` — header/footer/layout, `VolumePool`, distribution helpers, and constants

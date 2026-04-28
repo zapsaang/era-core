@@ -1,7 +1,7 @@
 # ERA-CORE KNOWLEDGE BASE
 
-**Generated:** 2026-04-17
-**Commit:** d157ae5
+**Generated:** 2026-04-25
+**Commit:** 47a68a6
 **Branch:** feat_fly
 
 Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing.
@@ -74,14 +74,15 @@ L0: era-crypto, era-common
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `era-engine/src/writer.rs` | 2554 | Archive creation pipeline |
-| `era-engine/src/reader.rs` | 2313 | Archive extraction pipeline |
-| `era-engine/src/block_iter.rs` | 1699 | 4 iterator types, virtual striping |
-| `era-engine/src/repair.rs` | 1451 | RS-based shard recovery |
+| `era-engine/src/writer.rs` | 2710 | Archive creation pipeline |
+| `era-engine/src/reader.rs` | 2412 | Archive extraction pipeline |
+| `bins/era-cli/src/commands.rs` | 2039 | CLI command implementations |
+| `era-engine/src/block_iter.rs` | 1729 | 4 iterator types, virtual striping |
+| `era-engine/src/repair.rs` | 1529 | RS-based shard recovery |
 | `era-index/src/reader.rs` | 1269 | Bloom + L1/L2 index lookup |
-| `era-volume/src/header.rs` | 1225 | SuperHeader, RecipientSlot, KeyWrap |
+| `era-volume/src/header.rs` | 1231 | SuperHeader, RecipientSlot, KeyWrap |
 | `era-volume/src/volume_pool.rs` | 1199 | Volume rotation, matrix distribution |
-| `era-engine/src/checkpoint.rs` | 927 | WAL-based binary checkpoints (v2.2+) |
+| `era-engine/src/checkpoint.rs` | 929 | WAL-based binary checkpoints (v2.2+) |
 
 ## TEST ORG
 

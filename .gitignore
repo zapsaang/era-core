@@ -35,6 +35,7 @@ fuzz/
 **/bench_data/
 **/test_shell/
 .sisyphus/
+.opencode/
 .cross-review/
 .tmp*
 tmp*

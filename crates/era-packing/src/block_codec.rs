@@ -9,7 +9,7 @@
 
 use bytes::Bytes;
 use era_codec::Compressor;
-use era_common::{BlockChunkIndex, BlockId, EraError, Result};
+use era_common::{BlockChunkIndex, BlockId, BlockType, EraError, Result};
 use era_crypto::DerivedKey;
 
 pub struct DecryptContext<'a> {
@@ -42,13 +42,31 @@ pub fn decrypt_and_decompress(
     encrypted_data: &[u8],
     compressor: &dyn Compressor,
 ) -> Result<(BlockChunkIndex, Bytes)> {
+    decrypt_and_decompress_for_type(
+        context,
+        block_id,
+        BlockType::Data,
+        encrypted_data,
+        compressor,
+    )
+}
+
+/// Decrypt and decompress a typed block with unified error handling.
+pub fn decrypt_and_decompress_for_type(
+    context: &DecryptContext<'_>,
+    block_id: BlockId,
+    block_type: BlockType,
+    encrypted_data: &[u8],
+    compressor: &dyn Compressor,
+) -> Result<(BlockChunkIndex, Bytes)> {
     // Decrypt
-    let compressed = era_crypto::decrypt_with_context(
+    let compressed = era_crypto::decrypt_with_context_for_type(
         context.key,
         context.nonce_context,
         &context.block_context.archive_id,
         context.block_context.epoch_id,
         context.block_context.volume_index,
+        block_type,
         block_id,
         encrypted_data,
     )?;

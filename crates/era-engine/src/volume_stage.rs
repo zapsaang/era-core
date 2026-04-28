@@ -6,8 +6,10 @@
 //! This module is part of the God Object decomposition effort (Phase 2).
 
 use era_common::{
-    BlockLocation, BlockType, EncryptedMacroBlock, EraError, MatrixShardEntry, Result, VolumeId,
+    BlockId, BlockLocation, BlockType, EncryptedMacroBlock, EraError, MatrixShardEntry, Result,
+    VolumeId,
 };
+use era_crypto::encrypt_with_context_for_type;
 use era_storage::StorageBackend;
 use era_volume::{VolumePool, VolumePoolStats, VolumeWriter};
 
@@ -69,6 +71,18 @@ impl<B: StorageBackend> VolumeStage<B> {
     /// Check whether a canonical block would force volume expansion/rotation.
     pub fn needs_expansion(&self, required_size: u64) -> Result<bool> {
         self.pool.needs_expansion(required_size)
+    }
+
+    /// Precheck typed-block fanout space and rotate volumes if needed.
+    pub async fn precheck_and_rotate_if_needed(
+        &mut self,
+        catalog_size: u64,
+        index_size: u64,
+        manifest_size: u64,
+    ) -> Result<bool> {
+        self.pool
+            .precheck_and_rotate_if_needed(catalog_size, index_size, manifest_size)
+            .await
     }
 
     /// Write a single canonical block (non-erasure path).
@@ -223,9 +237,12 @@ impl<B: StorageBackend> VolumeStage<B> {
                         .write_canonical_block(block, BlockType::Catalog)
                         .await?;
 
+                    let block_id = u32::try_from(block.block_id.sequence()).map_err(|_| {
+                        EraError::Other("Block sequence ID exceeds u32::MAX".into())
+                    })?;
+                    location.slot_index = block_id;
+
                     if i == 0 {
-                        // AEAD key derivation requires logical block_id, not physical slot_index
-                        location.slot_index = first_block_id;
                         first_location = Some(location);
                     }
                 }
@@ -251,6 +268,211 @@ impl<B: StorageBackend> VolumeStage<B> {
         Ok(catalog_locations)
     }
 
+    /// Write already re-bound catalog block sets to every volume.
+    ///
+    /// Each entry in `blocks_by_volume` must contain the same logical catalog
+    /// block IDs encrypted with that target volume's sequence in nonce/AAD.
+    pub async fn write_catalog_block_sets_to_all(
+        &mut self,
+        blocks_by_volume: &[Vec<EncryptedMacroBlock>],
+        backup_blocks_by_volume: Option<&[Vec<EncryptedMacroBlock>]>,
+    ) -> Result<Vec<(u64, u32, u32)>> {
+        let volume_count = self.pool.volume_count();
+        if volume_count == 0 {
+            return Err(EraError::Other(
+                "No writable volumes available for catalog fanout".into(),
+            ));
+        }
+        if blocks_by_volume.len() != volume_count {
+            return Err(EraError::InvalidConfig(format!(
+                "catalog block-set count {} does not match volume count {}",
+                blocks_by_volume.len(),
+                volume_count
+            )));
+        }
+        if let Some(backup_sets) = backup_blocks_by_volume {
+            if backup_sets.len() != volume_count {
+                return Err(EraError::InvalidConfig(format!(
+                    "catalog backup block-set count {} does not match volume count {}",
+                    backup_sets.len(),
+                    volume_count
+                )));
+            }
+        }
+
+        let mut catalog_locations = Vec::with_capacity(volume_count);
+        for slot in 0..volume_count {
+            let blocks = &blocks_by_volume[slot];
+            if blocks.is_empty() {
+                return Err(EraError::Other(format!(
+                    "No catalog blocks to write for volume slot {slot}"
+                )));
+            }
+
+            let Some(writer) = self.pool.get_writer_mut(slot) else {
+                return Err(EraError::Other(format!(
+                    "Missing catalog writer slot {slot} while writing catalog fanout"
+                )));
+            };
+
+            let first_block_id = u32::try_from(blocks[0].block_id.sequence())
+                .map_err(|_| EraError::Other("Block sequence ID exceeds u32::MAX".into()))?;
+            let mut first_location = None;
+
+            for (i, block) in blocks.iter().enumerate() {
+                let mut location = writer
+                    .write_canonical_block(block, BlockType::Catalog)
+                    .await?;
+                location.slot_index = u32::try_from(block.block_id.sequence())
+                    .map_err(|_| EraError::Other("Block sequence ID exceeds u32::MAX".into()))?;
+                if i == 0 {
+                    first_location = Some(location);
+                }
+            }
+
+            if let Some(backup_sets) = backup_blocks_by_volume {
+                for backup in &backup_sets[slot] {
+                    let mut location = writer
+                        .write_canonical_block(backup, BlockType::Catalog)
+                        .await?;
+                    location.slot_index =
+                        u32::try_from(backup.block_id.sequence()).map_err(|_| {
+                            EraError::Other("Block sequence ID exceeds u32::MAX".into())
+                        })?;
+                }
+            }
+
+            let loc =
+                first_location.ok_or_else(|| EraError::Other("No catalog block written".into()))?;
+            catalog_locations.push((loc.physical_offset, loc.encrypted_size, first_block_id));
+        }
+
+        Ok(catalog_locations)
+    }
+
+    /// Write one pre-encrypted manifest block to each volume.
+    pub async fn write_manifest_to_all(
+        &mut self,
+        blocks: &[EncryptedMacroBlock],
+    ) -> Result<Vec<(u64, u32, u32)>> {
+        let volume_count = self.pool.volume_count();
+        if volume_count == 0 {
+            return Err(EraError::Other(
+                "No writable volumes available for manifest fanout".into(),
+            ));
+        }
+        if blocks.len() != volume_count {
+            return Err(EraError::InvalidConfig(format!(
+                "manifest block count {} does not match volume count {}",
+                blocks.len(),
+                volume_count
+            )));
+        }
+
+        let mut manifest_locations = Vec::with_capacity(volume_count);
+        for (slot, block) in blocks.iter().enumerate() {
+            let block_id = u32::try_from(block.block_id.sequence())
+                .map_err(|_| EraError::Other("Block sequence ID exceeds u32::MAX".into()))?;
+
+            let Some(writer) = self.pool.get_writer_mut(slot) else {
+                return Err(EraError::Other(format!(
+                    "Missing manifest writer slot {slot} while writing manifest fanout"
+                )));
+            };
+
+            let mut location = writer
+                .write_canonical_block(block, BlockType::Manifest)
+                .await?;
+            location.slot_index = block_id;
+            manifest_locations.push((location.physical_offset, location.encrypted_size, block_id));
+        }
+
+        Ok(manifest_locations)
+    }
+
+    /// Write index block fanout to volumes 1..N-1.
+    ///
+    /// Volume 0 is assumed to have already been written by the caller
+    /// (typically via `IndexBuilder::finalize_with_starting_block_id`).
+    /// This method re-encrypts the same plaintext for each remaining volume
+    /// using per-volume nonces to ensure proper AEAD context binding.
+    ///
+    /// # Arguments
+    /// * `index_plaintext` - The serialized MetaIndex plaintext bytes
+    /// * `index_block_id` - The logical block ID used for key derivation
+    /// * `session` - KeySession for block key derivation
+    /// * `volume_key` - VolumeKey for block key derivation
+    /// * `nonce_context` - 16-byte nonce context for per-volume nonce derivation
+    /// * `archive_id` - 16-byte archive ID for AAD binding
+    /// * `epoch_id` - Epoch ID for AAD binding
+    ///
+    /// # Returns
+    /// Per-volume locations for slots 1..N-1 as `(offset, size, block_id)` tuples.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_index_fanout(
+        &mut self,
+        index_plaintext: &[u8],
+        index_block_id: u32,
+        session: &era_crypto::KeySession,
+        volume_key: &era_crypto::VolumeKey,
+        nonce_context: &[u8; 16],
+        archive_id: &[u8; 16],
+        epoch_id: u32,
+    ) -> Result<Vec<(u64, u32, u32)>> {
+        let volume_count = self.pool.volume_count();
+        if volume_count <= 1 {
+            return Ok(Vec::new());
+        }
+
+        let block_key =
+            session.derive_block_key(volume_key, u64::from(index_block_id), nonce_context)?;
+        let derived_key = block_key.to_derived_key()?;
+        let original_size = u32::try_from(index_plaintext.len())
+            .map_err(|_| EraError::Other("MetaIndex size exceeds u32::MAX".into()))?;
+
+        let mut locations = Vec::with_capacity(volume_count - 1);
+
+        for slot in 1..volume_count {
+            let Some(writer) = self.pool.get_writer_mut(slot) else {
+                return Err(EraError::Other(format!(
+                    "Missing index writer slot {slot} while writing index fanout"
+                )));
+            };
+
+            let volume_index = u32::from(writer.volume_sequence());
+            let encrypted_data = encrypt_with_context_for_type(
+                &derived_key,
+                nonce_context,
+                archive_id,
+                epoch_id,
+                volume_index,
+                BlockType::IndexManifest,
+                BlockId::new(u64::from(index_block_id)),
+                index_plaintext,
+            )?;
+
+            let encrypted_index_block = EncryptedMacroBlock {
+                block_id: BlockId::new(u64::from(index_block_id)),
+                data: encrypted_data,
+                original_size,
+                compressed_size: original_size,
+                chunk_count: 0,
+            };
+
+            let mut location = writer
+                .write_canonical_block(&encrypted_index_block, BlockType::IndexManifest)
+                .await?;
+            location.slot_index = index_block_id;
+            locations.push((
+                location.physical_offset,
+                location.encrypted_size,
+                index_block_id,
+            ));
+        }
+
+        Ok(locations)
+    }
+
     /// Finalize all volumes with catalog location information.
     ///
     /// This writes footers to all volumes and closes them.
@@ -268,6 +490,22 @@ impl<B: StorageBackend> VolumeStage<B> {
     ) -> Result<VolumePoolStats> {
         self.pool
             .finalize_with_catalogs(catalog_locations, index_locations)
+            .await
+    }
+
+    /// Finalize all volumes with catalog, index, and manifest location information.
+    pub async fn finalize_with_manifest(
+        &mut self,
+        catalog_locations: &[(u64, u32, u32)],
+        index_locations: Option<&[(u64, u32, u32)]>,
+        manifest_locations: Option<&[(u64, u32, u32)]>,
+    ) -> Result<VolumePoolStats> {
+        self.pool
+            .finalize_with_catalogs_and_manifest(
+                catalog_locations,
+                index_locations,
+                manifest_locations,
+            )
             .await
     }
 

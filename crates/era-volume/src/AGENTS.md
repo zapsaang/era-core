@@ -1,6 +1,6 @@
 # Volume Source
 
-Physical volume format v8.1 and multi-volume management. L2.
+Physical volume format v8.2 and multi-volume management. L2.
 
 ## FILES
 
@@ -13,10 +13,10 @@ Physical volume format v8.1 and multi-volume management. L2.
 | `multi_volume.rs` | 671 | MultiVolumeReader, MultiVolumeWriter — multi-disk coordination |
 | `volume_pool.rs` | 1199 | Volume pool — rotation state machine, matrix shard distribution, space tracking |
 
-## VOLUME FORMAT v8.1
+## VOLUME FORMAT v8.2
 
 ```
-┌─ Primary Header (4096B) ─── magic "ERA\x08\x01", archive_id, encrypted VK, recipient slots
+┌─ Primary Header (4096B) ─── magic "ERA\x08\x02", archive_id, encrypted VK, recipient slots
 ├─ Backup Footer (128B)
 ├─ Data Region ──────────── encrypted blocks with RS shards, V2.1 index pages
 ├─ Backup Header (4096B)

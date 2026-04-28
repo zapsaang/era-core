@@ -6,7 +6,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::aead_context::{AeadContext, NONCE_SIZE};
 use crate::{DerivedKey, XChaCha20Poly1305Context};
-use era_common::{BlockId, EraError, Result};
+use era_common::{BlockId, BlockType, EraError, Result};
 
 /// Size of the authentication tag in bytes (XChaCha20-Poly1305)
 pub const TAG_SIZE: usize = 16;
@@ -138,6 +138,31 @@ pub fn encrypt_with_context(
         .map(Bytes::from)
 }
 
+/// Encrypt typed metadata using XChaCha20-Poly1305 with explicit type-bound AAD.
+#[allow(clippy::too_many_arguments)]
+pub fn encrypt_with_context_for_type(
+    key: &DerivedKey,
+    nonce_context: &[u8; 16],
+    archive_id: &[u8; 16],
+    epoch_id: u32,
+    volume_index: u32,
+    block_type: BlockType,
+    block_id: BlockId,
+    plaintext: &[u8],
+) -> Result<Bytes> {
+    XChaCha20Poly1305Context::from_derived_key(key)?
+        .encrypt_with_context_for_type(
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            block_type,
+            block_id,
+            plaintext,
+        )
+        .map(Bytes::from)
+}
+
 /// Decrypt data using XChaCha20-Poly1305
 pub fn decrypt_with_context(
     key: &DerivedKey,
@@ -154,6 +179,31 @@ pub fn decrypt_with_context(
             archive_id,
             epoch_id,
             volume_index,
+            block_id,
+            ciphertext,
+        )
+        .map(Bytes::from)
+}
+
+/// Decrypt typed metadata using XChaCha20-Poly1305 with explicit type-bound AAD.
+#[allow(clippy::too_many_arguments)]
+pub fn decrypt_with_context_for_type(
+    key: &DerivedKey,
+    nonce_context: &[u8; 16],
+    archive_id: &[u8; 16],
+    epoch_id: u32,
+    volume_index: u32,
+    block_type: BlockType,
+    block_id: BlockId,
+    ciphertext: &[u8],
+) -> Result<Bytes> {
+    XChaCha20Poly1305Context::from_derived_key(key)?
+        .decrypt_with_context_for_type(
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            block_type,
             block_id,
             ciphertext,
         )

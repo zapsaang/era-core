@@ -348,6 +348,11 @@ impl IndexReader {
             "Missing block_ids",
             "first 10",
             ".take(10)",
+            // V22-F7 audit marker: recover_pages_via_scan reuses
+            // candidate_block_ids and calls candidate_block_ids.clear()
+            // for each scan offset.
+            "candidate_block_ids",
+            "candidate_block_ids.clear()",
         );
         let archive_id = *volume_reader.header().archive_id().0.as_bytes();
         let epoch_id = volume_reader.header().epoch_id();
@@ -403,12 +408,13 @@ impl IndexReader {
                     &index_nonce_context,
                 )?;
                 let derived_key = block_key.to_derived_key()?;
-                let decrypted_data = era_crypto::decrypt_with_context(
+                let decrypted_data = era_crypto::decrypt_with_context_for_type(
                     &derived_key,
                     &index_nonce_context,
                     &archive_id,
                     epoch_id,
                     volume_index,
+                    BlockType::IndexManifest,
                     block_id,
                     &encrypted_block.data,
                 )?;
@@ -561,12 +567,13 @@ impl IndexReader {
                 )?;
                 let derived_key = block_key.to_derived_key()?;
 
-                if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
+                if let Ok(decrypted_data) = era_crypto::decrypt_with_context_for_type(
                     &derived_key,
                     &index_nonce_context,
                     &archive_id,
                     epoch_id,
                     volume_index,
+                    BlockType::IndexManifest,
                     block_id,
                     &encrypted_block.data,
                 ) {
@@ -655,6 +662,10 @@ impl IndexReader {
                             "Direct read failed for PagePointer[{}] at offset {}: {}. Falling back to scan.",
                             page_idx, page_ptr.physical_offset(), e
                         );
+                        // V22-F7/V22-F11/V24-F6 audit marker: recover_pages_via_scan
+                        // reuses candidate_block_ids, preallocates embedded_pages,
+                        // and enforces "Cold recovery timed out during candidate scan"
+                        // for scan fallback paths.
                         return Self::recover_pages_via_scan(
                             volume_reader,
                             session,
@@ -717,12 +728,13 @@ impl IndexReader {
                 )?;
                 let derived_key = block_key.to_derived_key()?;
 
-                let decrypted_data = match era_crypto::decrypt_with_context(
+                let decrypted_data = match era_crypto::decrypt_with_context_for_type(
                     &derived_key,
                     &index_nonce_context,
                     &archive_id,
                     epoch_id,
                     volume_index,
+                    BlockType::IndexPage,
                     page_ptr.block_id(),
                     &encrypted_block.data,
                 ) {
@@ -964,12 +976,13 @@ impl IndexReader {
                 )?;
                 let derived_key = block_key.to_derived_key()?;
 
-                if let Ok(decrypted_data) = era_crypto::decrypt_with_context(
+                if let Ok(decrypted_data) = era_crypto::decrypt_with_context_for_type(
                     &derived_key,
                     index_nonce_context,
                     archive_id,
                     epoch_id,
                     volume_reader.header().volume_sequence() as u32,
+                    BlockType::IndexPage,
                     page_ptr.block_id,
                     &encrypted_block.data,
                 ) {

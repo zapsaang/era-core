@@ -903,7 +903,12 @@ impl ArchiveReader {
             {
                 Ok(encrypted_block) => {
                     let unpacker = self.create_unpacker();
-                    match unpacker.unpack(&encrypted_block, 0) {
+                    let volume_index = u32::from(reader.header().volume_sequence());
+                    match unpacker.unpack_with_type(
+                        &encrypted_block,
+                        volume_index,
+                        era_common::BlockType::Catalog,
+                    ) {
                         Ok(chunks) => {
                             if chunks.index.entries.is_empty() {
                                 last_error = Some(EraError::EmptyCatalog);
@@ -1020,7 +1025,13 @@ impl ArchiveReader {
                         .await?;
 
                     let block_unpacker = self.create_unpacker();
-                    let block_chunks = block_unpacker.unpack(&enc_block, 0)?;
+                    let volume_index =
+                        u32::from(self.volume_readers[reader_idx].header().volume_sequence());
+                    let block_chunks = block_unpacker.unpack_with_type(
+                        &enc_block,
+                        volume_index,
+                        era_common::BlockType::Catalog,
+                    )?;
 
                     if block_chunks.index.entries.is_empty() {
                         return Err(EraError::IntegrityError(format!(

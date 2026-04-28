@@ -17,7 +17,8 @@
 use bytes::{BufMut, BytesMut};
 use era_codec::Compressor;
 use era_common::{
-    BlockChunkIndex, BlockId, ChunkIndexEntry, ChunkVec, EncryptedMacroBlock, Result, UniqueChunk,
+    BlockChunkIndex, BlockId, BlockType, ChunkIndexEntry, ChunkVec, EncryptedMacroBlock, Result,
+    UniqueChunk,
 };
 use era_crypto::{BlockKey, KeySession, VolumeKey};
 use std::cell::Cell;
@@ -116,10 +117,28 @@ impl<'a> SessionBlockBuilder<'a> {
         self.pack_chunks(vec![chunk])
     }
 
+    /// Pack a single typed metadata chunk into a MacroBlock.
+    pub fn pack_single_with_type(
+        &self,
+        chunk: UniqueChunk,
+        block_type: BlockType,
+    ) -> Result<EncryptedMacroBlock> {
+        self.pack_chunks_with_type(vec![chunk], block_type)
+    }
+
     /// Pack multiple chunks into a single MacroBlock with per-block key derivation.
     ///
     /// Each block is encrypted with a unique key derived via HKDF from the volume key.
     pub fn pack_chunks(&self, chunks: Vec<UniqueChunk>) -> Result<EncryptedMacroBlock> {
+        self.pack_chunks_with_type(chunks, BlockType::Data)
+    }
+
+    /// Pack multiple chunks into a typed MacroBlock with per-block key derivation.
+    pub fn pack_chunks_with_type(
+        &self,
+        chunks: Vec<UniqueChunk>,
+        block_type: BlockType,
+    ) -> Result<EncryptedMacroBlock> {
         let id = self.next_block_id.get();
         self.next_block_id.set(id + 1);
         let block_id = BlockId::new(id);
@@ -162,12 +181,13 @@ impl<'a> SessionBlockBuilder<'a> {
 
         // 5. Encrypt with the per-block key
         let derived_key = block_key.to_derived_key()?;
-        let encrypted = era_crypto::encrypt_with_context(
+        let encrypted = era_crypto::encrypt_with_context_for_type(
             &derived_key,
             &self.nonce_context,
             &self.archive_id,
             self.epoch_id,
             self.volume_index,
+            block_type,
             block_id,
             &compressed,
         )?;
@@ -239,6 +259,16 @@ impl<'a> SessionBlockUnpacker<'a> {
         block: &EncryptedMacroBlock,
         volume_index: u32,
     ) -> Result<crate::unpacker::UnpackedBlock> {
+        self.unpack_with_type(block, volume_index, BlockType::Data)
+    }
+
+    /// Decrypt and decompress a typed MacroBlock, returning raw data and index.
+    pub fn unpack_with_type(
+        &self,
+        block: &EncryptedMacroBlock,
+        volume_index: u32,
+        block_type: BlockType,
+    ) -> Result<crate::unpacker::UnpackedBlock> {
         let block_key = self.derive_block_key(block.block_id)?;
         let derived_key = block_key.to_derived_key()?;
         let decrypt_context = crate::DecryptContext {
@@ -251,9 +281,10 @@ impl<'a> SessionBlockUnpacker<'a> {
             },
         };
 
-        let (index, data) = crate::block_codec::decrypt_and_decompress(
+        let (index, data) = crate::block_codec::decrypt_and_decompress_for_type(
             &decrypt_context,
             block.block_id,
+            block_type,
             &block.data,
             self.compressor.as_ref(),
         )?;

@@ -64,6 +64,8 @@ pub struct WritePipeline<B: StorageBackend> {
     /// Cached erasure coder: (data_shards, parity_shards, coder)
     /// Reused across stripes with matching RS parameters
     cached_erasure_coder: Option<(usize, usize, ErasureCoder)>,
+    /// Logical block locations written by this pipeline.
+    written_blocks: Vec<BlockLocation>,
 }
 
 impl<B: StorageBackend> WritePipeline<B> {
@@ -92,6 +94,7 @@ impl<B: StorageBackend> WritePipeline<B> {
             distribution_strategy,
             pending_erasure_shard_index: 0,
             cached_erasure_coder: None,
+            written_blocks: Vec::new(),
         }
     }
 
@@ -170,10 +173,12 @@ impl<B: StorageBackend> WritePipeline<B> {
             }
         } else {
             // Non-erasure path: write directly
-            let (location, _volume_id) = self
+            let (mut location, _volume_id) = self
                 .volume
                 .write_block(&encrypted_block, BlockType::Data)
                 .await?;
+            location.slot_index = encrypted_block.block_id.sequence() as u32;
+            self.written_blocks.push(location.clone());
 
             // Update index for all hashes
             for hash in hashes {
@@ -205,6 +210,7 @@ impl<B: StorageBackend> WritePipeline<B> {
     #[allow(clippy::needless_range_loop)]
     async fn flush_stripe_internal(&mut self, stripe: Stripe) -> Result<()> {
         let volume_count = self.volume.volume_count();
+        let written_blocks_start = self.written_blocks.len();
 
         if volume_count == 0 {
             return Err(era_common::EraError::Io(std::io::Error::other(
@@ -298,7 +304,8 @@ impl<B: StorageBackend> WritePipeline<B> {
                     entry.physical_offset,
                     block.data.len() as u32,
                 );
-                locations.push(loc);
+                locations.push(loc.clone());
+                self.written_blocks.push(loc);
                 data_info.push((entry.volume_sequence, entry.physical_offset));
             } else {
                 // Write padding block
@@ -334,6 +341,7 @@ impl<B: StorageBackend> WritePipeline<B> {
         self.volume.advance_block_sequence();
 
         // Update index for data blocks with stripe information
+        let mut erasure_written_blocks = Vec::with_capacity(stripe.block_meta.len());
         for (i, meta) in stripe.block_meta.iter().enumerate() {
             let base = &locations[i];
 
@@ -367,12 +375,16 @@ impl<B: StorageBackend> WritePipeline<B> {
                 shard_offsets,
                 shard_volumes,
             )?;
+            erasure_written_blocks.push(loc.clone());
 
             // Update index for all chunk hashes in this block
             for hash in &meta.chunk_hashes {
                 self.index.record_location(*hash, loc.clone())?;
             }
         }
+
+        self.written_blocks.truncate(written_blocks_start);
+        self.written_blocks.extend(erasure_written_blocks);
 
         Ok(())
     }
@@ -441,6 +453,7 @@ impl<B: StorageBackend> WritePipeline<B> {
         let archive_id = self.encryption.archive_id();
         let epoch_id = self.encryption.epoch_id();
 
+        let block_id = self.encryption.next_block_id()?;
         mgr.commit_to_volume(
             writer,
             session,
@@ -448,6 +461,7 @@ impl<B: StorageBackend> WritePipeline<B> {
             nonce_context,
             archive_id,
             epoch_id,
+            block_id,
         )
         .await?;
 
@@ -459,12 +473,33 @@ impl<B: StorageBackend> WritePipeline<B> {
         self.encryption.blocks_written()
     }
 
+    pub fn advance_block_id(&self, n: u64) -> Result<()> {
+        self.encryption.advance_block_id(n)
+    }
+
+    pub fn reserve_block_id(&self) -> Result<u64> {
+        self.encryption.next_block_id()
+    }
+
+    /// Get the block locations written by this pipeline.
+    #[allow(dead_code)]
+    pub fn written_block_locations(&self) -> &[BlockLocation] {
+        &self.written_blocks
+    }
+
+    /// Take the block locations written by this pipeline.
+    #[allow(dead_code)]
+    pub fn take_written_block_locations(&mut self) -> Vec<BlockLocation> {
+        std::mem::take(&mut self.written_blocks)
+    }
+
     /// Get a reference to the encryption context.
     pub fn encryption(&self) -> &EncryptionContext {
         &self.encryption
     }
 
     /// Get a mutable reference to the encryption context.
+    #[allow(dead_code)]
     pub fn encryption_mut(&mut self) -> &mut EncryptionContext {
         &mut self.encryption
     }
@@ -677,5 +712,95 @@ mod tests {
         // Stripe complete, both chunks should be indexed
         assert!(pipeline.contains(&hash1).unwrap());
         assert!(pipeline.contains(&hash2).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_block_locations_tracking() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+
+        let config = VolumePoolConfig::new(&base_path, 1);
+        let header = create_test_header();
+        let pool = VolumePool::create(backend, config, header).await?;
+
+        let encryption = create_test_encryption();
+        let erasure = ErasureStage::disabled();
+        let volume = VolumeStage::new(pool);
+        let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
+        let compression = CompressionConfig::default();
+
+        let mut pipeline = WritePipeline::new(
+            encryption,
+            erasure,
+            volume,
+            index,
+            compression,
+            MatrixDistributionStrategy::default(),
+        );
+
+        assert!(pipeline.written_block_locations().is_empty());
+
+        pipeline
+            .process_chunks(vec![create_test_chunk(b"chunk-1")], vec![])
+            .await?;
+        pipeline
+            .process_chunks(vec![create_test_chunk(b"chunk-2")], vec![])
+            .await?;
+        pipeline
+            .process_chunks(vec![create_test_chunk(b"chunk-3")], vec![])
+            .await?;
+
+        let locations = pipeline.written_block_locations();
+        assert_eq!(locations.len(), 3);
+        assert!(locations
+            .iter()
+            .all(|location| { location.physical_offset > 0 && location.encrypted_size > 0 }));
+
+        let taken_locations = pipeline.take_written_block_locations();
+        assert_eq!(taken_locations.len(), 3);
+        assert!(pipeline.written_block_locations().is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_block_locations_tracking_erasure() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+
+        let erasure_config = ErasureCodeConfig::new(2, 1);
+        let config = VolumePoolConfig::new(&base_path, 3).for_erasure(erasure_config);
+        let header = create_test_header();
+        let pool = VolumePool::create(backend, config, header).await?;
+
+        let encryption = create_test_encryption();
+        let erasure = ErasureStage::new(Some(erasure_config))?;
+        let volume = VolumeStage::new(pool);
+        let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
+        let compression = CompressionConfig::default();
+
+        let mut pipeline = WritePipeline::new(
+            encryption,
+            erasure,
+            volume,
+            index,
+            compression,
+            MatrixDistributionStrategy::default(),
+        );
+
+        assert!(pipeline.written_block_locations().is_empty());
+
+        pipeline
+            .process_chunks(vec![create_test_chunk(b"Chunk 1 data")], vec![])
+            .await?;
+        pipeline
+            .process_chunks(vec![create_test_chunk(b"Chunk 2 data")], vec![])
+            .await?;
+
+        assert_eq!(pipeline.written_block_locations().len(), 2);
+
+        Ok(())
     }
 }

@@ -17,14 +17,17 @@
 use crate::auth::PasswordSlotParams;
 use bytes::Bytes;
 use era_common::{
-    ArchiveConfig, ArchiveId, ChunkHash, EncryptedMacroBlock, EraError, ErasureCodeConfig,
-    MatrixDistributionStrategy, Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, ArchiveManifest, BlockId, ChunkHash, EncryptedMacroBlock, EraError,
+    ErasureCodeConfig, MatrixDistributionStrategy, Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::hybrid_certificate::{HybridCertificate, HybridKeyPair};
 use era_crypto::Nonce;
-use era_crypto::{AeadContext, XChaCha20Poly1305Context};
-use era_crypto::{KdfParams, KeySession, Salt};
+use era_crypto::{
+    build_aad, compute_catalog_commitment, compute_index_commitment,
+    derive_nonce_with_volume_index, AeadContext, KdfParams, KeySession, Salt,
+    XChaCha20Poly1305Context, NONCE_SIZE,
+};
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
 use era_packing::{PackedBlock, PackedChunk};
 use era_storage::LocalStorageBackend;
@@ -43,6 +46,8 @@ use zeroize::Zeroizing;
 
 const INTERNAL_META_PREFIX: &str = ".era/meta/";
 
+type CatalogBlockSets = Vec<Vec<EncryptedMacroBlock>>;
+
 use crate::checkpoint::CheckpointManager;
 use crate::chunk_index::{create_chunk_index_with_context, ChunkIndex};
 use crate::encryption_context::EncryptionContext;
@@ -51,6 +56,7 @@ use crate::index_stage::IndexStage;
 use crate::packing_stage::PackingStage;
 use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
+use crate::sequence::INITIAL_FINALIZE_SEQUENCE;
 use crate::small_file_packer::{SmallFileEntry, SmallFilePacker};
 use crate::volume_stage::VolumeStage;
 use crate::write_pipeline::WritePipeline;
@@ -1128,6 +1134,7 @@ impl ArchiveWriterBuilder {
             },
             pipeline,
             pending_hashes: HashSet::new(),
+            finalize_sequence: INITIAL_FINALIZE_SEQUENCE,
         })
     }
 }
@@ -1180,6 +1187,8 @@ pub struct ArchiveWriter {
     pipeline: WritePipeline<LocalStorageBackend>,
 
     pending_hashes: HashSet<ChunkHash>,
+
+    finalize_sequence: u64,
 }
 
 /// Recursively collect file paths using async I/O.
@@ -1221,6 +1230,194 @@ impl ArchiveWriter {
 
     fn contains_or_pending(&self, hash: &ChunkHash) -> Result<bool> {
         Ok(self.pipeline.contains(hash)? || self.pending_hashes.contains(hash))
+    }
+
+    fn build_manifest(
+        &self,
+        catalog_bytes: &[u8],
+        index_bytes: &[u8],
+        committed_horizon: u64,
+    ) -> Result<ArchiveManifest> {
+        let catalog_commitment = compute_catalog_commitment(catalog_bytes);
+        let index_commitment = compute_index_commitment(index_bytes);
+        let epoch_id = self.pipeline.encryption().epoch_id();
+
+        Ok(ArchiveManifest::new(
+            epoch_id,
+            self.finalize_sequence,
+            committed_horizon,
+            catalog_commitment,
+            index_commitment,
+        ))
+    }
+
+    fn encrypt_manifest_for_volume(
+        &self,
+        manifest_bytes: &[u8],
+        volume_index: u32,
+        block_id: u64,
+        aead_ctx: &XChaCha20Poly1305Context,
+    ) -> Result<EncryptedMacroBlock> {
+        let nonce_context = self.pipeline.encryption().nonce_context();
+        let nonce =
+            derive_nonce_with_volume_index(&nonce_context, BlockId::new(block_id), volume_index);
+
+        let archive_id = self.pipeline.encryption().archive_id();
+        let epoch_id = self.pipeline.encryption().epoch_id();
+
+        let aad = build_aad(
+            &archive_id,
+            epoch_id,
+            era_common::BlockType::Manifest,
+            volume_index,
+            BlockId::new(block_id),
+        );
+
+        let ciphertext = aead_ctx.encrypt(&nonce, &aad, manifest_bytes)?;
+
+        let original_size = u32::try_from(manifest_bytes.len())
+            .map_err(|_| EraError::Other("Manifest size exceeds u32::MAX".into()))?;
+
+        let mut data = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+        data.extend_from_slice(&nonce);
+        data.extend_from_slice(&ciphertext);
+
+        Ok(EncryptedMacroBlock {
+            block_id: BlockId::new(block_id),
+            data: Bytes::from(data),
+            original_size,
+            compressed_size: original_size,
+            chunk_count: 1,
+        })
+    }
+
+    fn block_disk_size(block: &EncryptedMacroBlock) -> u64 {
+        block.data.len() as u64 + era_common::BlockHeader::SIZE as u64
+    }
+
+    fn block_set_disk_size(blocks: &[EncryptedMacroBlock]) -> u64 {
+        blocks.iter().map(Self::block_disk_size).sum()
+    }
+
+    fn typed_plaintext_disk_size(plaintext_len: usize) -> Result<u64> {
+        let encrypted_len = plaintext_len
+            .checked_add(NONCE_SIZE)
+            .and_then(|n| n.checked_add(era_crypto::TAG_SIZE))
+            .ok_or_else(|| EraError::Other("typed block size overflow".into()))?;
+        u64::try_from(encrypted_len)
+            .map_err(|_| EraError::Other("typed block size exceeds u64::MAX".into()))?
+            .checked_add(era_common::BlockHeader::SIZE as u64)
+            .ok_or_else(|| EraError::Other("typed block disk size overflow".into()))
+    }
+
+    fn current_volume_indices(&self) -> Result<Vec<u32>> {
+        let volume_count = self.pipeline.volume().pool().volume_count();
+        if volume_count == 0 {
+            return Err(EraError::InvalidConfig(
+                "No writable volumes available for archive finalization".into(),
+            ));
+        }
+
+        (0..volume_count)
+            .map(|slot| {
+                self.pipeline
+                    .volume()
+                    .pool()
+                    .volume_sequence(slot)
+                    .map(u32::from)
+                    .ok_or_else(|| {
+                        EraError::InvalidConfig(format!(
+                            "Missing volume sequence for slot {}",
+                            slot
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    fn build_catalog_block_sets(
+        &self,
+        chunks: &[(Bytes, ChunkHash)],
+        catalog_block_ids: &[u64],
+        backup_block_ids: Option<&[u64]>,
+        volume_indices: &[u32],
+    ) -> Result<(CatalogBlockSets, Option<CatalogBlockSets>)> {
+        if chunks.is_empty() {
+            return Err(EraError::Other("No catalog chunks to encrypt".into()));
+        }
+        if volume_indices.is_empty() {
+            return Err(EraError::InvalidConfig(
+                "No target volume indices available for catalog encryption".into(),
+            ));
+        }
+        if catalog_block_ids.len() != chunks.len() {
+            return Err(EraError::InvalidConfig(format!(
+                "catalog block id count {} does not match chunk count {}",
+                catalog_block_ids.len(),
+                chunks.len()
+            )));
+        }
+        if let Some(ids) = backup_block_ids {
+            if ids.len() != chunks.len() {
+                return Err(EraError::InvalidConfig(format!(
+                    "backup catalog block id count {} does not match chunk count {}",
+                    ids.len(),
+                    chunks.len()
+                )));
+            }
+        }
+
+        let mut catalog_blocks_by_volume: Vec<Vec<EncryptedMacroBlock>> = volume_indices
+            .iter()
+            .map(|_| Vec::with_capacity(chunks.len()))
+            .collect();
+
+        for ((chunk_data, hash), logical_block_id) in chunks.iter().zip(catalog_block_ids) {
+            for (slot, volume_index) in volume_indices.iter().copied().enumerate() {
+                let chunk = UniqueChunk::new(chunk_data.clone(), *hash);
+                let compressor = self.pipeline.create_compressor();
+                let builder = self
+                    .pipeline
+                    .encryption()
+                    .create_block_builder_with_block_id(
+                        compressor,
+                        volume_index,
+                        *logical_block_id,
+                    )?;
+                catalog_blocks_by_volume[slot]
+                    .push(builder.pack_single_with_type(chunk, era_common::BlockType::Catalog)?);
+            }
+        }
+
+        let backup_blocks_by_volume = if let Some(ids) = backup_block_ids {
+            let mut backups_by_volume: Vec<Vec<EncryptedMacroBlock>> = volume_indices
+                .iter()
+                .map(|_| Vec::with_capacity(chunks.len()))
+                .collect();
+
+            for ((chunk_data, hash), logical_block_id) in chunks.iter().zip(ids) {
+                for (slot, volume_index) in volume_indices.iter().copied().enumerate() {
+                    let chunk = UniqueChunk::new(chunk_data.clone(), *hash);
+                    let compressor = self.pipeline.create_compressor();
+                    let builder = self
+                        .pipeline
+                        .encryption()
+                        .create_block_builder_with_block_id(
+                            compressor,
+                            volume_index,
+                            *logical_block_id,
+                        )?;
+                    backups_by_volume[slot].push(
+                        builder.pack_single_with_type(chunk, era_common::BlockType::Catalog)?,
+                    );
+                }
+            }
+            Some(backups_by_volume)
+        } else {
+            None
+        };
+
+        Ok((catalog_blocks_by_volume, backup_blocks_by_volume))
     }
 
     /// Get the archive ID
@@ -1815,6 +2012,8 @@ impl ArchiveWriter {
         self.flush_pending().await?;
         self.pipeline.flush_stripe().await?;
 
+        self.catalog.block_locations = self.pipeline.take_written_block_locations();
+
         self.pipeline.commit_durable_checkpoint().await?;
         debug!("Durable checkpoint committed before catalog write");
 
@@ -1832,104 +2031,132 @@ impl ArchiveWriter {
         first_chunk_prefix.extend_from_slice(&(catalog_chunk_count as u32).to_le_bytes());
         first_chunk_prefix.extend_from_slice(&total_len.to_le_bytes());
 
-        let mut catalog_blocks = Vec::with_capacity(catalog_chunk_count);
-        let mut first_block_id = 0u32;
-
-        if catalog_bytes.is_empty() {
+        // Pre-chunk catalog data to avoid double iteration in erasure mode
+        let chunks: Vec<(Bytes, ChunkHash)> = if catalog_bytes.is_empty() {
             let chunk_data = Bytes::from(first_chunk_prefix.clone());
             let hash = era_crypto::hash(&chunk_data);
-            let chunk = UniqueChunk::new(chunk_data, hash);
-            self.pipeline.encryption_mut().set_volume_index(0);
-            let compressor = self.pipeline.create_compressor();
-            let builder = self
-                .pipeline
-                .encryption_mut()
-                .create_block_builder(compressor)?;
-            let block = builder.pack_single(chunk)?;
-            first_block_id = block.block_id.sequence() as u32;
-            catalog_blocks.push(block);
+            vec![(chunk_data, hash)]
         } else {
-            for (i, raw_chunk) in catalog_bytes.chunks(max_catalog_chunk).enumerate() {
-                let chunk_data = if i == 0 {
-                    let mut buf = Vec::with_capacity(first_chunk_prefix.len() + raw_chunk.len());
-                    buf.extend_from_slice(&first_chunk_prefix);
-                    buf.extend_from_slice(raw_chunk);
-                    Bytes::from(buf)
-                } else {
-                    Bytes::copy_from_slice(raw_chunk)
-                };
+            catalog_bytes
+                .chunks(max_catalog_chunk)
+                .enumerate()
+                .map(|(i, raw_chunk)| {
+                    let chunk_data = if i == 0 {
+                        let mut buf =
+                            Vec::with_capacity(first_chunk_prefix.len() + raw_chunk.len());
+                        buf.extend_from_slice(&first_chunk_prefix);
+                        buf.extend_from_slice(raw_chunk);
+                        Bytes::from(buf)
+                    } else {
+                        Bytes::copy_from_slice(raw_chunk)
+                    };
+                    let hash = era_crypto::hash(&chunk_data);
+                    (chunk_data, hash)
+                })
+                .collect()
+        };
 
-                let hash = era_crypto::hash(&chunk_data);
-                let chunk = UniqueChunk::new(chunk_data, hash);
-
-                self.pipeline.encryption_mut().set_volume_index(0);
-                let compressor = self.pipeline.create_compressor();
-                let builder = self
-                    .pipeline
-                    .encryption_mut()
-                    .create_block_builder(compressor)?;
-                let block = builder.pack_single(chunk)?;
-
-                if i == 0 {
-                    first_block_id = block.block_id.sequence() as u32;
-                }
-                catalog_blocks.push(block);
-            }
-        }
-
-        let catalog_block_id = first_block_id;
-
-        let backup_blocks: Option<Vec<EncryptedMacroBlock>> = if self.pipeline.erasure_enabled() {
-            let mut backups = Vec::with_capacity(catalog_blocks.len());
-            for (i, raw_chunk) in catalog_bytes.chunks(max_catalog_chunk).enumerate() {
-                let chunk_data = if i == 0 {
-                    let mut buf = Vec::with_capacity(first_chunk_prefix.len() + raw_chunk.len());
-                    buf.extend_from_slice(&first_chunk_prefix);
-                    buf.extend_from_slice(raw_chunk);
-                    Bytes::from(buf)
-                } else {
-                    Bytes::copy_from_slice(raw_chunk)
-                };
-                let hash = era_crypto::hash(&chunk_data);
-                let chunk = UniqueChunk::new(chunk_data, hash);
-                self.pipeline.encryption_mut().set_volume_index(0);
-                let compressor = self.pipeline.create_compressor();
-                let builder = self
-                    .pipeline
-                    .encryption_mut()
-                    .create_block_builder(compressor)?;
-                backups.push(builder.pack_single(chunk)?);
-            }
-            Some(backups)
+        let catalog_block_ids: Vec<u64> = (0..chunks.len())
+            .map(|_| self.pipeline.reserve_block_id())
+            .collect::<Result<_>>()?;
+        let backup_block_ids: Option<Vec<u64>> = if self.pipeline.erasure_enabled() {
+            Some(
+                (0..chunks.len())
+                    .map(|_| self.pipeline.reserve_block_id())
+                    .collect::<Result<_>>()?,
+            )
         } else {
             None
         };
+        let catalog_block_id = u32::try_from(catalog_block_ids[0])
+            .map_err(|_| EraError::Other("Catalog block ID exceeds u32::MAX".into()))?;
+
+        let committed_horizon = if let Some(last_location) = self.catalog.block_locations.last() {
+            last_location.physical_offset + u64::from(last_location.encrypted_size)
+        } else {
+            era_volume::DATA_REGION_START
+        };
+
+        let mut index_builder = self.pipeline.index().take_index_builder();
+        let index_total_size = if let Some(builder) = index_builder.as_mut() {
+            builder.estimated_finalized_disk_size()?
+        } else {
+            0
+        };
+
+        let provisional_manifest = self.build_manifest(&catalog_bytes, &[], committed_horizon)?;
+        let manifest_total_size =
+            Self::typed_plaintext_disk_size(provisional_manifest.to_bytes()?.len())?;
+
+        let mut volume_indices = self.current_volume_indices()?;
+        let (mut catalog_blocks_by_volume, mut backup_blocks_by_volume) = self
+            .build_catalog_block_sets(
+                &chunks,
+                &catalog_block_ids,
+                backup_block_ids.as_deref(),
+                &volume_indices,
+            )?;
+
+        let catalog_total_size = Self::block_set_disk_size(&catalog_blocks_by_volume[0])
+            + backup_blocks_by_volume
+                .as_ref()
+                .map(|sets| Self::block_set_disk_size(&sets[0]))
+                .unwrap_or(0);
+        let rotated = self
+            .pipeline
+            .volume_mut()
+            .precheck_and_rotate_if_needed(
+                catalog_total_size,
+                index_total_size,
+                manifest_total_size,
+            )
+            .await?;
+
+        if rotated {
+            volume_indices = self.current_volume_indices()?;
+            (catalog_blocks_by_volume, backup_blocks_by_volume) = self.build_catalog_block_sets(
+                &chunks,
+                &catalog_block_ids,
+                backup_block_ids.as_deref(),
+                &volume_indices,
+            )?;
+        }
 
         let catalog_locations = self
             .pipeline
             .volume_mut()
-            .write_catalog_blocks_to_all(&catalog_blocks, backup_blocks.as_deref())
+            .write_catalog_block_sets_to_all(
+                &catalog_blocks_by_volume,
+                backup_blocks_by_volume.as_deref(),
+            )
             .await?;
 
         debug!(
             "Catalog ({} blocks, block_id={}) written to {} volumes for full redundancy",
-            catalog_blocks.len(),
+            catalog_blocks_by_volume[0].len(),
             catalog_block_id,
             catalog_locations.len()
         );
 
-        // Finalize the V2.1 index: write typed index blocks to volume 0
-        let volume_count = self.pipeline.volume().pool().volume_count();
-        let index_locations = if let Some(mut builder) = self.pipeline.index().take_index_builder()
-        {
-            // Copy crypto params before taking mutable borrow on pipeline
+        // Finalize the V2.1 index: write the canonical index root to volume 0,
+        // then replicate the encrypted root block to the remaining volumes.
+        let volume_count = volume_indices.len();
+
+        let (index_locations, index_bytes) = if let Some(mut builder) = index_builder {
             let session = self.pipeline.encryption().session().try_clone()?;
             let volume_key = self.pipeline.encryption().volume_key().try_clone()?;
             let nonce_context = self.pipeline.encryption().nonce_context();
             let index_start_block_id = self.pipeline.blocks_written();
 
-            if let Some(writer) = self.pipeline.volume_mut().get_writer_mut(0) {
-                match builder
+            let finalize_result = {
+                let Some(writer) = self.pipeline.volume_mut().get_writer_mut(0) else {
+                    warn!("No volume writer available for index finalization");
+                    return Err(EraError::InvalidConfig(
+                        "No primary volume writer available for index finalization".into(),
+                    ));
+                };
+
+                builder
                     .finalize_with_starting_block_id(
                         writer,
                         &session,
@@ -1938,46 +2165,112 @@ impl ArchiveWriter {
                         index_start_block_id,
                     )
                     .await
-                {
-                    Ok((_meta_index, manifest_location)) => {
-                        let mut locs: Vec<(u64, u32, u32)> = Vec::with_capacity(volume_count);
-                        // Volume 0 gets the real location
-                        locs.push((
-                            manifest_location.physical_offset,
-                            manifest_location.encrypted_size,
-                            manifest_location.slot_index,
-                        ));
-                        // Other volumes get zeroed entries
-                        for _ in 1..volume_count {
-                            locs.push((0, 0, 0));
-                        }
-                        debug!(
-                            "V2.1 index finalized: manifest at offset={}, size={}, block_id={}",
-                            manifest_location.physical_offset,
-                            manifest_location.encrypted_size,
-                            manifest_location.slot_index,
-                        );
-                        Some(locs)
+            };
+
+            match finalize_result {
+                Ok((meta_index, manifest_location)) => {
+                    let index_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_index)
+                        .map_err(|e| EraError::Serialization(e.to_string()))?;
+                    let index_plaintext = index_bytes.to_vec();
+                    let index_block_id = manifest_location.slot_index;
+
+                    let index_blocks_consumed =
+                        u64::from(index_block_id).saturating_sub(index_start_block_id) + 1;
+                    self.pipeline.advance_block_id(index_blocks_consumed)?;
+
+                    let mut locations = Vec::with_capacity(volume_count);
+                    locations.push((
+                        manifest_location.physical_offset,
+                        manifest_location.encrypted_size,
+                        index_block_id,
+                    ));
+
+                    if volume_count > 1 {
+                        let archive_id = self.pipeline.encryption().archive_id();
+                        let epoch_id = self.pipeline.encryption().epoch_id();
+                        let fanout_locations = self
+                            .pipeline
+                            .volume_mut()
+                            .write_index_fanout(
+                                &index_plaintext,
+                                index_block_id,
+                                &session,
+                                &volume_key,
+                                &nonce_context,
+                                &archive_id,
+                                epoch_id,
+                            )
+                            .await?;
+                        locations.extend(fanout_locations);
                     }
-                    Err(e) => {
-                        warn!("Failed to finalize V2.1 index, falling back to embedded snapshot only: {}", e);
-                        None
-                    }
+
+                    debug!(
+                        "V2.1 index finalized: root at offset={}, size={}, block_id={}, fanout={}",
+                        manifest_location.physical_offset,
+                        manifest_location.encrypted_size,
+                        index_block_id,
+                        locations.len(),
+                    );
+
+                    (Some(locations), index_plaintext)
                 }
-            } else {
-                warn!("No volume writer available for index finalization");
-                None
+                Err(e) => {
+                    warn!(
+                        "Failed to finalize V2.1 index, building manifest without index commitment: {}",
+                        e
+                    );
+                    (None, Vec::new())
+                }
             }
         } else {
-            None
+            (None, Vec::new())
         };
 
-        // Finalize the pool with per-volume catalog offsets and index locations
+        let manifest = self.build_manifest(&catalog_bytes, &index_bytes, committed_horizon)?;
+        let manifest_bytes = manifest.to_bytes()?;
+
+        let manifest_block_id = self.pipeline.reserve_block_id()?;
+
+        let session = self.pipeline.encryption().session();
+        let volume_key = self.pipeline.encryption().volume_key();
+        let nonce_context = self.pipeline.encryption().nonce_context();
+        let block_key = session.derive_block_key(volume_key, manifest_block_id, &nonce_context)?;
+        let derived_key = block_key.to_derived_key()?;
+        let aead_ctx = XChaCha20Poly1305Context::from_derived_key(&derived_key)?;
+
+        let manifest_blocks: Vec<EncryptedMacroBlock> = volume_indices
+            .into_iter()
+            .map(|volume_index| {
+                self.encrypt_manifest_for_volume(
+                    &manifest_bytes,
+                    volume_index,
+                    manifest_block_id,
+                    &aead_ctx,
+                )
+            })
+            .collect::<Result<_>>()?;
+
+        let manifest_locations = self
+            .pipeline
+            .volume_mut()
+            .write_manifest_to_all(&manifest_blocks)
+            .await?;
+
+        debug!(
+            "Manifest (block_id={}) written to {} volumes",
+            manifest_block_id,
+            manifest_locations.len()
+        );
+
+        // Finalize the pool with per-volume catalog, index, and manifest locations.
         let pool_stats = self
             .pipeline
             .volume_mut()
-            .pool_mut()
-            .finalize_with_catalogs(&catalog_locations, index_locations.as_deref())
+            .finalize_with_manifest(
+                &catalog_locations,
+                index_locations.as_deref(),
+                Some(&manifest_locations),
+            )
             .await?;
 
         info!(
@@ -2050,8 +2343,105 @@ pub struct ArchiveStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequence::INITIAL_FINALIZE_SEQUENCE;
+    use era_common::BlockType;
+    use era_crypto::{compute_catalog_commitment, compute_index_commitment, NONCE_SIZE};
+    use era_volume::volume_path;
     use std::io::Write;
+    use std::path::Path;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[tokio::test]
+    async fn test_manifest_build_and_encryption() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("manifest.era");
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .build()
+            .await
+            .unwrap();
+
+        let catalog_bytes = b"catalog plaintext".to_vec();
+        let index_bytes = b"index plaintext".to_vec();
+
+        let manifest: ArchiveManifest = writer
+            .build_manifest(&catalog_bytes, &index_bytes, era_volume::DATA_REGION_START)
+            .unwrap();
+
+        assert_eq!(
+            manifest.catalog_commitment,
+            era_crypto::compute_catalog_commitment(&catalog_bytes)
+        );
+        assert_eq!(
+            manifest.index_commitment,
+            era_crypto::compute_index_commitment(&index_bytes)
+        );
+        assert_eq!(manifest.epoch_id, writer.pipeline.encryption().epoch_id());
+        assert_eq!(manifest.finalize_sequence, INITIAL_FINALIZE_SEQUENCE);
+        assert_eq!(manifest.committed_horizon, era_volume::DATA_REGION_START);
+
+        let manifest_without_index = writer
+            .build_manifest(&catalog_bytes, &[], era_volume::DATA_REGION_START)
+            .unwrap();
+        assert_eq!(manifest_without_index.index_commitment, [0u8; 32]);
+
+        writer.finalize_sequence = 7;
+
+        writer
+            .catalog
+            .block_locations
+            .push(era_common::BlockLocation::single(
+                era_common::VolumeId::new(),
+                3,
+                4096,
+                512,
+            ));
+
+        let manifest_with_block_location =
+            writer.build_manifest(&catalog_bytes, &[], 4608).unwrap();
+        assert_eq!(manifest_with_block_location.finalize_sequence, 7);
+        assert_eq!(manifest_with_block_location.committed_horizon, 4608);
+
+        let block_id = era_common::BlockId::new(42);
+        let nonce_volume_0 = era_crypto::derive_nonce_with_volume_index(
+            &writer.pipeline.encryption().nonce_context(),
+            block_id,
+            0,
+        );
+        let nonce_volume_1 = era_crypto::derive_nonce_with_volume_index(
+            &writer.pipeline.encryption().nonce_context(),
+            block_id,
+            1,
+        );
+        assert_ne!(nonce_volume_0, nonce_volume_1);
+
+        let cipher = XChaCha20Poly1305Context::new(&[0x42; 32]).unwrap();
+        let archive_id = writer.pipeline.encryption().archive_id();
+        let epoch_id = writer.pipeline.encryption().epoch_id();
+        let plaintext = b"manifest plaintext";
+
+        let mut aad_volume_0 = [0u8; 32];
+        aad_volume_0[0..16].copy_from_slice(&archive_id);
+        aad_volume_0[16..20].copy_from_slice(&epoch_id.to_le_bytes());
+        aad_volume_0[20..24].copy_from_slice(&0u32.to_le_bytes());
+        aad_volume_0[24..32].copy_from_slice(&block_id.sequence().to_le_bytes());
+
+        let mut aad_volume_1 = [0u8; 32];
+        aad_volume_1[0..16].copy_from_slice(&archive_id);
+        aad_volume_1[16..20].copy_from_slice(&epoch_id.to_le_bytes());
+        aad_volume_1[20..24].copy_from_slice(&1u32.to_le_bytes());
+        aad_volume_1[24..32].copy_from_slice(&block_id.sequence().to_le_bytes());
+
+        let ciphertext_volume_0 = cipher
+            .encrypt(&nonce_volume_0, &aad_volume_0, plaintext)
+            .unwrap();
+        let ciphertext_volume_1 = cipher
+            .encrypt(&nonce_volume_1, &aad_volume_1, plaintext)
+            .unwrap();
+
+        assert_ne!(ciphertext_volume_0, ciphertext_volume_1);
+    }
 
     #[tokio::test]
     async fn test_create_archive() {
@@ -2306,6 +2696,221 @@ mod tests {
         assert_eq!(stats.total_files, 1);
         assert_eq!(stats.total_size, 256);
     }
+
+    #[tokio::test]
+    async fn test_build_manifest_uses_commitments_and_initial_sequence() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("manifest.era");
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .build()
+            .await
+            .unwrap();
+
+        let catalog_bytes = b"catalog";
+        let index_bytes = b"";
+        let committed_horizon = 1234;
+
+        writer
+            .catalog
+            .block_locations
+            .push(era_common::BlockLocation::single(
+                era_common::VolumeId::new(),
+                0,
+                1000,
+                234,
+            ));
+
+        let manifest = writer
+            .build_manifest(catalog_bytes, index_bytes, committed_horizon)
+            .unwrap();
+
+        assert_eq!(manifest.epoch_id, writer.pipeline.encryption().epoch_id());
+        assert_eq!(manifest.finalize_sequence, INITIAL_FINALIZE_SEQUENCE);
+        assert_eq!(manifest.committed_horizon, committed_horizon);
+        assert_eq!(
+            manifest.catalog_commitment,
+            compute_catalog_commitment(catalog_bytes)
+        );
+        assert_eq!(
+            manifest.index_commitment,
+            compute_index_commitment(index_bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finalize_writes_manifest_to_all_volumes_with_distinct_nonces() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("manifest_multi.era");
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .volume_count(2)
+            .build()
+            .await
+            .unwrap();
+
+        writer
+            .add_bytes("hello.txt", b"Hello manifest")
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_name = Path::new(archive_path.file_name().unwrap());
+        let volume1_name = volume_path(base_name, 1);
+
+        let reader0 = VolumeReader::open(&backend, base_name).await.unwrap();
+        let reader1 = VolumeReader::open(&backend, &volume1_name).await.unwrap();
+
+        let footer0 = reader0.footer().unwrap();
+        let footer1 = reader1.footer().unwrap();
+        assert!(footer0.has_manifest());
+        assert!(footer1.has_manifest());
+        assert_eq!(footer0.manifest_block_id(), footer1.manifest_block_id());
+
+        let manifest_blocks0 = reader0
+            .scan_for_typed_blocks(BlockType::Manifest)
+            .await
+            .unwrap();
+        let manifest_blocks1 = reader1
+            .scan_for_typed_blocks(BlockType::Manifest)
+            .await
+            .unwrap();
+
+        assert_eq!(manifest_blocks0.len(), 1);
+        assert_eq!(manifest_blocks1.len(), 1);
+        assert_eq!(
+            footer0.manifest_offset(),
+            manifest_blocks0[0].physical_offset
+        );
+        assert_eq!(
+            footer1.manifest_offset(),
+            manifest_blocks1[0].physical_offset
+        );
+
+        let manifest0 = reader0.read_block(&manifest_blocks0[0]).await.unwrap();
+        let manifest1 = reader1.read_block(&manifest_blocks1[0]).await.unwrap();
+
+        assert!(manifest0.data.len() >= NONCE_SIZE);
+        assert!(manifest1.data.len() >= NONCE_SIZE);
+        assert_ne!(&manifest0.data[..NONCE_SIZE], &manifest1.data[..NONCE_SIZE]);
+        assert_ne!(manifest0.data, manifest1.data);
+    }
+
+    #[tokio::test]
+    async fn test_manifest_roundtrip_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("manifest_roundtrip.era");
+
+        let writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .build()
+            .await
+            .unwrap();
+
+        let catalog_bytes = b"catalog plaintext for roundtrip";
+        let index_bytes = b"index plaintext for roundtrip";
+        let committed_horizon = 5678u64;
+
+        let manifest = writer
+            .build_manifest(catalog_bytes, index_bytes, committed_horizon)
+            .unwrap();
+
+        let serialized = manifest.to_bytes().unwrap();
+        let deserialized = era_common::ArchiveManifest::from_bytes(&serialized).unwrap();
+
+        assert_eq!(manifest.epoch_id, deserialized.epoch_id);
+        assert_eq!(manifest.finalize_sequence, deserialized.finalize_sequence);
+        assert_eq!(manifest.committed_horizon, deserialized.committed_horizon);
+        assert_eq!(manifest.catalog_commitment, deserialized.catalog_commitment);
+        assert_eq!(manifest.index_commitment, deserialized.index_commitment);
+    }
+
+    #[tokio::test]
+    async fn test_catalog_block_locations_populated() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("block_locations.era");
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .build()
+            .await
+            .unwrap();
+
+        writer.add_bytes("file1.txt", b"content 1").await.unwrap();
+        writer.add_bytes("file2.txt", b"content 2").await.unwrap();
+
+        let stats = writer.finalize().await.unwrap();
+        assert!(stats.blocks_written > 0);
+
+        let mut reader = ArchiveReader::open(&archive_path, "test_password")
+            .await
+            .unwrap();
+        let catalog = reader.load_catalog().await.unwrap();
+        assert!(
+            !catalog.block_locations.is_empty(),
+            "catalog.block_locations should be populated after finalize"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_written_to_all_volumes() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("index_all_volumes.era");
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .volume_count(2)
+            .build()
+            .await
+            .unwrap();
+
+        let data = vec![0u8; 64 * 1024];
+        writer.add_bytes("large.bin", &data).await.unwrap();
+        writer.finalize().await.unwrap();
+
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_name = Path::new(archive_path.file_name().unwrap());
+        let volume1_name = volume_path(base_name, 1);
+
+        let reader0 = era_volume::VolumeReader::open(&backend, base_name)
+            .await
+            .unwrap();
+        let reader1 = era_volume::VolumeReader::open(&backend, &volume1_name)
+            .await
+            .unwrap();
+
+        let index_blocks0 = reader0
+            .scan_for_typed_blocks(BlockType::IndexManifest)
+            .await
+            .unwrap();
+        let index_blocks1 = reader1
+            .scan_for_typed_blocks(BlockType::IndexManifest)
+            .await
+            .unwrap();
+
+        assert!(
+            !index_blocks0.is_empty(),
+            "Volume 0 should contain IndexManifest blocks"
+        );
+        assert!(
+            !index_blocks1.is_empty(),
+            "Volume 1 should contain IndexManifest blocks"
+        );
+    }
+
+    #[test]
+    fn test_footer_without_manifest_backward_compat() {
+        let footer = era_volume::Footer::new(4096, 1, 0);
+        assert!(
+            !footer.has_manifest(),
+            "v8.1 footer without manifest should return has_manifest == false"
+        );
+        assert_eq!(footer.manifest_offset(), 0);
+        assert_eq!(footer.manifest_block_id(), 0);
+    }
 }
 
 /// Generic archive writer that supports any storage backend
@@ -2472,6 +3077,7 @@ pub mod generic {
                     4 * 1024 * 1024,
                     self.config.packing.flush_threshold,
                 )?,
+                written_blocks: Vec::new(),
                 pending_hashes: HashSet::new(),
             })
         }
@@ -2495,6 +3101,7 @@ pub mod generic {
         chunk_index: Arc<dyn ChunkIndex>,
         /// Packing stage for k-Bounded Best-Fit bin packing
         packing: PackingStage,
+        written_blocks: Vec<era_common::BlockLocation>,
 
         pending_hashes: HashSet<ChunkHash>,
     }
@@ -2572,6 +3179,8 @@ pub mod generic {
                 .write_canonical_block(&encrypted_block, era_common::BlockType::Data)
                 .await?;
 
+            self.written_blocks.push(location.clone());
+
             for hash in hashes {
                 self.chunk_index.put(hash, location.clone())?;
             }
@@ -2595,6 +3204,8 @@ pub mod generic {
             info!("Finalizing archive...");
 
             self.flush_pending().await?;
+
+            self.catalog.block_locations = std::mem::take(&mut self.written_blocks);
 
             // Serialize and write catalog
             let catalog_bytes = self.catalog.to_bytes()?;

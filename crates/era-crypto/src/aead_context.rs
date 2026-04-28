@@ -4,7 +4,7 @@
 //! eliminating code duplication and enabling support for multiple algorithms.
 
 use crate::DerivedKey;
-use era_common::{BlockId, EraError, Result};
+use era_common::{BlockId, BlockType, EraError, Result};
 
 /// Size of the nonce in bytes (24 bytes for XChaCha20)
 pub const NONCE_SIZE: usize = 24;
@@ -33,13 +33,32 @@ pub trait AeadContext {
         block_id: BlockId,
         plaintext: &[u8],
     ) -> Result<Vec<u8>> {
-        let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
+        self.encrypt_with_context_for_type(
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            BlockType::Data,
+            block_id,
+            plaintext,
+        )
+    }
 
-        let mut aad = [0u8; 32];
-        aad[0..16].copy_from_slice(archive_id);
-        aad[16..20].copy_from_slice(&epoch_id.to_le_bytes());
-        aad[20..24].copy_from_slice(&volume_index.to_le_bytes());
-        aad[24..32].copy_from_slice(&block_id.sequence().to_le_bytes());
+    /// Encrypt with implicit nonce derivation and explicit typed-block AAD binding.
+    #[allow(clippy::too_many_arguments)]
+    fn encrypt_with_context_for_type(
+        &self,
+        nonce_context: &[u8; 16],
+        archive_id: &[u8; 16],
+        epoch_id: u32,
+        volume_index: u32,
+        block_type: BlockType,
+        block_id: BlockId,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>> {
+        let nonce = derive_nonce_with_volume_index(nonce_context, block_id, volume_index);
+
+        let aad = build_aad(archive_id, epoch_id, block_type, volume_index, block_id);
 
         self.encrypt(&nonce, &aad, plaintext)
     }
@@ -54,13 +73,32 @@ pub trait AeadContext {
         block_id: BlockId,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
-        let nonce = Self::derive_nonce_with_context(nonce_context, block_id);
+        self.decrypt_with_context_for_type(
+            nonce_context,
+            archive_id,
+            epoch_id,
+            volume_index,
+            BlockType::Data,
+            block_id,
+            ciphertext,
+        )
+    }
 
-        let mut aad = [0u8; 32];
-        aad[0..16].copy_from_slice(archive_id);
-        aad[16..20].copy_from_slice(&epoch_id.to_le_bytes());
-        aad[20..24].copy_from_slice(&volume_index.to_le_bytes());
-        aad[24..32].copy_from_slice(&block_id.sequence().to_le_bytes());
+    /// Decrypt with implicit nonce derivation and explicit typed-block AAD binding.
+    #[allow(clippy::too_many_arguments)]
+    fn decrypt_with_context_for_type(
+        &self,
+        nonce_context: &[u8; 16],
+        archive_id: &[u8; 16],
+        epoch_id: u32,
+        volume_index: u32,
+        block_type: BlockType,
+        block_id: BlockId,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>> {
+        let nonce = derive_nonce_with_volume_index(nonce_context, block_id, volume_index);
+
+        let aad = build_aad(archive_id, epoch_id, block_type, volume_index, block_id);
 
         self.decrypt(&nonce, &aad, ciphertext)
     }
@@ -79,7 +117,58 @@ pub trait AeadContext {
     }
 }
 
+/// Build AEAD AAD: archive_id ‖ epoch_id ‖ type_identifier ‖ volume_index ‖ block_id.
+///
+/// The type identifier prevents cross-type replay between typed metadata blocks
+/// (for example replaying an Index block as a Manifest block) while preserving
+/// the existing archive/epoch/volume/block context binding.
+pub fn build_aad(
+    archive_id: &[u8; 16],
+    epoch_id: u32,
+    block_type: BlockType,
+    volume_index: u32,
+    block_id: BlockId,
+) -> Vec<u8> {
+    let type_id = match block_type {
+        BlockType::Data => b"DATA".as_slice(),
+        BlockType::IndexPage => b"INDEX_PAGE".as_slice(),
+        BlockType::IndexManifest => b"INDEX".as_slice(),
+        BlockType::Catalog => b"CATALOG".as_slice(),
+        BlockType::LsmManifest => b"LSM_MANIFEST".as_slice(),
+        BlockType::Manifest => b"MANIFEST".as_slice(),
+        BlockType::Checkpoint => b"CHECKPOINT".as_slice(),
+        BlockType::Reserved => b"RESERVED".as_slice(),
+    };
+
+    let mut aad = Vec::with_capacity(16 + 4 + type_id.len() + 4 + 8);
+    aad.extend_from_slice(archive_id);
+    aad.extend_from_slice(&epoch_id.to_le_bytes());
+    aad.extend_from_slice(type_id);
+    aad.extend_from_slice(&volume_index.to_le_bytes());
+    aad.extend_from_slice(&block_id.sequence().to_le_bytes());
+    aad
+}
+
+/// Derive a nonce from context, block ID, and volume index.
+pub fn derive_nonce_with_volume_index(
+    context: &[u8; 16],
+    block_id: BlockId,
+    volume_index: u32,
+) -> [u8; NONCE_SIZE] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ERA-NONCE-V2");
+    hasher.update(context);
+    hasher.update(&block_id.sequence().to_le_bytes());
+    hasher.update(&volume_index.to_le_bytes());
+
+    let hash = hasher.finalize();
+    let mut nonce = [0u8; NONCE_SIZE];
+    nonce.copy_from_slice(&hash.as_bytes()[..NONCE_SIZE]);
+    nonce
+}
+
 /// XChaCha20-Poly1305 context implementation
+#[derive(Clone)]
 pub struct XChaCha20Poly1305Context {
     cipher: chacha20poly1305::XChaCha20Poly1305,
 }
@@ -221,6 +310,17 @@ mod tests {
 
         assert_eq!(packet2.nonce(), &nonce);
         assert_eq!(packet2.ciphertext(), ciphertext.as_slice());
+    }
+
+    #[test]
+    fn test_derive_nonce_with_volume_index_changes_per_volume() {
+        let context = [0x11u8; 16];
+        let block_id = BlockId::new(7);
+
+        let nonce0 = derive_nonce_with_volume_index(&context, block_id, 0);
+        let nonce1 = derive_nonce_with_volume_index(&context, block_id, 1);
+
+        assert_ne!(nonce0, nonce1);
     }
 
     #[test]

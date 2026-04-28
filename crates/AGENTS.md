@@ -13,7 +13,7 @@
 
 ### Transformation (L2)
 - **era-codec**: `Compressor` trait (Zstd/LZ4/NoCompressor) + Reed-Solomon erasure coding.
-- **era-volume**: Volume format v8.1. SuperHeader (4096B), Footer (128B), VolumeReader/Writer, MultiVolume, VolumePool.
+- **era-volume**: Volume format v8.2. SuperHeader (4096B), Footer (128B), VolumeReader/Writer, MultiVolume, VolumePool.
 
 ### Logic (L3)
 - **era-packing**: k-Bounded Best-Fit MacroBlock packing. StagingPool, resilient AEAD with 4-tier corruption detection.
