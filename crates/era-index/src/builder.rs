@@ -221,6 +221,7 @@ impl IndexBuilder {
 
         let mut meta = super::MetaIndex::new();
         let mut total = 0u64;
+        let mut est_block_id: u64 = 0;
         self.store.for_each_sorted_page(|page, _page_block_id| {
             let page_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&page)
                 .map_err(|e| EraError::Serialization(e.to_string()))?;
@@ -237,12 +238,13 @@ impl IndexBuilder {
             meta.add_page(
                 *page.min_hash(),
                 *page.max_hash(),
-                BlockId::new(0),
+                BlockId::new(est_block_id),
                 0,
                 u32::try_from(encrypted_size).map_err(|_| {
                     EraError::IndexError("estimated IndexPage size exceeds u32::MAX".into())
                 })?,
             )?;
+            est_block_id += 1;
             Ok(())
         })?;
 
