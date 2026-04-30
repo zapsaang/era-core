@@ -40,6 +40,11 @@ pub struct ArchiveManifest {
     /// = blake3::keyed_hash("ERA-IDX-COMMIT-v1_______________", &index_plaintext)
     /// If no Index exists, set to all zeros [0u8; 32].
     pub index_commitment: [u8; 32],
+
+    /// Per-volume committed data boundaries sorted by volume sequence.
+    /// Used by append mode to reject repaired/finalized state that would move
+    /// any volume's committed end backward.
+    pub volume_committed_ends: Vec<u64>,
 }
 
 impl ArchiveManifest {
@@ -50,6 +55,7 @@ impl ArchiveManifest {
         committed_horizon: u64,
         catalog_commitment: [u8; 32],
         index_commitment: [u8; 32],
+        volume_committed_ends: Vec<u64>,
     ) -> Self {
         Self {
             epoch_id,
@@ -57,6 +63,7 @@ impl ArchiveManifest {
             committed_horizon,
             catalog_commitment,
             index_commitment,
+            volume_committed_ends,
         }
     }
 
@@ -101,6 +108,7 @@ impl From<&ArchiveManifest> for crate::proto::ArchiveManifest {
             committed_horizon: m.committed_horizon,
             catalog_commitment: m.catalog_commitment.to_vec(),
             index_commitment: m.index_commitment.to_vec(),
+            volume_committed_ends: m.volume_committed_ends.clone(),
         }
     }
 }
@@ -122,6 +130,7 @@ impl TryFrom<crate::proto::ArchiveManifest> for ArchiveManifest {
             committed_horizon: p.committed_horizon,
             catalog_commitment,
             index_commitment,
+            volume_committed_ends: p.volume_committed_ends,
         })
     }
 }
@@ -132,17 +141,18 @@ mod tests {
 
     #[test]
     fn new_manifest() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![10, 20]);
         assert_eq!(m.epoch_id, 1);
         assert_eq!(m.finalize_sequence, 5);
         assert_eq!(m.committed_horizon, 10);
         assert_eq!(m.catalog_commitment, [0xAA; 32]);
         assert_eq!(m.index_commitment, [0xBB; 32]);
+        assert_eq!(m.volume_committed_ends, vec![10, 20]);
     }
 
     #[test]
     fn manifest_roundtrip_bytes() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![10, 20]);
         let bytes = m.to_bytes().unwrap();
         let m2 = ArchiveManifest::from_bytes(&bytes).unwrap();
         assert_eq!(m, m2);
@@ -150,25 +160,25 @@ mod tests {
 
     #[test]
     fn has_index_with_nonzero_commitment() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![]);
         assert!(m.has_index());
     }
 
     #[test]
     fn has_index_with_zero_commitment() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0u8; 32]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0u8; 32], vec![]);
         assert!(!m.has_index());
     }
 
     #[test]
     fn sequence_for_selection() {
-        let m = ArchiveManifest::new(1, 42, 10, [0; 32], [0; 32]);
+        let m = ArchiveManifest::new(1, 42, 10, [0; 32], [0; 32], vec![]);
         assert_eq!(m.sequence_for_selection(), 42);
     }
 
     #[test]
     fn proto_roundtrip() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![10, 20]);
         let proto: crate::proto::ArchiveManifest = (&m).into();
         let m2: ArchiveManifest = proto.try_into().unwrap();
         assert_eq!(m, m2);
@@ -182,6 +192,7 @@ mod tests {
             committed_horizon: 10,
             catalog_commitment: vec![0xAA; 31],
             index_commitment: vec![0xBB; 32],
+            volume_committed_ends: vec![],
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -196,6 +207,7 @@ mod tests {
             committed_horizon: 10,
             catalog_commitment: vec![0xAA; 32],
             index_commitment: vec![0xBB; 33],
+            volume_committed_ends: vec![],
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();

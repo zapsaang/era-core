@@ -322,4 +322,5 @@ message ArchiveManifest {
   uint64 committed_horizon = 3;
   bytes catalog_commitment = 4; // exactly 32 bytes
   bytes index_commitment = 5; // exactly 32 bytes, or all zeros if no index
+  repeated uint64 volume_committed_ends = 6; // per-volume committed end offsets sorted by volume sequence
 }

@@ -394,6 +394,20 @@ impl<B: StorageBackend> VolumePool<B> {
             + active_size
     }
 
+    /// Returns per-volume committed data boundaries.
+    /// Combines rotated volumes (from `stats.volume_sizes`) with active writers.
+    /// Must be called BEFORE writing typed blocks to get data-only boundaries.
+    /// Returns `Vec<(volume_sequence, committed_end_offset)>` sorted by sequence.
+    #[must_use]
+    pub fn committed_ends(&self) -> Vec<(u16, u64)> {
+        let mut ends: Vec<(u16, u64)> = self.stats.volume_sizes.clone();
+        for (i, writer) in self.writers.iter().enumerate() {
+            ends.push((self.sequences[i], writer.current_size()));
+        }
+        ends.sort_by_key(|(seq, _)| *seq);
+        ends
+    }
+
     /// Get the current block sequence number.
     #[must_use]
     pub fn block_sequence(&self) -> u64 {
@@ -1142,6 +1156,119 @@ mod tests {
             AccessPolicy::AnyOfN,
         )
         .unwrap()
+    }
+
+    impl VolumePool<LocalStorageBackend> {
+        async fn write_to_current(&mut self, data: &[u8]) -> era_common::Result<()> {
+            let data_len = u32::try_from(data.len()).expect("test data fits in u32");
+            let block = EncryptedMacroBlock {
+                block_id: BlockId::new(0),
+                data: Bytes::copy_from_slice(data),
+                original_size: data_len,
+                compressed_size: data_len,
+                chunk_count: 1,
+            };
+
+            self.write_canonical_block(&block, BlockType::Data)
+                .await
+                .map(|_| ())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_committed_ends_empty_pool() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+        let config = VolumePoolConfig::new(&base_path, 1);
+        let header = create_test_header();
+        let pool = VolumePool::create(backend, config, header).await.unwrap();
+
+        let ends = pool.committed_ends();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].0, 0);
+        assert_eq!(ends[0].1, crate::DATA_REGION_START);
+    }
+
+    #[tokio::test]
+    async fn test_committed_ends_after_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+        let config = VolumePoolConfig::new(&base_path, 1);
+        let header = create_test_header();
+        let mut pool = VolumePool::create(backend, config, header).await.unwrap();
+
+        let data = vec![0u8; 1024];
+        pool.write_to_current(&data).await.unwrap();
+
+        let ends = pool.committed_ends();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].0, 0);
+        assert!(ends[0].1 > crate::DATA_REGION_START);
+    }
+
+    #[tokio::test]
+    async fn test_committed_ends_after_rotation() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+        let mut config = VolumePoolConfig::new(&base_path, 1);
+        config.max_volume_size = 2048;
+        let header = create_test_header();
+        let mut pool = VolumePool::create(backend, config, header).await.unwrap();
+
+        let data = vec![0u8; 4096];
+        pool.write_to_current(&data).await.unwrap();
+
+        let ends = pool.committed_ends();
+        assert!(ends.len() >= 2);
+        assert_eq!(ends[0].0, 0);
+        assert_eq!(ends[1].0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_committed_ends_sorted_by_sequence() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+        let mut config = VolumePoolConfig::new(&base_path, 1);
+        config.max_volume_size = 1024;
+        let header = create_test_header();
+        let mut pool = VolumePool::create(backend, config, header).await.unwrap();
+
+        for _ in 0..3 {
+            let data = vec![0u8; 2048];
+            pool.write_to_current(&data).await.unwrap();
+        }
+
+        let ends = pool.committed_ends();
+        for i in 1..ends.len() {
+            assert!(ends[i].0 > ends[i - 1].0, "Sequences should be sorted");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_committed_ends_no_duplicates() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let base_path = temp_dir.path().join("test_archive");
+        let mut config = VolumePoolConfig::new(&base_path, 1);
+        config.max_volume_size = 1024;
+        let header = create_test_header();
+        let mut pool = VolumePool::create(backend, config, header).await.unwrap();
+
+        for _ in 0..2 {
+            let data = vec![0u8; 2048];
+            pool.write_to_current(&data).await.unwrap();
+        }
+
+        let ends = pool.committed_ends();
+        let mut seen = std::collections::HashSet::new();
+        for (seq, _) in &ends {
+            assert!(!seen.contains(seq), "Duplicate sequence found: {seq}");
+            seen.insert(*seq);
+        }
     }
 
     #[tokio::test]

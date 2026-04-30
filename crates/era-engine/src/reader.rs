@@ -19,9 +19,14 @@ use crate::chunk_processor::{
 pub use crate::chunk_processor::{ArchiveHealthStatus, ExtractStats, VerifyStats};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
-use era_common::{BlockId, BlockLocation, ChunkHash, ChunkVec, EraError, Result, ShardLayout};
+use era_common::{
+    ArchiveManifest, BlockId, BlockLocation, BlockType, ChunkHash, ChunkVec, EraError, Result,
+    ShardLayout,
+};
 use era_crypto::certificate::EraKeyPair;
-use era_crypto::{KeySession, VolumeKey};
+use era_crypto::{
+    build_aad, AeadContext, KeySession, VolumeKey, XChaCha20Poly1305Context, NONCE_SIZE,
+};
 use era_index::IndexReader;
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
@@ -94,6 +99,8 @@ pub struct ArchiveReader {
     /// Compression algorithm type
     compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
+    /// Per-volume committed end offsets loaded from the highest-sequence manifest.
+    volume_committed_ends: Vec<u64>,
     /// V2.1 index reader recovered from volume
     index_reader: Option<IndexReader>,
     embedded_index_recovery_failed: bool,
@@ -380,6 +387,7 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
+            volume_committed_ends: Vec::new(),
             index_reader: None,
             embedded_index_recovery_failed: false,
         })
@@ -446,6 +454,7 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
+            volume_committed_ends: Vec::new(),
             index_reader: None,
             embedded_index_recovery_failed: false,
         })
@@ -503,6 +512,14 @@ impl ArchiveReader {
         }
     }
 
+    fn committed_ends_for_iterators(&self) -> Option<Vec<u64>> {
+        if self.volume_committed_ends.is_empty() {
+            None
+        } else {
+            Some(self.volume_committed_ends.clone())
+        }
+    }
+
     /// Create a temporary session-based block unpacker.
     ///
     /// The returned unpacker borrows the session and volume_key, so its lifetime
@@ -541,6 +558,7 @@ impl ArchiveReader {
             warn!("Embedded index recovery failed; continuing in degraded mode");
         }
         self.load_catalog().await?;
+        self.load_manifest().await?;
         Ok(())
     }
 
@@ -685,6 +703,7 @@ impl ArchiveReader {
                     data_shards: config.data_shards,
                     parity_shards: config.parity_shards,
                     distribution_strategy: dist_strategy,
+                    committed_ends: self.committed_ends_for_iterators(),
                 },
             ))
         } else {
@@ -696,6 +715,7 @@ impl ArchiveReader {
                 self.archive_id,
                 self.epoch_id,
                 self.create_compressor(),
+                self.committed_ends_for_iterators(),
             ))
         };
 
@@ -975,6 +995,137 @@ impl ArchiveReader {
         Err(last_error.unwrap_or(EraError::EmptyArchive))
     }
 
+    async fn load_manifest(&mut self) -> Result<()> {
+        let mut best_manifest: Option<ArchiveManifest> = None;
+
+        for i in 0..self.volume_readers.len() {
+            let reader = &self.volume_readers[i];
+            let footer = match reader.footer() {
+                Some(f) => f,
+                None => continue,
+            };
+
+            if !footer.has_manifest() {
+                continue;
+            }
+
+            let manifest_offset = footer.manifest_offset();
+            let manifest_block_id = footer.manifest_block_id();
+            let volume_id = reader.header().volume_id();
+            let volume_sequence = reader.header().volume_sequence();
+
+            let manifest_location =
+                BlockLocation::single(volume_id, manifest_block_id, manifest_offset, 0);
+
+            let encrypted_block = match self.volume_readers[i].read_block(&manifest_location).await
+            {
+                Ok(block) => block,
+                Err(e) => {
+                    warn!("Failed to read manifest from volume {}: {}", i, e);
+                    continue;
+                }
+            };
+
+            let block_key = match self.session.derive_block_key(
+                &self.volume_key,
+                manifest_block_id as u64,
+                &self.nonce_context,
+            ) {
+                Ok(bk) => bk,
+                Err(e) => {
+                    warn!("Failed to derive block key: {}", e);
+                    continue;
+                }
+            };
+            let derived_key = match block_key.to_derived_key() {
+                Ok(dk) => dk,
+                Err(e) => {
+                    warn!("Failed to derive key: {}", e);
+                    continue;
+                }
+            };
+            let aead_ctx = match XChaCha20Poly1305Context::from_derived_key(&derived_key) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    warn!("Failed to create AEAD context: {}", e);
+                    continue;
+                }
+            };
+
+            let nonce_slice = match encrypted_block.data.get(..NONCE_SIZE) {
+                Some(n) => n,
+                None => {
+                    warn!("Manifest nonce too short");
+                    continue;
+                }
+            };
+            let nonce_bytes: [u8; NONCE_SIZE] = match nonce_slice.try_into() {
+                Ok(n) => n,
+                Err(_) => {
+                    warn!("Manifest nonce too short");
+                    continue;
+                }
+            };
+            let ciphertext = match encrypted_block.data.get(NONCE_SIZE..) {
+                Some(c) => c,
+                None => {
+                    warn!("Manifest ciphertext missing");
+                    continue;
+                }
+            };
+            let aad = build_aad(
+                &self.archive_id,
+                self.epoch_id,
+                BlockType::Manifest,
+                u32::from(volume_sequence),
+                BlockId::new(manifest_block_id as u64),
+            );
+
+            let decrypted = match aead_ctx.decrypt(&nonce_bytes, &aad, ciphertext) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("Failed to decrypt manifest: {}", e);
+                    continue;
+                }
+            };
+
+            let manifest = match ArchiveManifest::from_bytes(&decrypted) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("Failed to deserialize manifest from volume {}: {}", i, e);
+                    continue;
+                }
+            };
+
+            let dominated = best_manifest
+                .as_ref()
+                .is_some_and(|best| best.finalize_sequence >= manifest.finalize_sequence);
+            if !dominated {
+                best_manifest = Some(manifest);
+            }
+        }
+
+        if let Some(manifest) = best_manifest {
+            let ends = &manifest.volume_committed_ends;
+            if !ends.is_empty() && ends.len() != self.expected_volume_count {
+                return Err(EraError::InvalidFormat(format!(
+                    "Manifest volume_committed_ends count ({}) != expected volume count ({})",
+                    ends.len(),
+                    self.expected_volume_count,
+                )));
+            }
+            self.volume_committed_ends = manifest.volume_committed_ends;
+            debug!(
+                "Loaded manifest: finalize_sequence={}, volume_committed_ends={:?}",
+                manifest.finalize_sequence, self.volume_committed_ends
+            );
+        } else {
+            debug!("No manifest found in any volume (backward compat)");
+        }
+
+        Ok(())
+    }
+
     async fn assemble_catalog_data(
         &self,
         reader_idx: usize,
@@ -1075,6 +1226,37 @@ impl ArchiveReader {
         } else {
             Ok(first_chunk_data.to_vec())
         }
+    }
+
+    fn check_read_bound(&self, volume_sequence: u16, offset: u64, read_len: u64) -> Result<()> {
+        if self.volume_committed_ends.is_empty() {
+            return Ok(());
+        }
+
+        let committed_end = self
+            .volume_committed_ends
+            .get(volume_sequence as usize)
+            .ok_or_else(|| {
+                EraError::InvalidFormat(format!(
+                    "Missing committed end for volume sequence {}",
+                    volume_sequence
+                ))
+            })?;
+        let read_end = offset.checked_add(read_len).ok_or_else(|| {
+            EraError::InvalidFormat(format!(
+                "Read bound overflow for volume sequence {}",
+                volume_sequence
+            ))
+        })?;
+
+        if read_end > *committed_end {
+            return Err(EraError::IntegrityError(format!(
+                "Read beyond committed end for volume {}: range {}..{} exceeds {}",
+                volume_sequence, offset, read_end, committed_end
+            )));
+        }
+
+        Ok(())
     }
 
     /// Read a block and extract all chunks, handling both erasure and non-erasure blocks
@@ -1184,7 +1366,12 @@ impl ArchiveReader {
                         }
                     };
 
-                    match self.read_shard(&self.volume_readers[vol_idx], offset).await {
+                    let shard_reader = &self.volume_readers[vol_idx];
+                    let vol_seq = shard_reader.header().volume_sequence();
+                    let shard_size = u64::from(erasure_info.shard_size);
+                    self.check_read_bound(vol_seq, offset, shard_size)?;
+
+                    match self.read_shard(shard_reader, offset).await {
                         Ok(shard) => {
                             available_shards.push((shard_idx, shard));
                         }
@@ -1218,6 +1405,12 @@ impl ArchiveReader {
                 .iter()
                 .find(|r| r.header().volume_id() == location.volume_id)
                 .unwrap_or(&self.volume_readers[0]);
+            let volume_sequence = reader.header().volume_sequence();
+            self.check_read_bound(
+                volume_sequence,
+                location.physical_offset,
+                u64::from(location.encrypted_size),
+            )?;
             let encrypted_block = reader.read_block(location).await?;
             let unpacker = self.create_unpacker();
             let unpacked = unpacker.unpack(&encrypted_block, 0)?;
@@ -1832,6 +2025,7 @@ impl ArchiveReader {
                     data_shards: config.data_shards,
                     parity_shards: config.parity_shards,
                     distribution_strategy: dist_strategy,
+                    committed_ends: self.committed_ends_for_iterators(),
                 },
             ))
         } else {
@@ -1843,6 +2037,7 @@ impl ArchiveReader {
                 self.archive_id,
                 self.epoch_id,
                 self.create_compressor(),
+                self.committed_ends_for_iterators(),
             ))
         };
 
@@ -1894,6 +2089,7 @@ impl ArchiveReader {
                     data_shards: config.data_shards,
                     parity_shards: config.parity_shards,
                     distribution_strategy: dist_strategy,
+                    committed_ends: self.committed_ends_for_iterators(),
                 },
             ))
         } else {
@@ -1905,6 +2101,7 @@ impl ArchiveReader {
                 self.archive_id,
                 self.epoch_id,
                 self.create_compressor(),
+                self.committed_ends_for_iterators(),
             ))
         };
 

@@ -68,6 +68,46 @@ const MAX_BLOCK_SIZE: u32 = 64 * 1024 * 1024;
 const MAX_SHARD_SIZE: u32 = 256 * 1024 * 1024;
 const MAX_PROBE_ATTEMPTS: usize = 256;
 
+fn check_commit_horizon_for_sequence(
+    committed_ends: Option<&[u64]>,
+    volume_sequence: usize,
+    offset: u64,
+    expected_size: u64,
+) -> Result<()> {
+    let Some(ends) = committed_ends else {
+        return Ok(());
+    };
+    let Some(&committed_end) = ends.get(volume_sequence) else {
+        return Ok(());
+    };
+
+    let read_end = offset.checked_add(expected_size).ok_or_else(|| {
+        EraError::InvalidFormat(format!(
+            "Read bound overflow for volume sequence {}",
+            volume_sequence
+        ))
+    })?;
+
+    if read_end > committed_end {
+        return Err(EraError::BeyondCommitHorizon {
+            offset,
+            horizon: committed_end,
+        });
+    }
+
+    Ok(())
+}
+
+fn check_reader_commit_horizon<R: era_storage::StorageReader>(
+    committed_ends: Option<&[u64]>,
+    reader: &VolumeReader<R>,
+    offset: u64,
+    expected_size: u64,
+) -> Result<()> {
+    let volume_sequence = reader.header().volume_sequence() as usize;
+    check_commit_horizon_for_sequence(committed_ends, volume_sequence, offset, expected_size)
+}
+
 /// Iterator for standard (non-erasure) blocks
 pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {
     volume_reader: &'a VolumeReader<R>,
@@ -76,6 +116,8 @@ pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {
     current_offset: u64,
     /// End of data region
     data_end: u64,
+    /// Manifest-committed end offsets by original volume sequence.
+    committed_ends: Option<Vec<u64>>,
     /// Current block index
     block_index: u32,
     /// Iteration statistics
@@ -84,13 +126,18 @@ pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {
 
 impl<'a, R: era_storage::StorageReader> StandardBlockIterator<'a, R> {
     /// Create a new standard block iterator
-    pub fn new(volume_reader: &'a VolumeReader<R>, unpacker: &'a MacroBlockUnpacker) -> Self {
+    pub fn new(
+        volume_reader: &'a VolumeReader<R>,
+        unpacker: &'a MacroBlockUnpacker,
+        committed_ends: Option<Vec<u64>>,
+    ) -> Self {
         let (data_start, data_end) = volume_reader.data_region();
         Self {
             volume_reader,
             unpacker,
             current_offset: data_start,
             data_end,
+            committed_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
         }
@@ -101,6 +148,7 @@ impl<'a, R: era_storage::StorageReader> StandardBlockIterator<'a, R> {
         volume_reader: &'a VolumeReader<R>,
         unpacker: &'a MacroBlockUnpacker,
         end_offset: u64,
+        committed_ends: Option<Vec<u64>>,
     ) -> Self {
         let (data_start, _) = volume_reader.data_region();
         Self {
@@ -108,6 +156,7 @@ impl<'a, R: era_storage::StorageReader> StandardBlockIterator<'a, R> {
             unpacker,
             current_offset: data_start,
             data_end: end_offset,
+            committed_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
         }
@@ -119,6 +168,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
     async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
         if self.current_offset >= self.data_end {
             return None;
+        }
+
+        if let Err(e) = check_reader_commit_horizon(
+            self.committed_ends.as_deref(),
+            self.volume_reader,
+            self.current_offset,
+            BlockHeader::SIZE as u64,
+        ) {
+            return Some(Err(e));
         }
 
         // Read BlockHeader (16 bytes)
@@ -171,6 +229,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
                 size: block_size as usize,
                 max_size: MAX_BLOCK_SIZE as usize,
             }));
+        }
+
+        if let Err(e) = check_reader_commit_horizon(
+            self.committed_ends.as_deref(),
+            self.volume_reader,
+            self.current_offset,
+            BlockHeader::SIZE as u64 + block_size as u64,
+        ) {
+            return Some(Err(e));
         }
 
         let location = BlockLocation::single(
@@ -235,6 +302,8 @@ pub struct ErasureBlockIterator<'a, R: era_storage::StorageReader> {
     current_offsets: Vec<u64>,
     /// End of data region for each volume
     data_ends: Vec<u64>,
+    /// Manifest-committed end offsets by original volume sequence.
+    committed_ends: Option<Vec<u64>>,
     /// Current block index
     block_index: u32,
     /// Iteration statistics
@@ -257,6 +326,7 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
         erasure_unpacker: &'a ErasureBlockUnpacker,
         data_shards: u8,
         parity_shards: u8,
+        committed_ends: Option<Vec<u64>>,
     ) -> Result<Self> {
         if volume_readers.is_empty() {
             return Err(EraError::InvalidFormat("No volume readers provided".into()));
@@ -310,6 +380,7 @@ impl<'a, R: era_storage::StorageReader> ErasureBlockIterator<'a, R> {
             original_volume_count,
             current_offsets,
             data_ends,
+            committed_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
         })
@@ -331,6 +402,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 
         // Read erasure block header (4 bytes original_len) from the first available volume
         // All volumes now have this header written before their first shard of each block
+        if let Err(e) = check_reader_commit_horizon(
+            self.committed_ends.as_deref(),
+            &self.volume_readers[0],
+            self.current_offsets[0],
+            4,
+        ) {
+            return Some(Err(e));
+        }
         let header_bytes = match self.volume_readers[0]
             .read_raw(self.current_offsets[0], 4)
             .await
@@ -386,12 +465,25 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             // If this is the first shard for this volume in this block,
             // skip the original_len header (4 bytes)
             if !header_read_for_volume[reader_idx] {
+                if let Err(e) =
+                    check_reader_commit_horizon(self.committed_ends.as_deref(), reader, offset, 4)
+                {
+                    return Some(Err(e));
+                }
                 offset += 4;
                 self.current_offsets[reader_idx] += 4;
                 header_read_for_volume[reader_idx] = true;
             }
 
             // Read shard header (8 bytes: 4 length + 4 CRC)
+            if let Err(e) = check_reader_commit_horizon(
+                self.committed_ends.as_deref(),
+                reader,
+                offset,
+                ShardHeader::SIZE as u64,
+            ) {
+                return Some(Err(e));
+            }
             let header_bytes = match reader.read_raw(offset, ShardHeader::SIZE).await {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 Ok(_) => {
@@ -431,6 +523,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 
             if first_shard_size == 0 {
                 first_shard_size = bounded_len;
+            }
+
+            if let Err(e) = check_reader_commit_horizon(
+                self.committed_ends.as_deref(),
+                reader,
+                offset,
+                ShardHeader::SIZE as u64 + shard_len as u64,
+            ) {
+                return Some(Err(e));
             }
 
             // Read shard data
@@ -557,6 +658,8 @@ pub struct SessionBlockIterator<'a, R: era_storage::StorageReader> {
     current_offset: u64,
     /// End of data region
     data_end: u64,
+    /// Manifest-committed end offsets by original volume sequence.
+    committed_ends: Option<Vec<u64>>,
     /// Current block index
     block_index: u32,
     /// Iteration statistics
@@ -572,6 +675,7 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
     /// * `volume_key` - The volume key for this volume
     /// * `nonce_context` - The 16-byte nonce context (archive salt)
     /// * `compressor` - The compressor for decompression
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         volume_reader: &'a VolumeReader<R>,
         session: &'a KeySession,
@@ -580,6 +684,7 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
         archive_id: [u8; 16],
         epoch_id: u32,
         compressor: Box<dyn era_codec::Compressor>,
+        committed_ends: Option<Vec<u64>>,
     ) -> Self {
         let (data_start, data_end) = volume_reader.data_region();
         let unpacker = SessionBlockUnpacker::new(
@@ -595,6 +700,7 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
             unpacker,
             current_offset: data_start,
             data_end,
+            committed_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
         }
@@ -611,6 +717,7 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
         epoch_id: u32,
         compressor: Box<dyn era_codec::Compressor>,
         end_offset: u64,
+        committed_ends: Option<Vec<u64>>,
     ) -> Self {
         let (data_start, _) = volume_reader.data_region();
         let unpacker = SessionBlockUnpacker::new(
@@ -626,6 +733,7 @@ impl<'a, R: era_storage::StorageReader> SessionBlockIterator<'a, R> {
             unpacker,
             current_offset: data_start,
             data_end: end_offset,
+            committed_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
         }
@@ -638,6 +746,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
         loop {
             if self.current_offset >= self.data_end {
                 return None;
+            }
+
+            if let Err(e) = check_reader_commit_horizon(
+                self.committed_ends.as_deref(),
+                self.volume_reader,
+                self.current_offset,
+                BlockHeader::SIZE as u64,
+            ) {
+                return Some(Err(e));
             }
 
             // Read BlockHeader (16 bytes)
@@ -675,6 +792,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             // Skip non-data blocks (e.g., IndexPage, IndexManifest) — they are
             // encrypted with different keys and are not part of the data stream.
             if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    self.volume_reader,
+                    self.current_offset,
+                    BlockHeader::SIZE as u64 + block_size as u64,
+                ) {
+                    return Some(Err(e));
+                }
                 self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
                 // Don't increment block_index — index blocks use their own ID space
                 continue;
@@ -698,6 +823,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
                     size: block_size as usize,
                     max_size: MAX_BLOCK_SIZE as usize,
                 }));
+            }
+
+            if let Err(e) = check_reader_commit_horizon(
+                self.committed_ends.as_deref(),
+                self.volume_reader,
+                self.current_offset,
+                BlockHeader::SIZE as u64 + block_size as u64,
+            ) {
+                return Some(Err(e));
             }
 
             let location = BlockLocation::single(
@@ -754,6 +888,7 @@ pub struct MultiVolumeSessionBlockIterator<'a, R: era_storage::StorageReader> {
     current_volume_idx: usize,
     current_offsets: Vec<u64>,
     data_ends: Vec<u64>,
+    committed_ends: Option<Vec<u64>>,
     block_index: u32,
     stats: BlockIterStats,
 }
@@ -768,6 +903,7 @@ impl<'a, R: era_storage::StorageReader> MultiVolumeSessionBlockIterator<'a, R> {
         archive_id: [u8; 16],
         epoch_id: u32,
         compressor: Box<dyn era_codec::Compressor>,
+        committed_ends: Option<Vec<u64>>,
     ) -> Self {
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
         let mut data_ends = Vec::with_capacity(volume_readers.len());
@@ -793,6 +929,7 @@ impl<'a, R: era_storage::StorageReader> MultiVolumeSessionBlockIterator<'a, R> {
             current_volume_idx: 0,
             current_offsets,
             data_ends,
+            committed_ends,
             block_index: 0,
             stats: BlockIterStats::default(),
         }
@@ -817,6 +954,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
             }
 
             let reader = &self.volume_readers[vol_idx];
+
+            if let Err(e) = check_reader_commit_horizon(
+                self.committed_ends.as_deref(),
+                reader,
+                offset,
+                BlockHeader::SIZE as u64,
+            ) {
+                return Some(Err(e));
+            }
 
             let header_bytes = match reader.read_raw(offset, BlockHeader::SIZE).await {
                 Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
@@ -849,6 +995,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
             let block_size = header.length;
 
             if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    reader,
+                    offset,
+                    BlockHeader::SIZE as u64 + block_size as u64,
+                ) {
+                    return Some(Err(e));
+                }
                 self.current_offsets[vol_idx] += BlockHeader::SIZE as u64 + block_size as u64;
                 continue;
             }
@@ -868,6 +1022,15 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
                     size: block_size as usize,
                     max_size: MAX_BLOCK_SIZE as usize,
                 }));
+            }
+
+            if let Err(e) = check_reader_commit_horizon(
+                self.committed_ends.as_deref(),
+                reader,
+                offset,
+                BlockHeader::SIZE as u64 + block_size as u64,
+            ) {
+                return Some(Err(e));
             }
 
             let location = BlockLocation::single(
@@ -943,6 +1106,8 @@ pub struct SessionErasureBlockIterator<'a, R: era_storage::StorageReader> {
     current_offsets: Vec<u64>,
     /// End of data region for each volume
     data_ends: Vec<u64>,
+    /// Manifest-committed end offsets by original volume sequence.
+    committed_ends: Option<Vec<u64>>,
     /// Current block index
     block_index: u32,
     /// Current stripe index (Virtual Striping)
@@ -969,6 +1134,7 @@ pub struct SessionErasureBlockIteratorArgs<'a, R: era_storage::StorageReader> {
     pub data_shards: u8,
     pub parity_shards: u8,
     pub distribution_strategy: MatrixDistributionStrategy,
+    pub committed_ends: Option<Vec<u64>>,
 }
 
 impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
@@ -997,6 +1163,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             data_shards,
             parity_shards,
             distribution_strategy,
+            committed_ends,
         } = args;
         if volume_readers.is_empty() {
             return Err(EraError::InvalidFormat("No volume readers provided".into()));
@@ -1047,6 +1214,7 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             original_volume_count,
             current_offsets,
             data_ends,
+            committed_ends,
             block_index: 0,
             current_stripe_index: 0,
             distribution_strategy,
@@ -1106,6 +1274,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         let mut data_lengths: Vec<Option<u32>> = vec![None; data_shards];
         let mut max_len: usize = 0;
         let header_prefix_len = data_shards * 4;
+        let header_prefix_len_u64 = header_prefix_len as u64;
 
         let mut any_shard_seen = false;
 
@@ -1131,8 +1300,17 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     continue;
                 }
 
-                let prefix_bytes = match reader.read_raw(temp_offsets[idx], header_prefix_len).await
-                {
+                let shard_start = temp_offsets[idx];
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    reader,
+                    shard_start,
+                    header_prefix_len_u64,
+                ) {
+                    return Some(Err(e));
+                }
+
+                let prefix_bytes = match reader.read_raw(shard_start, header_prefix_len).await {
                     Ok(bytes) if bytes.len() == header_prefix_len => bytes,
                     Ok(_) => {
                         temp_offsets[idx] = self.data_ends[idx];
@@ -1144,13 +1322,24 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     }
                 };
 
-                let header_bytes = match reader
-                    .read_raw(
-                        temp_offsets[idx] + header_prefix_len as u64,
-                        ShardHeader::SIZE,
-                    )
-                    .await
-                {
+                let header_offset = match shard_start.checked_add(header_prefix_len_u64) {
+                    Some(offset) => offset,
+                    None => {
+                        return Some(Err(EraError::InvalidFormat(
+                            "Shard header offset overflow".into(),
+                        )))
+                    }
+                };
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    reader,
+                    header_offset,
+                    ShardHeader::SIZE as u64,
+                ) {
+                    return Some(Err(e));
+                }
+
+                let header_bytes = match reader.read_raw(header_offset, ShardHeader::SIZE).await {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                     Ok(_) => {
                         temp_offsets[idx] = self.data_ends[idx];
@@ -1175,9 +1364,17 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     continue;
                 }
                 let shard_len = shard_header.length as usize;
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    reader,
+                    shard_start,
+                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64,
+                ) {
+                    return Some(Err(e));
+                }
                 prefix_copies.push(prefix_bytes);
                 temp_offsets[idx] +=
-                    header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64;
             }
         }
         let stripe_lengths =
@@ -1201,10 +1398,17 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     continue;
                 }
 
-                let _prefix_bytes = match reader
-                    .read_raw(self.current_offsets[idx], header_prefix_len)
-                    .await
-                {
+                let shard_start = self.current_offsets[idx];
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    reader,
+                    shard_start,
+                    header_prefix_len_u64,
+                ) {
+                    return Some(Err(e));
+                }
+
+                let _prefix_bytes = match reader.read_raw(shard_start, header_prefix_len).await {
                     Ok(bytes) if bytes.len() == header_prefix_len => {
                         any_shard_seen = true;
                         bytes
@@ -1219,13 +1423,24 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     }
                 };
 
-                let header_bytes = match reader
-                    .read_raw(
-                        self.current_offsets[idx] + header_prefix_len as u64,
-                        ShardHeader::SIZE,
-                    )
-                    .await
-                {
+                let header_offset = match shard_start.checked_add(header_prefix_len_u64) {
+                    Some(offset) => offset,
+                    None => {
+                        return Some(Err(EraError::InvalidFormat(
+                            "Shard header offset overflow".into(),
+                        )))
+                    }
+                };
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    reader,
+                    header_offset,
+                    ShardHeader::SIZE as u64,
+                ) {
+                    return Some(Err(e));
+                }
+
+                let header_bytes = match reader.read_raw(header_offset, ShardHeader::SIZE).await {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                     Ok(_) => {
                         self.current_offsets[idx] = self.data_ends[idx];
@@ -1263,9 +1478,17 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     let header_len = shard_header.length;
                     if let Some(pb) = parity_bound {
                         if pb > 0 && header_len < pb {
+                            if let Err(e) = check_reader_commit_horizon(
+                                self.committed_ends.as_deref(),
+                                reader,
+                                shard_start,
+                                header_prefix_len_u64 + ShardHeader::SIZE as u64 + pb as u64,
+                            ) {
+                                return Some(Err(e));
+                            }
                             self.stats.corrupted_shards += 1;
                             self.current_offsets[idx] +=
-                                header_prefix_len as u64 + ShardHeader::SIZE as u64 + pb as u64;
+                                header_prefix_len_u64 + ShardHeader::SIZE as u64 + pb as u64;
                             continue;
                         }
                         if pb > 0 && header_len > pb {
@@ -1292,10 +1515,19 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     max_len = shard_len;
                 }
 
+                if let Err(e) = check_reader_commit_horizon(
+                    self.committed_ends.as_deref(),
+                    reader,
+                    shard_start,
+                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64,
+                ) {
+                    return Some(Err(e));
+                }
+
                 let shard_data = match reader
                     .read_raw(
                         self.current_offsets[idx]
-                            + header_prefix_len as u64
+                            + header_prefix_len_u64
                             + ShardHeader::SIZE as u64,
                         shard_len,
                     )
@@ -1304,7 +1536,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     Ok(data) => data,
                     Err(_) => {
                         self.current_offsets[idx] +=
-                            header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+                            header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64;
                         continue;
                     }
                 };
@@ -1333,7 +1565,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 }
 
                 self.current_offsets[idx] +=
-                    header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64;
             }
         }
 
@@ -1679,6 +1911,75 @@ mod tests {
             .unwrap()
     }
 
+    async fn create_volume_reader_with_data_block(
+        temp_dir: &TempDir,
+        file_name: &str,
+        sequence: u16,
+        total_volumes: u16,
+    ) -> (VolumeReader<era_storage::LocalStorageReader>, BlockLocation) {
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let mut writer = VolumeWriter::create(
+            &backend,
+            Path::new(file_name),
+            test_header(sequence, total_volumes),
+        )
+        .await
+        .unwrap();
+
+        let block = era_common::EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from_static(b"unencrypted test payload"),
+            original_size: 24,
+            compressed_size: 24,
+            chunk_count: 1,
+        };
+        let location = writer
+            .write_canonical_block(&block, BlockType::Data)
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        let reader = VolumeReader::open(&backend, Path::new(file_name))
+            .await
+            .unwrap();
+        (reader, location)
+    }
+
+    #[tokio::test]
+    async fn test_standard_iterator_rejects_block_past_committed_horizon() {
+        let temp_dir = TempDir::new().unwrap();
+        let (reader, location) =
+            create_volume_reader_with_data_block(&temp_dir, "horizon.era", 0, 1).await;
+        let unpacker = MacroBlockUnpacker::new(
+            DerivedKey::from_bytes([0x66; 32]).unwrap(),
+            [0x77; 16],
+            [0x88; 16],
+            1,
+            0,
+            Box::new(NoCompressor),
+        );
+        let full_block_end = location.physical_offset
+            + BlockHeader::SIZE as u64
+            + u64::from(location.encrypted_size);
+        let committed_end = full_block_end - 1;
+
+        let mut iter = StandardBlockIterator::new(&reader, &unpacker, Some(vec![committed_end]));
+        let err = iter
+            .next_block()
+            .await
+            .expect("iterator should report a horizon violation")
+            .expect_err("block read must fail before decrypting beyond horizon");
+
+        assert!(
+            matches!(
+                err,
+                EraError::BeyondCommitHorizon { offset, horizon }
+                    if offset == location.physical_offset && horizon == committed_end
+            ),
+            "expected BeyondCommitHorizon, got: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn test_erasure_iterator_accepts_sparse_original_indices() {
         let temp_dir = TempDir::new().unwrap();
@@ -1695,7 +1996,8 @@ mod tests {
             Box::new(NoCompressor),
         );
 
-        let iter = ErasureBlockIterator::new(&volume_readers, &[0, 2], &unpacker, 2, 1).unwrap();
+        let iter =
+            ErasureBlockIterator::new(&volume_readers, &[0, 2], &unpacker, 2, 1, None).unwrap();
 
         assert_eq!(iter.original_volume_count, 3);
         assert_eq!(iter.vol_index_map, vec![Some(0), None, Some(1)]);
@@ -1717,7 +2019,7 @@ mod tests {
             Box::new(NoCompressor),
         );
 
-        let err = ErasureBlockIterator::new(&volume_readers, &[0, 0], &unpacker, 2, 1)
+        let err = ErasureBlockIterator::new(&volume_readers, &[0, 0], &unpacker, 2, 1, None)
             .err()
             .expect("duplicate indices must be rejected");
         let msg = err.to_string();

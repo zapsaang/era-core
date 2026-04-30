@@ -10,9 +10,9 @@
 //! not as sidecar files. Recovery detection uses `VolumeReader` to check
 //! the footer's `last_checkpoint_offset` field.
 
-use era_common::{BlockLocation, ChunkHash, EraError, Result};
+use era_common::{BlockHeader, BlockLocation, ChunkHash, EraError, Result};
 use era_storage::LocalStorageBackend;
-use era_volume::VolumeReader;
+use era_volume::{Footer, VolumeReader};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -241,6 +241,30 @@ impl RecoveryManager {
         }
     }
 
+    /// Read the footer from the archive file (for structural integrity checks).
+    async fn read_footer(archive_path: &Path) -> Result<Footer> {
+        let parent_dir = archive_path.parent().unwrap_or(Path::new("."));
+        let backend = LocalStorageBackend::new(parent_dir);
+        let volume_name = archive_path.file_name().unwrap_or_default();
+
+        let reader = VolumeReader::open(&backend, Path::new(volume_name)).await?;
+        reader
+            .footer()
+            .ok_or_else(|| EraError::InvalidConfig("No footer found in archive".into()))
+            .cloned()
+    }
+
+    /// Read raw bytes from the archive file at a given offset.
+    async fn read_raw(archive_path: &Path, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let parent_dir = archive_path.parent().unwrap_or(Path::new("."));
+        let backend = LocalStorageBackend::new(parent_dir);
+        let volume_name = archive_path.file_name().unwrap_or_default();
+
+        let reader = VolumeReader::open(&backend, Path::new(volume_name)).await?;
+        let bytes = reader.read_raw(offset, len).await?;
+        Ok(bytes.to_vec())
+    }
+
     /// Create a recovery manager for an archive
     ///
     /// **V2.2 Change:** Now checks volume footer instead of sidecar files.
@@ -368,6 +392,32 @@ impl RecoveryManager {
             return Err(EraError::InvalidConfig(
                 "Cannot truncate: no valid footer with data_end_offset".into(),
             ));
+        }
+
+        // Structural integrity check: ensure truncation doesn't destroy manifest block.
+        // Skip for archives without manifest (backward compat).
+        if let Ok(footer) = Self::read_footer(&self.archive_path).await {
+            if footer.has_manifest() {
+                let manifest_offset = footer.manifest_offset();
+                // Read BlockHeader at manifest offset to determine full manifest block size
+                let manifest_block_end = if let Ok(header_bytes) = Self::read_raw(
+                    &self.archive_path, manifest_offset, BlockHeader::SIZE
+                ).await {
+                    if let Some(header) = BlockHeader::from_bytes(&header_bytes) {
+                        manifest_offset + BlockHeader::SIZE as u64 + u64::from(header.length)
+                    } else {
+                        manifest_offset + BlockHeader::SIZE as u64
+                    }
+                } else {
+                    manifest_offset + BlockHeader::SIZE as u64
+                };
+                if data_end < manifest_block_end {
+                    return Err(EraError::IntegrityError(format!(
+                        "data_end ({}) is below manifest block end ({}); truncation would destroy manifest",
+                        data_end, manifest_block_end
+                    )));
+                }
+            }
         }
 
         if cancel_flag.load(Ordering::Relaxed) {

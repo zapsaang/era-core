@@ -17,8 +17,9 @@
 use crate::auth::PasswordSlotParams;
 use bytes::Bytes;
 use era_common::{
-    ArchiveConfig, ArchiveId, ArchiveManifest, BlockId, ChunkHash, EncryptedMacroBlock, EraError,
-    ErasureCodeConfig, MatrixDistributionStrategy, Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, ArchiveManifest, BlockId, BlockLocation, BlockType, ChunkHash,
+    EncryptedMacroBlock, EraError, ErasureCodeConfig, MatrixDistributionStrategy, Result,
+    UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::hybrid_certificate::{HybridCertificate, HybridKeyPair};
@@ -56,7 +57,7 @@ use crate::index_stage::IndexStage;
 use crate::packing_stage::PackingStage;
 use crate::reader::ArchiveReader;
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
-use crate::sequence::INITIAL_FINALIZE_SEQUENCE;
+use crate::sequence::{next_finalize_sequence, INITIAL_FINALIZE_SEQUENCE};
 use crate::small_file_packer::{SmallFileEntry, SmallFilePacker};
 use crate::volume_stage::VolumeStage;
 use crate::write_pipeline::WritePipeline;
@@ -409,6 +410,8 @@ impl ArchiveWriterBuilder {
         let mut append_header: Option<SuperHeader> = None;
         let mut append_footer: Option<Footer> = None;
         let mut append_catalog: Option<Catalog> = None;
+        let mut append_manifest_data: Option<(EncryptedMacroBlock, u16, u32)> = None;
+        let mut existing_manifest: Option<ArchiveManifest> = None;
         let mut key_encapsulation: Option<KeyEncapsulation> = None;
 
         // Extract Copy fields before moving config to avoid clone
@@ -563,6 +566,22 @@ impl ArchiveWriterBuilder {
                         if let Ok(catalog) = Catalog::from_bytes(&catalog_bytes) {
                             append_catalog = Some(catalog);
                         }
+                    }
+                }
+                if f.has_manifest() {
+                    let manifest_block_id = f.manifest_block_id();
+                    let manifest_location = BlockLocation::single(
+                        last_valid_reader.header().volume_id(),
+                        manifest_block_id,
+                        f.manifest_offset(),
+                        0,
+                    );
+                    if let Ok(block) = last_valid_reader.read_block(&manifest_location).await {
+                        append_manifest_data = Some((
+                            block,
+                            last_valid_reader.header().volume_sequence(),
+                            manifest_block_id,
+                        ));
                     }
                 }
             } else {
@@ -821,6 +840,49 @@ impl ArchiveWriterBuilder {
 
         // Store nonce context (salt) for block encryption
         let nonce_context = *archive_salt.as_bytes();
+
+        // Decrypt the prior manifest in append mode so finalize_sequence and
+        // per-volume committed ends remain monotonic across append finalizes.
+        if let Some((encrypted_block, vol_seq, manifest_block_id)) = append_manifest_data {
+            let block_key =
+                session.derive_block_key(&volume_key, manifest_block_id as u64, &nonce_context)?;
+            let derived_key = block_key.to_derived_key()?;
+            let aead_ctx = XChaCha20Poly1305Context::from_derived_key(&derived_key)?;
+            let nonce_slice = encrypted_block
+                .data
+                .get(..NONCE_SIZE)
+                .ok_or_else(|| EraError::IntegrityError("Manifest nonce too short".into()))?;
+            let nonce_bytes: [u8; NONCE_SIZE] = nonce_slice
+                .try_into()
+                .map_err(|_| EraError::IntegrityError("Manifest nonce too short".into()))?;
+            let ciphertext = encrypted_block
+                .data
+                .get(NONCE_SIZE..)
+                .ok_or_else(|| EraError::IntegrityError("Manifest ciphertext missing".into()))?;
+            let epoch_id = append_header
+                .as_ref()
+                .ok_or_else(|| {
+                    era_common::EraError::CorruptedHeader("Missing append header".into())
+                })?
+                .epoch_id();
+            let archive_id_bytes = *archive_id.0.as_bytes();
+            let aad = build_aad(
+                &archive_id_bytes,
+                epoch_id,
+                BlockType::Manifest,
+                vol_seq as u32,
+                BlockId::new(manifest_block_id as u64),
+            );
+            let decrypted = aead_ctx.decrypt(&nonce_bytes, &aad, ciphertext)
+                .map_err(|e| EraError::IntegrityError(
+                    format!("Failed to decrypt existing manifest: {}", e)
+                ))?;
+            let manifest = ArchiveManifest::from_bytes(&decrypted)
+                .map_err(|e| EraError::IntegrityError(
+                    format!("Failed to deserialize existing manifest: {}", e)
+                ))?;
+            existing_manifest = Some(manifest);
+        }
 
         // Build config with erasure setting
         if !self.append_existing {
@@ -1135,6 +1197,7 @@ impl ArchiveWriterBuilder {
             pipeline,
             pending_hashes: HashSet::new(),
             finalize_sequence: INITIAL_FINALIZE_SEQUENCE,
+            existing_manifest,
         })
     }
 }
@@ -1189,6 +1252,8 @@ pub struct ArchiveWriter {
     pending_hashes: HashSet<ChunkHash>,
 
     finalize_sequence: u64,
+
+    existing_manifest: Option<ArchiveManifest>,
 }
 
 /// Recursively collect file paths using async I/O.
@@ -1237,6 +1302,7 @@ impl ArchiveWriter {
         catalog_bytes: &[u8],
         index_bytes: &[u8],
         committed_horizon: u64,
+        volume_committed_ends: Vec<u64>,
     ) -> Result<ArchiveManifest> {
         let catalog_commitment = compute_catalog_commitment(catalog_bytes);
         let index_commitment = compute_index_commitment(index_bytes);
@@ -1248,6 +1314,7 @@ impl ArchiveWriter {
             committed_horizon,
             catalog_commitment,
             index_commitment,
+            volume_committed_ends,
         ))
     }
 
@@ -2071,12 +2138,6 @@ impl ArchiveWriter {
         let catalog_block_id = u32::try_from(catalog_block_ids[0])
             .map_err(|_| EraError::Other("Catalog block ID exceeds u32::MAX".into()))?;
 
-        let committed_horizon = if let Some(last_location) = self.catalog.block_locations.last() {
-            last_location.physical_offset + u64::from(last_location.encrypted_size)
-        } else {
-            era_volume::DATA_REGION_START
-        };
-
         let mut index_builder = self.pipeline.index().take_index_builder();
         let index_total_size = if let Some(builder) = index_builder.as_mut() {
             builder.estimated_finalized_disk_size()?
@@ -2084,7 +2145,8 @@ impl ArchiveWriter {
             0
         };
 
-        let provisional_manifest = self.build_manifest(&catalog_bytes, &[], committed_horizon)?;
+        let provisional_manifest =
+            self.build_manifest(&catalog_bytes, &[], era_volume::DATA_REGION_START, vec![])?;
         let manifest_total_size =
             Self::typed_plaintext_disk_size(provisional_manifest.to_bytes()?.len())?;
 
@@ -2121,6 +2183,20 @@ impl ArchiveWriter {
                 &volume_indices,
             )?;
         }
+
+        let volume_committed_ends: Vec<u64> = self
+            .pipeline
+            .volume()
+            .pool()
+            .committed_ends()
+            .into_iter()
+            .map(|(_, committed_end)| committed_end)
+            .collect();
+        let committed_horizon = volume_committed_ends
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(era_volume::DATA_REGION_START);
 
         let catalog_locations = self
             .pipeline
@@ -2226,7 +2302,43 @@ impl ArchiveWriter {
             (None, Vec::new())
         };
 
-        let manifest = self.build_manifest(&catalog_bytes, &index_bytes, committed_horizon)?;
+        let manifest = if let Some(ref old_manifest) = self.existing_manifest {
+            if volume_committed_ends.len() < old_manifest.volume_committed_ends.len() {
+                return Err(EraError::IntegrityError(format!(
+                    "Volume count decreased in append mode: {} -> {}",
+                    old_manifest.volume_committed_ends.len(),
+                    volume_committed_ends.len()
+                )));
+            }
+
+            for (seq, (&new_end, &old_end)) in volume_committed_ends
+                .iter()
+                .zip(old_manifest.volume_committed_ends.iter())
+                .enumerate()
+            {
+                if new_end < old_end {
+                    return Err(EraError::IntegrityError(format!(
+                        "Volume {} committed_end decreased: {} -> {}",
+                        seq, old_end, new_end
+                    )));
+                }
+            }
+
+            self.finalize_sequence = next_finalize_sequence(old_manifest.finalize_sequence)?;
+            self.build_manifest(
+                &catalog_bytes,
+                &index_bytes,
+                committed_horizon,
+                volume_committed_ends,
+            )?
+        } else {
+            self.build_manifest(
+                &catalog_bytes,
+                &index_bytes,
+                committed_horizon,
+                volume_committed_ends,
+            )?
+        };
         let manifest_bytes = manifest.to_bytes()?;
 
         let manifest_block_id = self.pipeline.reserve_block_id()?;
@@ -2351,6 +2463,47 @@ mod tests {
     use std::path::Path;
     use tempfile::{NamedTempFile, TempDir};
 
+    async fn read_primary_manifest(archive_path: &Path, password: &str) -> ArchiveManifest {
+        let reader = ArchiveReader::open(archive_path, password).await.unwrap();
+        let footer = reader.primary_footer().unwrap();
+        let backend = LocalStorageBackend::new(archive_path.parent().unwrap());
+        let base_name = Path::new(archive_path.file_name().unwrap());
+        let volume_reader = VolumeReader::open(&backend, base_name).await.unwrap();
+        let manifest_block_id = footer.manifest_block_id();
+        let manifest_location = BlockLocation::single(
+            reader.header().volume_id(),
+            manifest_block_id,
+            footer.manifest_offset(),
+            0,
+        );
+        let encrypted_block = volume_reader.read_block(&manifest_location).await.unwrap();
+
+        let nonce_bytes: [u8; NONCE_SIZE] = encrypted_block.data[..NONCE_SIZE].try_into().unwrap();
+        let ciphertext = &encrypted_block.data[NONCE_SIZE..];
+        let nonce_context = reader.nonce_context();
+        let block_key = reader
+            .session()
+            .derive_block_key(
+                reader.volume_key(),
+                manifest_block_id as u64,
+                &nonce_context,
+            )
+            .unwrap();
+        let derived_key = block_key.to_derived_key().unwrap();
+        let aead_ctx = XChaCha20Poly1305Context::from_derived_key(&derived_key).unwrap();
+        let archive_id = reader.archive_id_bytes();
+        let aad = build_aad(
+            &archive_id,
+            reader.epoch_id(),
+            BlockType::Manifest,
+            u32::from(reader.header().volume_sequence()),
+            BlockId::new(manifest_block_id as u64),
+        );
+        let decrypted = aead_ctx.decrypt(&nonce_bytes, &aad, ciphertext).unwrap();
+
+        ArchiveManifest::from_bytes(&decrypted).unwrap()
+    }
+
     #[tokio::test]
     async fn test_manifest_build_and_encryption() {
         let temp_dir = TempDir::new().unwrap();
@@ -2366,7 +2519,12 @@ mod tests {
         let index_bytes = b"index plaintext".to_vec();
 
         let manifest: ArchiveManifest = writer
-            .build_manifest(&catalog_bytes, &index_bytes, era_volume::DATA_REGION_START)
+            .build_manifest(
+                &catalog_bytes,
+                &index_bytes,
+                era_volume::DATA_REGION_START,
+                vec![era_volume::DATA_REGION_START],
+            )
             .unwrap();
 
         assert_eq!(
@@ -2380,9 +2538,18 @@ mod tests {
         assert_eq!(manifest.epoch_id, writer.pipeline.encryption().epoch_id());
         assert_eq!(manifest.finalize_sequence, INITIAL_FINALIZE_SEQUENCE);
         assert_eq!(manifest.committed_horizon, era_volume::DATA_REGION_START);
+        assert_eq!(
+            manifest.volume_committed_ends,
+            vec![era_volume::DATA_REGION_START]
+        );
 
         let manifest_without_index = writer
-            .build_manifest(&catalog_bytes, &[], era_volume::DATA_REGION_START)
+            .build_manifest(
+                &catalog_bytes,
+                &[],
+                era_volume::DATA_REGION_START,
+                vec![era_volume::DATA_REGION_START],
+            )
             .unwrap();
         assert_eq!(manifest_without_index.index_commitment, [0u8; 32]);
 
@@ -2398,8 +2565,9 @@ mod tests {
                 512,
             ));
 
-        let manifest_with_block_location =
-            writer.build_manifest(&catalog_bytes, &[], 4608).unwrap();
+        let manifest_with_block_location = writer
+            .build_manifest(&catalog_bytes, &[], 4608, vec![4608])
+            .unwrap();
         assert_eq!(manifest_with_block_location.finalize_sequence, 7);
         assert_eq!(manifest_with_block_location.committed_horizon, 4608);
 
@@ -2723,7 +2891,12 @@ mod tests {
             ));
 
         let manifest = writer
-            .build_manifest(catalog_bytes, index_bytes, committed_horizon)
+            .build_manifest(
+                catalog_bytes,
+                index_bytes,
+                committed_horizon,
+                vec![committed_horizon],
+            )
             .unwrap();
 
         assert_eq!(manifest.epoch_id, writer.pipeline.encryption().epoch_id());
@@ -2737,6 +2910,99 @@ mod tests {
             manifest.index_commitment,
             compute_index_commitment(index_bytes)
         );
+    }
+
+    #[tokio::test]
+    async fn test_build_manifest_preserves_volume_committed_ends() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("manifest_committed_ends.era");
+
+        let writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .build()
+            .await
+            .unwrap();
+
+        let volume_committed_ends = vec![era_volume::DATA_REGION_START, 8192, 12288];
+        let manifest = writer
+            .build_manifest(b"catalog", b"index", 12288, volume_committed_ends.clone())
+            .unwrap();
+
+        assert_eq!(manifest.volume_committed_ends, volume_committed_ends);
+    }
+
+    #[tokio::test]
+    async fn test_append_manifest_sequence_and_committed_ends_are_monotonic() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("append_manifest_monotonic.era");
+        let config = ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        };
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config.clone())
+            .build()
+            .await
+            .unwrap();
+        writer
+            .add_bytes("first.txt", b"first payload")
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        let first_manifest = read_primary_manifest(&archive_path, "test_password").await;
+        assert_eq!(first_manifest.finalize_sequence, INITIAL_FINALIZE_SEQUENCE);
+        assert!(!first_manifest.volume_committed_ends.is_empty());
+        assert_eq!(
+            first_manifest.committed_horizon,
+            first_manifest
+                .volume_committed_ends
+                .iter()
+                .copied()
+                .max()
+                .unwrap()
+        );
+
+        let mut append_writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config)
+            .append_existing(true)
+            .build()
+            .await
+            .unwrap();
+        append_writer
+            .add_bytes("second.txt", b"second payload")
+            .await
+            .unwrap();
+        append_writer.finalize().await.unwrap();
+
+        let second_manifest = read_primary_manifest(&archive_path, "test_password").await;
+        assert_eq!(
+            second_manifest.finalize_sequence,
+            first_manifest.finalize_sequence + 1
+        );
+        assert!(
+            second_manifest.volume_committed_ends.len()
+                >= first_manifest.volume_committed_ends.len()
+        );
+        assert_eq!(
+            second_manifest.committed_horizon,
+            second_manifest
+                .volume_committed_ends
+                .iter()
+                .copied()
+                .max()
+                .unwrap()
+        );
+        for (&new_end, &old_end) in second_manifest
+            .volume_committed_ends
+            .iter()
+            .zip(first_manifest.volume_committed_ends.iter())
+        {
+            assert!(new_end >= old_end);
+        }
     }
 
     #[tokio::test]
@@ -2815,7 +3081,12 @@ mod tests {
         let committed_horizon = 5678u64;
 
         let manifest = writer
-            .build_manifest(catalog_bytes, index_bytes, committed_horizon)
+            .build_manifest(
+                catalog_bytes,
+                index_bytes,
+                committed_horizon,
+                vec![committed_horizon],
+            )
             .unwrap();
 
         let serialized = manifest.to_bytes().unwrap();
@@ -2824,6 +3095,10 @@ mod tests {
         assert_eq!(manifest.epoch_id, deserialized.epoch_id);
         assert_eq!(manifest.finalize_sequence, deserialized.finalize_sequence);
         assert_eq!(manifest.committed_horizon, deserialized.committed_horizon);
+        assert_eq!(
+            manifest.volume_committed_ends,
+            deserialized.volume_committed_ends
+        );
         assert_eq!(manifest.catalog_commitment, deserialized.catalog_commitment);
         assert_eq!(manifest.index_commitment, deserialized.index_commitment);
     }

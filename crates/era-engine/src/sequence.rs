@@ -59,13 +59,13 @@ mod tests {
 
     #[test]
     fn manifest_implements_sequence_selector() {
-        let m = ArchiveManifest::new(1, 42, 10, [0; 32], [0; 32]);
+        let m = ArchiveManifest::new(1, 42, 10, [0; 32], [0; 32], vec![]);
         assert_eq!(m.selection_sequence(), 42);
     }
 
     #[test]
     fn sequence_selector_trait_object() {
-        let m = ArchiveManifest::new(1, 99, 10, [0; 32], [0; 32]);
+        let m = ArchiveManifest::new(1, 99, 10, [0; 32], [0; 32], vec![]);
         let selector: &dyn SequenceSelector = &m;
         assert_eq!(selector.selection_sequence(), 99);
     }
