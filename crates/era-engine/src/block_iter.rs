@@ -78,7 +78,10 @@ fn check_commit_horizon_for_sequence(
         return Ok(());
     };
     let Some(&committed_end) = ends.get(volume_sequence) else {
-        return Ok(());
+        return Err(EraError::InvalidFormat(format!(
+            "Missing committed end for volume sequence {}",
+            volume_sequence
+        )));
     };
 
     let read_end = offset.checked_add(expected_size).ok_or_else(|| {

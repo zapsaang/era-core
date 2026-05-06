@@ -273,7 +273,7 @@ fn v2_rob_07_truncate_to_checkpoint_uses_spawn_blocking() {
     let fn_start = source
         .find("pub async fn truncate_to_checkpoint")
         .expect("truncate_to_checkpoint exists");
-    let area = &source[fn_start..fn_start + 2600.min(source.len() - fn_start)];
+    let area = &source[fn_start..fn_start + 5000.min(source.len() - fn_start)];
     assert!(area.contains("spawn_blocking"));
 }
 

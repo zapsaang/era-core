@@ -113,6 +113,10 @@ pub struct VolumePool<B: StorageBackend> {
     block_sequence: u64,
     /// Statistics
     stats: VolumePoolStats,
+    /// Initial committed ends from previous manifest (append mode only).
+    initial_committed_ends: Vec<u64>,
+    /// Position when volume was opened for append (append mode only).
+    append_start_positions: Vec<u64>,
 }
 
 impl<B: StorageBackend> VolumePool<B> {
@@ -172,6 +176,8 @@ impl<B: StorageBackend> VolumePool<B> {
             sequences,
             block_sequence: 0,
             stats,
+            initial_committed_ends: Vec::new(),
+            append_start_positions: Vec::new(),
         };
 
         Ok(pool)
@@ -243,6 +249,8 @@ impl<B: StorageBackend> VolumePool<B> {
             // because the rotating offset strategy tolerates imprecise counters.
             block_sequence: max_block_count as u64,
             stats,
+            initial_committed_ends: Vec::new(),
+            append_start_positions: Vec::new(),
         })
     }
 
@@ -257,6 +265,7 @@ impl<B: StorageBackend> VolumePool<B> {
         mut config: VolumePoolConfig,
         header: SuperHeader,
         footer: &crate::Footer,
+        initial_committed_ends: Vec<u64>,
     ) -> Result<Self> {
         config.initial_volume_count = 1;
         let volume_path = config.volume_path(0);
@@ -266,6 +275,7 @@ impl<B: StorageBackend> VolumePool<B> {
             VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)
                 .await?;
         let block_sequence = writer.block_count() as u64;
+        let append_start_position = footer.data_end_offset();
 
         let stats = VolumePoolStats {
             volume_count: 1,
@@ -280,6 +290,8 @@ impl<B: StorageBackend> VolumePool<B> {
             sequences: vec![0],
             block_sequence,
             stats,
+            initial_committed_ends,
+            append_start_positions: vec![append_start_position],
         })
     }
 
@@ -402,7 +414,19 @@ impl<B: StorageBackend> VolumePool<B> {
     pub fn committed_ends(&self) -> Vec<(u16, u64)> {
         let mut ends: Vec<(u16, u64)> = self.stats.volume_sizes.clone();
         for (i, writer) in self.writers.iter().enumerate() {
-            ends.push((self.sequences[i], writer.current_size()));
+            let seq = self.sequences[i];
+            let current = writer.current_size();
+            let committed =
+                if let Some(&initial) = self.initial_committed_ends.get(usize::from(seq)) {
+                    if let Some(&start_pos) = self.append_start_positions.get(i) {
+                        initial + (current - start_pos)
+                    } else {
+                        current
+                    }
+                } else {
+                    current
+                };
+            ends.push((seq, committed));
         }
         ends.sort_by_key(|(seq, _)| *seq);
         ends

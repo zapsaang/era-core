@@ -100,7 +100,11 @@ pub struct ArchiveReader {
     compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
     /// Per-volume committed end offsets loaded from the highest-sequence manifest.
-    volume_committed_ends: Vec<u64>,
+    /// `None` = no manifest (v8.1 or not yet loaded).
+    /// `Some(vec)` = manifest loaded successfully (v8.2).
+    volume_committed_ends: Option<Vec<u64>>,
+    /// The full manifest loaded from volumes (v8.2 only).
+    manifest: Option<ArchiveManifest>,
     /// V2.1 index reader recovered from volume
     index_reader: Option<IndexReader>,
     embedded_index_recovery_failed: bool,
@@ -374,7 +378,7 @@ impl ArchiveReader {
         let compression_level = header.config().compression.level;
         let compression_algorithm = header.config().compression.algorithm;
 
-        Ok(Self {
+        let mut reader = Self {
             volume_readers: discovered.volume_readers,
             volume_indices: discovered.volume_indices,
             expected_volume_count: discovered.expected_volume_count,
@@ -387,10 +391,13 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
-            volume_committed_ends: Vec::new(),
+            volume_committed_ends: None,
+            manifest: None,
             index_reader: None,
             embedded_index_recovery_failed: false,
-        })
+        };
+        reader.load_manifest().await?;
+        Ok(reader)
     }
 
     /// Open an archive using a pre-derived key session
@@ -441,7 +448,7 @@ impl ArchiveReader {
         let compression_level = header.config().compression.level;
         let compression_algorithm = header.config().compression.algorithm;
 
-        Ok(Self {
+        let mut reader = Self {
             volume_readers: discovered.volume_readers,
             volume_indices: discovered.volume_indices,
             expected_volume_count: discovered.expected_volume_count,
@@ -454,10 +461,13 @@ impl ArchiveReader {
             compression_level,
             compression_algorithm,
             catalog: None,
-            volume_committed_ends: Vec::new(),
+            volume_committed_ends: None,
+            manifest: None,
             index_reader: None,
             embedded_index_recovery_failed: false,
-        })
+        };
+        reader.load_manifest().await?;
+        Ok(reader)
     }
 
     /// Open an archive using a keypair (certificate mode)
@@ -513,11 +523,13 @@ impl ArchiveReader {
     }
 
     fn committed_ends_for_iterators(&self) -> Option<Vec<u64>> {
-        if self.volume_committed_ends.is_empty() {
-            None
-        } else {
-            Some(self.volume_committed_ends.clone())
-        }
+        self.volume_committed_ends.clone()
+    }
+
+    /// Returns the loaded archive manifest if available (v8.2 only).
+    #[must_use]
+    pub fn manifest(&self) -> Option<&ArchiveManifest> {
+        self.manifest.as_ref()
     }
 
     /// Create a temporary session-based block unpacker.
@@ -558,7 +570,9 @@ impl ArchiveReader {
             warn!("Embedded index recovery failed; continuing in degraded mode");
         }
         self.load_catalog().await?;
-        self.load_manifest().await?;
+        if self.manifest.is_none() {
+            self.load_manifest().await?;
+        }
         Ok(())
     }
 
@@ -997,6 +1011,7 @@ impl ArchiveReader {
 
     async fn load_manifest(&mut self) -> Result<()> {
         let mut best_manifest: Option<ArchiveManifest> = None;
+        let mut any_volume_has_manifest = false;
 
         for i in 0..self.volume_readers.len() {
             let reader = &self.volume_readers[i];
@@ -1008,6 +1023,7 @@ impl ArchiveReader {
             if !footer.has_manifest() {
                 continue;
             }
+            any_volume_has_manifest = true;
 
             let manifest_offset = footer.manifest_offset();
             let manifest_block_id = footer.manifest_block_id();
@@ -1114,13 +1130,19 @@ impl ArchiveReader {
                     self.expected_volume_count,
                 )));
             }
-            self.volume_committed_ends = manifest.volume_committed_ends;
+            self.volume_committed_ends = Some(manifest.volume_committed_ends.clone());
+            self.manifest = Some(manifest);
             debug!(
                 "Loaded manifest: finalize_sequence={}, volume_committed_ends={:?}",
-                manifest.finalize_sequence, self.volume_committed_ends
+                self.manifest.as_ref().unwrap().finalize_sequence,
+                self.volume_committed_ends.as_ref().unwrap()
             );
+        } else if any_volume_has_manifest {
+            return Err(EraError::IntegrityError(
+                "Archive declares manifest but manifest cannot be loaded".into(),
+            ));
         } else {
-            debug!("No manifest found in any volume (backward compat)");
+            debug!("No manifest found in any volume (backward compat v8.1)");
         }
 
         Ok(())
@@ -1229,12 +1251,21 @@ impl ArchiveReader {
     }
 
     fn check_read_bound(&self, volume_sequence: u16, offset: u64, read_len: u64) -> Result<()> {
-        if self.volume_committed_ends.is_empty() {
-            return Ok(());
-        }
+        let committed_ends = match &self.volume_committed_ends {
+            None => {
+                // v8.1 archive (no manifest) - allow reads without bounds
+                return Ok(());
+            }
+            Some(ends) if ends.is_empty() => {
+                // v8.2 archive with empty committed_ends = format error (fail-closed)
+                return Err(EraError::InvalidFormat(
+                    "v8.2 archive with empty volume_committed_ends".into(),
+                ));
+            }
+            Some(ends) => ends,
+        };
 
-        let committed_end = self
-            .volume_committed_ends
+        let committed_end = committed_ends
             .get(volume_sequence as usize)
             .ok_or_else(|| {
                 EraError::InvalidFormat(format!(
@@ -1369,7 +1400,11 @@ impl ArchiveReader {
                     let shard_reader = &self.volume_readers[vol_idx];
                     let vol_seq = shard_reader.header().volume_sequence();
                     let shard_size = u64::from(erasure_info.shard_size);
-                    self.check_read_bound(vol_seq, offset, shard_size)?;
+                    self.check_read_bound(
+                        vol_seq,
+                        offset,
+                        shard_size + era_common::ShardHeader::SIZE as u64,
+                    )?;
 
                     match self.read_shard(shard_reader, offset).await {
                         Ok(shard) => {
@@ -1409,7 +1444,7 @@ impl ArchiveReader {
             self.check_read_bound(
                 volume_sequence,
                 location.physical_offset,
-                u64::from(location.encrypted_size),
+                u64::from(location.encrypted_size) + era_common::BlockHeader::SIZE as u64,
             )?;
             let encrypted_block = reader.read_block(location).await?;
             let unpacker = self.create_unpacker();

@@ -1178,7 +1178,22 @@ pub async fn repair(
     let manager = RecoveryManager::new(archive)
         .await
         .context("Failed to load recovery state")?;
-    manager.cleanup().context("Failed to clean up checkpoint")?;
+
+    // Load manifest for integrity validation before truncation
+    let mut reader = open_archive(archive, passwords, key_paths).await?;
+    reader.preflight_metadata_recovery().await?;
+
+    if let Some(manifest) = reader.manifest() {
+        manager
+            .truncate_to_checkpoint_with_manifest(Some(manifest))
+            .await
+            .context("Failed to truncate archive with manifest validation")?;
+    } else {
+        manager
+            .truncate_to_checkpoint()
+            .await
+            .context("Failed to truncate archive")?;
+    }
 
     info!("✅ Checkpoint discarded. You can now create a new archive.");
 

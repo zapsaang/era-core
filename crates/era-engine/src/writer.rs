@@ -873,14 +873,29 @@ impl ArchiveWriterBuilder {
                 vol_seq as u32,
                 BlockId::new(manifest_block_id as u64),
             );
-            let decrypted = aead_ctx.decrypt(&nonce_bytes, &aad, ciphertext)
-                .map_err(|e| EraError::IntegrityError(
-                    format!("Failed to decrypt existing manifest: {}", e)
-                ))?;
-            let manifest = ArchiveManifest::from_bytes(&decrypted)
-                .map_err(|e| EraError::IntegrityError(
-                    format!("Failed to deserialize existing manifest: {}", e)
-                ))?;
+            let decrypted = aead_ctx
+                .decrypt(&nonce_bytes, &aad, ciphertext)
+                .map_err(|e| {
+                    EraError::IntegrityError(format!("Failed to decrypt existing manifest: {}", e))
+                })?;
+            let manifest = ArchiveManifest::from_bytes(&decrypted).map_err(|e| {
+                EraError::IntegrityError(format!("Failed to deserialize existing manifest: {}", e))
+            })?;
+
+            // Verify footer data_end_offset >= manifest committed_end (integrity check)
+            if let Some(ref footer) = append_footer {
+                let seq = footer.sequence_number();
+                if let Some(&committed_end) = manifest.volume_committed_ends.get(seq as usize) {
+                    if footer.data_end_offset() < committed_end {
+                        return Err(EraError::IntegrityError(format!(
+                            "Volume {} footer data_end_offset {} is less than manifest committed end {}. \
+                             This indicates footer corruption or manifest mismatch.",
+                            seq, footer.data_end_offset(), committed_end
+                        )));
+                    }
+                }
+            }
+
             existing_manifest = Some(manifest);
         }
 
@@ -994,11 +1009,16 @@ impl ArchiveWriterBuilder {
             let footer = append_footer
                 .as_ref()
                 .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
+            let initial_committed_ends = existing_manifest
+                .as_ref()
+                .map(|m| m.volume_committed_ends.clone())
+                .unwrap_or_default();
             VolumePool::open_append_single(
                 backend.clone(),
                 pool_config,
                 active_header.clone(),
                 footer,
+                initial_committed_ends,
             )
             .await?
         } else {
@@ -2145,8 +2165,24 @@ impl ArchiveWriter {
             0
         };
 
-        let provisional_manifest =
-            self.build_manifest(&catalog_bytes, &[], era_volume::DATA_REGION_START, vec![])?;
+        let provisional_committed_ends: Vec<u64> = self
+            .pipeline
+            .volume()
+            .pool()
+            .committed_ends()
+            .into_iter()
+            .map(|(_, committed_end)| committed_end)
+            .collect();
+        let provisional_manifest = self.build_manifest(
+            &catalog_bytes,
+            &[],
+            provisional_committed_ends
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(era_volume::DATA_REGION_START),
+            provisional_committed_ends,
+        )?;
         let manifest_total_size =
             Self::typed_plaintext_disk_size(provisional_manifest.to_bytes()?.len())?;
 

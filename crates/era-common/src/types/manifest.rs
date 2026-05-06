@@ -117,6 +117,25 @@ impl TryFrom<crate::proto::ArchiveManifest> for ArchiveManifest {
     type Error = crate::EraError;
 
     fn try_from(p: crate::proto::ArchiveManifest) -> crate::Result<Self> {
+        const MAX_VOLUMES: usize = 1024;
+        if p.volume_committed_ends.len() > MAX_VOLUMES {
+            return Err(crate::EraError::Deserialization(format!(
+                "volume_committed_ends count {} exceeds maximum {}",
+                p.volume_committed_ends.len(),
+                MAX_VOLUMES
+            )));
+        }
+
+        const DATA_REGION_START: u64 = 4224;
+        for (seq, &end) in p.volume_committed_ends.iter().enumerate() {
+            if end < DATA_REGION_START && end != 0 {
+                return Err(crate::EraError::Deserialization(format!(
+                    "volume {} committed_end {} is below DATA_REGION_START",
+                    seq, end
+                )));
+            }
+        }
+
         let catalog_commitment: [u8; 32] = p.catalog_commitment.try_into().map_err(|_| {
             crate::EraError::Deserialization("catalog_commitment must be exactly 32 bytes".into())
         })?;
@@ -141,18 +160,18 @@ mod tests {
 
     #[test]
     fn new_manifest() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![10, 20]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![5000, 6000]);
         assert_eq!(m.epoch_id, 1);
         assert_eq!(m.finalize_sequence, 5);
         assert_eq!(m.committed_horizon, 10);
         assert_eq!(m.catalog_commitment, [0xAA; 32]);
         assert_eq!(m.index_commitment, [0xBB; 32]);
-        assert_eq!(m.volume_committed_ends, vec![10, 20]);
+        assert_eq!(m.volume_committed_ends, vec![5000, 6000]);
     }
 
     #[test]
     fn manifest_roundtrip_bytes() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![10, 20]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![5000, 6000]);
         let bytes = m.to_bytes().unwrap();
         let m2 = ArchiveManifest::from_bytes(&bytes).unwrap();
         assert_eq!(m, m2);
@@ -178,7 +197,7 @@ mod tests {
 
     #[test]
     fn proto_roundtrip() {
-        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![10, 20]);
+        let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![5000, 6000]);
         let proto: crate::proto::ArchiveManifest = (&m).into();
         let m2: ArchiveManifest = proto.try_into().unwrap();
         assert_eq!(m, m2);
@@ -212,5 +231,87 @@ mod tests {
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn volume_committed_ends_uses_varint_not_fixed64_wire_encoding() {
+        let proto = crate::proto::ArchiveManifest {
+            epoch_id: 1,
+            finalize_sequence: 1,
+            committed_horizon: 100,
+            catalog_commitment: vec![0; 32],
+            index_commitment: vec![0; 32],
+            volume_committed_ends: vec![1, 2],
+        };
+
+        let bytes = prost::Message::encode_to_vec(&proto);
+
+        let mut idx = 0;
+        let mut field6_payload_len: Option<usize> = None;
+
+        while idx < bytes.len() {
+            let tag = bytes[idx];
+            let field_num = (tag >> 3) as u32;
+            let wire_type = tag & 0x07;
+            idx += 1;
+
+            if field_num == 6 {
+                assert_eq!(
+                    wire_type, 2,
+                    "Field 6 must use packed repeated encoding (wire type 2)"
+                );
+
+                let mut length = 0u64;
+                let mut shift = 0;
+                while idx < bytes.len() {
+                    let b = bytes[idx];
+                    idx += 1;
+                    length |= ((b & 0x7F) as u64) << shift;
+                    if b & 0x80 == 0 {
+                        break;
+                    }
+                    shift += 7;
+                    assert!(shift <= 63, "Invalid varint length");
+                }
+                field6_payload_len = Some(length as usize);
+                break;
+            }
+
+            match wire_type {
+                0 => {
+                    while idx < bytes.len() && bytes[idx] & 0x80 != 0 {
+                        idx += 1;
+                    }
+                    idx += 1;
+                }
+                2 => {
+                    let mut length = 0u64;
+                    let mut shift = 0;
+                    while idx < bytes.len() {
+                        let b = bytes[idx];
+                        idx += 1;
+                        length |= ((b & 0x7F) as u64) << shift;
+                        if b & 0x80 == 0 {
+                            break;
+                        }
+                        shift += 7;
+                    }
+                    idx += length as usize;
+                }
+                1 => idx += 8,
+                5 => idx += 4,
+                _ => panic!("Unexpected wire type {} in protobuf bytes", wire_type),
+            }
+        }
+
+        let payload_len = field6_payload_len
+            .expect("Field 6 (volume_committed_ends) must be present in encoded bytes");
+
+        assert_eq!(
+            payload_len, 2,
+            "volume_committed_ends packed payload must be 2 bytes (varint encoding). \
+             If {} bytes, the field is using fixed64 which breaks v8.2 wire compatibility.",
+            payload_len
+        );
     }
 }
