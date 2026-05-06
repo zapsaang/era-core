@@ -21,7 +21,6 @@ use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{compute_shard_crc, EraError, ErasureCodeConfig, Result, ShardHeader};
 use era_storage::LocalStorageBackend;
 use era_volume::{DistributionCalculator, VolumeReader};
-use zeroize::Zeroize;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -31,6 +30,7 @@ use std::sync::{
     Arc,
 };
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
 

@@ -1179,9 +1179,12 @@ pub async fn repair(
         .await
         .context("Failed to load recovery state")?;
 
-    // Load manifest for integrity validation before truncation
-    let mut reader = open_archive(archive, passwords, key_paths).await?;
-    reader.preflight_metadata_recovery().await?;
+    // Open archive to load manifest for integrity validation before truncation.
+    // preflight_metadata_recovery is intentionally skipped here because:
+    // 1. open_archive already calls load_manifest() during reader construction
+    // 2. repair --force only needs the manifest for committed_end validation
+    // 3. restore_embedded_index + load_catalog would add unnecessary I/O
+    let reader = open_archive(archive, passwords, key_paths).await?;
 
     if let Some(manifest) = reader.manifest() {
         manager
@@ -1194,6 +1197,9 @@ pub async fn repair(
             .await
             .context("Failed to truncate archive")?;
     }
+
+    // Clear checkpoint footer pointer so subsequent opens default to StartFresh
+    manager.cleanup().context("Failed to clean up checkpoint")?;
 
     info!("✅ Checkpoint discarded. You can now create a new archive.");
 

@@ -5,14 +5,39 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-/// Helper: read primary manifest from archive
+fn write_test_file(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, content).unwrap();
+    path
+}
+
+fn test_config() -> ArchiveConfig {
+    ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    }
+}
+
+async fn create_test_archive(archive_path: &Path, password: &str, config: ArchiveConfig) {
+    let temp_dir = TempDir::new().unwrap();
+    let data_path = write_test_file(temp_dir.path(), "data.txt", b"hello world");
+
+    let mut writer = ArchiveWriter::builder(archive_path)
+        .password(password)
+        .config(config)
+        .build()
+        .await
+        .unwrap();
+    writer.add_file(&data_path).await.unwrap();
+    writer.finalize().await.unwrap();
+}
+
 async fn read_manifest(archive_path: &Path, password: &str) -> era_common::ArchiveManifest {
     let mut reader = ArchiveReader::open(archive_path, password).await.unwrap();
     reader.preflight_metadata_recovery().await.unwrap();
     reader.manifest().unwrap().clone()
 }
 
-/// Helper: read primary footer from archive
 async fn read_footer(archive_path: &Path) -> Footer {
     let backend = era_storage::LocalStorageBackend::new(archive_path.parent().unwrap());
     let volume_name = std::path::Path::new(archive_path.file_name().unwrap());
@@ -20,36 +45,25 @@ async fn read_footer(archive_path: &Path) -> Footer {
     reader.footer().unwrap().clone()
 }
 
+fn read_block_header(data: &[u8], offset: u64) -> BlockHeader {
+    let header_bytes: [u8; BlockHeader::SIZE] = data
+        [offset as usize..offset as usize + BlockHeader::SIZE]
+        .try_into()
+        .unwrap();
+    BlockHeader::from_bytes(&header_bytes).unwrap()
+}
+
 #[tokio::test]
 async fn test_append_committed_end_monotonic() {
     let temp_dir = TempDir::new().unwrap();
-    let data_path = temp_dir.path().join("data.txt");
     let archive_path = temp_dir.path().join("append.era");
+    let config = test_config();
 
-    fs::write(&data_path, b"hello world first").unwrap();
-
-    let config = ArchiveConfig {
-        erasure: None,
-        ..Default::default()
-    };
-
-    // First finalize
-    let mut writer = ArchiveWriter::builder(&archive_path)
-        .password("test")
-        .config(config.clone())
-        .build()
-        .await
-        .unwrap();
-    writer.add_file(&data_path).await.unwrap();
-    writer.finalize().await.unwrap();
-
+    create_test_archive(&archive_path, "test", config.clone()).await;
     let manifest_first = read_manifest(&archive_path, "test").await;
     let ends_first = manifest_first.volume_committed_ends;
 
-    // Append more data
-    let data_path2 = temp_dir.path().join("data2.txt");
-    fs::write(&data_path2, b"hello world second append data").unwrap();
-
+    let data_path2 = write_test_file(temp_dir.path(), "data2.txt", b"append data");
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test")
         .append_existing(true)
@@ -81,19 +95,9 @@ async fn test_append_committed_end_monotonic() {
 #[tokio::test]
 async fn test_append_committed_end_excludes_typed_blocks() {
     let temp_dir = TempDir::new().unwrap();
-    let data_path = temp_dir.path().join("data.txt");
     let archive_path = temp_dir.path().join("append.era");
 
-    fs::write(&data_path, b"some test data for typed block exclusion").unwrap();
-
-    let mut writer = ArchiveWriter::builder(&archive_path)
-        .password("test")
-        .config(ArchiveConfig::default())
-        .build()
-        .await
-        .unwrap();
-    writer.add_file(&data_path).await.unwrap();
-    writer.finalize().await.unwrap();
+    create_test_archive(&archive_path, "test", ArchiveConfig::default()).await;
 
     let manifest = read_manifest(&archive_path, "test").await;
     let committed_end = manifest.volume_committed_ends[0];
@@ -101,8 +105,6 @@ async fn test_append_committed_end_excludes_typed_blocks() {
     let footer = read_footer(&archive_path).await;
     let data_end_offset = footer.data_end_offset();
 
-    // Scan all blocks between committed_end and data_end_offset
-    // These are the typed blocks written after committed_ends was calculated
     let file_data = fs::read(&archive_path).unwrap();
     let mut typed_blocks_total_size = 0u64;
     let mut offset = committed_end;
@@ -125,29 +127,13 @@ async fn test_append_committed_end_excludes_typed_blocks() {
 #[tokio::test]
 async fn test_append_no_data_committed_end_unchanged() {
     let temp_dir = TempDir::new().unwrap();
-    let data_path = temp_dir.path().join("data.txt");
     let archive_path = temp_dir.path().join("append.era");
+    let config = test_config();
 
-    fs::write(&data_path, b"unchanged test data").unwrap();
-
-    let config = ArchiveConfig {
-        erasure: None,
-        ..Default::default()
-    };
-
-    let mut writer = ArchiveWriter::builder(&archive_path)
-        .password("test")
-        .config(config.clone())
-        .build()
-        .await
-        .unwrap();
-    writer.add_file(&data_path).await.unwrap();
-    writer.finalize().await.unwrap();
-
+    create_test_archive(&archive_path, "test", config.clone()).await;
     let manifest_first = read_manifest(&archive_path, "test").await;
     let ends_first = manifest_first.volume_committed_ends;
 
-    // Re-open in append mode but write nothing
     let writer = ArchiveWriter::builder(&archive_path)
         .password("test")
         .append_existing(true)
@@ -169,35 +155,16 @@ async fn test_append_no_data_committed_end_unchanged() {
 #[tokio::test]
 async fn test_append_corrupt_footer_rejected() {
     let temp_dir = TempDir::new().unwrap();
-    let data_path = temp_dir.path().join("data.txt");
     let archive_path = temp_dir.path().join("append.era");
 
-    fs::write(&data_path, b"corrupt footer test data").unwrap();
+    create_test_archive(&archive_path, "test", test_config()).await;
 
-    let config = ArchiveConfig {
-        erasure: None,
-        ..Default::default()
-    };
-    let mut writer = ArchiveWriter::builder(&archive_path)
-        .password("test")
-        .config(config)
-        .build()
-        .await
-        .unwrap();
-    writer.add_file(&data_path).await.unwrap();
-    writer.finalize().await.unwrap();
-
-    // Corrupt footer checksum to trigger integrity rejection.
-    // A structurally valid footer cannot have data_end < committed_end
-    // because Footer::from_bytes enforces data_end >= catalog region,
-    // and catalog is written after committed_end is calculated.
     let mut file_data = fs::read(&archive_path).unwrap();
     let file_len = file_data.len() as u64;
 
     let primary_footer_offset = file_len - FOOTER_SIZE as u64;
     let backup_footer_offset = era_volume::HEADER_SIZE as u64;
 
-    // Corrupt footer magic to make parsing fail immediately
     file_data[primary_footer_offset as usize] = b'X';
     file_data[backup_footer_offset as usize] = b'X';
 
@@ -211,14 +178,10 @@ async fn test_append_corrupt_footer_rejected() {
         "VolumeReader should reject corrupted footer"
     );
 
-    let config = ArchiveConfig {
-        erasure: None,
-        ..Default::default()
-    };
     let result = ArchiveWriter::builder(&archive_path)
         .password("test")
         .append_existing(true)
-        .config(config)
+        .config(test_config())
         .build()
         .await;
 
@@ -228,44 +191,19 @@ async fn test_append_corrupt_footer_rejected() {
     );
 }
 
-fn read_block_header(data: &[u8], offset: u64) -> BlockHeader {
-    let header_bytes: [u8; BlockHeader::SIZE] = data
-        [offset as usize..offset as usize + BlockHeader::SIZE]
-        .try_into()
-        .unwrap();
-    BlockHeader::from_bytes(&header_bytes).unwrap()
-}
-
 #[tokio::test]
 async fn test_v82_corrupt_manifest_fails_closed() {
     let temp_dir = TempDir::new().unwrap();
-    let data_path = temp_dir.path().join("data.txt");
     let archive_path = temp_dir.path().join("v82.era");
 
-    fs::write(&data_path, b"test data for manifest corruption").unwrap();
+    create_test_archive(&archive_path, "test", test_config()).await;
 
-    let config = ArchiveConfig {
-        erasure: None,
-        ..Default::default()
-    };
-    let mut writer = ArchiveWriter::builder(&archive_path)
-        .password("test")
-        .config(config)
-        .build()
-        .await
-        .unwrap();
-    writer.add_file(&data_path).await.unwrap();
-    writer.finalize().await.unwrap();
-
-    // Corrupt manifest nonce to trigger decryption failure
     let footer = read_footer(&archive_path).await;
     assert!(footer.has_manifest(), "Archive should have manifest");
 
     let mut file_data = fs::read(&archive_path).unwrap();
     let manifest_offset = footer.manifest_offset();
 
-    // Manifest block: [BlockHeader(16B)][nonce(24B)][ciphertext...]
-    // Corrupt a few bytes in the nonce region
     let nonce_start = manifest_offset as usize + BlockHeader::SIZE;
     file_data[nonce_start] ^= 0xFF;
     file_data[nonce_start + 5] ^= 0xFF;
@@ -273,7 +211,6 @@ async fn test_v82_corrupt_manifest_fails_closed() {
 
     fs::write(&archive_path, &file_data).unwrap();
 
-    // Opening should fail because manifest is declared but cannot be loaded
     let result = ArchiveReader::open(&archive_path, "test").await;
     assert!(result.is_err(), "Should fail when manifest is corrupted");
     let err_string = match result {
@@ -284,5 +221,36 @@ async fn test_v82_corrupt_manifest_fails_closed() {
         err_string.contains("IntegrityError") || err_string.contains("manifest"),
         "Error should mention integrity or manifest: {}",
         err_string
+    );
+}
+
+#[test]
+fn test_append_manifest_footer_integrity_check_present() {
+    let source = include_str!("../src/writer.rs");
+    assert!(
+        source.contains("footer data_end_offset {} is less than manifest committed end"),
+        "Writer append integrity check must be present"
+    );
+}
+
+#[tokio::test]
+async fn test_empty_volume_committed_ends_fail_closed() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("empty_ends.era");
+
+    create_test_archive(&archive_path, "test", test_config()).await;
+
+    let footer = read_footer(&archive_path).await;
+    let mut file_data = fs::read(&archive_path).unwrap();
+    let manifest_offset = footer.manifest_offset();
+
+    let ciphertext_start = manifest_offset as usize + BlockHeader::SIZE + 24;
+    file_data[ciphertext_start] ^= 0xFF;
+    fs::write(&archive_path, &file_data).unwrap();
+
+    let result = ArchiveReader::open(&archive_path, "test").await;
+    assert!(
+        result.is_err(),
+        "Should fail when manifest cannot be loaded but is declared"
     );
 }

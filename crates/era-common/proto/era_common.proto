@@ -322,5 +322,10 @@ message ArchiveManifest {
   uint64 committed_horizon = 3;
   bytes catalog_commitment = 4; // exactly 32 bytes
   bytes index_commitment = 5; // exactly 32 bytes, or all zeros if no index
-  repeated uint64 volume_committed_ends = 6; // per-volume committed end offsets sorted by volume sequence
+  // Per-volume committed end offsets sorted by volume sequence.
+  // Validation rules enforced by ArchiveManifest::try_from:
+  //   - Maximum 1024 entries (MAX_VOLUMES)
+  //   - Each value must be >= 4224 (DATA_REGION_START = SuperHeader + BackupFooter)
+  //     or exactly 0 (sentinel: volume exists but has no committed data yet)
+  repeated uint64 volume_committed_ends = 6;
 }

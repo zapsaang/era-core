@@ -10,6 +10,7 @@ use era_common::{
     ShardHeader, VolumeId,
 };
 use era_storage::StorageBackend;
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
@@ -115,8 +116,8 @@ pub struct VolumePool<B: StorageBackend> {
     stats: VolumePoolStats,
     /// Initial committed ends from previous manifest (append mode only).
     initial_committed_ends: Vec<u64>,
-    /// Position when volume was opened for append (append mode only).
-    append_start_positions: Vec<u64>,
+    /// Position when each volume was opened for append, keyed by volume sequence (append mode only).
+    append_start_positions: HashMap<u16, u64>,
 }
 
 impl<B: StorageBackend> VolumePool<B> {
@@ -177,7 +178,7 @@ impl<B: StorageBackend> VolumePool<B> {
             block_sequence: 0,
             stats,
             initial_committed_ends: Vec::new(),
-            append_start_positions: Vec::new(),
+            append_start_positions: HashMap::new(),
         };
 
         Ok(pool)
@@ -250,7 +251,7 @@ impl<B: StorageBackend> VolumePool<B> {
             block_sequence: max_block_count as u64,
             stats,
             initial_committed_ends: Vec::new(),
-            append_start_positions: Vec::new(),
+            append_start_positions: HashMap::new(),
         })
     }
 
@@ -291,7 +292,11 @@ impl<B: StorageBackend> VolumePool<B> {
             block_sequence,
             stats,
             initial_committed_ends,
-            append_start_positions: vec![append_start_position],
+            append_start_positions: {
+                let mut map = HashMap::new();
+                map.insert(0, append_start_position);
+                map
+            },
         })
     }
 
@@ -367,6 +372,11 @@ impl<B: StorageBackend> VolumePool<B> {
         let old_writers = std::mem::replace(&mut self.writers, new_writers);
         self.sequences = new_sequences;
 
+        // New volumes start from empty, so their append_start_position is 0.
+        for &next_sequence in &self.sequences {
+            self.append_start_positions.insert(next_sequence, 0);
+        }
+
         for (i, mut writer) in old_writers.into_iter().enumerate() {
             let size = writer.current_size();
             let sequence = old_sequences[i];
@@ -418,8 +428,11 @@ impl<B: StorageBackend> VolumePool<B> {
             let current = writer.current_size();
             let committed =
                 if let Some(&initial) = self.initial_committed_ends.get(usize::from(seq)) {
-                    if let Some(&start_pos) = self.append_start_positions.get(i) {
-                        initial + (current - start_pos)
+                    if let Some(&start_pos) = self.append_start_positions.get(&seq) {
+                        current
+                            .checked_sub(start_pos)
+                            .and_then(|delta| initial.checked_add(delta))
+                            .unwrap_or(current)
                     } else {
                         current
                     }

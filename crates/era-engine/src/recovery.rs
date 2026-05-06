@@ -395,7 +395,10 @@ impl RecoveryManager {
                 let header_bytes = reader.read_raw(manifest_offset, BlockHeader::SIZE).await?;
                 let manifest_block_end =
                     if let Some(header) = BlockHeader::from_bytes(&header_bytes) {
-                        manifest_offset + BlockHeader::SIZE as u64 + u64::from(header.length)
+                        manifest_offset
+                            .checked_add(BlockHeader::SIZE as u64)
+                            .and_then(|v| v.checked_add(u64::from(header.length)))
+                            .unwrap_or(manifest_offset + BlockHeader::SIZE as u64)
                     } else {
                         manifest_offset + BlockHeader::SIZE as u64
                     };

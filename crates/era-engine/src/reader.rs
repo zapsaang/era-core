@@ -118,6 +118,32 @@ struct DiscoveredVolumes {
 }
 
 impl ArchiveReader {
+    fn from_discovered(
+        discovered: DiscoveredVolumes,
+        session: KeySession,
+        volume_key: era_crypto::VolumeKey,
+        header: &era_volume::SuperHeader,
+    ) -> Self {
+        Self {
+            volume_readers: discovered.volume_readers,
+            volume_indices: discovered.volume_indices,
+            expected_volume_count: discovered.expected_volume_count,
+            missing_volume_indices: discovered.missing_volume_indices,
+            session,
+            volume_key,
+            nonce_context: *header.salt(),
+            archive_id: *header.archive_id().0.as_bytes(),
+            epoch_id: header.epoch_id(),
+            compression_level: header.config().compression.level,
+            compression_algorithm: header.config().compression.algorithm,
+            catalog: None,
+            volume_committed_ends: None,
+            manifest: None,
+            index_reader: None,
+            embedded_index_recovery_failed: false,
+        }
+    }
+
     /// Open an archive for reading
     ///
     /// This function can open an archive starting from any available volume.
@@ -309,7 +335,7 @@ impl ArchiveReader {
 
         // Use first available reader for key derivation (all volumes share same crypto params)
         let volume_reader = &discovered.volume_readers[0];
-        let header = volume_reader.header();
+        let header = volume_reader.header().clone();
 
         let mk_array: [u8; 32] = match header.access_policy() {
             era_volume::AccessPolicy::AnyOfN => {
@@ -370,32 +396,7 @@ impl ArchiveReader {
             header.encrypted_volume_key().ciphertext(),
         )?;
 
-        // Store nonce context
-        let nonce_context = *header.salt();
-        let archive_id = *header.archive_id().0.as_bytes();
-        let epoch_id = header.epoch_id();
-
-        let compression_level = header.config().compression.level;
-        let compression_algorithm = header.config().compression.algorithm;
-
-        let mut reader = Self {
-            volume_readers: discovered.volume_readers,
-            volume_indices: discovered.volume_indices,
-            expected_volume_count: discovered.expected_volume_count,
-            missing_volume_indices: discovered.missing_volume_indices,
-            session,
-            volume_key,
-            nonce_context,
-            archive_id,
-            epoch_id,
-            compression_level,
-            compression_algorithm,
-            catalog: None,
-            volume_committed_ends: None,
-            manifest: None,
-            index_reader: None,
-            embedded_index_recovery_failed: false,
-        };
+        let mut reader = Self::from_discovered(discovered, session, volume_key, &header);
         reader.load_manifest().await?;
         Ok(reader)
     }
@@ -428,7 +429,7 @@ impl ArchiveReader {
         let discovered = Self::discover_volumes(path).await?;
 
         let volume_reader = &discovered.volume_readers[0];
-        let header = volume_reader.header();
+        let header = volume_reader.header().clone();
 
         if let era_volume::AccessPolicy::Threshold(t) = header.access_policy() {
             return Err(EraError::InvalidConfig(
@@ -442,30 +443,7 @@ impl ArchiveReader {
             header.encrypted_volume_key().ciphertext(),
         )?;
 
-        let nonce_context = *header.salt();
-        let archive_id = *header.archive_id().0.as_bytes();
-        let epoch_id = header.epoch_id();
-        let compression_level = header.config().compression.level;
-        let compression_algorithm = header.config().compression.algorithm;
-
-        let mut reader = Self {
-            volume_readers: discovered.volume_readers,
-            volume_indices: discovered.volume_indices,
-            expected_volume_count: discovered.expected_volume_count,
-            missing_volume_indices: discovered.missing_volume_indices,
-            session: owned_session,
-            volume_key,
-            nonce_context,
-            archive_id,
-            epoch_id,
-            compression_level,
-            compression_algorithm,
-            catalog: None,
-            volume_committed_ends: None,
-            manifest: None,
-            index_reader: None,
-            embedded_index_recovery_failed: false,
-        };
+        let mut reader = Self::from_discovered(discovered, owned_session, volume_key, &header);
         reader.load_manifest().await?;
         Ok(reader)
     }
@@ -1130,11 +1108,12 @@ impl ArchiveReader {
                     self.expected_volume_count,
                 )));
             }
+            let finalize_sequence = manifest.finalize_sequence;
             self.volume_committed_ends = Some(manifest.volume_committed_ends.clone());
             self.manifest = Some(manifest);
             debug!(
                 "Loaded manifest: finalize_sequence={}, volume_committed_ends={:?}",
-                self.manifest.as_ref().unwrap().finalize_sequence,
+                finalize_sequence,
                 self.volume_committed_ends.as_ref().unwrap()
             );
         } else if any_volume_has_manifest {

@@ -126,8 +126,14 @@ impl TryFrom<crate::proto::ArchiveManifest> for ArchiveManifest {
             )));
         }
 
+        // DATA_REGION_START = SuperHeader(4096) + BackupFooterGap(128) = 4224.
+        // Canonical definition lives in era-volume/src/header.rs.
+        // era-common (L0) cannot import era-volume (L2), so we replicate the value here.
+        // If the header layout changes, this constant must be updated in sync.
         const DATA_REGION_START: u64 = 4224;
         for (seq, &end) in p.volume_committed_ends.iter().enumerate() {
+            // end == 0 is a sentinel value meaning "volume exists but has no committed data yet".
+            // This can happen for newly rotated volumes before any data is written.
             if end < DATA_REGION_START && end != 0 {
                 return Err(crate::EraError::Deserialization(format!(
                     "volume {} committed_end {} is below DATA_REGION_START",
@@ -312,6 +318,70 @@ mod tests {
             "volume_committed_ends packed payload must be 2 bytes (varint encoding). \
              If {} bytes, the field is using fixed64 which breaks v8.2 wire compatibility.",
             payload_len
+        );
+    }
+
+    #[test]
+    fn proto_rejects_too_many_volume_committed_ends() {
+        let proto = crate::proto::ArchiveManifest {
+            epoch_id: 1,
+            finalize_sequence: 5,
+            committed_horizon: 10,
+            catalog_commitment: vec![0xAA; 32],
+            index_commitment: vec![0xBB; 32],
+            volume_committed_ends: vec![5000; 1025],
+        };
+
+        let result: crate::Result<ArchiveManifest> = proto.try_into();
+        assert!(result.is_err(), "Should reject >1024 volume_committed_ends");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("1024"),
+            "Error should mention limit 1024: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proto_rejects_committed_end_below_data_region_start() {
+        let proto = crate::proto::ArchiveManifest {
+            epoch_id: 1,
+            finalize_sequence: 5,
+            committed_horizon: 10,
+            catalog_commitment: vec![0xAA; 32],
+            index_commitment: vec![0xBB; 32],
+            volume_committed_ends: vec![100, 5000],
+        };
+
+        let result: crate::Result<ArchiveManifest> = proto.try_into();
+        assert!(
+            result.is_err(),
+            "Should reject committed_end below DATA_REGION_START"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("DATA_REGION_START"),
+            "Error should mention DATA_REGION_START: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proto_allows_sentinel_zero_committed_end() {
+        let proto = crate::proto::ArchiveManifest {
+            epoch_id: 1,
+            finalize_sequence: 5,
+            committed_horizon: 10,
+            catalog_commitment: vec![0xAA; 32],
+            index_commitment: vec![0xBB; 32],
+            volume_committed_ends: vec![0, 5000],
+        };
+
+        let result: crate::Result<ArchiveManifest> = proto.try_into();
+        assert!(
+            result.is_ok(),
+            "Should allow sentinel value 0 for committed_end: {:?}",
+            result.err()
         );
     }
 }
