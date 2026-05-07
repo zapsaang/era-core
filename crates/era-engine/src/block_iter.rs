@@ -111,6 +111,35 @@ fn check_reader_commit_horizon<R: era_storage::StorageReader>(
     check_commit_horizon_for_sequence(committed_ends, volume_sequence, offset, expected_size)
 }
 
+/// Check commit horizon, returning `None` when beyond horizon (end of committed data).
+fn check_reader_commit_horizon_opt<R: era_storage::StorageReader>(
+    committed_ends: Option<&[u64]>,
+    reader: &VolumeReader<R>,
+    offset: u64,
+    expected_size: u64,
+) -> Option<Result<()>> {
+    match check_commit_horizon_for_sequence(
+        committed_ends,
+        reader.header().volume_sequence() as usize,
+        offset,
+        expected_size,
+    ) {
+        Ok(()) => Some(Ok(())),
+        Err(EraError::BeyondCommitHorizon { .. }) => None,
+        Err(e) => Some(Err(e)),
+    }
+}
+
+macro_rules! check_commit_or_end {
+    ($ends:expr, $reader:expr, $offset:expr, $size:expr) => {
+        match check_reader_commit_horizon_opt($ends, $reader, $offset, $size) {
+            Some(Ok(())) => {}
+            None => return None,
+            Some(Err(e)) => return Some(Err(e)),
+        }
+    };
+}
+
 /// Iterator for standard (non-erasure) blocks
 pub struct StandardBlockIterator<'a, R: era_storage::StorageReader> {
     volume_reader: &'a VolumeReader<R>,
@@ -173,14 +202,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             return None;
         }
 
-        if let Err(e) = check_reader_commit_horizon(
+        check_commit_or_end!(
             self.committed_ends.as_deref(),
             self.volume_reader,
             self.current_offset,
-            BlockHeader::SIZE as u64,
-        ) {
-            return Some(Err(e));
-        }
+            BlockHeader::SIZE as u64
+        );
 
         // Read BlockHeader (16 bytes)
         let header_bytes = match self
@@ -234,14 +261,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for StandardBlockIterator<
             }));
         }
 
-        if let Err(e) = check_reader_commit_horizon(
+        check_commit_or_end!(
             self.committed_ends.as_deref(),
             self.volume_reader,
             self.current_offset,
-            BlockHeader::SIZE as u64 + block_size as u64,
-        ) {
-            return Some(Err(e));
-        }
+            BlockHeader::SIZE as u64 + block_size as u64
+        );
 
         let location = BlockLocation::single(
             self.volume_reader.header().volume_id(),
@@ -405,14 +430,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
 
         // Read erasure block header (4 bytes original_len) from the first available volume
         // All volumes now have this header written before their first shard of each block
-        if let Err(e) = check_reader_commit_horizon(
+        check_commit_or_end!(
             self.committed_ends.as_deref(),
             &self.volume_readers[0],
             self.current_offsets[0],
-            4,
-        ) {
-            return Some(Err(e));
-        }
+            4
+        );
         let header_bytes = match self.volume_readers[0]
             .read_raw(self.current_offsets[0], 4)
             .await
@@ -479,14 +502,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             }
 
             // Read shard header (8 bytes: 4 length + 4 CRC)
-            if let Err(e) = check_reader_commit_horizon(
+            check_commit_or_end!(
                 self.committed_ends.as_deref(),
                 reader,
                 offset,
-                ShardHeader::SIZE as u64,
-            ) {
-                return Some(Err(e));
-            }
+                ShardHeader::SIZE as u64
+            );
             let header_bytes = match reader.read_raw(offset, ShardHeader::SIZE).await {
                 Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
                 Ok(_) => {
@@ -528,14 +549,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
                 first_shard_size = bounded_len;
             }
 
-            if let Err(e) = check_reader_commit_horizon(
+            check_commit_or_end!(
                 self.committed_ends.as_deref(),
                 reader,
                 offset,
-                ShardHeader::SIZE as u64 + shard_len as u64,
-            ) {
-                return Some(Err(e));
-            }
+                ShardHeader::SIZE as u64 + shard_len as u64
+            );
 
             // Read shard data
             match reader
@@ -751,14 +770,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
                 return None;
             }
 
-            if let Err(e) = check_reader_commit_horizon(
+            check_commit_or_end!(
                 self.committed_ends.as_deref(),
                 self.volume_reader,
                 self.current_offset,
-                BlockHeader::SIZE as u64,
-            ) {
-                return Some(Err(e));
-            }
+                BlockHeader::SIZE as u64
+            );
 
             // Read BlockHeader (16 bytes)
             let header_bytes = match self
@@ -795,14 +812,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
             // Skip non-data blocks (e.g., IndexPage, IndexManifest) — they are
             // encrypted with different keys and are not part of the data stream.
             if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     self.volume_reader,
                     self.current_offset,
-                    BlockHeader::SIZE as u64 + block_size as u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    BlockHeader::SIZE as u64 + block_size as u64
+                );
                 self.current_offset += BlockHeader::SIZE as u64 + block_size as u64;
                 // Don't increment block_index — index blocks use their own ID space
                 continue;
@@ -828,14 +843,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
                 }));
             }
 
-            if let Err(e) = check_reader_commit_horizon(
+            check_commit_or_end!(
                 self.committed_ends.as_deref(),
                 self.volume_reader,
                 self.current_offset,
-                BlockHeader::SIZE as u64 + block_size as u64,
-            ) {
-                return Some(Err(e));
-            }
+                BlockHeader::SIZE as u64 + block_size as u64
+            );
 
             let location = BlockLocation::single(
                 self.volume_reader.header().volume_id(),
@@ -958,14 +971,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
 
             let reader = &self.volume_readers[vol_idx];
 
-            if let Err(e) = check_reader_commit_horizon(
+            check_commit_or_end!(
                 self.committed_ends.as_deref(),
                 reader,
                 offset,
-                BlockHeader::SIZE as u64,
-            ) {
-                return Some(Err(e));
-            }
+                BlockHeader::SIZE as u64
+            );
 
             let header_bytes = match reader.read_raw(offset, BlockHeader::SIZE).await {
                 Ok(bytes) if bytes.len() == BlockHeader::SIZE => bytes,
@@ -998,14 +1009,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
             let block_size = header.length;
 
             if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,
                     offset,
-                    BlockHeader::SIZE as u64 + block_size as u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    BlockHeader::SIZE as u64 + block_size as u64
+                );
                 self.current_offsets[vol_idx] += BlockHeader::SIZE as u64 + block_size as u64;
                 continue;
             }
@@ -1027,14 +1036,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
                 }));
             }
 
-            if let Err(e) = check_reader_commit_horizon(
+            check_commit_or_end!(
                 self.committed_ends.as_deref(),
                 reader,
                 offset,
-                BlockHeader::SIZE as u64 + block_size as u64,
-            ) {
-                return Some(Err(e));
-            }
+                BlockHeader::SIZE as u64 + block_size as u64
+            );
 
             let location = BlockLocation::single(
                 reader.header().volume_id(),
@@ -1304,14 +1311,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 }
 
                 let shard_start = temp_offsets[idx];
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,
                     shard_start,
-                    header_prefix_len_u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    header_prefix_len_u64
+                );
 
                 let prefix_bytes = match reader.read_raw(shard_start, header_prefix_len).await {
                     Ok(bytes) if bytes.len() == header_prefix_len => bytes,
@@ -1333,14 +1338,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         )))
                     }
                 };
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,
                     header_offset,
-                    ShardHeader::SIZE as u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    ShardHeader::SIZE as u64
+                );
 
                 let header_bytes = match reader.read_raw(header_offset, ShardHeader::SIZE).await {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
@@ -1367,14 +1370,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     continue;
                 }
                 let shard_len = shard_header.length as usize;
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,
                     shard_start,
-                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64
+                );
                 prefix_copies.push(prefix_bytes);
                 temp_offsets[idx] +=
                     header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64;
@@ -1402,14 +1403,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 }
 
                 let shard_start = self.current_offsets[idx];
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,
                     shard_start,
-                    header_prefix_len_u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    header_prefix_len_u64
+                );
 
                 let _prefix_bytes = match reader.read_raw(shard_start, header_prefix_len).await {
                     Ok(bytes) if bytes.len() == header_prefix_len => {
@@ -1434,14 +1433,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         )))
                     }
                 };
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,
                     header_offset,
-                    ShardHeader::SIZE as u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    ShardHeader::SIZE as u64
+                );
 
                 let header_bytes = match reader.read_raw(header_offset, ShardHeader::SIZE).await {
                     Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
@@ -1481,14 +1478,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     let header_len = shard_header.length;
                     if let Some(pb) = parity_bound {
                         if pb > 0 && header_len < pb {
-                            if let Err(e) = check_reader_commit_horizon(
+                            check_commit_or_end!(
                                 self.committed_ends.as_deref(),
                                 reader,
                                 shard_start,
-                                header_prefix_len_u64 + ShardHeader::SIZE as u64 + pb as u64,
-                            ) {
-                                return Some(Err(e));
-                            }
+                                header_prefix_len_u64 + ShardHeader::SIZE as u64 + pb as u64
+                            );
                             self.stats.corrupted_shards += 1;
                             self.current_offsets[idx] +=
                                 header_prefix_len_u64 + ShardHeader::SIZE as u64 + pb as u64;
@@ -1518,14 +1513,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     max_len = shard_len;
                 }
 
-                if let Err(e) = check_reader_commit_horizon(
+                check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,
                     shard_start,
-                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64,
-                ) {
-                    return Some(Err(e));
-                }
+                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64
+                );
 
                 let shard_data = match reader
                     .read_raw(

@@ -562,7 +562,9 @@ pub async fn repair_archive_with_providers(
                     } else {
                         shard_header.verify(&shard_data)
                     };
-                    if crc_valid {
+                    let header_len_corrupted =
+                        authoritative_len.is_some_and(|auth_len| shard_header.length != auth_len);
+                    if crc_valid && !header_len_corrupted {
                         shards.push((shard_idx, shard_data));
                     } else {
                         debug!(
@@ -1252,7 +1254,9 @@ async fn repair_archive_matrix_with_providers(
                         } else {
                             shard_header.verify(&shard_data)
                         };
-                        if crc_valid {
+                        let header_len_corrupted = authoritative_len
+                            .is_some_and(|auth_len| shard_header.length != auth_len);
+                        if crc_valid && !header_len_corrupted {
                             shards.push((shard_idx, shard_data));
                             shard_locations.push((
                                 shard_idx,
