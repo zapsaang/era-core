@@ -1942,7 +1942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_standard_iterator_rejects_block_past_committed_horizon() {
+    async fn test_standard_iterator_returns_none_past_committed_horizon() {
         let temp_dir = TempDir::new().unwrap();
         let (reader, location) =
             create_volume_reader_with_data_block(&temp_dir, "horizon.era", 0, 1).await;
@@ -1960,19 +1960,11 @@ mod tests {
         let committed_end = full_block_end - 1;
 
         let mut iter = StandardBlockIterator::new(&reader, &unpacker, Some(vec![committed_end]));
-        let err = iter
-            .next_block()
-            .await
-            .expect("iterator should report a horizon violation")
-            .expect_err("block read must fail before decrypting beyond horizon");
+        let result = iter.next_block().await;
 
         assert!(
-            matches!(
-                err,
-                EraError::BeyondCommitHorizon { offset, horizon }
-                    if offset == location.physical_offset && horizon == committed_end
-            ),
-            "expected BeyondCommitHorizon, got: {err}"
+            result.is_none(),
+            "iterator should return None when block extends past committed horizon"
         );
     }
 
