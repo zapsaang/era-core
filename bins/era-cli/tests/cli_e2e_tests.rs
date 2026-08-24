@@ -12,7 +12,6 @@ mod common;
 
 use common::*;
 use std::fs;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 // ===========================================================================
@@ -838,33 +837,11 @@ mod multivolume_stress_tests {
 mod repair_chain_tests {
     use super::*;
 
-    fn create_ec_archive(temp: &TempDir, name: &str, data: &[u8]) -> (PathBuf, PathBuf) {
-        let input = create_test_file(temp.path(), &format!("{}.bin", name), data);
-        let archive = temp.path().join(format!("{}.era", name));
-
-        era_cmd()
-            .args([
-                "create",
-                input.to_str().unwrap(),
-                "--output",
-                archive.to_str().unwrap(),
-                "--password",
-                "pwd",
-                "--erasure",
-                "4:2",
-                "--no-compression",
-            ])
-            .assert()
-            .success();
-
-        (input, archive)
-    }
-
     #[test]
     fn test_repair_double_cycle() {
         let temp = TempDir::new().unwrap();
         let data = generate_deterministic_data(256 * 1024);
-        let (_input, archive) = create_ec_archive(&temp, "double_cycle", &data);
+        let archive = create_ec_archive(&temp, "double_cycle", &data);
 
         // First corruption and repair
         corrupt_archive_shard(&archive, 5000);
@@ -985,7 +962,7 @@ mod repair_chain_tests {
     fn test_repair_then_repack_chain() {
         let temp = TempDir::new().unwrap();
         let data = generate_deterministic_data(128 * 1024);
-        let (_input, archive) = create_ec_archive(&temp, "repair_repack", &data);
+        let archive = create_ec_archive(&temp, "repair_repack", &data);
 
         // Corrupt and repair
         corrupt_archive_shard(&archive, 5000);
@@ -1042,7 +1019,7 @@ mod repair_chain_tests {
     fn test_repair_dry_run_then_force() {
         let temp = TempDir::new().unwrap();
         let data = vec![0x66; 256 * 1024];
-        let (_input, archive) = create_ec_archive(&temp, "dry_then_force", &data);
+        let archive = create_ec_archive(&temp, "dry_then_force", &data);
 
         corrupt_archive_shard(&archive, 5000);
         let before_bytes = fs::read(&archive).unwrap();
@@ -1081,7 +1058,7 @@ mod repair_chain_tests {
     fn test_repair_verbose_output_contains_stats() {
         let temp = TempDir::new().unwrap();
         let data = vec![0x77; 256 * 1024];
-        let (_input, archive) = create_ec_archive(&temp, "verbose_stats", &data);
+        let archive = create_ec_archive(&temp, "verbose_stats", &data);
 
         corrupt_archive_shard(&archive, 5000);
 

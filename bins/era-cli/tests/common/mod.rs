@@ -217,6 +217,30 @@ pub fn create_archive_with_cert(input: &Path, archive: &Path, cert: &Path) {
         .success();
 }
 
+/// Creates a 4:2 erasure-coded, uncompressed, password-"pwd" archive of `data`.
+/// Returns the archive path; the source file is `<name>.bin` in the same dir.
+pub fn create_ec_archive(temp: &tempfile::TempDir, name: &str, data: &[u8]) -> PathBuf {
+    let input = create_test_file(temp.path(), &format!("{}.bin", name), data);
+    let archive = temp.path().join(format!("{}.era", name));
+
+    era_cmd()
+        .args([
+            "create",
+            input.to_str().unwrap(),
+            "--output",
+            archive.to_str().unwrap(),
+            "--password",
+            "pwd",
+            "--erasure",
+            "4:2",
+            "--no-compression",
+        ])
+        .assert()
+        .success();
+
+    archive
+}
+
 pub fn assert_file_content_eq(path: &Path, expected: &[u8]) {
     let actual = fs::read(path).unwrap();
     assert_eq!(

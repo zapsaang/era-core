@@ -1131,33 +1131,11 @@ mod multivolume_extreme_tests {
 mod repair_extreme_tests {
     use super::*;
 
-    fn create_ec_archive(temp: &TempDir, name: &str, data: &[u8]) -> (PathBuf, PathBuf) {
-        let input = create_test_file(temp.path(), &format!("{}.bin", name), data);
-        let archive = temp.path().join(format!("{}.era", name));
-
-        era_cmd()
-            .args([
-                "create",
-                input.to_str().unwrap(),
-                "--output",
-                archive.to_str().unwrap(),
-                "--password",
-                "pwd",
-                "--erasure",
-                "4:2",
-                "--no-compression",
-            ])
-            .assert()
-            .success();
-
-        (input, archive)
-    }
-
     #[test]
     fn test_repair_partial_shard_corruption_single() {
         let temp = TempDir::new().unwrap();
         let data = vec![0xAA; 256 * 1024];
-        let (_input, archive) = create_ec_archive(&temp, "rep_single", &data);
+        let archive = create_ec_archive(&temp, "rep_single", &data);
 
         let file_len = fs::metadata(&archive).unwrap().len();
         assert!(file_len > 5200);
@@ -1201,7 +1179,7 @@ mod repair_extreme_tests {
     fn test_repair_partial_shard_corruption_double() {
         let temp = TempDir::new().unwrap();
         let data = vec![0xBB; 256 * 1024];
-        let (_input, archive) = create_ec_archive(&temp, "rep_double", &data);
+        let archive = create_ec_archive(&temp, "rep_double", &data);
 
         let file_len = fs::metadata(&archive).unwrap().len();
         assert!(file_len > 6200);
@@ -1293,7 +1271,7 @@ mod repair_extreme_tests {
     fn test_repair_dry_run_no_modification() {
         let temp = TempDir::new().unwrap();
         let data = vec![0xDD; 256 * 1024];
-        let (_input, archive) = create_ec_archive(&temp, "rep_drymod", &data);
+        let archive = create_ec_archive(&temp, "rep_drymod", &data);
 
         let file_len = fs::metadata(&archive).unwrap().len();
         assert!(file_len > 5200);
@@ -1317,7 +1295,7 @@ mod repair_extreme_tests {
     fn test_repair_force_creates_backup() {
         let temp = TempDir::new().unwrap();
         let data = vec![0xEE; 256 * 1024];
-        let (_input, archive) = create_ec_archive(&temp, "rep_bak", &data);
+        let archive = create_ec_archive(&temp, "rep_bak", &data);
 
         let file_len = fs::metadata(&archive).unwrap().len();
         assert!(file_len > 5200);
@@ -1345,7 +1323,7 @@ mod repair_extreme_tests {
     fn test_repair_post_repair_full_roundtrip() {
         let temp = TempDir::new().unwrap();
         let data = generate_deterministic_data(256 * 1024);
-        let (_input, archive) = create_ec_archive(&temp, "rep_rt", &data);
+        let archive = create_ec_archive(&temp, "rep_rt", &data);
 
         let file_len = fs::metadata(&archive).unwrap().len();
         assert!(file_len > 5200);
@@ -1663,7 +1641,7 @@ mod repair_extreme_tests {
     fn test_repair_verbose_output_details() {
         let temp = TempDir::new().unwrap();
         let data = vec![0xEF; 256 * 1024];
-        let (_input, archive) = create_ec_archive(&temp, "rep_verb", &data);
+        let archive = create_ec_archive(&temp, "rep_verb", &data);
 
         let file_len = fs::metadata(&archive).unwrap().len();
         assert!(file_len > 5200);

@@ -406,28 +406,6 @@ mod multivolume_extreme_scenarios {
 mod repair_corruption_scenarios {
     use super::*;
 
-    fn create_ec_archive(temp: &TempDir, name: &str, data: &[u8]) -> PathBuf {
-        let input = create_test_file(temp.path(), &format!("{}.bin", name), data);
-        let archive = temp.path().join(format!("{}.era", name));
-
-        era_cmd()
-            .args([
-                "create",
-                input.to_str().unwrap(),
-                "--output",
-                archive.to_str().unwrap(),
-                "--password",
-                "pwd",
-                "--erasure",
-                "4:2",
-                "--no-compression",
-            ])
-            .assert()
-            .success();
-
-        archive
-    }
-
     /// Repair data region corruption at early offset
     #[test]
     fn test_repair_data_region_early_corruption() {
