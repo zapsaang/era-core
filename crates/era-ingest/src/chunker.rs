@@ -176,7 +176,7 @@ pub struct ChunkIterator<'a> {
     inner: FastCDC<'a>,
 }
 
-fn normalization_to_fastcdc(level: NormalizationLevel) -> Normalization {
+pub(crate) fn normalization_to_fastcdc(level: NormalizationLevel) -> Normalization {
     match level {
         NormalizationLevel::Level0 => Normalization::Level0,
         NormalizationLevel::Level1 => Normalization::Level1,

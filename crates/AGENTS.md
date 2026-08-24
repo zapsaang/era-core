@@ -50,7 +50,7 @@ era-crypto → era-common
 
 ### Optimizing Throughput
 - Compression: `era-codec/src/compression.rs`
-- Chunking: `era-ingest/src/chunker*.rs` (3 implementations)
+- Chunking: `era-ingest/src/chunker*.rs` (2 implementations)
 - Pipeline: `era-engine/src/writer.rs` (async orchestration)
 - Erasure: `era-codec/src/erasure.rs`
 

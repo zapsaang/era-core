@@ -30,12 +30,12 @@
 //! ```
 
 use async_stream::try_stream;
-use era_common::{NormalizationLevel, Result, UniqueChunk};
-use fastcdc::v2020::{FastCDC, Normalization};
+use era_common::{Result, UniqueChunk};
+use fastcdc::v2020::FastCDC;
 use futures::stream::Stream;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::chunker::ChunkerConfig;
+use crate::chunker::{normalization_to_fastcdc, ChunkerConfig};
 
 /// Zero-copy streaming chunker with ring buffer
 ///
@@ -196,15 +196,6 @@ impl<R: AsyncRead + Unpin> StreamingChunkerZeroCopy<R> {
     }
 }
 
-fn normalization_to_fastcdc(level: NormalizationLevel) -> Normalization {
-    match level {
-        NormalizationLevel::Level0 => Normalization::Level0,
-        NormalizationLevel::Level1 => Normalization::Level1,
-        NormalizationLevel::Level2 => Normalization::Level2,
-        NormalizationLevel::Level3 => Normalization::Level3,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +241,87 @@ mod tests {
 
         assert_eq!(total_size, data.len());
         assert!(chunk_count > 0);
+    }
+
+    #[tokio::test]
+    async fn test_normalization_levels_consistent_across_chunkers() {
+        use crate::chunker::{normalization_to_fastcdc, Chunker};
+        use era_common::NormalizationLevel;
+        use fastcdc::v2020::Normalization;
+
+        let levels = [
+            NormalizationLevel::Level0,
+            NormalizationLevel::Level1,
+            NormalizationLevel::Level2,
+            NormalizationLevel::Level3,
+        ];
+
+        let empty = Vec::new();
+        let exactly_min = vec![0xAB; 2 * 1024];
+        let exactly_avg = vec![0xCD; 16 * 1024];
+        let pattern_at_max: Vec<u8> = (0..64 * 1024).map(|i| ((i * 31 + 7) % 256) as u8).collect();
+        let pattern_spanning_all: Vec<u8> =
+            (0..150_000).map(|i| ((i * 31 + 7) % 256) as u8).collect();
+        let boundary_data: Vec<Vec<u8>> = vec![
+            empty,
+            exactly_min,
+            exactly_avg,
+            pattern_at_max,
+            pattern_spanning_all,
+        ];
+
+        for level in levels {
+            // Given: the mapping for this level produces the expected FastCDC variant
+            let mapped = normalization_to_fastcdc(level);
+            let matches_expected = match level {
+                NormalizationLevel::Level0 => matches!(mapped, Normalization::Level0),
+                NormalizationLevel::Level1 => matches!(mapped, Normalization::Level1),
+                NormalizationLevel::Level2 => matches!(mapped, Normalization::Level2),
+                NormalizationLevel::Level3 => matches!(mapped, Normalization::Level3),
+            };
+            assert!(matches_expected, "level {:?} mapped incorrectly", level);
+
+            let config = ChunkerConfig {
+                min_size: 2 * 1024,
+                avg_size: 16 * 1024,
+                max_size: 64 * 1024,
+                normalization_level: level,
+                rolling_hash_seed: 0,
+            };
+
+            for data in &boundary_data {
+                // When: chunking identical data via the slice path and the zero-copy path
+                let chunks_slice: Vec<(usize, _)> = Chunker::new(config.clone())
+                    .chunk_all(data)
+                    .iter()
+                    .map(|c| (c.data.len(), c.hash))
+                    .collect();
+
+                let reader = Cursor::new(data.clone());
+                let mut zero = StreamingChunkerZeroCopy::new(reader, config.clone());
+                let mut chunks_zero: Vec<(usize, _)> = Vec::new();
+                while let Ok(Some(chunk)) = zero.next_chunk().await {
+                    chunks_zero.push((chunk.data.len(), chunk.hash));
+                }
+
+                // Then: both paths produce identical chunk boundaries and hashes
+                assert_eq!(
+                    chunks_slice,
+                    chunks_zero,
+                    "level {:?} data len {}: chunk boundaries diverged",
+                    level,
+                    data.len()
+                );
+
+                // And: non-final chunks respect [min, max] size bounds
+                for (i, (len, _)) in chunks_slice.iter().enumerate() {
+                    assert!(*len <= config.max_size, "chunk {} exceeds max_size", i);
+                    if i + 1 < chunks_slice.len() {
+                        assert!(*len >= config.min_size, "chunk {} below min_size", i);
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
