@@ -14,7 +14,6 @@ era-ingest/src/
 ├── lib.rs               # Re-exports: Chunker, StreamingChunker, DirectoryScanner
 ├── chunker.rs           # FastCDC chunking implementation
 ├── chunker_zerocopy.rs  # Zero-copy chunker paths
-├── chunker_ringbuf.rs   # Ring-buffer chunker (NEVER calls copy_within)
 ├── reader.rs            # FileReader
 ├── entry.rs             # Ingest entry types
 └── acl.rs               # Platform ACL handling
