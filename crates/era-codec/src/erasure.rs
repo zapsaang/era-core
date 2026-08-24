@@ -379,13 +379,20 @@ impl ErasureCoder {
             .iter()
             .all(|s| s.is_some());
         if all_data_present {
-            return Ok(normalized[..self.config.data_shards]
+            return normalized[..self.config.data_shards]
                 .iter()
-                .map(|s| s.as_ref().unwrap().clone())
-                .collect());
+                .map(|s| {
+                    s.as_ref()
+                        .ok_or_else(|| {
+                            EraError::ErasureError(
+                                "Data shard unexpectedly None after all_data_present check".into(),
+                            )
+                        })
+                        .cloned()
+                })
+                .collect::<Result<Vec<_>>>();
         }
 
-        // Decode missing shards
         // Decode missing shards
         let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(
             self.config.data_shards,
