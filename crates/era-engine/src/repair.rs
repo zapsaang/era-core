@@ -816,7 +816,7 @@ fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
         let mut read_buffer = vec![0u8; repair.data.len()];
         file.read_exact(&mut read_buffer)?;
 
-        let read_crc = compute_shard_crc(&Bytes::from(read_buffer.clone()));
+        let read_crc = compute_shard_crc(&read_buffer);
         if read_crc != crc {
             return Err(EraError::IntegrityError(format!(
                 "Post-write CRC verification failed for repaired shard {} (expected {}, got {})",
