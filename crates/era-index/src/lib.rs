@@ -57,6 +57,7 @@ pub use store::IndexStore;
 // Re-export for convenience
 pub use era_common::{BlockId, BlockLocation, ChunkHash, VolumeId};
 
+use era_common::EraError;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Number of entries per L2 Index Page
@@ -246,11 +247,11 @@ impl IndexPage {
         );
         let min_hash = entries
             .first()
-            .expect("guaranteed non-empty after is_empty check")
+            .ok_or_else(|| EraError::InvalidFormat("IndexPage cannot be empty".into()))?
             .hash;
         let max_hash = entries
             .last()
-            .expect("guaranteed non-empty after is_empty check")
+            .ok_or_else(|| EraError::InvalidFormat("IndexPage cannot be empty".into()))?
             .hash;
         Ok(Self {
             min_hash,
@@ -303,11 +304,11 @@ impl IndexPage {
         );
         let min_hash = entries
             .first()
-            .expect("guaranteed non-empty after is_empty check")
+            .ok_or_else(|| era_common::EraError::InvalidFormat("IndexPage cannot be empty".into()))?
             .hash;
         let max_hash = entries
             .last()
-            .expect("guaranteed non-empty after is_empty check")
+            .ok_or_else(|| era_common::EraError::InvalidFormat("IndexPage cannot be empty".into()))?
             .hash;
         Ok(Self {
             min_hash,
