@@ -523,18 +523,16 @@ pub async fn repair_archive_with_providers(
                 parity_estimate as usize
             };
 
-            if shard_header.is_none() {
+            let Some(shard_header) = shard_header else {
                 debug!(
                     "Invalid shard header at block {}, shard {}",
                     block_index, shard_idx
                 );
                 corrupted_indices.push(shard_idx);
                 stats.corrupted_shards_found += 1;
-                // Advance offset even with corrupt header
                 offset += header_prefix_len as u64 + ShardHeader::SIZE as u64 + shard_len as u64;
                 continue;
-            }
-            let shard_header = shard_header.unwrap();
+            };
 
             shard_offsets[shard_idx] = Some(shard_header_offset);
 
@@ -1212,21 +1210,19 @@ async fn repair_archive_matrix_with_providers(
                     parity_estimate as usize
                 };
 
-                if shard_header.is_none() {
+                let Some(shard_header) = shard_header else {
                     debug!(
                         "Invalid shard header at block {}, shard {}",
                         block_sequence, shard_idx
                     );
                     corrupted_indices.push(shard_idx);
                     stats.corrupted_shards_found += 1;
-                    // Advance offset even with corrupt header
                     volume_offsets[reader_idx] = shard_offset
                         + header_prefix_len as u64
                         + ShardHeader::SIZE as u64
                         + shard_len as u64;
                     continue;
-                }
-                let shard_header = shard_header.unwrap();
+                };
 
                 if is_data_shard {
                     if let Some(slot) = data_lengths.get_mut(shard_idx) {

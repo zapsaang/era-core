@@ -963,8 +963,7 @@ impl ArchiveReader {
                                 }
                             };
 
-                            self.catalog = Some(catalog);
-                            return Ok(self.catalog.as_ref().unwrap());
+                            return Ok(self.catalog.insert(catalog));
                         }
                         Err(e) => {
                             warn!("Failed to unpack catalog from volume {}: {}", reader_idx, e);
@@ -1109,12 +1108,12 @@ impl ArchiveReader {
                 )));
             }
             let finalize_sequence = manifest.finalize_sequence;
-            self.volume_committed_ends = Some(manifest.volume_committed_ends.clone());
+            let volume_committed_ends = manifest.volume_committed_ends.clone();
+            self.volume_committed_ends = Some(volume_committed_ends.clone());
             self.manifest = Some(manifest);
             debug!(
                 "Loaded manifest: finalize_sequence={}, volume_committed_ends={:?}",
-                finalize_sequence,
-                self.volume_committed_ends.as_ref().unwrap()
+                finalize_sequence, volume_committed_ends
             );
         } else if any_volume_has_manifest {
             return Err(EraError::IntegrityError(
