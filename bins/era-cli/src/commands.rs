@@ -649,8 +649,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         ProgressStyle::default_bar()
             .template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg} (ETA: {eta})"
-            )
-            .unwrap()
+            )?
             .progress_chars("█▓▒░-"),
     );
 
@@ -843,9 +842,7 @@ pub async fn verify(
     let start_time = Instant::now();
     let pb = progress::spinner();
     pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .unwrap(),
+        ProgressStyle::default_spinner().template("{spinner:.green} [{elapsed_precise}] {msg}")?,
     );
     pb.set_message("Scanning blocks...");
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -993,9 +990,7 @@ pub async fn repair(
         let mut reader = open_archive(archive, passwords, key_paths).await?;
 
         let header = reader.header();
-        let erasure_enabled = header.config().erasure.is_some();
-        if erasure_enabled {
-            let erasure_config = header.config().erasure.as_ref().unwrap();
+        if let Some(erasure_config) = header.config().erasure.as_ref() {
             info!(
                 "Erasure coding:     Enabled ({}/{} data/parity shards)",
                 erasure_config.data_shards, erasure_config.parity_shards
@@ -1089,7 +1084,8 @@ pub async fn repair(
             );
         }
 
-        if erasure_enabled {
+        let header = reader.header();
+        if header.config().erasure.is_some() {
             info!("Attempting repair using Reed-Solomon erasure coding...");
             info!("");
 
