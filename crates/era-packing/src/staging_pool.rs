@@ -198,13 +198,16 @@ impl StagingPool {
             // couldn't fit it (which implies chunk >= target, but that's handled by pack_single).
             // OR, more likely, we have NO empty bins and all partial bins are too full.
 
-            let fullest_idx = self
+            let Some(fullest_idx) = self
                 .bins
                 .iter()
                 .enumerate()
                 .max_by_key(|(_, bin)| bin.current_size)
                 .map(|(idx, _)| idx)
-                .unwrap(); // Safe: bins is never empty
+            else {
+                // No bins available — pack single chunk directly
+                return Some(self.pack_single(chunk));
+            };
 
             trace!(
                 "No fit found. Strategy: Evict Fullest. Flushing bin {} (size {}) to make room.",

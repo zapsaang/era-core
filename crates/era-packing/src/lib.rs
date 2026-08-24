@@ -20,6 +20,7 @@ mod block_codec;
 mod builder;
 mod erasure_builder;
 mod erasure_unpacker;
+#[cfg(test)]
 mod integration_performance_tests;
 mod packed_chunk;
 mod resilient_aead;
