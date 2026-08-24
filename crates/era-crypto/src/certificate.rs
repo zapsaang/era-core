@@ -412,7 +412,10 @@ impl EraKeyPair {
         let nonce = Nonce::from_bytes(&file_data[21..45])?;
         let mut key_id = [0u8; KEY_ID_LEN];
         key_id.copy_from_slice(&file_data[45..61]);
-        let created_at = u64::from_le_bytes(file_data[61..69].try_into().unwrap());
+        let created_at =
+            u64::from_le_bytes(file_data[61..69].try_into().map_err(|_| {
+                EraError::InvalidFormat("Invalid created_at timestamp length".into())
+            })?);
         let encrypted_secret = &file_data[69..];
 
         // Derive decryption key via Argon2
@@ -588,7 +591,11 @@ impl EraCertificate {
             ));
         }
 
-        let cert_len = u32::from_le_bytes(file_data[5..9].try_into().unwrap()) as usize;
+        let cert_len = u32::from_le_bytes(
+            file_data[5..9]
+                .try_into()
+                .map_err(|_| EraError::InvalidFormat("Invalid certificate length field".into()))?,
+        ) as usize;
         if file_data.len() < 9 + cert_len {
             return Err(EraError::InvalidFormat("Certificate file truncated".into()));
         }
