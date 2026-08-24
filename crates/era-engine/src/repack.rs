@@ -1,7 +1,8 @@
 use crate::reader::{ArchiveReader, ExtractOptions};
 use crate::writer::{ArchiveWriter, ArchiveWriterBuilder};
 use era_common::{ArchiveConfig, EraError, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 use tracing::info;
 
 #[derive(Debug)]
@@ -10,6 +11,27 @@ pub struct RepackStats {
     pub extracted_bytes: u64,
     pub repacked_total_size: u64,
     pub blocks_written: u64,
+}
+
+async fn prepare_repack(source: PathBuf, output: PathBuf) -> Result<(PathBuf, TempDir)> {
+    tokio::task::spawn_blocking(move || {
+        let source_canonical = std::fs::canonicalize(source).map_err(EraError::Io)?;
+        let output_parent = output.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(output_parent).map_err(EraError::Io)?;
+        if output.exists() {
+            let output_canonical = std::fs::canonicalize(output).map_err(EraError::Io)?;
+            if source_canonical == output_canonical {
+                return Err(EraError::InvalidConfig(
+                    "source and output paths must differ".into(),
+                ));
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().map_err(EraError::Io)?;
+        Ok((source_canonical, temp_dir))
+    })
+    .await
+    .map_err(|error| EraError::AsyncError(format!("repack preparation task failed: {error}")))?
 }
 
 /// Generic repack with externally-provided source auth and writer builder.
@@ -22,19 +44,7 @@ pub async fn repack_archive_with_builder(
     source_providers: Vec<Box<dyn crate::auth::AuthProvider>>,
     writer_builder: ArchiveWriterBuilder,
 ) -> Result<RepackStats> {
-    let source_canonical = std::fs::canonicalize(source).map_err(EraError::Io)?;
-    let output_parent = output.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(output_parent).map_err(EraError::Io)?;
-    if output.exists() {
-        let output_canonical = std::fs::canonicalize(output).map_err(EraError::Io)?;
-        if source_canonical == output_canonical {
-            return Err(EraError::InvalidConfig(
-                "source and output paths must differ".into(),
-            ));
-        }
-    }
-
-    let temp_dir = tempfile::tempdir().map_err(EraError::Io)?;
+    let (_, temp_dir) = prepare_repack(source.to_path_buf(), output.to_path_buf()).await?;
     let extract_dir = temp_dir.path();
 
     info!("extracting source archive to temp dir");
@@ -66,19 +76,7 @@ pub async fn repack_archive(
     password: &str,
     new_config: ArchiveConfig,
 ) -> Result<RepackStats> {
-    let source_canonical = std::fs::canonicalize(source).map_err(EraError::Io)?;
-    let output_parent = output.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(output_parent).map_err(EraError::Io)?;
-    if output.exists() {
-        let output_canonical = std::fs::canonicalize(output).map_err(EraError::Io)?;
-        if source_canonical == output_canonical {
-            return Err(EraError::InvalidConfig(
-                "source and output paths must differ".into(),
-            ));
-        }
-    }
-
-    let temp_dir = tempfile::tempdir().map_err(EraError::Io)?;
+    let (_, temp_dir) = prepare_repack(source.to_path_buf(), output.to_path_buf()).await?;
     let extract_dir = temp_dir.path();
 
     info!("extracting source archive to temp dir");
@@ -114,19 +112,7 @@ pub async fn repack_archive_with_passwords(
     passwords: &[&str],
     new_config: ArchiveConfig,
 ) -> Result<RepackStats> {
-    let source_canonical = std::fs::canonicalize(source).map_err(EraError::Io)?;
-    let output_parent = output.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(output_parent).map_err(EraError::Io)?;
-    if output.exists() {
-        let output_canonical = std::fs::canonicalize(output).map_err(EraError::Io)?;
-        if source_canonical == output_canonical {
-            return Err(EraError::InvalidConfig(
-                "source and output paths must differ".into(),
-            ));
-        }
-    }
-
-    let temp_dir = tempfile::tempdir().map_err(EraError::Io)?;
+    let (_, temp_dir) = prepare_repack(source.to_path_buf(), output.to_path_buf()).await?;
     let extract_dir = temp_dir.path();
 
     let providers: Vec<Box<dyn crate::auth::AuthProvider>> = passwords
@@ -209,19 +195,7 @@ pub async fn repack_archive_with_private_keys(
     keypairs: &[era_crypto::EitherKeyPair],
     new_config: ArchiveConfig,
 ) -> Result<RepackStats> {
-    let source_canonical = std::fs::canonicalize(source).map_err(EraError::Io)?;
-    let output_parent = output.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(output_parent).map_err(EraError::Io)?;
-    if output.exists() {
-        let output_canonical = std::fs::canonicalize(output).map_err(EraError::Io)?;
-        if source_canonical == output_canonical {
-            return Err(EraError::InvalidConfig(
-                "source and output paths must differ".into(),
-            ));
-        }
-    }
-
-    let temp_dir = tempfile::tempdir().map_err(EraError::Io)?;
+    let (_, temp_dir) = prepare_repack(source.to_path_buf(), output.to_path_buf()).await?;
     let extract_dir = temp_dir.path();
 
     let mut providers: Vec<Box<dyn crate::auth::AuthProvider>> = Vec::new();
@@ -356,19 +330,7 @@ pub async fn repack_archive_with_keypair(
     keypair: &era_crypto::certificate::EraKeyPair,
     new_config: ArchiveConfig,
 ) -> Result<RepackStats> {
-    let source_canonical = std::fs::canonicalize(source).map_err(EraError::Io)?;
-    let output_parent = output.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(output_parent).map_err(EraError::Io)?;
-    if output.exists() {
-        let output_canonical = std::fs::canonicalize(output).map_err(EraError::Io)?;
-        if source_canonical == output_canonical {
-            return Err(EraError::InvalidConfig(
-                "source and output paths must differ".into(),
-            ));
-        }
-    }
-
-    let temp_dir = tempfile::tempdir().map_err(EraError::Io)?;
+    let (_, temp_dir) = prepare_repack(source.to_path_buf(), output.to_path_buf()).await?;
     let extract_dir = temp_dir.path();
 
     let mut reader = ArchiveReader::open_with_keypair(source, keypair).await?;
@@ -390,4 +352,96 @@ pub async fn repack_archive_with_keypair(
         repacked_total_size: archive_stats.total_size,
         blocks_written: archive_stats.blocks_written,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::ErrorKind;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn prepare_repack_returns_io_not_found_when_source_does_not_exist() {
+        // Given
+        let sandbox = TempDir::new().expect("sandbox should be created");
+        let source = sandbox.path().join("missing.era");
+        let output = sandbox.path().join("output.era");
+
+        // When
+        let result = prepare_repack(source, output).await;
+
+        // Then
+        match result {
+            Err(EraError::Io(error)) => assert_eq!(error.kind(), ErrorKind::NotFound),
+            Err(error) => panic!("expected I/O error, got {error:?}"),
+            Ok(_) => panic!("missing source should fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_repack_rejects_literal_same_source_and_output_path() {
+        // Given
+        let sandbox = TempDir::new().expect("sandbox should be created");
+        let source = sandbox.path().join("archive.era");
+        fs::write(&source, b"archive").expect("source should be written");
+
+        // When
+        let result = prepare_repack(source.clone(), source).await;
+
+        // Then
+        match result {
+            Err(EraError::InvalidConfig(message)) => {
+                assert_eq!(message, "source and output paths must differ")
+            }
+            Err(error) => panic!("expected invalid configuration, got {error:?}"),
+            Ok(_) => panic!("identical source and output should fail"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_repack_rejects_symlink_equivalent_source_and_output_paths() {
+        use std::os::unix::fs::symlink;
+
+        // Given
+        let sandbox = TempDir::new().expect("sandbox should be created");
+        let source = sandbox.path().join("archive.era");
+        let output = sandbox.path().join("archive-link.era");
+        fs::write(&source, b"archive").expect("source should be written");
+        symlink(&source, &output).expect("output symlink should be created");
+
+        // When
+        let result = prepare_repack(source, output).await;
+
+        // Then
+        match result {
+            Err(EraError::InvalidConfig(message)) => {
+                assert_eq!(message, "source and output paths must differ")
+            }
+            Err(error) => panic!("expected invalid configuration, got {error:?}"),
+            Ok(_) => panic!("symlink-equivalent source and output should fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_repack_creates_missing_output_parent() {
+        // Given
+        let sandbox = TempDir::new().expect("sandbox should be created");
+        let source = sandbox.path().join("archive.era");
+        let output_parent = sandbox.path().join("missing").join("parent");
+        let output = output_parent.join("output.era");
+        fs::write(&source, b"archive").expect("source should be written");
+        let expected_source = fs::canonicalize(&source).expect("source should canonicalize");
+
+        // When
+        let (canonical_source, temp_dir) = prepare_repack(source, output)
+            .await
+            .expect("repack preparation should succeed");
+
+        // Then
+        assert_eq!(canonical_source, expected_source);
+        assert!(output_parent.is_dir());
+        assert!(temp_dir.path().is_dir());
+    }
 }
