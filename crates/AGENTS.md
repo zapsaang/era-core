@@ -1,6 +1,6 @@
 # Crate Architecture and Navigation
 
-8 library crates forming a strict L0-L4 pipeline. Each layer only depends on layers below it.
+9 library crates forming a strict L0-L4 pipeline. Each layer only depends on layers below it.
 
 ## Crate Map
 
@@ -18,10 +18,10 @@
 ### Logic (L3)
 - **era-packing**: k-Bounded Best-Fit MacroBlock packing. StagingPool, resilient AEAD with 4-tier corruption detection.
 - **era-ingest**: FastCDC chunking (16KB-64KB-256KB default), FileReader, DirectoryScanner, ACL handling.
-- **era-index**: V2.1 embedded dedup index. Redb 2.1 ACID B-tree, Bloom filters, L1/L2 tiered pages, cold recovery.
+- **era-index**: V2.1 embedded dedup index. Redb 3.1.1 ACID B-tree, Bloom filters, L1/L2 tiered pages, cold recovery.
 
 ### Orchestration (L4)
-- **era-engine**: Async pipeline. ArchiveWriter, ArchiveReader, RecoveryManager, repair, repack, 4 BlockIterator variants.
+- **era-engine**: Async pipeline. ArchiveWriter, ArchiveReader, RecoveryManager, repair, repack, 5 BlockIterator variants: `StandardBlockIterator`, `ErasureBlockIterator`, `SessionBlockIterator`, `MultiVolumeSessionBlockIterator`, `SessionErasureBlockIterator` (see `crates/era-engine/src/AGENTS.md`).
 
 ## Actual Dependency Graph
 
@@ -29,7 +29,7 @@
 era-engine → era-{common,crypto,codec,storage,volume,packing,ingest,index}
 era-index  → era-{common,crypto,storage,volume}
 era-packing → era-{common,crypto,codec}
-era-ingest → era-{common,crypto,codec}
+era-ingest → era-{common,crypto}
 era-volume → era-{common,storage}
 era-codec  → era-common
 era-storage → era-common

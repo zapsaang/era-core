@@ -4,7 +4,7 @@ File ingestion, FastCDC content-defined chunking, and directory scanning. L3.
 
 ## SURFACES
 - `src/AGENTS.md` — `Chunker`, `StreamingChunker`, `DirectoryScanner`, `FileReader` internals
-- `tests/` — zerocopy, directory scanning, and platform-specific ACL handling
+- `tests/AGENTS.md` — five integration suites (zerocopy, directory scanning, ignore handling, streaming chunker, ACL support) and `cargo test -p era-ingest`
 - `benches/ingest_bench.rs`, `benches/streaming_memory_bench.rs` — chunking throughput
 
 ## STRUCTURE

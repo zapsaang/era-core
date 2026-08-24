@@ -12,7 +12,7 @@ V2.1 embedded deduplication index. L3 — depends on era-storage and era-volume 
 | `reader.rs` | IndexReader — queries index for dedup decisions |
 | `store.rs` | Storage layer — persists index as encrypted blocks in-volume |
 | `bloom_serde.rs` | Bloom filter serialization (rkyv zero-copy) |
-| `schema.rs` | Database schema (Redb 2.1 ACID B-tree) |
+| `schema.rs` | Database schema (Redb 3.1.1 ACID B-tree) |
 
 ## ARCHITECTURE
 
@@ -20,11 +20,11 @@ V2.1 embedded deduplication index. L3 — depends on era-storage and era-volume 
 - **L1 MetaIndex**: Compact page directory for range queries
 - **L2 IndexPages**: Full chunk hash → location mappings
 - **Self-contained**: Embedded in volume as typed encrypted blocks (no external state)
-- **Cold recovery**: Can rebuild index from volume headers alone
+- **Cold recovery**: reads the footer index location when present (fast path); otherwise scans the volume data region for typed `BlockType::IndexManifest` blocks (then `BlockType::IndexPage` blocks) and decrypts them with candidate `block_id` values around the page count. See `crates/era-index/src/reader.rs::recover_from_volume`.
 
 ## KEY FEATURES
 
-- **Redb 2.1**: ACID B-tree database for durable index operations
+- **Redb 3.1.1**: ACID B-tree database for durable index operations
 - **Zero-copy**: rkyv serialization for IndexEntry, IndexPage, MetaIndex
 - **Bloom false negative guarantee**: Bloom filter NEVER produces false negatives (audit-verified)
 

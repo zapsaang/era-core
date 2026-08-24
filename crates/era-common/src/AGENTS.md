@@ -7,15 +7,17 @@ Shared types, EraError, Result, protobuf codegen, and config types. L0. Bottom o
 | File | Purpose |
 |------|---------|
 | `lib.rs` | Re-exports: EraError, Result, config types, serialization helpers |
-| `error.rs` | `EraError` enum (35 variants), `Result<T>` alias |
+| `error.rs` | `EraError` enum (49 variants), `Result<T>` alias |
 | `config.rs` | `ArchiveConfig`, `CompressionConfig`, `EncryptionConfig`, etc. |
 | `conversion.rs` | `From`/`TryFrom` between config types and protobuf |
 | `serde.rs` | Bounded `deserialize_proto` helpers |
-| `types/mod.rs` | Re-exports: block, chunk, ids, matrix |
+| `types/mod.rs` | re-exports block, chunk, ids, manifest, matrix, typed_block |
 | `types/block.rs` | `BlockLocation`, `ShardLayout`, `VerifiedShard`, `compute_shard_crc()` |
 | `types/chunk.rs` | `RawChunk`, `UniqueChunk`, `ChunkLocation`, `ChunkVec` |
 | `types/ids.rs` | `ArchiveId`, `VolumeId`, `BlockId`, `ChunkHash` (rkyv/bytecheck) |
+| `types/manifest.rs` | `ArchiveManifest`: v8.2 archive metadata, epoch/finalize sequencing, committed horizons, cryptographic commitments, per-volume committed ends |
 | `types/matrix.rs` | `MatrixDistributionConfig`, `MatrixBlockLocation` |
+| `types/typed_block.rs` | `TypedBlockKind` enum with exactly three variants — `Manifest`, `Catalog`, `Index`; `Index` maps to `BlockType::IndexManifest` |
 
 ## BUILD
 
