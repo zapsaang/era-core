@@ -1,21 +1,21 @@
-//! Secure Memory Management - Optimized Version
+//! Secure Memory Management
 //!
-//! This module implements system-level memory protection using industry-standard
-//! zeroize-alloc allocator from RustCrypto, eliminating ~200 lines of manual
-//! platform-specific code while maintaining all security properties.
+//! This module implements system-level memory protection using manual zeroization
+//! and mlock, eliminating ~200 lines of manual platform-specific code while
+//! maintaining all security properties.
 //!
 //! ## Security Features
 //!
-//! - **Automatic Zeroization**: zeroize-alloc ensures all data is zeroed on deallocation
+//! - **Manual Zeroization**: Explicit zeroize calls on drop for key material
 //! - **mlock Support**: Memory pages are locked to prevent swapping to disk
 //! - **Debug Redaction**: Prevents accidental logging of key material
 //! - **Graceful Degradation**: Works across all platforms with feature detection
 //!
 //! ## Platform Support
 //!
-//! - Unix/Linux: Full mlock support via zeroize-alloc
-//! - macOS: Full mlock support via zeroize-alloc
-//! - Windows: Full mlock support via zeroize-alloc
+//! - Unix/Linux: Full mlock support
+//! - macOS: Full mlock support
+//! - Windows: Full mlock support
 //! - Other: Graceful degradation with warnings
 
 use std::fmt;
@@ -44,9 +44,9 @@ impl std::error::Error for SecureMemoryError {}
 /// Configuration for secure memory allocation
 #[derive(Debug, Clone, Copy)]
 pub struct SecureMemoryConfig {
-    /// Enable mlock to prevent swapping (zeroize-alloc handles this)
+    /// Enable mlock to prevent swapping
     pub enable_mlock: bool,
-    /// Enable guard pages for overflow protection (not used with zeroize-alloc)
+    /// Enable guard pages for overflow protection (not used in this implementation)
     pub enable_guard_pages: bool,
     /// Fail if mlock is not available (vs. warn and continue)
     pub strict_mlock: bool,
@@ -64,10 +64,10 @@ impl Default for SecureMemoryConfig {
 
 /// A secure memory region that is protected from swapping and zeroed on drop.
 ///
-/// This type uses zeroize-alloc internally to provide:
-/// - Automatic zeroization on drop (no manual zeroize needed)
+/// This type provides:
+/// - Manual zeroization on drop
 /// - mlock protection to prevent OS from swapping memory to disk
-/// - Zero unsafe code in normal usage
+/// - Minimal unsafe code
 /// - Cross-platform compatibility
 ///
 /// # Example
@@ -77,11 +77,9 @@ impl Default for SecureMemoryConfig {
 /// secure.as_mut().copy_from_slice(&key_bytes);
 /// // Memory is now protected from swapping
 /// // ...use the key...
-/// drop(secure); // Memory is automatically zeroed by zeroize-alloc
+/// drop(secure); // Memory is zeroized on drop
 /// ```
 pub struct SecureBuffer<const N: usize> {
-    // Using Box with standard allocator, but wrapped in zeroize-capable container
-    // The actual memory is allocated and managed by the global zeroize-alloc allocator
     data: Box<[u8; N]>,
     is_locked: bool,
 }
@@ -94,7 +92,6 @@ impl<const N: usize> SecureBuffer<N> {
 
     /// Create a new secure buffer with custom configuration
     pub fn with_config(config: SecureMemoryConfig) -> Result<Self, SecureMemoryError> {
-        // Allocate zeroed memory using the global allocator (zeroize-alloc)
         let data: Box<[u8; N]> = Box::new([0u8; N]);
 
         let is_locked = if config.enable_mlock {
@@ -138,8 +135,6 @@ impl<const N: usize> AsMut<[u8; N]> for SecureBuffer<N> {
 
 impl<const N: usize> Drop for SecureBuffer<N> {
     fn drop(&mut self) {
-        // Manually zeroize before drop (belt-and-suspenders approach)
-        // zeroize-alloc will also zeroize on deallocation
         unsafe {
             let slice = std::slice::from_raw_parts_mut(self.data.as_mut_ptr(), N);
             slice.zeroize();
@@ -149,7 +144,7 @@ impl<const N: usize> Drop for SecureBuffer<N> {
         if self.is_locked {
             let _ = munlock(self.data.as_ptr(), N);
         }
-        // Box will deallocate automatically, and zeroize-alloc allocator will zeroize
+        // Box will deallocate automatically
     }
 }
 
@@ -175,7 +170,7 @@ impl<const N: usize> fmt::Debug for SecureBuffer<N> {
 /// A secure memory region with runtime-determined size.
 ///
 /// Similar to `SecureBuffer` but allows allocating any size at runtime.
-/// Uses zeroize-alloc for automatic secure memory management.
+/// Uses manual zeroization for secure memory management.
 #[allow(dead_code)]
 pub struct SecureBytes {
     data: Vec<u8>,
@@ -195,7 +190,7 @@ impl SecureBytes {
             return Err(SecureMemoryError::AllocationFailed);
         }
 
-        // Allocate via zeroize-alloc
+        // Allocate standard Vec
         let data = vec![0u8; size];
 
         let is_locked = if config.enable_mlock {
@@ -252,7 +247,7 @@ impl Drop for SecureBytes {
         if self.is_locked {
             let _ = munlock(self.data.as_ptr(), self.data.len());
         }
-        // Vec will deallocate automatically, zeroize-alloc will zeroize
+        // Vec will deallocate automatically
     }
 }
 
@@ -385,7 +380,10 @@ pub fn check_security_features() -> SecurityReport {
     SecurityReport {
         mlock_available: check_mlock_available(),
         platform: std::env::consts::OS,
-        zeroize_alloc_enabled: true, // Always enabled with this implementation
+        // No global secure allocator is currently configured. Manual zeroization
+        // is used instead. A real secure global allocator (e.g., via custom global
+        // alloc or LD_PRELOAD) is tracked as a separate follow-up item.
+        zeroize_alloc_enabled: false,
     }
 }
 
@@ -461,6 +459,6 @@ mod tests {
     fn test_security_features_report() {
         let report = check_security_features();
         assert_eq!(report.platform, std::env::consts::OS);
-        assert!(report.zeroize_alloc_enabled);
+        assert!(!report.zeroize_alloc_enabled);
     }
 }

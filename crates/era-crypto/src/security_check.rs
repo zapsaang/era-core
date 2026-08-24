@@ -41,15 +41,13 @@ pub fn print_security_report() {
     eprintln!();
 
     // Overall assessment
-    if report.zeroize_alloc_enabled && report.mlock_available {
-        eprintln!("✅ Overall Security: EXCELLENT");
-        eprintln!("   All security features are available and functioning");
-    } else if report.zeroize_alloc_enabled || report.mlock_available {
+    if report.mlock_available {
         eprintln!("⚠️  Overall Security: GOOD");
-        eprintln!("   Core security features available");
+        eprintln!("   Manual zeroization + mlock available");
+        eprintln!("   (No global secure allocator configured)");
     } else {
         eprintln!("❌ Overall Security: REDUCED");
-        eprintln!("   Platform lacks some security features");
+        eprintln!("   Platform lacks mlock support");
         eprintln!("   NOT RECOMMENDED for production use with sensitive data");
     }
 

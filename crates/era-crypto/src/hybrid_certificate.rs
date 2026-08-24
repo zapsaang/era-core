@@ -6,7 +6,7 @@
 
 use crate::aead::{AeadCipher, Nonce};
 use crate::hybrid_kem::{self, HybridPublicKey, HybridSecretKey};
-use era_common::{EraError, Result};
+use era_common::Result;
 
 /// Domain separator for hybrid certificate MK encapsulation AAD
 const HYBRID_ENCAPS_AAD: &[u8] = b"ERA_HYBRID_CERT_ENCAPS_v8.1";
@@ -42,15 +42,14 @@ impl HybridCertificate {
 
 /// Hybrid keypair with automatic zeroization on drop.
 pub struct HybridKeyPair {
-    secret_key: HybridSecretKey,
+    secret_key: std::sync::Arc<HybridSecretKey>,
     public_key: HybridPublicKey,
 }
 
 impl Clone for HybridKeyPair {
     fn clone(&self) -> Self {
         Self {
-            secret_key: HybridSecretKey::from_bytes(&self.secret_key.to_bytes())
-                .expect(" cloning own bytes must succeed"),
+            secret_key: std::sync::Arc::clone(&self.secret_key),
             public_key: self.public_key.clone(),
         }
     }
@@ -70,25 +69,9 @@ impl HybridKeyPair {
     pub fn generate() -> Self {
         let (public_key, secret_key) = hybrid_kem::generate_keypair();
         Self {
-            secret_key,
+            secret_key: std::sync::Arc::new(secret_key),
             public_key,
         }
-    }
-
-    /// Create a keypair from raw secret key bytes.
-    ///
-    /// The public key is re-derived from the X25519 component.
-    pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self> {
-        let secret_key = HybridSecretKey::from_bytes(bytes)?;
-        // Re-derive X25519 public key from the secret
-        use x25519_dalek::PublicKey as X25519PublicKey;
-        let _x25519_public = X25519PublicKey::from(&secret_key.x25519);
-        // Re-derive Kyber public key is not directly supported, so we require
-        // the caller to provide both. For PEM loading we store the public key
-        // alongside the secret key.
-        Err(EraError::InvalidKey(
-            "Use from_secret_and_public_bytes for hybrid keys".into(),
-        ))
     }
 
     /// Create a keypair from separate secret and public key byte slices.
@@ -96,7 +79,7 @@ impl HybridKeyPair {
         let secret_key = HybridSecretKey::from_bytes(secret_bytes)?;
         let public_key = HybridPublicKey::from_bytes(public_bytes)?;
         Ok(Self {
-            secret_key,
+            secret_key: std::sync::Arc::new(secret_key),
             public_key,
         })
     }
@@ -141,20 +124,13 @@ impl HybridKeyPair {
     }
 
     /// Serialize the secret key to bytes.
-    pub fn secret_key_bytes(&self) -> Vec<u8> {
+    pub fn secret_key_bytes(&self) -> zeroize::Zeroizing<Vec<u8>> {
         self.secret_key.to_bytes()
     }
 
     /// Serialize the public key to bytes.
     pub fn public_key_bytes(&self) -> Vec<u8> {
         self.public_key.to_bytes()
-    }
-}
-
-impl Drop for HybridKeyPair {
-    fn drop(&mut self) {
-        // HybridSecretKey already zeroizes its x25519 component on drop.
-        // No extra work needed here.
     }
 }
 

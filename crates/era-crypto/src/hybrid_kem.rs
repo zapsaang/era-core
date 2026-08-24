@@ -68,26 +68,36 @@ pub struct HybridPublicKey {
 
 /// Hybrid secret key with automatic zeroization on drop
 ///
-/// Note: We manually implement Drop instead of deriving ZeroizeOnDrop because
-/// pqcrypto-kyber's SecretKey doesn't implement Zeroize. The mlkem768::SecretKey
-/// handles its own zeroization via FFI Drop, so we only need to explicitly
-/// zeroize the x25519 key.
+/// Hybrid secret key with explicit zeroization.
+///
+/// pqcrypto-mlkem 0.1.1's `mlkem768::SecretKey` is `#[derive(Clone, Copy)]` with
+/// NO Drop impl and NO zeroization. The kyber bytes are stored in owned zeroizing
+/// storage. The X25519 component is also explicitly zeroized.
+///
+/// Honest boundary: the transient `mlkem768::SecretKey` materialized inside
+/// `decapsulate` for the FFI call cannot be eliminated with the current dependency.
+/// This implementation only guarantees long-term stored key material is zeroized on drop.
 pub struct HybridSecretKey {
     /// X25519 secret key (32 bytes, zeroized on drop)
     pub(crate) x25519: StaticSecret,
-    /// Kyber-768 secret key (2400 bytes, zeroized on drop via FFI)
-    pub(crate) kyber: mlkem768::SecretKey,
+    /// Kyber-768 secret key bytes (2400 bytes, zeroized on drop)
+    pub(crate) kyber_bytes: zeroize::Zeroizing<[u8; 2400]>,
+}
+
+impl zeroize::Zeroize for HybridSecretKey {
+    fn zeroize(&mut self) {
+        self.x25519.zeroize();
+        self.kyber_bytes.zeroize();
+    }
 }
 
 impl Drop for HybridSecretKey {
     fn drop(&mut self) {
-        // Zeroize the X25519 key (StaticSecret implements Zeroize)
-        use zeroize::Zeroize;
-        self.x25519.zeroize();
-        // Note: mlkem768::SecretKey handles its own zeroization via Drop
-        // from the pqcrypto FFI bindings (it wraps a C library that zeros memory)
+        self.zeroize();
     }
 }
+
+impl zeroize::ZeroizeOnDrop for HybridSecretKey {}
 
 impl HybridPublicKey {
     /// Serialize the public key to bytes
@@ -129,19 +139,20 @@ impl HybridSecretKey {
     ///
     /// Format: [X25519 SK: 32 bytes][Kyber SK: 2400 bytes]
     /// Total: 2432 bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(32 + mlkem768::secret_key_bytes());
+    pub fn to_bytes(&self) -> zeroize::Zeroizing<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(32 + 2400);
         bytes.extend_from_slice(self.x25519.as_bytes());
-        bytes.extend_from_slice(self.kyber.as_bytes());
-        bytes
+        bytes.extend_from_slice(&*self.kyber_bytes);
+        zeroize::Zeroizing::new(bytes)
     }
 
     /// Deserialize a secret key from bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() != 32 + mlkem768::secret_key_bytes() {
+        const EXPECTED_LEN: usize = 32 + 2400;
+        if bytes.len() != EXPECTED_LEN {
             return Err(EraError::Deserialization(format!(
                 "Invalid hybrid secret key length: expected {}, got {}",
-                32 + mlkem768::secret_key_bytes(),
+                EXPECTED_LEN,
                 bytes.len()
             )));
         }
@@ -151,11 +162,15 @@ impl HybridSecretKey {
             .map_err(|_| EraError::Deserialization("Failed to parse X25519 secret key".into()))?;
         let x25519 = StaticSecret::from(x25519_bytes);
 
-        let kyber = mlkem768::SecretKey::from_bytes(&bytes[32..]).map_err(|e| {
-            EraError::Deserialization(format!("Failed to parse Kyber secret key: {}", e))
+        let kyber_bytes_slice: [u8; 2400] = bytes[32..].try_into().map_err(|_| {
+            EraError::Deserialization("Failed to parse Kyber secret key bytes".into())
         })?;
+        let kyber_bytes = zeroize::Zeroizing::new(kyber_bytes_slice);
 
-        Ok(Self { x25519, kyber })
+        Ok(Self {
+            x25519,
+            kyber_bytes,
+        })
     }
 }
 
@@ -176,9 +191,13 @@ pub fn generate_keypair() -> (HybridPublicKey, HybridSecretKey) {
         kyber: kyber_public,
     };
 
+    let mut kyber_bytes_array = [0u8; 2400];
+    kyber_bytes_array.copy_from_slice(kyber_secret.as_bytes());
+    let kyber_bytes = zeroize::Zeroizing::new(kyber_bytes_array);
+
     let secret_key = HybridSecretKey {
         x25519: x25519_secret,
-        kyber: kyber_secret,
+        kyber_bytes,
     };
 
     (public_key, secret_key)
@@ -261,7 +280,12 @@ pub fn decapsulate(
         .map_err(|e| EraError::Decryption(format!("Failed to parse Kyber ciphertext: {}", e)))?;
 
     // Step 5: Kyber-768 decapsulation
-    let kyber_shared = mlkem768::decapsulate(&kyber_ct, &recipient_sk.kyber);
+    // Materialize transient mlkem768::SecretKey for FFI call only
+    let kyber_sk_transient =
+        mlkem768::SecretKey::from_bytes(&*recipient_sk.kyber_bytes).map_err(|e| {
+            EraError::Decryption(format!("Failed to parse stored Kyber secret key: {}", e))
+        })?;
+    let kyber_shared = mlkem768::decapsulate(&kyber_ct, &kyber_sk_transient);
 
     // Step 6: Combine shared secrets using HKDF
     let aead_key = combine_shared_secrets(x25519_shared.as_bytes(), kyber_shared.as_bytes())?;
@@ -346,6 +370,19 @@ mod tests {
     }
 
     #[test]
+    fn test_secret_key_byte_format_roundtrip() {
+        let (_pk, sk) = generate_keypair();
+
+        let bytes = sk.to_bytes();
+        assert_eq!(bytes.len(), 32 + 2400);
+
+        let sk_restored = HybridSecretKey::from_bytes(&bytes).unwrap();
+        let bytes_restored = sk_restored.to_bytes();
+
+        assert_eq!(bytes, bytes_restored);
+    }
+
+    #[test]
     fn test_wrong_secret_key() {
         let (recipient_pk1, _recipient_sk1) = generate_keypair();
         let (_recipient_pk2, recipient_sk2) = generate_keypair();
@@ -361,12 +398,9 @@ mod tests {
     }
 
     #[test]
-    fn test_zeroization() {
-        // This test verifies that secret keys are zeroized on drop
-        // The actual zeroization happens via ZeroizeOnDrop trait
-        let (_pk, sk) = generate_keypair();
-        drop(sk);
-        // If we had unsafe access to the dropped memory, we would verify
-        // that it's been zeroized. The ZeroizeOnDrop trait handles this.
+    fn test_secret_types_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<HybridSecretKey>();
     }
 }

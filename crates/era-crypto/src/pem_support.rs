@@ -111,45 +111,39 @@ pub fn load_private_key_from_pem_string(
 /// WARNING: This does not encrypt the private key. Use only for testing or
 /// exporting to a secure location.
 pub fn export_private_key_as_pem(keypair: &EraKeyPair) -> Result<String> {
-    // Manually construct PKCS#8 components for X25519
-    let secret = keypair.secret_key.to_bytes();
+    use zeroize::Zeroize;
 
-    // 1. Inner CurvePrivateKey ::= OCTET STRING (32 bytes)
-    // Structure: 04 20 [32 bytes]
-    let mut key_field = Vec::with_capacity(34);
+    let secret = zeroize::Zeroizing::new(keypair.secret_key.to_bytes());
+
+    let mut key_field = zeroize::Zeroizing::new(Vec::with_capacity(34));
     key_field.push(0x04);
-    key_field.push(0x20); // 32 bytes length
-    key_field.extend_from_slice(&secret);
+    key_field.push(0x20);
+    key_field.extend_from_slice(&*secret);
 
-    // 2. AlgorithmIdentifier for X25519
-    // OID: 1.3.101.110 -> 2B 65 6E
-    // Sequence: 30 05 06 03 2B 65 6E
     let algo_id = [0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e];
-
-    // 3. Version: 0 -> 02 01 00
     let version = [0x02, 0x01, 0x00];
 
-    // 4. PrivateKey wrapper field (OCTET STRING containing key_field)
-    // Structure: 04 [len] [key_field]
-    let mut key_wrapper = Vec::with_capacity(36);
+    let mut key_wrapper = zeroize::Zeroizing::new(Vec::with_capacity(36));
     key_wrapper.push(0x04);
     key_wrapper.push(key_field.len() as u8);
     key_wrapper.extend_from_slice(&key_field);
 
-    // 5. Outer Sequence (PrivateKeyInfo)
-    // Structure: 30 [len] [Version] [Algo] [KeyWrapper]
-    let mut seq_content = Vec::new();
+    let mut seq_content = zeroize::Zeroizing::new(Vec::new());
     seq_content.extend_from_slice(&version);
     seq_content.extend_from_slice(&algo_id);
     seq_content.extend_from_slice(&key_wrapper);
 
     let mut der = Vec::new();
-    der.push(0x30); // SEQUENCE
+    der.push(0x30);
     der.push(seq_content.len() as u8);
     der.extend_from_slice(&seq_content);
 
-    let pem = pem::Pem::new("PRIVATE KEY", der);
-    Ok(pem::encode(&pem))
+    let pem_obj = pem::Pem::new("PRIVATE KEY", der);
+    let encoded = pem::encode(&pem_obj);
+
+    pem_obj.into_contents().zeroize();
+
+    Ok(encoded)
 }
 
 /// Load a public key from a PEM file
@@ -200,13 +194,20 @@ pub fn export_hybrid_public_key_as_pem(cert: &HybridCertificate) -> Result<Strin
 
 /// Export hybrid private key as custom PEM (includes public key block for reconstruction).
 pub fn export_hybrid_private_key_as_pem(keypair: &HybridKeyPair) -> Result<String> {
-    let private_pem = pem::Pem::new("ERA HYBRID PRIVATE KEY", keypair.secret_key_bytes());
+    use zeroize::Zeroize;
+
+    let private_pem = pem::Pem::new(
+        "ERA HYBRID PRIVATE KEY",
+        keypair.secret_key_bytes().to_vec(),
+    );
     let public_pem = pem::Pem::new("ERA HYBRID PUBLIC KEY", keypair.public_key_bytes());
-    Ok(format!(
-        "{}\n{}",
-        pem::encode(&private_pem),
-        pem::encode(&public_pem)
-    ))
+
+    let private_encoded = pem::encode(&private_pem);
+    let public_encoded = pem::encode(&public_pem);
+
+    private_pem.into_contents().zeroize();
+
+    Ok(format!("{}\n{}", private_encoded, public_encoded))
 }
 
 /// Load a hybrid public key from a PEM file
