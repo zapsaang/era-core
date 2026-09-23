@@ -1431,10 +1431,10 @@ fn test_bb1_total_panic_surface() {
         unwrap_count, expect_count, assert_count, panic_count, total, report
     );
 
-    // We expect to find violations
-    assert!(
-        total > 0,
-        "Production code should have zero panic paths, found {}",
+    // Production code was hardened in commit 1da642b: zero panic paths is the passing state
+    assert_eq!(
+        total, 0,
+        "Production code must have zero panic paths, found {}",
         total
     );
 }
