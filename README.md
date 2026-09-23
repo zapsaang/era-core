@@ -459,7 +459,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - [ ] Incremental backup support
 - [ ] Streaming extraction API
 - [ ] Python bindings (PyO3)
-- [ ] Bit-level volume integrity scan — detect and report every corrupted bit across all volumes (see [`doc_gen/TODO/BIT_LEVEL_VOLUME_INTEGRITY_SCAN.md`](doc_gen/TODO/BIT_LEVEL_VOLUME_INTEGRITY_SCAN.md))
+- [ ] Bit-level volume integrity scan — detect and report every corrupted bit across all volumes
 
 ### Long-term (2027+)
 
@@ -469,7 +469,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 
 ## Contributing
 
-1. Read [CLAUDE.md](CLAUDE.md) for architecture mandates and security constraints
+1. Read [AGENTS.md](AGENTS.md) for architecture mandates and security constraints
 2. Fork, branch, and make changes following the coding standards
 3. Run all CI checks locally (`fmt`, `clippy -D warnings`, `test --workspace`)
 4. Submit a PR — all checks must pass, code review required
@@ -517,4 +517,4 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
 
 ---
 
-**Issues**: [GitHub Issues](https://github.com/zapsaang/era-core/issues) | **Docs**: [CLAUDE.md](CLAUDE.md), `docs/`
+**Issues**: [GitHub Issues](https://github.com/zapsaang/era-core/issues) | **Docs**: [AGENTS.md](AGENTS.md)
