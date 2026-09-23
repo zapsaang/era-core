@@ -236,11 +236,12 @@ mod low_severity {
     fn test_v3_qual_01_generic_writer_warns_on_empty_password() {
         let source = include_str!("../src/writer.rs");
 
+        // Security fix: building without a password must be rejected with
+        // InvalidConfig, never silently encrypted with an empty password.
         assert!(
-            source.contains("self.password.unwrap_or_else(||")
-                && source
-                    .contains("GenericArchiveWriter: no password provided, using empty password"),
-            "GenericArchiveWriter builder must warn on missing password fallback"
+            source.contains("self.password.ok_or_else(||")
+                && source.contains("GenericArchiveWriter requires a password; none provided"),
+            "GenericArchiveWriter builder must reject missing password with InvalidConfig"
         );
         assert!(
             !source.contains("let password = self.password.unwrap_or_default();"),
