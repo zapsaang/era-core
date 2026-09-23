@@ -723,22 +723,47 @@ fn v17_regression_v16f3_min_page_size() {
     );
 }
 
-/// V16-F5 regression: try_new uses .expect() not .unwrap()
+/// V16-F5 regression: try_new is panic-free (ok_or_else + InvalidFormat,
+/// hardened in commit 1da642b; supersedes the old .expect() contract)
 #[test]
 fn v17_regression_v16f5_expect_not_unwrap() {
     let source = read_source_file("src/lib.rs");
     let fn_body = extract_fn_body(&source, "try_new(", 2000);
 
+    // No panicking accessors anywhere in try_new.
+    assert!(
+        !fn_body.contains(".unwrap()"),
+        "V16-F5 regression: try_new must NOT use .unwrap()"
+    );
+    assert!(
+        !fn_body.contains(".expect("),
+        "V16-F5 regression: try_new must NOT use .expect(); \
+         hardened contract is ok_or_else + InvalidFormat"
+    );
+    // Non-panicking contract must be present.
+    assert!(
+        fn_body.contains("is_empty()"),
+        "V16-F5 regression: try_new must keep the is_empty() guard"
+    );
+    assert!(
+        fn_body.contains(".ok_or_else("),
+        "V16-F5 regression: try_new must use .ok_or_else() for first()/last()"
+    );
+    assert!(
+        fn_body.contains("InvalidFormat"),
+        "V16-F5 regression: try_new must surface EraError::InvalidFormat"
+    );
+
     let dedup_pos = fn_body.find("dedup_by_key").unwrap_or(0);
     let after_dedup = &fn_body[dedup_pos..(dedup_pos + 800).min(fn_body.len())];
 
     assert!(
-        !after_dedup.contains(".unwrap()"),
-        "V16-F5 regression: try_new must NOT use .unwrap() after dedup"
+        !after_dedup.contains(".unwrap()") && !after_dedup.contains(".expect("),
+        "V16-F5 regression: try_new must NOT use .unwrap()/.expect() after dedup"
     );
     assert!(
-        after_dedup.contains(".expect("),
-        "V16-F5 regression: try_new must use .expect() for first()/last()"
+        after_dedup.contains(".ok_or_else("),
+        "V16-F5 regression: try_new must use .ok_or_else() for first()/last() after dedup"
     );
 }
 

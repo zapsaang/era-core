@@ -117,8 +117,11 @@ fn test_g2_index_page_try_new_returns_err_on_empty() {
 
 /// G3: `IndexPage::try_new()` previously used `.unwrap()` internally.
 ///
-/// REMEDIATION: `.unwrap()` replaced with `.expect("guaranteed non-empty after is_empty check")`.
-/// Verify the fix is in place.
+/// HARDENED (commit 1da642b): panicking accessors were replaced with a
+/// non-panicking contract — `is_empty()` early return + `.ok_or_else(...)`
+/// returning `EraError::InvalidFormat`, so empty input is a typed error,
+/// never a panic. Verify the contract is in place and no unguarded
+/// `.unwrap()`/`.expect()` was reintroduced.
 #[test]
 fn test_g3_try_new_contains_unwrap() {
     let source = include_str!("../src/lib.rs");
@@ -135,12 +138,34 @@ fn test_g3_try_new_contains_unwrap() {
     let has_unwrap = try_new_code.contains(".unwrap()");
     assert!(
         !has_unwrap,
-        "FIX G3 VERIFIED: IndexPage::try_new() should no longer contain .unwrap() calls. ",
+        "G3 REGRESSION: IndexPage::try_new() contains .unwrap() calls. \
+         Empty/invalid input must produce Err(EraError::InvalidFormat), not a panic.",
     );
     let has_expect = try_new_code.contains(".expect(");
     assert!(
-        has_expect,
-        "FIX G3 VERIFIED: IndexPage::try_new() should use .expect() with descriptive messages.",
+        !has_expect,
+        "G3 REGRESSION: IndexPage::try_new() contains .expect() calls. \
+         Use is_empty() early return + ok_or_else(InvalidFormat) instead.",
+    );
+
+    let empty_pos = try_new_code.find("entries.is_empty()");
+    assert!(
+        empty_pos.is_some(),
+        "G3: try_new must keep the is_empty() early return guard",
+    );
+    let ok_or_else_pos = try_new_code.find(".ok_or_else(");
+    assert!(
+        ok_or_else_pos.is_some(),
+        "G3: try_new must use .ok_or_else() for first()/last() instead of panicking accessors",
+    );
+    let invalid_format_pos = try_new_code.find("InvalidFormat");
+    assert!(
+        invalid_format_pos.is_some(),
+        "G3: try_new must surface EraError::InvalidFormat for empty input",
+    );
+    assert!(
+        empty_pos.unwrap() < ok_or_else_pos.unwrap(),
+        "G3: is_empty() early return must come before .ok_or_else() in try_new",
     );
 }
 
@@ -678,10 +703,12 @@ fn test_n1_reader_load_page_has_unwrap() {
     );
 }
 
-/// N2: lib.rs IndexPage methods previously had .unwrap() in production code.
+/// N2: lib.rs IndexPage methods previously had `.unwrap()` in production code.
 ///
-/// REMEDIATION: `.unwrap()` on `.first()` and `.last()` replaced with `.expect()`.
-/// Verify that production code has 0 `.unwrap()` calls and uses `.expect()` instead.
+/// HARDENED (commit 1da642b): production code must have ZERO unguarded
+/// `.unwrap()`/`.expect()` calls — fallible accessors use
+/// `.ok_or_else(|| EraError::InvalidFormat(...))?` behind an `is_empty()`
+/// early return. Verify zero panic paths remain in lib.rs production code.
 #[test]
 fn test_n2_index_page_methods_have_unwrap() {
     let source = include_str!("../src/lib.rs");
@@ -715,15 +742,30 @@ fn test_n2_index_page_methods_have_unwrap() {
         .count();
 
     assert!(
-        expect_in_production >= 2,
-        "FIX N2 VERIFIED: lib.rs should have >= 2 .expect() calls replacing .unwrap(). Found {}.",
+        expect_in_production == 0,
+        "N2 REGRESSION: lib.rs production code contains {} .expect() calls. \
+         Fallible accessors must use ok_or_else(InvalidFormat) instead of panicking.",
         expect_in_production
+    );
+
+    let ok_or_else_count = production_code.matches(".ok_or_else(").count();
+    assert!(
+        ok_or_else_count >= 2,
+        "N2: lib.rs production code should have >= 2 .ok_or_else() calls \
+         (first()/last() in try_new and try_new_presorted). Found {}.",
+        ok_or_else_count
+    );
+    assert!(
+        production_code.contains("EraError::InvalidFormat"),
+        "N2: lib.rs production code must surface EraError::InvalidFormat for empty pages"
     );
 }
 
 /// N3: Comprehensive unwrap+expect audit across all era-index source files.
 ///
-/// This is a corrected version of the competitor's E-tests that also
+/// HARDENED (commit 1da642b): lib.rs production code must be completely free
+/// of `.unwrap()`/`.expect()`; other source files are reported for the
+/// record. This is a corrected version of the competitor's E-tests that also
 /// catches .expect() calls — the audit gap found in test I1.
 #[test]
 fn test_n3_comprehensive_panic_audit() {
@@ -736,6 +778,7 @@ fn test_n3_comprehensive_panic_audit() {
         ("bloom_serde.rs", include_str!("../src/bloom_serde.rs")),
     ];
 
+    let mut lib_violations = 0;
     let mut total_violations = 0;
     let mut violations_report = String::new();
 
@@ -752,6 +795,9 @@ fn test_n3_comprehensive_panic_audit() {
 
             if trimmed.contains(".unwrap()") || trimmed.contains(".expect(") {
                 total_violations += 1;
+                if *filename == "lib.rs" {
+                    lib_violations += 1;
+                }
                 violations_report.push_str(&format!(
                     "  {} ~L{}: {}\n",
                     filename,
@@ -762,15 +808,26 @@ fn test_n3_comprehensive_panic_audit() {
         }
     }
 
-    // We expect to find violations (this is proving the competitor's code has issues)
+    // lib.rs (IndexPage::try_new / try_new_presorted) is hardened: empty or
+    // invalid input must produce Err(EraError::InvalidFormat), never a panic.
+    assert_eq!(
+        lib_violations, 0,
+        "N3 REGRESSION: lib.rs production code contains {} unguarded \
+         .unwrap()/.expect() call(s); hardened IndexPage constructors must be panic-free:\n{}",
+        lib_violations, violations_report
+    );
+
+    // The audit still scans every file and reports what it finds, so a
+    // reintroduction of panic paths in any era-index source is visible.
     assert!(
-        total_violations > 0,
-        "Comprehensive audit should find .unwrap()/.expect() in production code"
+        !violations_report.contains("lib.rs"),
+        "N3: violations report must not list lib.rs after hardening:\n{}",
+        violations_report
     );
 
     eprintln!(
-        "FINDING N3: Comprehensive panic audit found {} .unwrap()/.expect() violations \
-         in production code across era-index:\n{}",
+        "FINDING N3: Comprehensive panic audit found {} .unwrap()/.expect() occurrence(s) \
+         in production code across era-index (lib.rs: 0):\n{}",
         total_violations, violations_report
     );
 }

@@ -21,7 +21,7 @@
 //! | V16-F2 | MEDIUM | from_memory and from_pages signatures changed to `mut meta: MetaIndex` |
 //! | V16-F3 | MEDIUM | MIN_INDEX_PAGE_SIZE increased to 64, MIN_META_INDEX_SIZE to 48 |
 //! | V16-F4 | MEDIUM | After std::mem::take, re-allocate with Vec::with_capacity(entries_per_page) |
-//! | V16-F5 | LOW | .unwrap() replaced with .expect("guaranteed non-empty after is_empty check") |
+//! | V16-F5 | LOW | .unwrap()/.expect() removed; first()/last() use ok_or_else + InvalidFormat (hardened 1da642b) |
 //! | V16-F6 | MEDIUM | open_readonly bloom rebuild has comment explaining key-only iteration |
 //! | V16-F7 | LOW | contains_range doc comment updated |
 //! | V16-F8 | — | Non-issue (reclassified) |
@@ -298,38 +298,59 @@ fn v16_f4b_for_each_sorted_page_multi_page_behavioral() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// V16-F5 (LOW — Robustness): .unwrap() → .expect() in try_new
+// V16-F5 (LOW — Robustness): no unguarded panic in try_new
 // ═══════════════════════════════════════════════════════════════════════
 //
 // SOURCE: lib.rs, IndexPage::try_new()
-// The .unwrap() calls on entries.first()/last() were replaced with
-// .expect("guaranteed non-empty after is_empty check") for clarity.
+// HARDENED (commit 1da642b): entries.first()/last() now use
+// .ok_or_else(|| EraError::InvalidFormat(...))? behind an is_empty()
+// early return, so empty input is a typed error instead of a panic.
 
 #[test]
 fn v16_f5a_try_new_uses_expect_not_unwrap() {
     let source = read_source_file("src/lib.rs");
     let fn_body = extract_fn_body(&source, "try_new", 2000);
 
-    // Must contain .expect( calls (for first() and last())
+    // Must NOT contain panicking accessors anywhere in the function.
     assert!(
-        fn_body.contains(".expect("),
-        "V16-F5: try_new must use .expect() for first()/last(), got:\n{}",
+        !fn_body.contains(".unwrap()"),
+        "V16-F5 REGRESSION: try_new contains .unwrap(); empty input must \
+         return Err(EraError::InvalidFormat), not panic. Got:\n{}",
+        &fn_body[..500.min(fn_body.len())]
+    );
+    assert!(
+        !fn_body.contains(".expect("),
+        "V16-F5 REGRESSION: try_new contains .expect(); use ok_or_else + \
+         InvalidFormat instead. Got:\n{}",
         &fn_body[..500.min(fn_body.len())]
     );
 
-    // The expect message should mention the guarantee
+    // The non-panicking contract must be present.
+    let empty_pos = fn_body.find("is_empty()");
     assert!(
-        fn_body.contains("guaranteed non-empty after is_empty check"),
-        "V16-F5: expect message must mention 'guaranteed non-empty after is_empty check'"
+        empty_pos.is_some(),
+        "V16-F5: try_new must keep the is_empty() early return guard"
+    );
+    let ok_or_else_pos = fn_body.find(".ok_or_else(");
+    assert!(
+        ok_or_else_pos.is_some(),
+        "V16-F5: try_new must use .ok_or_else() for first()/last()"
+    );
+    assert!(
+        fn_body.contains("InvalidFormat"),
+        "V16-F5: try_new must surface EraError::InvalidFormat for empty input"
+    );
+    assert!(
+        empty_pos.unwrap() < ok_or_else_pos.unwrap(),
+        "V16-F5: is_empty() guard must come before .ok_or_else() in try_new"
     );
 
-    // Must NOT have bare .unwrap() calls on first()/last() in the hash extraction section
-    // Look for the section after dedup_by_key where min/max are extracted
+    // The hash extraction section after dedup must also be panic-free.
     let dedup_pos = fn_body.find("dedup_by_key").unwrap_or(0);
-    let after_dedup = &fn_body[dedup_pos..(dedup_pos + 500).min(fn_body.len())];
+    let after_dedup = &fn_body[dedup_pos..(dedup_pos + 600).min(fn_body.len())];
     assert!(
-        !after_dedup.contains(".unwrap()"),
-        "V16-F5: try_new must NOT use .unwrap() after dedup, got:\n{}",
+        !after_dedup.contains(".unwrap()") && !after_dedup.contains(".expect("),
+        "V16-F5: try_new must NOT use .unwrap()/.expect() after dedup, got:\n{}",
         after_dedup
     );
 }

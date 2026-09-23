@@ -534,11 +534,13 @@ fn v23_f8b_uses_modulo_operator() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// V23-F9: .expect() in try_new/try_new_presorted is safe [INFO]
+// V23-F9: fallible accessors in try_new/try_new_presorted are panic-free
 // ═══════════════════════════════════════════════════════════════════════
 
-// V23-F9 (INFO): .expect() calls in try_new and try_new_presorted are safe
-// because they are guarded by the is_empty() early return. No change needed.
+// V23-F9 (INFO): HARDENED (commit 1da642b). The old .expect() calls in
+// try_new and try_new_presorted were replaced with .ok_or_else() returning
+// EraError::InvalidFormat, guarded by the is_empty() early return. Empty
+// input is a typed error, never a panic.
 // SOURCE: lib.rs, IndexPage::try_new(), IndexPage::try_new_presorted()
 
 #[test]
@@ -546,17 +548,26 @@ fn v23_f9a_expect_guarded_by_empty_check_try_new() {
     let source = read_source_file("src/lib.rs");
     let fn_body = extract_fn_body(&source, "pub fn try_new(", 1700);
 
-    // Must have is_empty check before expect
+    // Must have is_empty check before the fallible accessor, and no panic path.
     let empty_check_pos = fn_body.find("is_empty()");
-    let expect_pos = fn_body.find(".expect(");
+    let ok_or_else_pos = fn_body.find(".ok_or_else(");
 
     assert!(
-        empty_check_pos.is_some() && expect_pos.is_some(),
-        "V23-F9: try_new must have both is_empty check and .expect"
+        empty_check_pos.is_some() && ok_or_else_pos.is_some(),
+        "V23-F9: try_new must have both is_empty check and .ok_or_else"
     );
     assert!(
-        empty_check_pos.unwrap() < expect_pos.unwrap(),
-        "V23-F9: is_empty check must come before .expect in try_new"
+        empty_check_pos.unwrap() < ok_or_else_pos.unwrap(),
+        "V23-F9: is_empty check must come before .ok_or_else in try_new"
+    );
+    assert!(
+        fn_body.contains("InvalidFormat"),
+        "V23-F9: try_new must surface EraError::InvalidFormat for empty input"
+    );
+    assert!(
+        !fn_body.contains(".unwrap()") && !fn_body.contains(".expect("),
+        "V23-F9 REGRESSION: try_new must not contain .unwrap()/.expect(); \
+         hardened contract is ok_or_else + InvalidFormat"
     );
 }
 
@@ -566,15 +577,24 @@ fn v23_f9b_expect_guarded_by_empty_check_presorted() {
     let fn_body = extract_fn_body(&source, "pub fn try_new_presorted(", 1700);
 
     let empty_check_pos = fn_body.find("is_empty()");
-    let expect_pos = fn_body.find(".expect(");
+    let ok_or_else_pos = fn_body.find(".ok_or_else(");
 
     assert!(
-        empty_check_pos.is_some() && expect_pos.is_some(),
-        "V23-F9: try_new_presorted must have both is_empty check and .expect"
+        empty_check_pos.is_some() && ok_or_else_pos.is_some(),
+        "V23-F9: try_new_presorted must have both is_empty check and .ok_or_else"
     );
     assert!(
-        empty_check_pos.unwrap() < expect_pos.unwrap(),
-        "V23-F9: is_empty check must come before .expect in try_new_presorted"
+        empty_check_pos.unwrap() < ok_or_else_pos.unwrap(),
+        "V23-F9: is_empty check must come before .ok_or_else in try_new_presorted"
+    );
+    assert!(
+        fn_body.contains("InvalidFormat"),
+        "V23-F9: try_new_presorted must surface EraError::InvalidFormat for empty input"
+    );
+    assert!(
+        !fn_body.contains(".unwrap()") && !fn_body.contains(".expect("),
+        "V23-F9 REGRESSION: try_new_presorted must not contain .unwrap()/.expect(); \
+         hardened contract is ok_or_else + InvalidFormat"
     );
 }
 
