@@ -8,7 +8,7 @@ An encrypted archival storage engine written in Rust, featuring 3-layer envelope
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: March 2026 — workspace verification recorded 2049 passed, 0 failed, 18 ignored.
+**Last Verified**: September 2026 — workspace verification recorded 2724 passed, 0 failed, 18 ignored.
 
 ## Features
 
@@ -331,7 +331,7 @@ ERA Core has undergone multiple rounds of adversarial security auditing (279+ te
 | `adversarial_audit_v2` | 53 | Skeptical baseline verification (all fixed) |
 | `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
 
-Workspace verification recorded 2049 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
+Workspace verification recorded 2724 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
 
 ## Development
 
@@ -360,7 +360,7 @@ cargo test --workspace
 
 ### Testing
 
-March 2026 workspace verification recorded 2049 passed, 0 failed, 18 ignored across 10 crates, covering:
+September 2026 workspace verification recorded 2724 passed, 0 failed, 18 ignored across 10 crates, covering:
 
 - **279+ adversarial audit tests** across multiple security audit suites (historical and V5)
 - Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
@@ -493,11 +493,11 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 |--------|-------|
 | Language | Rust 100% |
 | Lines of Code | ~56,900 (including tests) |
-| Source Files | 137 `.rs` files |
-| Tests | March 2026 workspace verification: 2049 passed, 0 failed, 18 ignored |
+| Source Files | 234 `.rs` files |
+| Tests | September 2026 workspace verification: 2724 passed, 0 failed, 18 ignored |
 | Security Audit Tests | 279+ across multiple suites |
 | Fuzz Targets | Planned (fuzz workspace not yet in repo) |
-| Crates | 8 library + 1 binary |
+| Crates | 9 library + 1 binary |
 | CLI Commands | 8 (create, extract, list, info, verify, repair, repack, keygen) |
 | Edition | 2021, resolver v2 |
 | Build Profile | LTO + codegen-units=1 + opt-level=3 (release) |
