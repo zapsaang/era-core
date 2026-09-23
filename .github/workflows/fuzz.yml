@@ -1,3 +1,5 @@
+# NOTE: The `fuzz/` workspace is not yet present in this repository.
+# Scheduled triggers are disabled until the workspace lands; run manually via workflow_dispatch.
 name: fuzz
 
 on:
@@ -11,9 +13,6 @@ on:
         options:
           - smoke
           - deep
-  schedule:
-    - cron: "15 2 * * *"
-    - cron: "30 3 * * 0"
 
 permissions:
   contents: read
@@ -22,7 +21,7 @@ jobs:
   fuzz-smoke:
     name: fuzz-smoke
     runs-on: ubuntu-latest
-    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'smoke') || github.event.schedule == '15 2 * * *' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'smoke' }}
 
     strategy:
       fail-fast: false
@@ -81,7 +80,7 @@ jobs:
   fuzz-deep:
     name: fuzz-deep
     runs-on: ubuntu-latest
-    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'deep') || github.event.schedule == '30 3 * * 0' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'deep' }}
 
     strategy:
       fail-fast: false

@@ -13,8 +13,8 @@ An encrypted archival storage engine written in Rust, featuring 3-layer envelope
 ## Features
 
 - **3-Layer Envelope Encryption**: Master Key (MK) → Intermediate Key (IK) → Volume Key (VK) hierarchy with randomized key wrapping (XChaCha20-Poly1305 AEAD)
-- **Hybrid KEM Support**: Hybrid KEM (X25519 + Kyber-768) for post-quantum key encapsulation, supporting standalone, password-combined, and threshold modes
-- **Multi-Party Access Control**: Any-of-N (OR) and T-of-N threshold (AND) policies via Shamir's Secret Sharing
+- **Hybrid KEM Support**: Hybrid KEM (X25519 + ML-KEM-768) for post-quantum key encapsulation, supporting standalone, password-combined, and threshold modes
+- **Multi-Party Access Control**: Any-of-N (OR) recipient slots and Shamir T-of-N threshold policies
 - **Instant Key Rotation**: Re-wrap volume keys without rewriting data — millisecond MK rotation for petabyte archives
 - **Erasure Coding**: Reed-Solomon (4+2 default) with strict shard validation for data redundancy
 - **Content-Defined Chunking**: FastCDC algorithm for efficient deduplication
@@ -23,7 +23,7 @@ An encrypted archival storage engine written in Rust, featuring 3-layer envelope
 - **Multi-Volume Support**: Automatic volume splitting with matrix shard distribution
 - **Secure Memory**: mlock'd pages, zeroization on drop, core dump prevention
 - **Small File Packing**: Efficient storage of many small files via k-Bounded Best-Fit packing
-- **Context-Bound AEAD**: All encryption binds archive ID, epoch ID, and block index into the AAD to prevent cross-archive and cross-block splicing attacks
+- **Context-Bound Block AEAD**: Block encryption binds archive ID, epoch ID, block type, volume index, and block ID as AAD to prevent cross-archive and cross-block splicing attacks
 - **Bounded Allocation**: All deserialization paths enforce strict size limits to prevent memory exhaustion from malicious inputs
 - **Archive Repair**: Reed-Solomon–based recovery of damaged archives
 
@@ -81,9 +81,14 @@ era repair archive.era --password "your-secret"
 era repack --input archive.era --output repacked.era --password "your-secret" --compact
 
 # Generate a keypair for certificate-based encryption
+# Default output is a hybrid (X25519 + ML-KEM-768) keypair
 era keygen
-era keygen -t x25519 -f ./my_key
-era keygen -t hybrid -f ./my_key
+
+# Generate a legacy X25519 keypair
+era keygen -t x25519 -f ./my_x25519_key
+
+# Generate a post-quantum hybrid keypair (default)
+era keygen -t hybrid -f ./my_hybrid_key
 ```
 
 ### Advanced Usage
@@ -98,18 +103,45 @@ era create --output archive.era --password "secret" --level 12 /path/to/files
 # Disable compression
 era create --output archive.era --password "secret" --no-compression /path/to/files
 
-# Certificate-based encryption (X25519-based)
- era create --output archive.era --certificate public.pem /path/to/files
- era extract --input archive.era --output /restored --key private.pem
+# Certificate-based encryption (legacy X25519)
+era create --output archive.era --certificate public.pem /path/to/files
 
-Note: passphrase-protected private keys are not yet supported. Use unencrypted PEM keys.
+# Extract with the matching private key
+era extract --input archive.era --output /restored --key private.pem
 
-# Post-quantum hybrid certificate encryption (X25519 + Kyber-768)
+# Note: passphrase-protected private keys are not yet supported. Use unencrypted PEM keys.
+
+# Post-quantum hybrid certificate encryption (X25519 + ML-KEM-768)
 era create --output archive.era --hybrid-certificate pub.pem /path/to/files
 era extract --input archive.era --output /restored --key private.pem
 
-# Multi-recipient (OR) authentication: certificate and password as separate slots
+# Any-of-N (OR): any single credential unlocks the archive.
+# Supported OR combinations are legacy certificate + password, or hybrid certificate + password.
+# Both credential types are stored as separate recipient slots; each slot protects the full Master Key.
 era create --output archive.era --certificate public.pem --password "secret" /path/to/files
+era create --output archive.era --hybrid-certificate pub.pem --password "secret" /path/to/files
+
+# T-of-N threshold (Shamir's Secret Sharing): the Master Key is split into N shares,
+# and any T shares can reconstruct it. The scheme supports multiple distinct passwords
+# or multiple distinct hybrid certificates (the --password or --hybrid-certificate
+# flags are repeated to provide them). Both --threshold and --shares are required.
+# Legacy certificate threshold and mixed credential threshold (password + hybrid certificate
+# in the same scheme) are not supported.
+# Note: threshold archives cannot be appended to existing archives.
+era create --output archive.era \
+    --password "share-1" --password "share-2" --password "share-3" \
+    --threshold 2 --shares 3 /path/to/files
+
+era create --output archive.era \
+    --hybrid-certificate holder-a.pub --hybrid-certificate holder-b.pub --hybrid-certificate holder-c.pub \
+    --threshold 2 --shares 3 /path/to/files
+
+# Threshold extraction: provide any T of the N credentials/keys
+era extract --input archive.era --output /restored \
+    --password "share-1" --password "share-2"
+
+era extract --input archive.era --output /restored \
+    --key holder-a --key holder-c
 
 # Multi-volume archive with size limit
 era create --output archive.era --password "secret" \
@@ -149,10 +181,10 @@ era-core/
 ├── bins/era-cli/          CLI binary (era)
 ├── crates/
 │   ├── era-common/        Shared types, errors, protobuf definitions
-│   ├── era-crypto/        XChaCha20-Poly1305, Kyber-768, HKDF, secure memory
+│   ├── era-crypto/        XChaCha20-Poly1305, ML-KEM-768, HKDF, secure memory
 │   ├── era-codec/         Compression (Zstd/LZ4), Reed-Solomon erasure coding
 │   ├── era-storage/       Async storage backend abstraction
-│   ├── era-volume/        Volume format v8.1, headers/footers, recovery
+│   ├── era-volume/        Volume format v8.2, headers/footers, recovery
 │   ├── era-packing/       k-Bounded Best-Fit MacroBlock packing
 │   ├── era-ingest/        File ingestion, FastCDC chunking
 │   ├── era-index/         V2.1 embedded deduplication index (Bloom + L1/L2)
@@ -170,16 +202,16 @@ Dependencies flow downward only — no upward or circular references:
 ├─────────────────────────────────────────────────────────────┤
 │  L4: era-engine       Archive orchestration, async pipeline │
 ├─────────────────────────────────────────────────────────────┤
-│  L3: era-packing      k-Bounded Best-Fit MacroBlock packing│
+│  L3: era-packing      k-Bounded Best-Fit MacroBlock packing │
 │      era-ingest       FastCDC chunking, file scanning       │
-│      era-index        V2.1 embedded dedup index (Bloom+L1/L2)│
+│      era-index        V2.1 dedup index (Bloom + L1/L2)      │
 ├─────────────────────────────────────────────────────────────┤
 │  L2: era-codec        Compression (Zstd/LZ4), Reed-Solomon  │
-│      era-volume       Volume format (v8.1), headers/footers │
+│      era-volume       Volume format (v8.2), headers/footers │
 ├─────────────────────────────────────────────────────────────┤
 │  L1: era-storage      Async storage backend abstraction     │
 ├─────────────────────────────────────────────────────────────┤
-│  L0: era-crypto       XChaCha20-Poly1305, Kyber-768, memory │
+│  L0: era-crypto       XChaCha20-Poly1305 + ML-KEM-768       │
 │      era-common       Shared types, errors, Protobuf defs   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -190,41 +222,43 @@ Dependencies flow downward only — no upward or circular references:
 
 **Read path:** Read shards from volumes → CRC verify → RS decode (exclude CRC-failed shards) → AEAD decrypt → decompress → extract chunks → reassemble files
 
-### Volume Format (v8.1)
+### Volume Format (v8.2)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Primary Header (4096 bytes)                                 │
-│  - Magic: "ERA\x08\x01"                                     │
-│  - Archive ID, Epoch ID, Encrypted Volume Key                │
-│  - Recipient Slots, Access Policy, Config                    │
-├──────────────────────────────────────────────────────────────┤
-│  Backup Footer (128 bytes, fixed-length binary)              │
-├──────────────────────────────────────────────────────────────┤
-│  Data Region (Encrypted Blocks)                              │
-│  - Packed chunks with erasure shards                         │
-│  - AEAD encrypted with per-block derived keys                │
-│  - AAD = archive_id ‖ epoch_id ‖ volume_index ‖ block_index │
-│  - V2.1 Index Pages (Bloom + L1/L2) embedded as typed blocks │
-├──────────────────────────────────────────────────────────────┤
-│  Backup Header (4096 bytes)                                  │
-├──────────────────────────────────────────────────────────────┤
-│  Primary Footer (128 bytes, fixed-length binary)             │
-│  - Block count, Index location, Blake3 checksum              │
-│  - Atomic write guarantee (single disk sector)               │
-└──────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  SuperHeader (4096 bytes)                                             │
+│  - Magic (8 bytes): 45 52 41 08 02 00 00 00                           │
+│  - Archive ID, Epoch ID, Encrypted Volume Key                         │
+│  - Recipient Slots, Access Policy, Config                             │
+├───────────────────────────────────────────────────────────────────────┤
+│  Reserved 128-byte gap (receives Footer copy at finalize)             │
+├───────────────────────────────────────────────────────────────────────┤
+│  Data Region (Encrypted Blocks)                                       │
+│  - Packed chunks with erasure shards                                  │
+│  - AEAD encrypted with per-block derived keys                         │
+│  - AAD = archive_id ‖ epoch_id ‖ block_type ‖ volume_index ‖ block_id │
+│  - V2.1 Index Pages (Bloom + L1/L2) as typed blocks                   │
+│  - v8.2 ArchiveManifest typed block                                   │
+├───────────────────────────────────────────────────────────────────────┤
+│  Backup SuperHeader (4096 bytes)                                      │
+├───────────────────────────────────────────────────────────────────────┤
+│  Primary Footer (128 bytes, fixed-length binary)                      │
+│  - Block count, Index location, Manifest block ID/offset              │
+│  - Blake3 checksum                                                    │
+│  - Sized to fit within a conventional disk sector                     │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Security Model
 
 ### 3-Layer Envelope Encryption
 
-ERA v8.1 uses a randomized key wrapping hierarchy that enables instant key rotation without rewriting data:
+ERA v8.2 uses a randomized key wrapping hierarchy that enables instant key rotation without rewriting data:
 
 ```
 Layer 1: Master Key (MK)
   ├── Generated via OsRng CSPRNG, stored encrypted in RecipientSlots
-  ├── Supports Any-of-N (OR) and T-of-N threshold (AND) access policies
+  ├── Supports Any-of-N (OR) and T-of-N threshold access policies
   │
 Layer 2: Intermediate Key (IK)
   ├── Derived: IK = HKDF-Expand(PRK=MK, Info="ERA_KeyWrap_v1")
@@ -238,6 +272,12 @@ Layer 3: Volume Key (VK)
 
 **Key Rotation**: Change MK → derive new IK → re-wrap existing VK → update header. Data untouched.
 
+### Certificates and External Trust
+
+Hybrid keys use ERA-specific `ERA HYBRID PUBLIC KEY` / `ERA HYBRID PRIVATE KEY` PEM blocks. Legacy X25519 keygen emits an unencrypted PKCS#8 private PEM and an SPKI public PEM; the legacy public loader also accepts X.509 and extracts the X25519 public key. ERA does not validate PKIX chains, CA trust, validity periods, or expiration; trust is established out of band.
+
+Password recipient slots derive their wrapping key with Argon2id and AEAD-wrap the Master Key or a Shamir share using XChaCha20-Poly1305 with a fresh random nonce. Legacy X25519 certificate recipient slots perform ephemeral ECDH, derive a wrapping key with HKDF-SHA256, and AEAD-wrap the full Master Key under XChaCha20-Poly1305 using a fixed zero nonce. Hybrid certificate recipient slots perform X25519 ECDH and ML-KEM-768 encapsulation, combine both shared secrets through HKDF-SHA256, and AEAD-wrap the full Master Key or a Shamir share under XChaCha20-Poly1305 using a fixed zero nonce. IK→VK wrapping inside the archive uses XChaCha20-Poly1305 with a fresh random nonce.
+
 ### Cryptographic Primitives
 
 | Purpose | Algorithm | Parameters |
@@ -246,7 +286,7 @@ Layer 3: Volume Key (VK)
 | Key wrapping (IK→VK) | XChaCha20-Poly1305 AEAD | Fresh random nonce per wrap |
 | Key derivation (MK→IK) | HKDF-SHA256 | Domain-separated context |
 | Password KDF | Argon2id | Configurable memory/time cost |
-| Hybrid KEM | X25519 + Kyber-768 | Post-quantum security |
+| Hybrid KEM | X25519 + ML-KEM-768 | Hybrid classical/PQ key establishment; ML-KEM-768 supplies the PQ component |
 | Content hashing | BLAKE3 | 256-bit output |
 | Secret sharing | Shamir's (sharks crate) | T-of-N threshold |
 | Shard integrity | CRC32 | Per-shard verification |
@@ -254,12 +294,12 @@ Layer 3: Volume Key (VK)
 
 ### Security Guarantees
 
-- **No nonce reuse**: Fresh 24-byte random nonce for every encryption operation
+- **Scoped nonce discipline**: Block nonces are deterministically derived from the nonce context, volume index, and block ID; password recipient-slot wraps and IK→VK wraps use fresh random nonces; certificate recipient-slot wraps use fresh one-time keys with a fixed zero nonce.
 - **Strict RNG policy**: `rand::rngs::OsRng` exclusively — `thread_rng()` forbidden
 - **Memory hygiene**: All key material (MK, IK, VK) zeroized on drop via `zeroize` crate
 - **No key logging**: Key material never appears in any log level including TRACE
-- **AEAD integrity**: Tag verification failure returns `EraError::Security("Key Tampering Detected")`
-- **Context-bound AEAD**: All encryption binds `archive_id ‖ epoch_id ‖ volume_index ‖ block_index` as AAD — blocks cannot be spliced between archives, volumes, or reordered within one
+- **AEAD integrity**: Authentication-tag verification failures are rejected.
+- **Context-bound block AEAD**: All block encryption binds `archive_id ‖ epoch_id ‖ block_type ‖ volume_index ‖ block_id` as AAD — blocks cannot be spliced between archives, volumes, or reordered within one
 - **Header validation**: Corrupted magic bytes cause hard failure (no silent recovery)
 - **Threshold enforcement**: Reader rejects `Threshold(T<2)` to prevent policy downgrade
 - **Erasure validation**: Extraction fails explicitly when insufficient shards are available
@@ -269,9 +309,9 @@ Layer 3: Volume Key (VK)
 
 ### Multi-Party Access Control
 
-**Any-of-N (OR)**: Each recipient slot holds MK encrypted by that user's credential. Any single valid credential unlocks the archive.
+**Any-of-N (OR)**: Each recipient slot holds the full Master Key encrypted by that slot's credential. Any single valid credential unlocks the archive and recovers the complete Master Key. Supported OR combinations are a legacy X25519 certificate together with one password, or a hybrid (X25519 + ML-KEM-768) certificate together with one password. Legacy certificates cannot be combined with hybrid certificates, and multiple legacy certificates are not supported in OR mode.
 
-**T-of-N Threshold (AND)**: MK is split via Shamir's Secret Sharing. Each recipient slot holds an encrypted share. T shares must be combined to reconstruct MK. Fewer than T shares cannot recover MK (mathematical guarantee).
+**T-of-N Threshold**: The Master Key is split into N shares via Shamir's Secret Sharing. The scheme can use multiple distinct passwords or multiple distinct hybrid certificates as share credentials. Each share is encrypted and stored in a separate recipient slot. Any T valid decrypted shares can reconstruct the Master Key. At the Shamir layer, fewer than T valid decrypted shares are information-theoretically insufficient to determine the Master Key. Threshold mode requires both `--threshold T` and `--shares N` with `2 <= T <= N <= 255`. A threshold scheme must be homogeneous: either all slots use distinct password credentials or all slots use distinct hybrid certificates. Legacy certificate threshold and mixed credential threshold are not supported. Threshold archives cannot be appended to existing archives.
 
 ### Security Audits
 
@@ -291,7 +331,7 @@ ERA Core has undergone multiple rounds of adversarial security auditing (279+ te
 | `adversarial_audit_v2` | 53 | Skeptical baseline verification (all fixed) |
 | `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
 
-Workspace verification recorded 2049 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + Kyber-768) certificate mode are supported via CLI.
+Workspace verification recorded 2049 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
 
 ## Development
 
@@ -345,24 +385,7 @@ cargo test -p era-cli                         # CLI integration tests
 
 ### Fuzzing
 
-Three fuzz targets for critical parsing code (separate workspace, requires nightly):
-
-```bash
-rustup toolchain install nightly
-cargo install cargo-fuzz
-
-cd fuzz
-# Run each target (60 seconds each)
-cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
-cargo +nightly fuzz run fuzz_block_header_parse -- -max_total_time=60
-cargo +nightly fuzz run fuzz_super_header_parse -- -max_total_time=60
-```
-
-| Target | Parses | Throughput | Crashes |
-|--------|--------|------------|---------|
-| `fuzz_footer_parse` | `Footer::from_bytes()` | ~444K exec/s | 0 (27M+ runs) |
-| `fuzz_block_header_parse` | `BlockHeader::from_bytes()`, `ShardHeader::from_bytes()` | ~1.3M exec/s | 0 (33M+ runs) |
-| `fuzz_super_header_parse` | `SuperHeader::from_bytes()` | ~160K exec/s | 0 (5M+ runs) |
+Fuzzing is planned for the critical parsing code paths (footer, block header, super header parsing) but the `fuzz/` workspace is not yet present in this repository. Fuzz targets, a nightly `cargo-fuzz` workspace, and scheduled CI runs will be added once the workspace lands.
 
 ### Benchmarks
 
@@ -417,7 +440,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - [x] Core archive creation/extraction pipeline
 - [x] 3-layer envelope encryption (MK/IK/VK)
 - [x] Multi-party access control (Any-of-N + T-of-N threshold)
-- [x] Post-quantum hybrid KEM (X25519 + Kyber-768)
+- [x] Post-quantum hybrid KEM (X25519 + ML-KEM-768)
 - [x] Erasure coding with strict shard validation
 - [x] Multi-volume support with matrix distribution
 - [x] Archive repair via Reed-Solomon recovery
@@ -459,7 +482,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 - Never log key material at any level
 - No `unwrap()` in runtime paths — use `Result<T, EraError>`
 - CPU-heavy work must use `spawn_blocking`
-- All AEAD operations must bind context (archive ID, epoch ID, block index) as AAD
+- Block AEAD operations must bind context (archive ID, epoch ID, block type, volume index, block ID) as AAD
 - All `TryFrom` deserialization must enforce bounded allocation limits
 - Zero-copy via `Bytes` and `rkyv` — avoid cloning large buffers
 - Async I/O via Tokio in L0–L2
@@ -473,7 +496,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 | Source Files | 137 `.rs` files |
 | Tests | March 2026 workspace verification: 2049 passed, 0 failed, 18 ignored |
 | Security Audit Tests | 279+ across multiple suites |
-| Fuzz Targets | 5 (combined 65M+ runs, 0 crashes) |
+| Fuzz Targets | Planned (fuzz workspace not yet in repo) |
 | Crates | 8 library + 1 binary |
 | CLI Commands | 8 (create, extract, list, info, verify, repair, repack, keygen) |
 | Edition | 2021, resolver v2 |
