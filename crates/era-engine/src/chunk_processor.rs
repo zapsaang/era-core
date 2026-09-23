@@ -176,7 +176,7 @@ impl ExtractionContext {
 
     /// Log warnings for any incomplete files
     pub fn log_incomplete_files(&self) {
-        for (_, state) in self.multi_chunk_files.iter() {
+        for state in self.multi_chunk_files.values() {
             if state.written_count > 0 {
                 debug!(
                     "Warning: Incomplete file: {} ({}/{})",

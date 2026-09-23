@@ -2,7 +2,7 @@ use bytes::Bytes;
 
 pub(crate) fn parse_stripe_lengths(prefix_bytes: &[u8], data_shards: usize) -> Vec<u32> {
     let mut lengths = Vec::with_capacity(data_shards);
-    for chunk in prefix_bytes.chunks_exact(4) {
+    for chunk in prefix_bytes.as_chunks::<4>().0 {
         lengths.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     lengths
