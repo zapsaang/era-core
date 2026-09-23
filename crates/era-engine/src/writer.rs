@@ -3289,10 +3289,11 @@ pub mod generic {
             OsRng.fill_bytes(&mut *master_key);
 
             // Password Recipient
-            let password = self.password.unwrap_or_else(|| {
-                tracing::warn!("GenericArchiveWriter: no password provided, using empty password");
-                String::new()
-            });
+            let password = self.password.ok_or_else(|| {
+                era_common::EraError::InvalidConfig(
+                    "GenericArchiveWriter requires a password; none provided".into(),
+                )
+            })?;
             let pwd_salt = era_crypto::Salt::generate();
             let kdf_params = KdfParams {
                 memory_cost: self.config.encryption.kdf_memory_cost,
@@ -3600,6 +3601,22 @@ pub mod generic {
             // Verify data is non-empty
             let data = backend.get_data(&paths[0]).unwrap().unwrap();
             assert!(!data.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_build_without_password_rejected() {
+            let backend = MemoryStorageBackend::new();
+
+            let result = GenericArchiveWriterBuilder::new(backend, "nopass.era")
+                .build()
+                .await;
+
+            match result {
+                Err(era_common::EraError::InvalidConfig(msg)) => {
+                    assert!(msg.contains("requires a password"));
+                }
+                other => panic!("expected InvalidConfig error, got {:?}", other.is_ok()),
+            }
         }
 
         #[tokio::test]
