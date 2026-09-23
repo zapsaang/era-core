@@ -927,8 +927,8 @@ impl<B: StorageBackend> VolumePool<B> {
 
         // Drain both writers and sequences upfront so internal state is consistent
         // even if the future is cancelled mid-finalization loop.
-        let old_sequences: Vec<u16> = self.sequences.drain(..).collect();
-        let writers: Vec<_> = self.writers.drain(..).collect();
+        let old_sequences: Vec<u16> = std::mem::take(&mut self.sequences);
+        let writers: Vec<_> = std::mem::take(&mut self.writers);
 
         for (i, writer) in writers.into_iter().enumerate() {
             let size = writer.current_size();
@@ -1032,8 +1032,8 @@ impl<B: StorageBackend> VolumePool<B> {
 
         // Drain both writers and sequences upfront so internal state is consistent
         // even if the future is cancelled mid-finalization loop.
-        let old_sequences: Vec<u16> = self.sequences.drain(..).collect();
-        let writers: Vec<_> = self.writers.drain(..).collect();
+        let old_sequences: Vec<u16> = std::mem::take(&mut self.sequences);
+        let writers: Vec<_> = std::mem::take(&mut self.writers);
 
         for (i, mut writer) in writers.into_iter().enumerate() {
             let size = writer.current_size();
