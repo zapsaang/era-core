@@ -22,17 +22,15 @@
 //! // Export the public certificate (safe to distribute)
 //! let cert = keypair.certificate();
 //!
-//! // Save the keypair (encrypted at rest)
-//! keypair.save_encrypted("my_key.era-key", "key_password")?;
+//! // Export the private key as a passphrase-protected PKCS#8 PEM
+//! let pem = era_crypto::export_private_key_as_encrypted_pem(&keypair, "key_password")?;
 //!
-//! // Load the keypair
-//! let keypair = EraKeyPair::load_encrypted("my_key.era-key", "key_password")?;
+//! // Load it back
+//! let keypair = era_crypto::load_private_key_from_pem_string(&pem, Some("key_password"))?;
 //! ```
 
 use crate::aead::{AeadCipher, AeadKey, Nonce};
-use crate::kdf::{derive_key, KdfParams};
 use crate::timestamp::{OptionalTimestamp, Timestamp};
-use crate::Salt;
 use era_common::proto::KeyEncapsulation as ProtoKeyEncapsulation;
 use era_common::{EraError, Result};
 use serde::{Deserialize, Serialize};
@@ -49,9 +47,6 @@ pub const KEY_ID_LEN: usize = 16;
 /// X25519 key length
 pub const KEY_LEN: usize = 32;
 
-/// Key file magic bytes
-const KEY_FILE_MAGIC: &[u8; 4] = b"ERAK";
-
 /// Certificate file magic bytes
 const CERT_FILE_MAGIC: &[u8; 4] = b"ERAC";
 
@@ -61,9 +56,6 @@ const KEY_FILE_VERSION: u8 = 1;
 /// FROZEN: domain separator for the certificate MK encapsulation construction.
 /// Never change; a changed construction gets a new label.
 const CERT_ENCAPS_AAD: &[u8] = b"ERA_CERT_ENCAPS_v8.1";
-
-/// Domain separator for key file encryption AAD
-const KEY_FILE_AAD: &[u8] = b"ERA_KEY_FILE_v8.1";
 
 /// ERA keypair
 ///
@@ -343,120 +335,6 @@ impl EraKeyPair {
         Ok(AeadKey(okm))
     }
 
-    /// Save the keypair to a file (encrypted at rest).
-    ///
-    /// Uses Argon2 to derive an encryption key to protect the private key.
-    /// The Argon2 cost is acceptable because the key file is loaded rarely.
-    pub fn save_encrypted<P: AsRef<Path>>(&self, path: P, password: &str) -> Result<()> {
-        // Derive encryption key via Argon2 (lighter params since the private key is high entropy)
-        let salt = Salt::generate();
-        let params = KdfParams::standard();
-        let encryption_key = derive_key(password.as_bytes(), &salt, &params)?;
-
-        // Encrypt private key
-        let aead = AeadCipher::new();
-        let nonce = Nonce::generate();
-        let secret_bytes = self.secret_key.as_bytes();
-        let encrypted_secret = aead.encrypt(
-            &AeadKey(*encryption_key.as_bytes()),
-            &nonce,
-            KEY_FILE_AAD,
-            secret_bytes,
-        )?;
-
-        // Build file payload
-        // Format: MAGIC(4) + VERSION(1) + SALT(16) + NONCE(24) + KEY_ID(16) + CREATED_AT(8) + ENCRYPTED_SECRET(32+16)
-        let mut file_data = Vec::with_capacity(128);
-        file_data.extend_from_slice(KEY_FILE_MAGIC);
-        file_data.push(KEY_FILE_VERSION);
-        file_data.extend_from_slice(salt.as_bytes());
-        file_data.extend_from_slice(nonce.as_bytes());
-        file_data.extend_from_slice(&self.key_id);
-        file_data.extend_from_slice(&self.created_at.to_le_bytes());
-        file_data.extend_from_slice(&encrypted_secret);
-
-        // Write file
-        let mut file = fs::File::create(path)?;
-        file.write_all(&file_data)?;
-
-        Ok(())
-    }
-
-    /// Load a keypair from an encrypted file
-    pub fn load_encrypted<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
-        let mut file = fs::File::open(path)?;
-        let mut file_data = Vec::new();
-        file.read_to_end(&mut file_data)?;
-
-        // Validate magic and version
-        // Format: MAGIC(4) + VERSION(1) + SALT(16) + NONCE(24) + KEY_ID(16) + CREATED_AT(8) + ENCRYPTED_SECRET
-        // Minimum: 4+1+16+24+16+8+48 = 117 bytes
-        if file_data.len() < 117 {
-            return Err(EraError::InvalidFormat("Key file too short".into()));
-        }
-
-        if &file_data[0..4] != KEY_FILE_MAGIC {
-            return Err(EraError::InvalidFormat("Invalid key file magic".into()));
-        }
-
-        if file_data[4] != KEY_FILE_VERSION {
-            return Err(EraError::InvalidFormat(
-                "Unsupported key file version".into(),
-            ));
-        }
-
-        // Parse file payload
-        let salt_bytes: [u8; 16] = file_data[5..21]
-            .try_into()
-            .map_err(|_| EraError::InvalidFormat("Invalid salt length".into()))?;
-        let salt = Salt::from_bytes(salt_bytes);
-        let nonce = Nonce::from_bytes(&file_data[21..45])?;
-        let mut key_id = [0u8; KEY_ID_LEN];
-        key_id.copy_from_slice(&file_data[45..61]);
-        let created_at =
-            u64::from_le_bytes(file_data[61..69].try_into().map_err(|_| {
-                EraError::InvalidFormat("Invalid created_at timestamp length".into())
-            })?);
-        let encrypted_secret = &file_data[69..];
-
-        // Derive decryption key via Argon2
-        let params = KdfParams::standard();
-        let encryption_key = derive_key(password.as_bytes(), &salt, &params)?;
-
-        // Decrypt private key
-        let aead = AeadCipher::new();
-        let secret_bytes = aead.decrypt(
-            &AeadKey(*encryption_key.as_bytes()),
-            &nonce,
-            KEY_FILE_AAD,
-            encrypted_secret,
-        )?;
-
-        if secret_bytes.len() != KEY_LEN {
-            return Err(EraError::InvalidKey("Invalid secret key length".into()));
-        }
-
-        let mut secret_array = [0u8; KEY_LEN];
-        secret_array.copy_from_slice(&secret_bytes);
-        let secret_key = StaticSecret::from(secret_array);
-        secret_array.zeroize();
-
-        let public_key = PublicKey::from(&secret_key);
-
-        // Validate key_id match
-        let computed_key_id = Self::compute_key_id(&public_key);
-        if computed_key_id != key_id {
-            return Err(EraError::InvalidKey("Key ID mismatch".into()));
-        }
-
-        Ok(Self {
-            secret_key,
-            public_key,
-            key_id,
-            created_at,
-        })
-    }
-
     /// Get creation time as OffsetDateTime.
     ///
     /// Converts the stored Unix timestamp to OffsetDateTime.
@@ -718,34 +596,6 @@ mod tests {
         let decapsulated = recipient.decapsulate(&encapsulation).unwrap();
 
         assert_eq!(decapsulated.master_key.as_slice(), &master_key);
-    }
-
-    #[test]
-    fn test_keypair_save_load() {
-        let temp_dir = TempDir::new().unwrap();
-        let key_path = temp_dir.path().join("test.era-key");
-
-        let original = EraKeyPair::generate().unwrap();
-        original.save_encrypted(&key_path, "test_password").unwrap();
-
-        let loaded = EraKeyPair::load_encrypted(&key_path, "test_password").unwrap();
-
-        assert_eq!(loaded.key_id(), original.key_id());
-        assert_eq!(loaded.public_key_bytes(), original.public_key_bytes());
-    }
-
-    #[test]
-    fn test_keypair_wrong_password() {
-        let temp_dir = TempDir::new().unwrap();
-        let key_path = temp_dir.path().join("test.era-key");
-
-        let original = EraKeyPair::generate().unwrap();
-        original
-            .save_encrypted(&key_path, "correct_password")
-            .unwrap();
-
-        let result = EraKeyPair::load_encrypted(&key_path, "wrong_password");
-        assert!(result.is_err());
     }
 
     #[test]

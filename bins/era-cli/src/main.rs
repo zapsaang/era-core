@@ -187,10 +187,16 @@ enum Commands {
         password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
-        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Passphrase-protected keys are supported via --key-passphrase or ERA_KEY_PASSPHRASE.
         /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
         key: Vec<PathBuf>,
+
+        /// Passphrase for passphrase-protected private key files.
+        /// A single passphrase applies to all --key files; priority:
+        /// --key-passphrase > ERA_KEY_PASSPHRASE > first --password > interactive prompt (TTY)
+        #[arg(long)]
+        key_passphrase: Option<String>,
 
         /// Overwrite existing files
         #[arg(short = 'f', long)]
@@ -214,10 +220,16 @@ enum Commands {
         password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
-        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Passphrase-protected keys are supported via --key-passphrase or ERA_KEY_PASSPHRASE.
         /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
         key: Vec<PathBuf>,
+
+        /// Passphrase for passphrase-protected private key files.
+        /// A single passphrase applies to all --key files; priority:
+        /// --key-passphrase > ERA_KEY_PASSPHRASE > first --password > interactive prompt (TTY)
+        #[arg(long)]
+        key_passphrase: Option<String>,
 
         /// Show sizes and chunk IDs for each file
         #[arg(short, long)]
@@ -243,10 +255,16 @@ enum Commands {
         password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
-        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Passphrase-protected keys are supported via --key-passphrase or ERA_KEY_PASSPHRASE.
         /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
         key: Vec<PathBuf>,
+
+        /// Passphrase for passphrase-protected private key files.
+        /// A single passphrase applies to all --key files; priority:
+        /// --key-passphrase > ERA_KEY_PASSPHRASE > first --password > interactive prompt (TTY)
+        #[arg(long)]
+        key_passphrase: Option<String>,
     },
 
     /// Verify integrity of an ERA archive
@@ -270,10 +288,16 @@ enum Commands {
         password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
-        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Passphrase-protected keys are supported via --key-passphrase or ERA_KEY_PASSPHRASE.
         /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
         key: Vec<PathBuf>,
+
+        /// Passphrase for passphrase-protected private key files.
+        /// A single passphrase applies to all --key files; priority:
+        /// --key-passphrase > ERA_KEY_PASSPHRASE > first --password > interactive prompt (TTY)
+        #[arg(long)]
+        key_passphrase: Option<String>,
 
         /// Show detailed error information
         #[arg(long)]
@@ -303,10 +327,16 @@ enum Commands {
         password: Vec<String>,
 
         /// Private key file for certificate mode (PEM format)
-        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Passphrase-protected keys are supported via --key-passphrase or ERA_KEY_PASSPHRASE.
         /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
         key: Vec<PathBuf>,
+
+        /// Passphrase for passphrase-protected private key files.
+        /// A single passphrase applies to all --key files; priority:
+        /// --key-passphrase > ERA_KEY_PASSPHRASE > first --password > interactive prompt (TTY)
+        #[arg(long)]
+        key_passphrase: Option<String>,
 
         /// Apply repairs or discard an interrupted-create checkpoint
         #[arg(short = 'f', long)]
@@ -345,10 +375,16 @@ enum Commands {
         password: Vec<String>,
 
         /// Private key file for source archive certificate mode (PEM format)
-        /// Unencrypted PEM private keys only — passphrase-protected keys are not yet supported.
+        /// Passphrase-protected keys are supported via --key-passphrase or ERA_KEY_PASSPHRASE.
         /// Repeatable for threshold archives; auto-detects legacy vs hybrid
         #[arg(short = 'k', long)]
         key: Vec<PathBuf>,
+
+        /// Passphrase for passphrase-protected private key files.
+        /// A single passphrase applies to all --key files; priority:
+        /// --key-passphrase > ERA_KEY_PASSPHRASE > first --password > interactive prompt (TTY)
+        #[arg(long)]
+        key_passphrase: Option<String>,
 
         /// Encryption password for destination archive
         /// Repeatable for threshold password destinations
@@ -414,9 +450,11 @@ enum Commands {
     },
 
     /// Generate an X25519 or hybrid X25519+Kyber-768 keypair
-    #[command(long_about = "Generate an X25519 or hybrid X25519+Kyber-768 keypair.")]
     #[command(
-        after_help = "\x1b[1mExamples:\x1b[0m\n  era keygen\n  era keygen -t x25519\n  era keygen -f ./my_key"
+        long_about = "Generate an X25519 or hybrid X25519+Kyber-768 keypair. The private key is passphrase-protected by default: prompted interactively (TTY) or read from ERA_KEY_PASSPHRASE. Use --no-passphrase to explicitly allow a plaintext key."
+    )]
+    #[command(
+        after_help = "\x1b[1mExamples:\x1b[0m\n  era keygen\n  era keygen -t x25519\n  era keygen -f ./my_key\n  ERA_KEY_PASSPHRASE=... era keygen -f ./my_key\n  era keygen --no-passphrase -f ./my_key"
     )]
     Keygen {
         /// Key type: x25519 or hybrid (post-quantum)
@@ -430,6 +468,10 @@ enum Commands {
         /// Overwrite existing files without prompting
         #[arg(long)]
         force: bool,
+
+        /// Write the private key unencrypted (plaintext PEM). Prints a security warning.
+        #[arg(long)]
+        no_passphrase: bool,
     },
 }
 
@@ -515,42 +557,77 @@ async fn main() -> anyhow::Result<()> {
             output,
             password,
             key,
+            key_passphrase,
             force,
-        } => commands::extract(&input, &output, &password, &key, force).await,
+        } => {
+            commands::extract(
+                &input,
+                &output,
+                &password,
+                &key,
+                key_passphrase.as_deref(),
+                force,
+            )
+            .await
+        }
 
         Commands::List {
             archive,
             password,
             key,
+            key_passphrase,
             long,
-        } => commands::list(&archive, &password, &key, long).await,
+        } => commands::list(&archive, &password, &key, key_passphrase.as_deref(), long).await,
 
         Commands::Info {
             archive,
             password,
             key,
-        } => commands::info(&archive, &password, &key).await,
+            key_passphrase,
+        } => commands::info(&archive, &password, &key, key_passphrase.as_deref()).await,
 
         Commands::Verify {
             archive,
             password,
             key,
+            key_passphrase,
             verbose,
-        } => commands::verify(&archive, &password, &key, verbose).await,
+        } => {
+            commands::verify(
+                &archive,
+                &password,
+                &key,
+                key_passphrase.as_deref(),
+                verbose,
+            )
+            .await
+        }
 
         Commands::Repair {
             archive,
             password,
             key,
+            key_passphrase,
             force,
             verbose,
-        } => commands::repair(&archive, &password, &key, force, verbose).await,
+        } => {
+            commands::repair(
+                &archive,
+                &password,
+                &key,
+                key_passphrase.as_deref(),
+                force,
+                verbose,
+            )
+            .await
+        }
 
         Commands::Repack {
             input,
             output,
             password,
             key,
+            key_passphrase,
             dest_password,
             certificate,
             hybrid_certificate,
@@ -572,6 +649,7 @@ async fn main() -> anyhow::Result<()> {
                 output: &output,
                 passwords: &password,
                 key_paths: &key,
+                key_passphrase: key_passphrase.as_deref(),
                 dest_password: &dest_password,
                 certificate_path: certificate.as_deref(),
                 hybrid_certificate_paths: &hybrid_certificate,
@@ -595,6 +673,7 @@ async fn main() -> anyhow::Result<()> {
             key_type,
             output,
             force,
-        } => commands::keygen(key_type.as_str(), output.as_deref(), force).await,
+            no_passphrase,
+        } => commands::keygen(key_type.as_str(), output.as_deref(), force, no_passphrase).await,
     }
 }

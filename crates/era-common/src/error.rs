@@ -37,6 +37,9 @@ pub enum EraError {
     #[error("Invalid key: {0}")]
     InvalidKey(String),
 
+    #[error("Passphrase required: {0}")]
+    PassphraseRequired(String),
+
     // Compression Errors
     #[error("Compression error: {0}")]
     Compression(String),

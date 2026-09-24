@@ -8,7 +8,7 @@ An encrypted archival storage engine written in Rust, featuring 3-layer envelope
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: September 2026 — workspace verification recorded 2724 passed, 0 failed, 18 ignored.
+**Last Verified**: September 2026 — workspace verification recorded 2737 passed, 0 failed, 18 ignored.
 
 ## Features
 
@@ -81,7 +81,10 @@ era repair archive.era --password "your-secret"
 era repack --input archive.era --output repacked.era --password "your-secret" --compact
 
 # Generate a keypair for certificate-based encryption
-# Default output is a hybrid (X25519 + ML-KEM-768) keypair
+# Default output is a hybrid (X25519 + ML-KEM-768) keypair.
+# The private key is passphrase-protected by default: prompted interactively
+# (TTY, no echo), or read from the ERA_KEY_PASSPHRASE environment variable
+# for scripted use.
 era keygen
 
 # Generate a legacy X25519 keypair
@@ -89,6 +92,10 @@ era keygen -t x25519 -f ./my_x25519_key
 
 # Generate a post-quantum hybrid keypair (default)
 era keygen -t hybrid -f ./my_hybrid_key
+
+# Opt out of passphrase protection explicitly (prints a security warning;
+# without this flag, non-interactive runs without ERA_KEY_PASSPHRASE fail)
+era keygen --no-passphrase -f ./my_plaintext_key
 ```
 
 ### Advanced Usage
@@ -109,7 +116,11 @@ era create --output archive.era --certificate public.pem /path/to/files
 # Extract with the matching private key
 era extract --input archive.era --output /restored --key private.pem
 
-# Note: passphrase-protected private keys are not yet supported. Use unencrypted PEM keys.
+# Passphrase-protected private keys are supported. Unlock with (highest priority first):
+#   --key-passphrase <pass> · ERA_KEY_PASSPHRASE env · first --password · interactive prompt (TTY)
+era extract --input archive.era --output /restored --key private.pem --key-passphrase "key-pass"
+# Known limitation: a single passphrase applies to all --key files;
+# multiple keys with different passphrases are not supported.
 
 # Post-quantum hybrid certificate encryption (X25519 + ML-KEM-768)
 era create --output archive.era --hybrid-certificate pub.pem /path/to/files
@@ -274,7 +285,7 @@ Layer 3: Volume Key (VK)
 
 ### Certificates and External Trust
 
-Hybrid keys use ERA-specific `ERA HYBRID PUBLIC KEY` / `ERA HYBRID PRIVATE KEY` PEM blocks. Legacy X25519 keygen emits an unencrypted PKCS#8 private PEM and an SPKI public PEM; the legacy public loader also accepts X.509 and extracts the X25519 public key. ERA does not validate PKIX chains, CA trust, validity periods, or expiration; trust is established out of band.
+Hybrid keys use ERA-specific `ERA HYBRID PUBLIC KEY` / `ERA HYBRID PRIVATE KEY` PEM blocks; passphrase-protected hybrid keys use `ERA ENCRYPTED HYBRID PRIVATE KEY` (Argon2id + XChaCha20-Poly1305, KDF parameters embedded). Legacy X25519 keygen emits a PKCS#8 private PEM (RFC 8018 PBES2-encrypted with scrypt + AES-256-CBC when a passphrase is given, unencrypted otherwise) and an SPKI public PEM; the legacy public loader also accepts X.509 and extracts the X25519 public key. ERA does not validate PKIX chains, CA trust, validity periods, or expiration; trust is established out of band.
 
 Password recipient slots derive their wrapping key with Argon2id and AEAD-wrap the Master Key or a Shamir share using XChaCha20-Poly1305 with a fresh random nonce. Legacy X25519 certificate recipient slots perform ephemeral ECDH, derive a wrapping key with HKDF-SHA256, and AEAD-wrap the full Master Key under XChaCha20-Poly1305 using a fixed zero nonce. Hybrid certificate recipient slots perform X25519 ECDH and ML-KEM-768 encapsulation, combine both shared secrets through HKDF-SHA256, and AEAD-wrap the full Master Key or a Shamir share under XChaCha20-Poly1305 using a fixed zero nonce. IK→VK wrapping inside the archive uses XChaCha20-Poly1305 with a fresh random nonce.
 
@@ -331,7 +342,7 @@ ERA Core has undergone multiple rounds of adversarial security auditing (279+ te
 | `adversarial_audit_v2` | 53 | Skeptical baseline verification (all fixed) |
 | `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
 
-Workspace verification recorded 2724 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
+Workspace verification recorded 2737 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
 
 ## Development
 
@@ -360,7 +371,7 @@ cargo test --workspace
 
 ### Testing
 
-September 2026 workspace verification recorded 2724 passed, 0 failed, 18 ignored across 10 crates, covering:
+September 2026 workspace verification recorded 2737 passed, 0 failed, 18 ignored across 10 crates, covering:
 
 - **279+ adversarial audit tests** across multiple security audit suites (historical and V5)
 - Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
@@ -494,7 +505,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 | Language | Rust 100% |
 | Lines of Code | ~56,900 (including tests) |
 | Source Files | 234 `.rs` files |
-| Tests | September 2026 workspace verification: 2724 passed, 0 failed, 18 ignored |
+| Tests | September 2026 workspace verification: 2737 passed, 0 failed, 18 ignored |
 | Security Audit Tests | 279+ across multiple suites |
 | Fuzz Targets | Planned (fuzz workspace not yet in repo) |
 | Crates | 9 library + 1 binary |

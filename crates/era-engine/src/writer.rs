@@ -214,7 +214,7 @@ impl ArchiveWriterBuilder {
     /// # Example
     ///
     /// ```ignore
-    /// let keypair = EraKeyPair::load_encrypted("~/.era/key.era-key", "password")?;
+    /// let keypair = era_crypto::load_private_key_from_pem("~/.era/key.pem", Some("password"))?;
     /// let cert = keypair.certificate();
     ///
     /// let writer = ArchiveWriterBuilder::new("archive.era")

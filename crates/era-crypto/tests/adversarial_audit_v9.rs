@@ -496,3 +496,152 @@ fn hybrid_certificate_pem_roundtrip() {
     let decrypted = loaded.decapsulate(&params, &encrypted).unwrap();
     assert_eq!(decrypted, master_key);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Passphrase-protected private keys (encrypted PKCS#8 + ERA hybrid container)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn encrypted_hybrid_private_key_roundtrip() {
+    let keypair = HybridKeyPair::generate();
+    let cert = keypair.certificate();
+
+    let pem = era_crypto::pem_support::export_hybrid_private_key_as_encrypted_pem(
+        &keypair,
+        "correct horse battery staple",
+    )
+    .unwrap();
+    assert!(pem.contains("BEGIN ERA ENCRYPTED HYBRID PRIVATE KEY"));
+    assert!(pem.contains("BEGIN ERA HYBRID PUBLIC KEY"));
+
+    // Explicit loader
+    let loaded = era_crypto::pem_support::load_hybrid_private_key_from_pem_string_encrypted(
+        &pem,
+        "correct horse battery staple",
+    )
+    .unwrap();
+    let master_key = [0x77u8; 32];
+    let (params, encrypted) = HybridKeyPair::encapsulate_for(&cert, &master_key).unwrap();
+    assert_eq!(loaded.decapsulate(&params, &encrypted).unwrap(), master_key);
+
+    // Auto-detect loader (the CLI path)
+    let any = era_crypto::pem_support::load_any_private_key_from_pem_string(
+        &pem,
+        Some("correct horse battery staple"),
+    )
+    .unwrap();
+    match any {
+        EitherKeyPair::Hybrid(loaded) => {
+            assert_eq!(loaded.decapsulate(&params, &encrypted).unwrap(), master_key);
+        }
+        _ => panic!("encrypted hybrid key must auto-detect as Hybrid"),
+    }
+}
+
+#[test]
+fn encrypted_hybrid_private_key_wrong_passphrase_fails() {
+    let keypair = HybridKeyPair::generate();
+    let pem = era_crypto::pem_support::export_hybrid_private_key_as_encrypted_pem(
+        &keypair,
+        "right passphrase",
+    )
+    .unwrap();
+
+    let err = era_crypto::pem_support::load_any_private_key_from_pem_string(
+        &pem,
+        Some("wrong passphrase"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, era_common::EraError::Decryption(_)),
+        "wrong passphrase must fail with Decryption, got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn encrypted_pkcs8_roundtrip_and_wrong_passphrase() {
+    let keypair = EraKeyPair::generate().unwrap();
+
+    let pem =
+        era_crypto::pem_support::export_private_key_as_encrypted_pem(&keypair, "s3cret").unwrap();
+    assert!(pem.contains("BEGIN ENCRYPTED PRIVATE KEY"));
+
+    // The DER payload must parse as a standard EncryptedPrivateKeyInfo.
+    let blocks = pem::parse_many(&pem).unwrap();
+    let encrypted_block = blocks
+        .iter()
+        .find(|b| b.tag() == "ENCRYPTED PRIVATE KEY")
+        .expect("encrypted block present");
+    use der::Decode;
+    pkcs8::EncryptedPrivateKeyInfo::from_der(encrypted_block.contents())
+        .expect("DER must parse as EncryptedPrivateKeyInfo");
+
+    let loaded =
+        era_crypto::pem_support::load_private_key_from_pem_string(&pem, Some("s3cret")).unwrap();
+    assert_eq!(loaded.key_id(), keypair.key_id());
+
+    let err =
+        era_crypto::pem_support::load_private_key_from_pem_string(&pem, Some("wr0ng")).unwrap_err();
+    assert!(
+        matches!(err, era_common::EraError::Decryption(_)),
+        "wrong passphrase must fail with Decryption, got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn encrypted_key_without_passphrase_errors() {
+    let hybrid = HybridKeyPair::generate();
+    let hybrid_pem =
+        era_crypto::pem_support::export_hybrid_private_key_as_encrypted_pem(&hybrid, "pw").unwrap();
+
+    let err = era_crypto::pem_support::load_any_private_key_from_pem_string(&hybrid_pem, None)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("passphrase required"),
+        "encrypted hybrid key without passphrase must say so, got: {}",
+        err
+    );
+
+    let legacy = EraKeyPair::generate().unwrap();
+    let legacy_pem =
+        era_crypto::pem_support::export_private_key_as_encrypted_pem(&legacy, "pw").unwrap();
+
+    let err =
+        era_crypto::pem_support::load_private_key_from_pem_string(&legacy_pem, None).unwrap_err();
+    assert!(
+        err.to_string().contains("passphrase required"),
+        "encrypted PKCS#8 without passphrase must say so, got: {}",
+        err
+    );
+
+    let err = era_crypto::pem_support::load_any_private_key_from_pem_string(&legacy_pem, None)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("passphrase required"),
+        "auto-detect encrypted PKCS#8 without passphrase must say so, got: {}",
+        err
+    );
+}
+
+#[test]
+fn encrypted_hybrid_pem_contains_no_secret_material() {
+    let keypair = HybridKeyPair::generate();
+    let secret = keypair.secret_key_bytes();
+
+    let pem = era_crypto::pem_support::export_hybrid_private_key_as_encrypted_pem(&keypair, "pw")
+        .unwrap();
+
+    let blocks = pem::parse_many(&pem).unwrap();
+    for block in &blocks {
+        assert!(
+            !block
+                .contents()
+                .windows(secret.len())
+                .any(|w| w == &secret[..]),
+            "PEM block '{}' must not contain raw secret key material",
+            block.tag()
+        );
+    }
+}

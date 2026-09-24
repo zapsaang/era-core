@@ -1315,12 +1315,13 @@ mod auth_mode_tests {
     }
 
     #[test]
-    fn test_extract_rejects_encrypted_private_key() {
+    fn test_extract_loads_openssl_encrypted_private_key() {
         let temp = TempDir::new().unwrap();
         let input = create_test_file(temp.path(), "enc_key.txt", b"encrypted key test");
         let archive = temp.path().join("enc_key.era");
         let raw_key = temp.path().join("raw_private.pem");
         let enc_key = temp.path().join("encrypted_private.pem");
+        let pub_key = temp.path().join("public.pem");
 
         let output = std::process::Command::new("openssl")
             .args([
@@ -1338,8 +1339,9 @@ mod auth_mode_tests {
             .args([
                 "pkcs8",
                 "-topk8",
+                "-scrypt",
                 "-v2",
-                "des3",
+                "aes-256-cbc",
                 "-in",
                 raw_key.to_str().unwrap(),
                 "-out",
@@ -1351,18 +1353,33 @@ mod auth_mode_tests {
             .expect("openssl should be available");
         assert!(output.status.success(), "openssl pkcs8 encryption failed");
 
+        let output = std::process::Command::new("openssl")
+            .args([
+                "pkey",
+                "-in",
+                raw_key.to_str().unwrap(),
+                "-pubout",
+                "-out",
+                pub_key.to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl should be available");
+        assert!(output.status.success(), "openssl pkey failed");
+
         era_cmd()
             .args([
                 "create",
                 input.to_str().unwrap(),
                 "--output",
                 archive.to_str().unwrap(),
-                "--password",
-                "secret",
+                "--certificate",
+                pub_key.to_str().unwrap(),
             ])
             .assert()
             .success();
 
+        // openssl-encrypted PKCS#8 must load: the first --password doubles as
+        // the key passphrase per the documented priority chain.
         era_cmd()
             .args([
                 "extract",
@@ -1376,10 +1393,27 @@ mod auth_mode_tests {
                 "keypass",
             ])
             .assert()
-            .failure()
-            .stderr(predicates::str::contains(
-                "No supported private key format found",
-            ));
+            .success();
+
+        assert_eq!(
+            fs::read(temp.path().join("out/enc_key.txt")).unwrap(),
+            b"encrypted key test"
+        );
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                temp.path().join("out_wrong").to_str().unwrap(),
+                "--key",
+                enc_key.to_str().unwrap(),
+                "--password",
+                "wrongpass",
+            ])
+            .assert()
+            .failure();
     }
 
     #[test]
@@ -5967,7 +6001,7 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .arg("keygen")
+            .args(["keygen", "--no-passphrase"])
             .write_stdin("\n")
             .assert()
             .success();
@@ -5991,7 +6025,14 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-t", "x25519", "-f", priv_path.to_str().unwrap()])
+            .args([
+                "keygen",
+                "-t",
+                "x25519",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--no-passphrase",
+            ])
             .assert()
             .success();
 
@@ -6015,7 +6056,12 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .args([
+                "keygen",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--no-passphrase",
+            ])
             .assert()
             .success();
 
@@ -6034,7 +6080,12 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .args([
+                "keygen",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--no-passphrase",
+            ])
             .write_stdin("n\n")
             .assert()
             .failure()
@@ -6055,7 +6106,13 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-f", priv_path.to_str().unwrap(), "--force"])
+            .args([
+                "keygen",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--force",
+                "--no-passphrase",
+            ])
             .assert()
             .success();
 
@@ -6074,7 +6131,12 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .args([
+                "keygen",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--no-passphrase",
+            ])
             .assert()
             .success();
 
@@ -6120,7 +6182,14 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-t", "x25519", "-f", priv_path.to_str().unwrap()])
+            .args([
+                "keygen",
+                "-t",
+                "x25519",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--no-passphrase",
+            ])
             .assert()
             .success();
 
@@ -6165,7 +6234,12 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .args([
+                "keygen",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--no-passphrase",
+            ])
             .assert()
             .success();
 
@@ -6202,7 +6276,13 @@ mod keygen_tests {
 
         era_cmd()
             .current_dir(temp.path())
-            .args(["keygen", "-f", priv_path.to_str().unwrap(), "--force"])
+            .args([
+                "keygen",
+                "-f",
+                priv_path.to_str().unwrap(),
+                "--force",
+                "--no-passphrase",
+            ])
             .assert()
             .success();
 
@@ -6213,5 +6293,87 @@ mod keygen_tests {
             "overwritten private key should be reset to owner-only, got {:o}",
             priv_mode
         );
+    }
+
+    #[test]
+    fn test_keygen_passphrase_create_extract_e2e() {
+        let temp = TempDir::new().unwrap();
+        let input = create_test_file(temp.path(), "keygen_pass.txt", b"passphrase roundtrip");
+        let archive = temp.path().join("keygen_pass.era");
+        let out_dir = temp.path().join("out");
+        let priv_path = temp.path().join("hybrid_key");
+        let pub_path = temp.path().join("hybrid_key.pub");
+
+        era_cmd()
+            .current_dir(temp.path())
+            .args(["keygen", "-f", priv_path.to_str().unwrap()])
+            .env("ERA_KEY_PASSPHRASE", "key-passphrase-1")
+            .assert()
+            .success();
+
+        let priv_content = fs::read_to_string(&priv_path).unwrap();
+        assert!(priv_content.contains("BEGIN ERA ENCRYPTED HYBRID PRIVATE KEY"));
+        assert!(priv_content.contains("BEGIN ERA HYBRID PUBLIC KEY"));
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--hybrid-certificate",
+                pub_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--key",
+                priv_path.to_str().unwrap(),
+                "--key-passphrase",
+                "key-passphrase-1",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(
+            fs::read(out_dir.join("keygen_pass.txt")).unwrap(),
+            b"passphrase roundtrip"
+        );
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                temp.path().join("out_wrong").to_str().unwrap(),
+                "--key",
+                priv_path.to_str().unwrap(),
+                "--key-passphrase",
+                "wrong-passphrase",
+            ])
+            .assert()
+            .failure();
+
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                temp.path().join("out_none").to_str().unwrap(),
+                "--key",
+                priv_path.to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("passphrase required"));
     }
 }

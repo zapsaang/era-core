@@ -55,10 +55,13 @@ pub use key_session::{
     IntermediateKey, KeySession, KeySessionBuilder, VolumeKey, WrappedVolumeKey,
 };
 pub use pem_support::{
-    export_hybrid_private_key_as_pem, export_hybrid_public_key_as_pem, export_public_key_as_pem,
-    load_any_private_key_from_pem, load_hybrid_private_key_from_pem,
-    load_hybrid_public_key_from_pem, load_private_key_from_pem, load_private_key_from_pem_string,
-    load_public_key_from_pem, load_public_key_from_pem_string, EitherKeyPair, PemFormat,
+    export_hybrid_private_key_as_encrypted_pem, export_hybrid_private_key_as_pem,
+    export_hybrid_public_key_as_pem, export_private_key_as_encrypted_pem, export_public_key_as_pem,
+    load_any_private_key_from_pem, load_any_private_key_from_pem_string,
+    load_hybrid_private_key_from_pem, load_hybrid_private_key_from_pem_string,
+    load_hybrid_private_key_from_pem_string_encrypted, load_hybrid_public_key_from_pem,
+    load_private_key_from_pem, load_private_key_from_pem_string, load_public_key_from_pem,
+    load_public_key_from_pem_string, EitherKeyPair, PemFormat,
 };
 pub use secure_memory::{
     check_security_features, disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64,

@@ -461,7 +461,7 @@ impl ArchiveReader {
     /// # Example
     ///
     /// ```ignore
-    /// let keypair = EraKeyPair::load_encrypted("~/.era/key.era-key", "keypass")?;
+    /// let keypair = era_crypto::load_private_key_from_pem("~/.era/key.pem", Some("keypass"))?;
     /// let reader = ArchiveReader::open_with_keypair(&archive_path, &keypair)?;
     /// ```
     ///

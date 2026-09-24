@@ -127,16 +127,65 @@ fn prompt_for_confirm(prompt: &str) -> Result<bool> {
     }
 }
 
+/// Environment variable consulted for private-key passphrases (keygen and `--key` loading).
+pub const KEY_PASSPHRASE_ENV: &str = "ERA_KEY_PASSPHRASE";
+
+/// Resolve the effective key passphrase: explicit `--key-passphrase` first,
+/// then `ERA_KEY_PASSPHRASE`, then the first `--password` (legacy behavior).
+fn resolve_key_passphrase(
+    explicit: Option<&str>,
+    first_password: Option<&str>,
+) -> Option<zeroize::Zeroizing<String>> {
+    explicit
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var(KEY_PASSPHRASE_ENV).ok())
+        .or_else(|| first_password.map(|s| s.to_string()))
+        .map(zeroize::Zeroizing::new)
+}
+
 /// Load private keys from PEM files, auto-detecting legacy vs hybrid.
+///
+/// `key_passphrase` is the already-resolved passphrase (see
+/// `resolve_key_passphrase`). When a key turns out to be passphrase-protected
+/// and no passphrase was resolved, a TTY gets one interactive (no-echo)
+/// prompt and a retry; non-TTY fails with the loader's explicit error.
 fn load_private_keys(
     key_paths: &[PathBuf],
-    password: Option<&str>,
+    key_passphrase: Option<&str>,
 ) -> Result<Vec<era_crypto::EitherKeyPair>> {
     let mut keys = Vec::new();
     for path in key_paths {
-        let kp = era_crypto::load_any_private_key_from_pem(path, password)
-            .map_err(|e| anyhow::anyhow!("Failed to load private key {}: {}", path.display(), e))?;
-        keys.push(kp);
+        match era_crypto::load_any_private_key_from_pem(path, key_passphrase) {
+            Ok(kp) => keys.push(kp),
+            Err(e) => {
+                use std::io::IsTerminal;
+                let needs_passphrase = matches!(e, era_common::EraError::PassphraseRequired(_));
+                let is_tty = std::io::stdin().is_terminal();
+                if needs_passphrase && key_passphrase.is_none() && is_tty {
+                    let prompted = Password::with_theme(&ColorfulTheme::default())
+                        .with_prompt(format!("Enter passphrase for key {}", path.display()))
+                        .interact()
+                        .context("Failed to read key passphrase")?;
+                    let prompted = zeroize::Zeroizing::new(prompted);
+                    let kp =
+                        era_crypto::load_any_private_key_from_pem(path, Some(prompted.as_str()))
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to load private key {}: {}",
+                                    path.display(),
+                                    e
+                                )
+                            })?;
+                    keys.push(kp);
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Failed to load private key {}: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        }
     }
     Ok(keys)
 }
@@ -162,11 +211,14 @@ fn load_hybrid_certificates(paths: &[PathBuf]) -> Result<Vec<era_crypto::HybridC
 fn build_auth_providers(
     passwords: &[String],
     key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
 ) -> Result<Vec<Box<dyn era_engine::auth::AuthProvider>>> {
     let mut providers: Vec<Box<dyn era_engine::auth::AuthProvider>> = Vec::new();
 
     if !key_paths.is_empty() {
-        let keypairs = load_private_keys(key_paths, passwords.first().map(|s| s.as_str()))?;
+        let resolved =
+            resolve_key_passphrase(key_passphrase, passwords.first().map(|s| s.as_str()));
+        let keypairs = load_private_keys(key_paths, resolved.as_ref().map(|z| z.as_str()))?;
         for kp in keypairs {
             match kp {
                 era_crypto::EitherKeyPair::Legacy(k) => {
@@ -688,11 +740,12 @@ pub async fn extract(
     output: &Path,
     passwords: &[String],
     key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
     force: bool,
 ) -> Result<()> {
     info!("Opening archive: {}", input.display());
 
-    let providers = build_auth_providers(passwords, key_paths)?;
+    let providers = build_auth_providers(passwords, key_paths, key_passphrase)?;
     let mut reader = ArchiveReader::open_with_providers(input, providers)
         .await
         .context("Failed to open archive")?;
@@ -724,8 +777,9 @@ async fn open_archive(
     archive: &Path,
     passwords: &[String],
     key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
 ) -> Result<ArchiveReader> {
-    let providers = build_auth_providers(passwords, key_paths)?;
+    let providers = build_auth_providers(passwords, key_paths, key_passphrase)?;
     ArchiveReader::open_with_providers(archive, providers)
         .await
         .context("Failed to open archive")
@@ -736,9 +790,10 @@ pub async fn list(
     archive: &Path,
     passwords: &[String],
     key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
     long_format: bool,
 ) -> Result<()> {
-    let mut reader = open_archive(archive, passwords, key_paths).await?;
+    let mut reader = open_archive(archive, passwords, key_paths, key_passphrase).await?;
 
     let files = reader
         .list_files()
@@ -778,8 +833,13 @@ pub async fn list(
 }
 
 /// Show information about an ERA archive
-pub async fn info(archive: &Path, passwords: &[String], key_paths: &[PathBuf]) -> Result<()> {
-    let mut reader = open_archive(archive, passwords, key_paths).await?;
+pub async fn info(
+    archive: &Path,
+    passwords: &[String],
+    key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
+) -> Result<()> {
+    let mut reader = open_archive(archive, passwords, key_paths, key_passphrase).await?;
 
     let header = reader.header().clone();
     let catalog = reader
@@ -832,12 +892,13 @@ pub async fn verify(
     archive: &Path,
     passwords: &[String],
     key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
     verbose: bool,
 ) -> Result<()> {
     info!("Verifying archive: {}", archive.display());
     info!("");
 
-    let mut reader = open_archive(archive, passwords, key_paths).await?;
+    let mut reader = open_archive(archive, passwords, key_paths, key_passphrase).await?;
 
     let start_time = Instant::now();
     let pb = progress::spinner();
@@ -936,6 +997,7 @@ pub async fn repair(
     archive: &Path,
     passwords: &[String],
     key_paths: &[PathBuf],
+    key_passphrase: Option<&str>,
     force: bool,
     verbose: bool,
 ) -> Result<()> {
@@ -987,7 +1049,7 @@ pub async fn repair(
         info!("Archive appears complete. Running verification...");
         info!("");
 
-        let mut reader = open_archive(archive, passwords, key_paths).await?;
+        let mut reader = open_archive(archive, passwords, key_paths, key_passphrase).await?;
 
         let header = reader.header();
         if let Some(erasure_config) = header.config().erasure.as_ref() {
@@ -1095,7 +1157,7 @@ pub async fn repair(
                 continue_on_error: true,
             };
 
-            let providers = build_auth_providers(passwords, key_paths)?;
+            let providers = build_auth_providers(passwords, key_paths, key_passphrase)?;
             let repair_result =
                 era_engine::repair_archive_with_providers(archive, providers, repair_options).await;
 
@@ -1180,7 +1242,7 @@ pub async fn repair(
     // 1. open_archive already calls load_manifest() during reader construction
     // 2. repair --force only needs the manifest for committed_end validation
     // 3. restore_embedded_index + load_catalog would add unnecessary I/O
-    let reader = open_archive(archive, passwords, key_paths).await?;
+    let reader = open_archive(archive, passwords, key_paths, key_passphrase).await?;
 
     if let Some(manifest) = reader.manifest() {
         manager
@@ -1208,6 +1270,7 @@ pub struct RepackArgs<'a> {
     pub output: &'a Path,
     pub passwords: &'a [String],
     pub key_paths: &'a [PathBuf],
+    pub key_passphrase: Option<&'a str>,
     pub dest_password: &'a [String],
     pub certificate_path: Option<&'a Path>,
     pub hybrid_certificate_paths: &'a [PathBuf],
@@ -1232,6 +1295,7 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
         output,
         passwords,
         key_paths,
+        key_passphrase,
         dest_password,
         certificate_path,
         hybrid_certificate_paths,
@@ -1295,7 +1359,7 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
         passwords.to_vec()
     };
 
-    let source_providers = build_auth_providers(&effective_passwords, key_paths)?;
+    let source_providers = build_auth_providers(&effective_passwords, key_paths, key_passphrase)?;
     let reader = ArchiveReader::open_with_providers(input, source_providers)
         .await
         .context("Failed to open source archive")?;
@@ -1303,7 +1367,7 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
     let source_recipients = reader.header().recipients().to_vec();
     drop(reader);
 
-    let source_providers = build_auth_providers(&effective_passwords, key_paths)?;
+    let source_providers = build_auth_providers(&effective_passwords, key_paths, key_passphrase)?;
 
     let dest_certificate = if let Some(path) = certificate_path {
         let cert = era_crypto::load_public_key_from_pem(path)
@@ -1328,7 +1392,14 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
 
     if !has_explicit_dest_auth {
         let keypairs = if !key_paths.is_empty() {
-            load_private_keys(key_paths, effective_passwords.first().map(|s| s.as_str()))?
+            let resolved_key_passphrase = resolve_key_passphrase(
+                key_passphrase,
+                effective_passwords.first().map(|s| s.as_str()),
+            );
+            load_private_keys(
+                key_paths,
+                resolved_key_passphrase.as_ref().map(|z| z.as_str()),
+            )?
         } else {
             Vec::new()
         };
@@ -1585,7 +1656,20 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
 }
 
 /// Generate a certificate keypair and write it to PEM files.
-pub async fn keygen(key_type: &str, output: Option<&Path>, force: bool) -> Result<()> {
+///
+/// The private key is passphrase-protected by default: interactively (TTY,
+/// no-echo, double confirmation) or via `ERA_KEY_PASSPHRASE` for scripts.
+/// `no_passphrase` explicitly opts into a plaintext PEM and prints a warning.
+/// A plaintext `--passphrase` flag is deliberately not offered (shell history
+/// and process-table leakage).
+pub async fn keygen(
+    key_type: &str,
+    output: Option<&Path>,
+    force: bool,
+    no_passphrase: bool,
+) -> Result<()> {
+    use std::io::IsTerminal;
+
     if key_type != "x25519" && key_type != "hybrid" {
         bail!("Invalid key type: {}. Supported: x25519, hybrid", key_type);
     }
@@ -1614,15 +1698,55 @@ pub async fn keygen(key_type: &str, output: Option<&Path>, force: bool) -> Resul
         }
     }
 
+    let passphrase: Option<zeroize::Zeroizing<String>> = if no_passphrase {
+        None
+    } else if let Ok(p) = std::env::var(KEY_PASSPHRASE_ENV) {
+        Some(zeroize::Zeroizing::new(p))
+    } else if std::io::stdin().is_terminal() {
+        let p = Password::with_theme(&ColorfulTheme::default())
+            .with_prompt("Enter passphrase for the private key")
+            .with_confirmation("Confirm passphrase", "Passphrases do not match")
+            .interact()
+            .context("Failed to read passphrase")?;
+        Some(zeroize::Zeroizing::new(p))
+    } else {
+        bail!(
+            "Refusing to write an unencrypted private key without explicit consent. \
+             Use --no-passphrase to allow a plaintext key, or set {} to provide \
+             a passphrase non-interactively.",
+            KEY_PASSPHRASE_ENV
+        );
+    };
+
+    if let Some(p) = &passphrase {
+        if p.is_empty() {
+            bail!("Empty passphrase is not allowed; use --no-passphrase for a plaintext key");
+        }
+    } else {
+        eprintln!(
+            "WARNING: writing an UNENCRYPTED private key to {}. \
+             Protect it with filesystem permissions (0600) and storage controls.",
+            priv_path.display()
+        );
+    }
+
     let (priv_pem, pub_pem) = if key_type == "hybrid" {
         let keypair = era_crypto::HybridKeyPair::generate();
         let pub_pem = era_crypto::export_hybrid_public_key_as_pem(&keypair.certificate())?;
-        let priv_pem = era_crypto::pem_support::export_hybrid_private_key_as_pem(&keypair)?;
+        let priv_pem = match &passphrase {
+            Some(p) => {
+                era_crypto::pem_support::export_hybrid_private_key_as_encrypted_pem(&keypair, p)?
+            }
+            None => era_crypto::pem_support::export_hybrid_private_key_as_pem(&keypair)?,
+        };
         (priv_pem, pub_pem)
     } else {
         let keypair = era_crypto::EraKeyPair::generate()?;
         let pub_pem = era_crypto::export_public_key_as_pem(&keypair.certificate())?;
-        let priv_pem = era_crypto::pem_support::export_private_key_as_pem(&keypair)?;
+        let priv_pem = match &passphrase {
+            Some(p) => era_crypto::pem_support::export_private_key_as_encrypted_pem(&keypair, p)?,
+            None => era_crypto::pem_support::export_private_key_as_pem(&keypair)?,
+        };
         (priv_pem, pub_pem)
     };
 
@@ -2022,6 +2146,7 @@ mod tests {
             &archive_path,
             &["test_password".to_string()],
             &[] as &[PathBuf],
+            None,
             false,
         )
         .await
@@ -2042,6 +2167,7 @@ mod tests {
             &archive_path,
             &["test_password".to_string()],
             &[] as &[PathBuf],
+            None,
             false,
             false,
         )

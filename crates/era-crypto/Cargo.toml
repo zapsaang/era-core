@@ -27,7 +27,8 @@ hex = { workspace = true }
 pem = { workspace = true }
 der = "0.7"
 spki = "0.7"
-pkcs8 = "0.10"
+pkcs8 = { version = "0.10", features = ["encryption"] }
+pkcs5 = { version = "0.7", features = ["pbes2"] }
 x509-cert = "0.2"
 ssh-key = "0.6"
 
