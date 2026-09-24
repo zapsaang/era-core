@@ -4,7 +4,7 @@ k-Bounded Best-Fit MacroBlock packing with resilient AEAD unpacking. L3.
 
 ## SURFACES
 - `src/AGENTS.md` — `MacroBlockBuilder`, `SessionBlockBuilder`, `StagingPool`, `ResilientBlockUnpacker` internals
-- `tests/` — vulnerability and resilience test coverage
+- `tests/` — vulnerability and resilience test coverage (2 files, 407 LOC: `key_reuse_vulnerability.rs` 178, `resilience_tests.rs` 229)
 - `benches/packing_bench.rs` — packing efficiency benchmarks
 
 ## STRUCTURE

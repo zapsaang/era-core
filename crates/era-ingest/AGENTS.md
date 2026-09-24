@@ -11,12 +11,12 @@ File ingestion, FastCDC content-defined chunking, and directory scanning. L3.
 
 ```
 era-ingest/src/
-├── lib.rs               # Re-exports: Chunker, StreamingChunker, DirectoryScanner
-├── chunker.rs           # FastCDC chunking implementation
-├── chunker_zerocopy.rs  # Zero-copy chunker paths
-├── reader.rs            # FileReader
-├── entry.rs             # Ingest entry types
-└── acl.rs               # Platform ACL handling
+├── lib.rs               # Re-exports: Chunker, StreamingChunker, StreamingChunkerZeroCopy, DirectoryScanner
+├── chunker.rs           # FastCDC chunking (16KB-64KB-256KB)
+├── chunker_zerocopy.rs  # StreamingChunkerZeroCopy
+├── reader.rs            # FileReader, DirectoryScanner
+├── entry.rs             # Catalog/FileEntry/ChunkRef
+└── acl.rs               # POSIX ACL handling (unix cfg-gated)
 ```
 
 ## WHEN CHANGING

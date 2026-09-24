@@ -6,7 +6,7 @@
 
 ### Foundation (L0)
 - **era-common**: EraError, Result, protobuf codegen, config types. Bottom of stack — everything depends on this.
-- **era-crypto**: XChaCha20-Poly1305, Kyber-768, HKDF, Argon2id, SecureBuffer, Shamir. All key material lives here.
+- **era-crypto**: XChaCha20-Poly1305, ML-KEM-768 (Kyber-768), HKDF, Argon2id, SecureBuffer, Shamir. All key material lives here.
 
 ### Abstraction (L1)
 - **era-storage**: `StorageBackend` trait + `LocalStorageBackend`, `MemoryStorageBackend`. All I/O is async.
@@ -46,7 +46,7 @@ era-crypto → era-common
 ### Modifying Security Patterns
 1. Implement changes in era-crypto.
 2. Update era-volume if key wrapping or AAD binding changes.
-3. Verify with adversarial audit tests in `era-engine/tests/` (6 audit suites).
+3. Verify with the audit suites in `era-engine/tests/`: the 6 canonical suites (`competitor_audit`, `second_audit`, `third_audit`, `fourth_audit`, `adversarial_audit_v5`, `adversarial_audit_v2` baseline), plus the workspace-wide adversarial_audit_vN waves (`era-index` V2–V25, `era-volume` V26–V30) and `era-index/tests/index_persistence_audit` (30 tests).
 
 ### Optimizing Throughput
 - Compression: `era-codec/src/compression.rs`

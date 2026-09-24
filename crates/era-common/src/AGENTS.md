@@ -1,29 +1,39 @@
 # Common Source
 
-Shared types, EraError, Result, protobuf codegen, and config types. L0. Bottom of stack.
+Shared types, EraError, Result, protobuf codegen, config types. L0. Bottom of stack.
 
 ## FILES
 
-| File | Purpose |
-|------|---------|
-| `lib.rs` | Re-exports: EraError, Result, config types, serialization helpers |
-| `error.rs` | `EraError` enum (49 variants), `Result<T>` alias |
-| `config.rs` | `ArchiveConfig`, `CompressionConfig`, `EncryptionConfig`, etc. |
-| `conversion.rs` | `From`/`TryFrom` between config types and protobuf |
-| `serde.rs` | Bounded `deserialize_proto` helpers |
-| `types/mod.rs` | re-exports block, chunk, ids, manifest, matrix, typed_block |
-| `types/block.rs` | `BlockLocation`, `ShardLayout`, `VerifiedShard`, `compute_shard_crc()` |
-| `types/chunk.rs` | `RawChunk`, `UniqueChunk`, `ChunkLocation`, `ChunkVec` |
-| `types/ids.rs` | `ArchiveId`, `VolumeId`, `BlockId`, `ChunkHash` (rkyv/bytecheck) |
-| `types/manifest.rs` | `ArchiveManifest`: v8.2 archive metadata, epoch/finalize sequencing, committed horizons, cryptographic commitments, per-volume committed ends |
-| `types/matrix.rs` | `MatrixDistributionConfig`, `MatrixBlockLocation` |
-| `types/typed_block.rs` | `TypedBlockKind` enum with exactly three variants — `Manifest`, `Catalog`, `Index`; `Index` maps to `BlockType::IndexManifest` |
+| File | LOC | Purpose |
+|------|-----|---------|
+| `lib.rs` | 24 | facade, re-exports of error/config/serde/types |
+| `config.rs` | 232 | `ArchiveConfig` etc., typed config structs |
+| `conversion.rs` | 449 | bounded protobuf `From`/`TryFrom` conversions |
+| `error.rs` | 332 | `EraError` (~49 variants), most cross-cut type in workspace |
+| `serde.rs` | 41 | bounded `deserialize_proto` helpers |
+| `build.rs` | 9 | prost codegen over `proto/` |
 
-## BUILD
+## PROTO
 
-`build.rs` compiles `proto/era_common.proto` and `proto/test_evolution.proto` via `prost-build`.
+`proto/era_common.proto` (331 LOC) + `proto/test_evolution.proto` (14 LOC), compiled by `build.rs` into OUT_DIR. Schema changes require `cargo build` regen.
+
+## TYPES/ SUBDIR
+
+Block, chunk, id, manifest, matrix, typed-block types. Split as:
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `types/mod.rs` | 15 | re-exports |
+| `types/block.rs` | 597 | `BlockType`, `BlockHeader`, `BlockLocation`, `ShardLayout`, `VerifiedShard`, `compute_shard_crc()` |
+| `types/chunk.rs` | 88 | `RawChunk`, `UniqueChunk`, `ChunkLocation` |
+| `types/ids.rs` | 183 | `ChunkHash`, `ArchiveId`, `VolumeId`, `BlockId` (rkyv/bytecheck) |
+| `types/manifest.rs` | 387 | v8.2 `ArchiveManifest`, epoch/finalize sequencing, committed horizons, commitments |
+| `types/matrix.rs` | 187 | `MatrixDistributionConfig`, `MatrixBlockLocation` |
+| `types/typed_block.rs` | 56 | `TypedBlockKind` (Manifest/Catalog/Index) |
 
 ## TEST
+
+Single test: `tests/compact_proto_schema.rs` (24 LOC, protobuf schema validation).
 
 ```bash
 cargo test -p era-common

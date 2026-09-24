@@ -12,14 +12,16 @@ Async storage backend abstraction. L1.
 era-storage/src/
 ├── lib.rs     # Re-exports: StorageBackend, LocalStorageBackend, MemoryStorageBackend
 ├── traits.rs  # StorageBackend trait (async read/write/pflush)
-├── local.rs   # Filesystem backend
-├── memory.rs  # In-memory backend (tests)
-└── config.rs  # Storage backend config
+├── local.rs   # Filesystem backend (306 LOC)
+├── memory.rs  # In-memory backend (310 LOC)
+├── config.rs  # Storage backend config (313 LOC)
+└── cache/     # EMPTY placeholder directory, no code yet
 ```
 
 ## WHEN CHANGING
-- New storage backends (S3, MinIO) should implement the `StorageBackend` trait.
+- New storage backends (S3, MinIO) should implement the `StorageBackend` trait (`traits.rs`: `StorageBackend`/`StorageReader`/`StorageWriter` async traits).
 - Async I/O is mandatory; blocking I/O in storage paths violates the async contract.
+- `src/cache/` is an empty placeholder; treat any cache work as greenfield.
 
 ## VALIDATION
 ```bash

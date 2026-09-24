@@ -8,9 +8,9 @@ L0 foundation. EraError enum (49 variants), Result, protobuf codegen, and config
 
 ## SURFACES
 
-- `src/AGENTS.md` — error types, config, protobuf codegen, serialization helpers
-- `tests/compact_proto_schema.rs` — protobuf schema validation
-- `proto/` — protobuf definitions compiled by `build.rs`
+- `src/AGENTS.md` — error types, config, protobuf codegen, serialization helpers (file inventory with LOC)
+- `tests/compact_proto_schema.rs` — protobuf schema validation (single test, 24 LOC)
+- `proto/` — `era_common.proto` + `test_evolution.proto`, compiled by `build.rs` (prost)
 
 ## BOUNDARY
 

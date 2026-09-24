@@ -4,10 +4,14 @@ Large integration surface for format parsing, footer/header recovery, atomicity,
 
 ## Groups
 
-- `adversarial_audit_v2.rs`, `adversarial_audit_v26.rs`, `adversarial_audit_v27.rs`, `adversarial_audit_v29.rs`, `adversarial_audit_v30.rs`, `competitor_vulnerability_audit.rs`, `coverage_gap_audit.rs` — security/regression audits
-- `header_adversarial.rs`, `floating_footer.rs`, `resilient_footer_reconstruction.rs` — parser and recovery edge cases
-- `atomicity_failure_full.rs`, `atomicity_stress.rs`, `property_tests.rs` — write/finalization guarantees (`property_tests.proptest-regressions` belongs with this group)
-- `security_dos_tests.rs`, `traffic_analysis.rs`, `performance.rs` — stress, traffic-shape, and perf checks
+16 test files. Audit numbering is workspace-global; v28 was skipped, so there is no `adversarial_audit_v28.rs` here.
+
+- Security/regression audits (7): `adversarial_audit_v2.rs` 288, `adversarial_audit_v26.rs` 916, `adversarial_audit_v27.rs` 782, `adversarial_audit_v29.rs` 456, `adversarial_audit_v30.rs` 682, `competitor_vulnerability_audit.rs` 584, `coverage_gap_audit.rs` 744
+- Parser and recovery edge cases (3): `header_adversarial.rs` 338, `floating_footer.rs` 81, `resilient_footer_reconstruction.rs` 170
+- Write/finalization guarantees (3): `atomicity_failure_full.rs` 183, `atomicity_stress.rs` 111, `property_tests.rs` 512
+- Stress, traffic-shape, and perf checks (3): `security_dos_tests.rs` 333, `traffic_analysis.rs` 183, `performance.rs` 85
+
+`property_tests.rs` is the only proptest suite in the workspace; its `property_tests.proptest-regressions` file is checked in with 2 saved seeds.
 
 ## Run
 

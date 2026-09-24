@@ -5,17 +5,17 @@ Security audit reports, format documentation, and architectural decision records
 ## STRUCTURE
 
 ```
-doc_gen/
-├── AUDIT_REPORT_era-compact/    # Compact-mode (--compact) audit notes
-├── AUDIT_REPORT_era-engine/     # Adversarial audit reports (V1–V5)
-├── AUDIT_REPORT_era-index/      # V2.1 index persistence audit
-├── AUDIT_REPORT_era-volume/     # Format atomicity audits (v30)
+doc_gen/                    # 72 .md files total, ARCHIVAL (frozen since 2026-04-28)
+├── AUDIT_REPORT_era-compact/    # Compact-mode (--compact) audit notes (1)
+├── AUDIT_REPORT_era-engine/     # Adversarial audit reports V1–V6 (7)
+├── AUDIT_REPORT_era-index/      # Index adversarial waves V4–V25, V22/V10 absent (20)
+├── AUDIT_REPORT_era-volume/     # Format atomicity audits V26–V30 (5)
 ├── V8P2_ITERATION/              # Volume format v8.2 design iterations
-│   ├── PRE_PHASE_3/             # Pre-phase design drafts
-│   ├── PHASE_1/                 # Initial design docs
-│   ├── PHASE_2/                 # Refinement and migration notes
-│   └── PHASE_3/                 # Final v8.2 spec and rollout
-└── TODO/                        # Pending architectural work
+│   ├── PRE_PHASE_3/             # Pre-phase design drafts (1)
+│   ├── PHASE_1/                 # Initial design docs (6)
+│   ├── PHASE_2/                 # Refinement and migration notes (2)
+│   └── PHASE_3/                 # Final v8.2 spec and rollout (2)
+└── TODO/                        # Pending architectural work (1)
 ```
 
 ## WHERE TO LOOK
@@ -34,3 +34,4 @@ doc_gen/
 
 - Audit reports are authoritative references for security invariants
 - Format changes must update relevant audit reports
+- Content is ARCHIVAL: frozen since 2026-04-28; consult live crate AGENTS.md files for current behavior

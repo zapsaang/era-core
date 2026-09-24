@@ -1,6 +1,6 @@
 # era-crypto crate
 
-Cryptographic primitives, key lifecycle, secure memory, and certificate/KEM helpers. L0.
+Cryptographic primitives, key lifecycle, secure memory, and certificate/KEM helpers (X25519 + ML-KEM-768). L0.
 
 ## SURFACES
 - `src/AGENTS.md` — AEAD, KDF, `KeySession`, hybrid KEM, PEM support, secure memory, and timestamp internals
