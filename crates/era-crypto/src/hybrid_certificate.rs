@@ -38,6 +38,18 @@ impl HybridCertificate {
     pub fn public_key(&self) -> &HybridPublicKey {
         &self.public_key
     }
+
+    /// Derive the recipient-slot key identifier from the public key.
+    ///
+    /// `BLAKE3(public_key_bytes)[..8]`, matching the legacy certificate
+    /// convention (`compute_key_id`, first 8 bytes of which go into slots).
+    /// Derived on demand — never stored — so it stays a pure public function.
+    pub fn key_id(&self) -> [u8; 8] {
+        let hash = crate::hash(&self.public_key.to_bytes());
+        let mut key_id = [0u8; 8];
+        key_id.copy_from_slice(&hash.as_bytes()[..8]);
+        key_id
+    }
 }
 
 /// Hybrid keypair with automatic zeroization on drop.
@@ -89,6 +101,11 @@ impl HybridKeyPair {
         HybridCertificate {
             public_key: self.public_key.clone(),
         }
+    }
+
+    /// Derive the recipient-slot key identifier; see [`HybridCertificate::key_id`].
+    pub fn key_id(&self) -> [u8; 8] {
+        self.certificate().key_id()
     }
 
     /// Encapsulate the master key for a hybrid certificate recipient.
@@ -152,6 +169,20 @@ mod tests {
 
         let decrypted = keypair.decapsulate(&params, &encrypted_master_key).unwrap();
         assert_eq!(decrypted, master_key);
+    }
+
+    #[test]
+    fn hybrid_key_id_is_deterministic_and_public_derived() {
+        let keypair = HybridKeyPair::generate();
+        let cert = keypair.certificate();
+
+        assert_eq!(keypair.key_id(), keypair.key_id());
+        assert_eq!(cert.key_id(), cert.key_id());
+        assert_eq!(keypair.key_id(), cert.key_id());
+
+        let other = HybridKeyPair::generate();
+        assert_ne!(keypair.key_id(), other.key_id());
+        assert_ne!(cert.key_id(), other.certificate().key_id());
     }
 
     #[test]

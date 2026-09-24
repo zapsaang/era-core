@@ -794,7 +794,7 @@ impl ArchiveWriterBuilder {
                                 HybridKeyPair::encapsulate_for(cert, share)?;
                             recipients.push(RecipientSlot::new(
                                 RecipientType::HybridKem,
-                                None,
+                                Some(cert.key_id()),
                                 params,
                                 encrypted_share,
                             ));
@@ -805,7 +805,7 @@ impl ArchiveWriterBuilder {
                             HybridKeyPair::encapsulate_for(cert, &*master_key)?;
                         recipients.push(RecipientSlot::new(
                             RecipientType::HybridKem,
-                            None,
+                            Some(cert.key_id()),
                             params,
                             encrypted_mk,
                         ));

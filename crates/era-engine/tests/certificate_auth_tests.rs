@@ -631,3 +631,123 @@ async fn test_repack_archive_with_private_keys_preserves_threshold_hybrid_access
         b"repack threshold hybrid"
     );
 }
+
+async fn read_header_recipients(archive_path: &std::path::Path) -> Vec<RecipientSlot> {
+    let backend = era_storage::LocalStorageBackend::new(archive_path.parent().unwrap());
+    let volume =
+        era_volume::VolumeReader::open(&backend, archive_path.file_name().unwrap().as_ref())
+            .await
+            .unwrap();
+    volume.header().recipients().to_vec()
+}
+
+/// New hybrid archives must carry the certificate's key_id in every hybrid slot.
+#[tokio::test]
+async fn test_hybrid_slot_carries_key_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("anyofn.era");
+    let kp = era_engine::HybridKeyPair::generate();
+
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+        .hybrid_certificate(kp.certificate())
+        .config(test_config_no_ec())
+        .build()
+        .await
+        .unwrap();
+    let test_file = temp_dir.path().join("data.txt");
+    fs::write(&test_file, b"key_id anyofn").unwrap();
+    writer.add_file(&test_file).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    let recipients = read_header_recipients(&archive_path).await;
+    let hybrid_slots: Vec<_> = recipients
+        .iter()
+        .filter(|s| s.r_type() == RecipientType::HybridKem)
+        .collect();
+    assert_eq!(hybrid_slots.len(), 1);
+    assert_eq!(
+        hybrid_slots[0].key_id(),
+        Some(&kp.key_id()),
+        "hybrid slot must carry the certificate key_id"
+    );
+
+    let thresh_path = temp_dir.path().join("threshold.era");
+    let kp1 = era_engine::HybridKeyPair::generate();
+    let kp2 = era_engine::HybridKeyPair::generate();
+
+    let mut writer = ArchiveWriterBuilder::new(&thresh_path)
+        .hybrid_certificate(kp1.certificate())
+        .add_hybrid_certificate(kp2.certificate())
+        .access_policy(era_volume::AccessPolicy::Threshold(2))
+        .config(test_config_no_ec())
+        .build()
+        .await
+        .unwrap();
+    writer.add_file(&test_file).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    let recipients = read_header_recipients(&thresh_path).await;
+    let hybrid_slots: Vec<_> = recipients
+        .iter()
+        .filter(|s| s.r_type() == RecipientType::HybridKem)
+        .collect();
+    assert_eq!(hybrid_slots.len(), 2);
+    let slot_kids: Vec<_> = hybrid_slots.iter().filter_map(|s| s.key_id()).collect();
+    assert_eq!(slot_kids.len(), 2, "every threshold hybrid slot has key_id");
+    assert!(slot_kids.contains(&&kp1.key_id()));
+    assert!(slot_kids.contains(&&kp2.key_id()));
+}
+
+/// A hybrid slot whose key_id mismatches must be rejected in O(1) without
+/// attempting decapsulation. Garbage params prove the fast path was taken:
+/// without it, decapsulation would fail with InvalidKey instead of Ok(None).
+#[test]
+fn test_hybrid_provider_fast_rejects_mismatched_key_id() {
+    use era_engine::auth::{AuthProvider, HybridCertificateProvider};
+
+    let keypair = era_engine::HybridKeyPair::generate();
+    let other = era_engine::HybridKeyPair::generate();
+
+    let slot = RecipientSlot::new(
+        RecipientType::HybridKem,
+        Some(other.key_id()),
+        vec![0xAA; 16],
+        vec![0xBB; 16],
+    );
+
+    let provider = HybridCertificateProvider::new(keypair);
+    let result = provider.try_unlock(&slot);
+    match result {
+        Ok(None) => {}
+        other => panic!(
+            "mismatched key_id must fast-reject to Ok(None), got: {:?}",
+            other.map(|o| o.map(|mk| mk.len()))
+        ),
+    }
+}
+
+/// Old hybrid archives whose slots carry no key_id must still unlock via full
+/// decapsulation (read-side backward compatibility).
+#[test]
+fn test_legacy_hybrid_archive_without_key_id_still_unlocks() {
+    use era_engine::auth::{AuthProvider, HybridCertificateProvider};
+
+    let keypair = era_engine::HybridKeyPair::generate();
+    let cert = keypair.certificate();
+
+    let master_key = [0x5Au8; 32];
+    let (params, encrypted_mk) =
+        era_engine::HybridKeyPair::encapsulate_for(&cert, &master_key).unwrap();
+
+    let slot = RecipientSlot::new(RecipientType::HybridKem, None, params, encrypted_mk);
+
+    let provider = HybridCertificateProvider::new(keypair);
+    let unlocked = provider
+        .try_unlock(&slot)
+        .expect("decapsulation must succeed");
+    assert_eq!(
+        unlocked.as_deref(),
+        Some(&master_key[..]),
+        "key_id=None slot must fall back to full decapsulation"
+    );
+}

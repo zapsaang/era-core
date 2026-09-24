@@ -152,6 +152,19 @@ impl AuthProvider for HybridCertificateProvider {
             return Ok(None);
         }
 
+        // Fast-reject mismatched recipients by key_id, mirroring
+        // CertificateProvider above. The key_id is only a 64-bit filter hint,
+        // not an authentication basis: a collision merely costs one extra
+        // decapsulation, and authenticity is still enforced by the AEAD tag.
+        // Slots without a key_id (pre-key_id archives) fall through to full
+        // decapsulation.
+        if let Some(slot_kid) = slot.key_id() {
+            let kid = self.keypair.key_id();
+            if !bool::from(slot_kid.as_ref().ct_eq(&kid[..])) {
+                return Ok(None);
+            }
+        }
+
         match self
             .keypair
             .decapsulate(slot.params(), slot.encrypted_master_key())
