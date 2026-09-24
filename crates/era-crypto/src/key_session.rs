@@ -191,7 +191,8 @@ pub struct WrappedVolumeKey {
 /// Wrap (encrypt) a Volume Key using the Intermediate Key.
 ///
 /// Uses XChaCha20-Poly1305 with a fresh random nonce from OsRng.
-/// Domain separator for VK wrap AAD context binding
+/// FROZEN: domain separator for the IK→VK wrap construction. Never change;
+/// a changed construction gets a new label.
 const VK_WRAP_AAD_DOMAIN: &[u8] = b"ERA_VK_WRAP_v8.1";
 
 pub fn wrap_volume_key(ik: &IntermediateKey, vk: &VolumeKey) -> Result<WrappedVolumeKey> {
@@ -488,6 +489,12 @@ mod tests {
             time_cost: 1,
             parallelism: 1,
         }
+    }
+
+    /// FROZEN — changing this value breaks all existing archives.
+    #[test]
+    fn frozen_aad_vk_wrap() {
+        assert_eq!(VK_WRAP_AAD_DOMAIN, b"ERA_VK_WRAP_v8.1");
     }
 
     #[test]

@@ -10,7 +10,7 @@ Cryptographic primitives, key lifecycle, secure memory, and certificate/KEM help
 
 ## WHEN CHANGING
 - `KeySession`, wrap/unwrap, or domain-separation changes must be checked against `era-volume` header slots and `era-engine` auth flows.
-- PEM / certificate changes must preserve the current archive compatibility path; current archive unlock still routes through X25519-based certificate handling.
+- PEM / certificate changes must preserve the current archive compatibility path; archive unlock routes through legacy X25519 certificate handling and the hybrid (X25519 + ML-KEM-768) certificate path.
 - Secure-memory or zeroization changes are high-risk; audit error paths as carefully as success paths.
 
 ## VALIDATION

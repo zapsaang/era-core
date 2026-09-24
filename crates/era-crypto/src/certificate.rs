@@ -58,7 +58,8 @@ const CERT_FILE_MAGIC: &[u8; 4] = b"ERAC";
 /// Key file version
 const KEY_FILE_VERSION: u8 = 1;
 
-/// Domain separator for certificate MK encapsulation AAD
+/// FROZEN: domain separator for the certificate MK encapsulation construction.
+/// Never change; a changed construction gets a new label.
 const CERT_ENCAPS_AAD: &[u8] = b"ERA_CERT_ENCAPS_v8.1";
 
 /// Domain separator for key file encryption AAD
@@ -678,6 +679,12 @@ mod tests {
     use super::*;
     use rand::RngCore;
     use tempfile::TempDir;
+
+    /// FROZEN — changing this value breaks all existing archives.
+    #[test]
+    fn frozen_aad_cert_encaps() {
+        assert_eq!(CERT_ENCAPS_AAD, b"ERA_CERT_ENCAPS_v8.1");
+    }
 
     #[test]
     fn test_keypair_generation() {

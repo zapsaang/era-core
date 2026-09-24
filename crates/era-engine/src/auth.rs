@@ -11,6 +11,9 @@ use zeroize::Zeroizing;
 /// AAD domain separator for password-based Master Key encryption.
 /// Used by all password recipient slots to bind MK encryption to its purpose,
 /// preventing cross-context ciphertext splicing attacks.
+///
+/// FROZEN: domain separator for the password-slot MK wrap construction.
+/// Never change; a changed construction gets a new label.
 pub const MK_WRAP_AAD_DOMAIN: &[u8] = b"ERA_MK_WRAP_v8.1";
 
 /// Abstract identity provider for authentication.
@@ -173,5 +176,16 @@ impl AuthProvider for HybridCertificateProvider {
             Err(EraError::Decryption(_)) => Ok(None),
             Err(other) => Err(other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FROZEN — changing this value breaks all existing archives.
+    #[test]
+    fn frozen_aad_mk_wrap() {
+        assert_eq!(MK_WRAP_AAD_DOMAIN, b"ERA_MK_WRAP_v8.1");
     }
 }

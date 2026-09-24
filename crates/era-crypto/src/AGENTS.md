@@ -33,9 +33,28 @@ MK (32B, OsRng) → HKDF(info="ERA_KeyWrap_v1") → IK (memory-only)
 
 ## DOMAIN SEPARATION CONSTANTS
 
+HKDF domains:
+
 - `IK_DOMAIN = b"ERA_KeyWrap_v1"` — MK → IK derivation
-- `VK_WRAP_AAD = b"ERA_VK_WRAP_v8.2"` — VK wrapping AAD
 - `BLOCK_KEY_DOMAIN = b"ERA_BlockKey_v1"` — VK → BK derivation
+
+AAD domains (all FROZEN — byte values are AEAD authentication inputs; changing any
+byte makes every existing archive's corresponding slot fail authentication):
+
+- `CERT_ENCAPS_AAD = b"ERA_CERT_ENCAPS_v8.1"` — legacy certificate MK encapsulation
+- `MK_WRAP_AAD_DOMAIN = b"ERA_MK_WRAP_v8.1"` (era-engine `auth.rs`) — password-slot MK wrap
+- `HYBRID_ENCAPS_AAD = b"ERA_HYBRID_CERT_ENCAPS_v8.1"` — hybrid certificate MK encapsulation
+- `VK_WRAP_AAD_DOMAIN = b"ERA_VK_WRAP_v8.1"` — IK→VK wrap
+- `HYBRID_KEY_FILE_AAD = b"ERA_HYBRID_KEY_FILE_v1"` — encrypted hybrid key file container
+
+Governance rules for domain separators:
+
+- Labels are versioned per *construction*, not per volume format: the same
+  construction keeps its label forever; a changed construction (algorithm,
+  concatenation order, or input semantics) MUST get a NEW label.
+- Labels do not carry, and do not promise to carry, the volume format version.
+- New constants are reviewed against these rules; each shipped constant gets a
+  FROZEN comment plus a byte-exact freeze unit test in its source file.
 
 ## SECURITY RULES
 

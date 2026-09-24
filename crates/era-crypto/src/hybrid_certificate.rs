@@ -8,7 +8,8 @@ use crate::aead::{AeadCipher, Nonce};
 use crate::hybrid_kem::{self, HybridPublicKey, HybridSecretKey};
 use era_common::Result;
 
-/// Domain separator for hybrid certificate MK encapsulation AAD
+/// FROZEN: domain separator for the hybrid certificate MK encapsulation
+/// construction. Never change; a changed construction gets a new label.
 const HYBRID_ENCAPS_AAD: &[u8] = b"ERA_HYBRID_CERT_ENCAPS_v8.1";
 
 /// Post-quantum public certificate containing a hybrid KEM public key.
@@ -154,6 +155,12 @@ impl HybridKeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FROZEN — changing this value breaks all existing archives.
+    #[test]
+    fn frozen_aad_hybrid_encaps() {
+        assert_eq!(HYBRID_ENCAPS_AAD, b"ERA_HYBRID_CERT_ENCAPS_v8.1");
+    }
 
     #[test]
     fn test_hybrid_certificate_wraps_and_unwraps_master_key_roundtrip() {

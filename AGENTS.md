@@ -70,6 +70,7 @@ Refs = production-source reference count (tests/benches excluded).
 | NEVER validate on one side only | Symmetric validation on read AND write paths (era-volume) |
 | NEVER block async runtime | `spawn_blocking` for CPU-heavy work |
 | NEVER `as any` type suppression | Proper type conversions |
+| NEVER mutate shipped AAD domain separators | New constructions get new labels (freeze tests + `crates/era-crypto/src/AGENTS.md` governance; if this file is regenerated, keep this entry in the generation source) |
 
 ## WHERE TO LOOK
 
