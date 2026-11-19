@@ -58,11 +58,18 @@ mod medium_severity {
             "next_block_id must not use Relaxed fetch_add"
         );
         assert!(
-            source.contains("fetch_update(Ordering::AcqRel, Ordering::Acquire"),
-            "next_block_id must use bounded fetch_update with AcqRel/Acquire"
+            !source.contains("fetch_update"),
+            "fetch_update is deprecated since Rust 1.99 (renamed to try_update); must not be used"
         );
         assert!(
-            source.contains("if current <= MAX_BLOCK_INDEX"),
+            source.contains("compare_exchange_weak(")
+                && source.contains("Ordering::AcqRel")
+                && source.contains("Ordering::Acquire"),
+            "next_block_id must use a bounded CAS loop with AcqRel/Acquire ordering"
+        );
+        assert!(
+            source.contains("current > MAX_BLOCK_INDEX")
+                && source.contains("new > MAX_BLOCK_INDEX"),
             "counter update must enforce MAX_BLOCK_INDEX boundary"
         );
         assert!(
@@ -113,14 +120,14 @@ mod medium_severity {
     #[test]
     fn test_v3_log_02_reader_warns_and_surfaces_embedded_index_recovery_failure_status() {
         let source = include_str!("../src/reader.rs");
+        let compact_source: String = source.split_whitespace().collect();
 
         assert!(
             source.contains("async fn restore_embedded_index(&mut self) -> Result<bool>"),
             "restore_embedded_index must propagate recovery status to caller"
         );
         assert!(
-            source.contains("warn!(\n                                \"V2.1 index recovery failed, continuing without index: {}\"")
-                || source.contains("warn!(\"V2.1 index recovery failed, continuing without index: {}\""),
+            compact_source.contains("warn!(\"V2.1indexrecoveryfailed,continuingwithoutindex:{}\","),
             "embedded index recovery failure must be logged at warn level"
         );
         assert!(

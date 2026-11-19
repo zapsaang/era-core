@@ -2183,8 +2183,11 @@ impl ArchiveWriter {
                 .unwrap_or(era_volume::DATA_REGION_START),
             provisional_committed_ends,
         )?;
-        let manifest_total_size =
-            Self::typed_plaintext_disk_size(provisional_manifest.to_bytes()?.len())?;
+        let manifest_total_size = Self::typed_plaintext_disk_size(
+            provisional_manifest
+                .to_bytes_with_header_digest([0; 32])
+                .len(),
+        )?;
 
         let mut volume_indices = self.current_volume_indices()?;
         let (mut catalog_blocks_by_volume, mut backup_blocks_by_volume) = self
@@ -2250,90 +2253,46 @@ impl ArchiveWriter {
             catalog_locations.len()
         );
 
-        // Finalize the V2.1 index: write the canonical index root to volume 0,
-        // then replicate the encrypted root block to the remaining volumes.
-        let volume_count = volume_indices.len();
-
+        // Finalize a complete V2.1 index independently on every active volume.
         let (index_locations, index_bytes) = if let Some(mut builder) = index_builder {
             let session = self.pipeline.encryption().session().try_clone()?;
             let volume_key = self.pipeline.encryption().volume_key().try_clone()?;
             let nonce_context = self.pipeline.encryption().nonce_context();
             let index_start_block_id = self.pipeline.blocks_written();
 
-            let finalize_result = {
-                let Some(writer) = self.pipeline.volume_mut().get_writer_mut(0) else {
-                    warn!("No volume writer available for index finalization");
-                    return Err(EraError::InvalidConfig(
-                        "No primary volume writer available for index finalization".into(),
-                    ));
-                };
+            let (meta_index, locations) = self
+                .pipeline
+                .volume_mut()
+                .write_index_fanout(
+                    &mut builder,
+                    &session,
+                    &volume_key,
+                    nonce_context,
+                    index_start_block_id,
+                )
+                .await?;
 
-                builder
-                    .finalize_with_starting_block_id(
-                        writer,
-                        &session,
-                        &volume_key,
-                        nonce_context,
-                        index_start_block_id,
-                    )
-                    .await
-            };
+            let index_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_index)
+                .map_err(|e| EraError::Serialization(e.to_string()))?;
+            let index_plaintext = index_bytes.to_vec();
+            let (manifest_offset, manifest_size, index_block_id) =
+                locations.first().copied().ok_or_else(|| {
+                    EraError::IntegrityError("Index fanout returned no manifest locations".into())
+                })?;
 
-            match finalize_result {
-                Ok((meta_index, manifest_location)) => {
-                    let index_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta_index)
-                        .map_err(|e| EraError::Serialization(e.to_string()))?;
-                    let index_plaintext = index_bytes.to_vec();
-                    let index_block_id = manifest_location.slot_index;
+            let index_blocks_consumed =
+                u64::from(index_block_id).saturating_sub(index_start_block_id) + 1;
+            self.pipeline.advance_block_id(index_blocks_consumed)?;
 
-                    let index_blocks_consumed =
-                        u64::from(index_block_id).saturating_sub(index_start_block_id) + 1;
-                    self.pipeline.advance_block_id(index_blocks_consumed)?;
+            debug!(
+                "V2.1 index finalized: root at offset={}, size={}, block_id={}, fanout={}",
+                manifest_offset,
+                manifest_size,
+                index_block_id,
+                locations.len(),
+            );
 
-                    let mut locations = Vec::with_capacity(volume_count);
-                    locations.push((
-                        manifest_location.physical_offset,
-                        manifest_location.encrypted_size,
-                        index_block_id,
-                    ));
-
-                    if volume_count > 1 {
-                        let archive_id = self.pipeline.encryption().archive_id();
-                        let epoch_id = self.pipeline.encryption().epoch_id();
-                        let fanout_locations = self
-                            .pipeline
-                            .volume_mut()
-                            .write_index_fanout(
-                                &index_plaintext,
-                                index_block_id,
-                                &session,
-                                &volume_key,
-                                &nonce_context,
-                                &archive_id,
-                                epoch_id,
-                            )
-                            .await?;
-                        locations.extend(fanout_locations);
-                    }
-
-                    debug!(
-                        "V2.1 index finalized: root at offset={}, size={}, block_id={}, fanout={}",
-                        manifest_location.physical_offset,
-                        manifest_location.encrypted_size,
-                        index_block_id,
-                        locations.len(),
-                    );
-
-                    (Some(locations), index_plaintext)
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to finalize V2.1 index, building manifest without index commitment: {}",
-                        e
-                    );
-                    (None, Vec::new())
-                }
-            }
+            (Some(locations), index_plaintext)
         } else {
             (None, Vec::new())
         };
@@ -2375,7 +2334,17 @@ impl ArchiveWriter {
                 volume_committed_ends,
             )?
         };
-        let manifest_bytes = manifest.to_bytes()?;
+        let volume_stage = self.pipeline.volume_mut();
+        let header_digests = (0..volume_indices.len())
+            .map(|slot| {
+                volume_stage
+                    .get_writer_mut(slot)
+                    .ok_or_else(|| {
+                        EraError::IntegrityError(format!("Missing volume writer for slot {slot}"))
+                    })?
+                    .finalized_header_digest()
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let manifest_block_id = self.pipeline.reserve_block_id()?;
 
@@ -2388,9 +2357,10 @@ impl ArchiveWriter {
 
         let manifest_blocks: Vec<EncryptedMacroBlock> = volume_indices
             .into_iter()
-            .map(|volume_index| {
+            .zip(header_digests)
+            .map(|(volume_index, header_digest)| {
                 self.encrypt_manifest_for_volume(
-                    &manifest_bytes,
+                    &manifest.to_bytes_with_header_digest(header_digest),
                     volume_index,
                     manifest_block_id,
                     &aead_ctx,
@@ -3209,6 +3179,38 @@ mod tests {
         assert!(
             !index_blocks1.is_empty(),
             "Volume 1 should contain IndexManifest blocks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_fanout_failure_aborts_finalization() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("index_fanout_failure.era");
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .volume_count(2)
+            .build()
+            .await
+            .unwrap();
+        writer
+            .add_bytes("data.bin", b"fanout failure")
+            .await
+            .unwrap();
+        let current_block_id = writer.pipeline.blocks_written();
+        let target_block_id = u64::from(u32::MAX) - 6;
+        writer
+            .pipeline
+            .advance_block_id(target_block_id - current_block_id)
+            .unwrap();
+
+        let error = writer
+            .finalize()
+            .await
+            .expect_err("an index fanout failure must not publish a finalized archive");
+
+        assert!(
+            matches!(error, EraError::IndexError(_)),
+            "unexpected finalization error: {error:?}"
         );
     }
 

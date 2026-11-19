@@ -15,12 +15,16 @@
 //! - Single-volume: All shards in a single volume using `shard_idx % volume_count`
 //! - Matrix: Shards distributed using `(shard_idx + block_sequence) % volume_count`
 
-use crate::reader::ArchiveHealthStatus;
+use crate::reader::{ArchiveHealthStatus, ArchiveReader};
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
-use era_common::{compute_shard_crc, EraError, ErasureCodeConfig, Result, ShardHeader};
+use era_common::{
+    compute_shard_crc, ArchiveManifest, BlockId, BlockLocation, BlockType, EraError,
+    ErasureCodeConfig, Result, ShardHeader,
+};
+use era_crypto::{build_aad, AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_storage::LocalStorageBackend;
-use era_volume::{DistributionCalculator, VolumeReader};
+use era_volume::{DistributionCalculator, VolumeReader, DATA_REGION_START, HEADER_SIZE};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -284,6 +288,92 @@ impl Default for RepairOptions {
     }
 }
 
+async fn recovered_header_bytes(
+    reader: &VolumeReader<era_storage::LocalStorageReader>,
+    archive: &ArchiveReader,
+) -> Result<Bytes> {
+    let footer = reader.footer().ok_or_else(|| {
+        EraError::IntegrityError("Recovered header has no footer provenance".into())
+    })?;
+    let backup_offset = footer.backup_header_offset();
+    if backup_offset < DATA_REGION_START || backup_offset != footer.data_end_offset() {
+        return Err(EraError::IntegrityError(
+            "Recovered header is outside the finalized backup-header location".into(),
+        ));
+    }
+
+    // ArchiveReader may have authenticated a manifest from a different volume.
+    // Require a context-bound manifest from the volume whose header will be written.
+    let header = reader.header();
+    let manifest_offset = footer.manifest_offset();
+    if !footer.has_manifest()
+        || !(DATA_REGION_START..backup_offset).contains(&manifest_offset)
+        || header.archive_id() != archive.header().archive_id()
+        || header.epoch_id() != archive.epoch_id()
+        || header.total_volumes() != archive.header().total_volumes()
+    {
+        return Err(EraError::IntegrityError(
+            "Recovered header has no matching on-volume manifest".into(),
+        ));
+    }
+    let block_id = footer.manifest_block_id();
+    let location = BlockLocation::single(header.volume_id(), block_id, manifest_offset, 0);
+    let (block_type, block) = reader.read_typed_block(&location).await?;
+    let manifest_end = manifest_offset
+        .checked_add(u64::from(block.compressed_size))
+        .and_then(|end| end.checked_add(era_common::BlockHeader::SIZE as u64));
+    if block_type != BlockType::Manifest || !manifest_end.is_some_and(|end| end <= backup_offset) {
+        return Err(EraError::IntegrityError(
+            "Recovered header manifest is outside the finalized data region or has the wrong type"
+                .into(),
+        ));
+    }
+    let nonce = block.data.first_chunk::<NONCE_SIZE>().ok_or_else(|| {
+        EraError::IntegrityError("Recovered header manifest has a truncated nonce".into())
+    })?;
+    let volume_key = archive.session().unwrap_volume_key(
+        header.encrypted_volume_key().nonce(),
+        header.encrypted_volume_key().ciphertext(),
+    )?;
+    let block_id = BlockId::new(u64::from(block_id));
+    let block_key =
+        archive
+            .session()
+            .derive_block_key(&volume_key, block_id.sequence(), header.salt())?;
+    let aead = XChaCha20Poly1305Context::from_derived_key(&block_key.to_derived_key()?)?;
+    let aad = build_aad(
+        header.archive_id().0.as_bytes(),
+        header.epoch_id(),
+        BlockType::Manifest,
+        u32::from(header.volume_sequence()),
+        block_id,
+    );
+    let plaintext = aead.decrypt(nonce, &aad, &block.data[NONCE_SIZE..])?;
+    let (manifest, header_digest) = ArchiveManifest::from_bytes_with_header_digest(&plaintext)?;
+    if archive.manifest() != Some(&manifest) || manifest.epoch_id != header.epoch_id() {
+        return Err(EraError::IntegrityError(
+            "Recovered header manifest does not match the authenticated archive state".into(),
+        ));
+    }
+
+    let header_digest = header_digest.ok_or_else(|| {
+        EraError::IntegrityError("Manifest has no authenticated backup header digest".into())
+    })?;
+    let backup_bytes = reader.read_raw(backup_offset, HEADER_SIZE).await?;
+    if backup_bytes.len() != HEADER_SIZE {
+        return Err(EraError::CorruptedHeader(
+            "Backup header is truncated before primary-header repair".into(),
+        ));
+    }
+    if blake3::hash(&backup_bytes).as_bytes() != &header_digest {
+        return Err(EraError::IntegrityError(
+            "Backup header bytes do not match the authenticated manifest digest".into(),
+        ));
+    }
+
+    Ok(backup_bytes)
+}
+
 /// Repair an ERA archive using RS erasure coding
 ///
 /// This function:
@@ -369,7 +459,13 @@ pub async fn repair_archive_with_providers(
     );
 
     // Verify credentials before proceeding with repair
-    let _mk_array = try_unlock_with_providers(header, &providers)?;
+    let header_repair = if volume_reader.header_recovered_from_backup() {
+        let archive = ArchiveReader::open_with_providers(path, providers).await?;
+        Some(recovered_header_bytes(&volume_reader, &archive).await?)
+    } else {
+        let _mk_array = try_unlock_with_providers(header, &providers)?;
+        None
+    };
 
     // Create compressor (kept for future decode-based validation if needed)
     let _compressor: Box<dyn era_codec::Compressor> =
@@ -390,6 +486,16 @@ pub async fn repair_archive_with_providers(
             check_cancelled(&cancel_flag, "repair backup copy")?;
         } else {
             info!("Backup already exists: {}", backup_path.display());
+        }
+    }
+
+    if let Some(header_bytes) = header_repair {
+        if options.dry_run {
+            info!("Dry run: would restore the primary header from its authenticated backup");
+        } else {
+            check_cancelled(&cancel_flag, "primary header repair")?;
+            info!("Restoring primary header from its authenticated backup");
+            apply_primary_header_repair(path, header_bytes).await?;
         }
     }
 
@@ -784,6 +890,19 @@ async fn repair_shards_rs(
     result
 }
 
+async fn apply_primary_header_repair(path: &Path, header_bytes: Bytes) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&header_bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| EraError::Other(format!("Primary header repair task failed: {e}")))?
+}
+
 /// Apply shard repairs to the archive file
 fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -975,7 +1094,21 @@ async fn repair_archive_matrix_with_providers(
     );
 
     // Verify credentials before proceeding with repair
-    let _mk_array = try_unlock_with_providers(&header, &_providers)?;
+    let mut header_repairs = Vec::new();
+    if volume_readers
+        .iter()
+        .any(VolumeReader::header_recovered_from_backup)
+    {
+        let archive = ArchiveReader::open_with_providers(path, _providers).await?;
+        for (reader, volume_path) in volume_readers.iter().zip(&volume_paths) {
+            if reader.header_recovered_from_backup() {
+                let header_bytes = recovered_header_bytes(reader, &archive).await?;
+                header_repairs.push((volume_path.clone(), header_bytes));
+            }
+        }
+    } else {
+        let _mk_array = try_unlock_with_providers(&header, &_providers)?;
+    }
 
     let _compressor: Box<dyn era_codec::Compressor> =
         Box::new(ZstdCompressor::new(header.config().compression.level));
@@ -1002,6 +1135,19 @@ async fn repair_archive_matrix_with_providers(
                 .map_err(|e| EraError::Other(format!("Backup task failed: {e}")))??;
                 check_cancelled(&cancel_flag, "matrix repair backup copy")?;
             }
+        }
+    }
+
+    for (volume_path, header_bytes) in header_repairs {
+        if options.dry_run {
+            info!(
+                "Dry run: would restore primary header for {}",
+                volume_path.display()
+            );
+        } else {
+            check_cancelled(&cancel_flag, "matrix primary header repair")?;
+            info!("Restoring primary header for {}", volume_path.display());
+            apply_primary_header_repair(&volume_path, header_bytes).await?;
         }
     }
 

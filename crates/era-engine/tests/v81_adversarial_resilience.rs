@@ -223,12 +223,11 @@ async fn create_single_volume_archive(
 }
 
 // =============================================================================
-// TEST 1: Corrupted primary header is rejected (security: no silent backup recovery)
+// TEST 1: Corrupted primary and backup headers are rejected
 // =============================================================================
 #[tokio::test]
-async fn test_v81_recover_from_corrupted_primary_header() -> Result<(), Box<dyn std::error::Error>>
-{
-    println!("\n=== TEST: V8.1 Corrupted Primary Header Rejected ===");
+async fn test_v81_corrupted_headers_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n=== TEST: V8.1 Corrupted Headers Rejected ===");
 
     let temp_dir = TempDir::new()?;
     let repo_dir = temp_dir.path().join("repo");
@@ -244,19 +243,17 @@ async fn test_v81_recover_from_corrupted_primary_header() -> Result<(), Box<dyn 
     let archive_path = create_single_volume_archive(&repo_dir, &source_dir, &original_data).await?;
     println!("✅ Archive created at {:?}", archive_path);
 
-    // Corrupt primary header
+    // Originally only the primary was damaged; FIND-03 recovers that fixture.
+    // Damage both independently stored headers to retain the rejection check.
     let saboteur = V81Saboteur::new(&archive_path);
     saboteur.corrupt_primary_header();
+    saboteur.corrupt_backup_header();
 
-    // Corrupted primary header must be rejected (no silent backup recovery)
-    println!("🔒 Verifying corrupted primary header is rejected...");
+    println!("🔒 Verifying corrupted headers are rejected...");
     let result = ArchiveReader::open(&archive_path, "testpass").await;
-    assert!(
-        result.is_err(),
-        "Corrupted primary header should be rejected"
-    );
+    assert!(result.is_err(), "Corrupted headers should be rejected");
 
-    println!("🎉 SUCCESS: Corrupted primary header correctly rejected!");
+    println!("🎉 SUCCESS: Corrupted headers correctly rejected!");
     Ok(())
 }
 
@@ -305,12 +302,12 @@ async fn test_v81_recover_from_corrupted_primary_footer() -> Result<(), Box<dyn 
 }
 
 // =============================================================================
-// TEST 3: Corrupted header AND footer is rejected
+// TEST 3: Corrupted headers AND primary footer are rejected
 // =============================================================================
 #[tokio::test]
-async fn test_v81_recover_from_corrupted_header_and_footer(
+async fn test_v81_corrupted_headers_and_primary_footer_rejected(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n=== TEST: V8.1 Corrupted Header AND Footer Rejected ===");
+    println!("\n=== TEST: V8.1 Corrupted Headers AND Primary Footer Rejected ===");
 
     let temp_dir = TempDir::new()?;
     let repo_dir = temp_dir.path().join("repo");
@@ -324,20 +321,20 @@ async fn test_v81_recover_from_corrupted_header_and_footer(
     let archive_path = create_single_volume_archive(&repo_dir, &source_dir, &original_data).await?;
     println!("✅ Archive created at {:?}", archive_path);
 
-    // Corrupt BOTH primary header AND primary footer
+    // Damage both header copies while retaining the original primary-footer scenario.
     let saboteur = V81Saboteur::new(&archive_path);
     saboteur.corrupt_primary_header();
+    saboteur.corrupt_backup_header();
     saboteur.corrupt_primary_footer();
 
-    // Corrupted primary header must be rejected
-    println!("🔒 Verifying corrupted header+footer is rejected...");
+    println!("🔒 Verifying corrupted headers+footer are rejected...");
     let result = ArchiveReader::open(&archive_path, "testpass").await;
     assert!(
         result.is_err(),
-        "Corrupted primary header should be rejected even with backup footer"
+        "Corrupted headers should be rejected even with backup footer"
     );
 
-    println!("🎉 SUCCESS: Corrupted header+footer correctly rejected!");
+    println!("🎉 SUCCESS: Corrupted headers+footer correctly rejected!");
     Ok(())
 }
 

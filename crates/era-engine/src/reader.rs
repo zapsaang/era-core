@@ -47,6 +47,19 @@ const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
 const MAX_EXTRACTION_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
 
 const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
+const MAX_CATALOG_PLAINTEXT_SIZE: u64 = 1024 * 1024 * 1024;
+const MAX_CATALOG_CHUNKS: u32 = 128;
+const MAX_CATALOG_SCAN_CANDIDATES: usize = 256;
+const CATALOG_SCAN_WINDOW: u64 = 64 * 1024;
+
+#[derive(Clone, Copy)]
+struct CatalogBlockLocator {
+    reader_idx: usize,
+    offset: u64,
+    expected_size: Option<u32>,
+    block_id: u32,
+    require_manifest: bool,
+}
 
 /// Options for extraction
 #[derive(Debug, Clone, Default)]
@@ -99,6 +112,7 @@ pub struct ArchiveReader {
     /// Compression algorithm type
     compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
+    catalog_recovered_from_backup: bool,
     /// Per-volume committed end offsets loaded from the highest-sequence manifest.
     /// `None` = no manifest (v8.1 or not yet loaded).
     /// `Some(vec)` = manifest loaded successfully (v8.2).
@@ -137,6 +151,7 @@ impl ArchiveReader {
             compression_level: header.config().compression.level,
             compression_algorithm: header.config().compression.algorithm,
             catalog: None,
+            catalog_recovered_from_backup: false,
             volume_committed_ends: None,
             manifest: None,
             index_reader: None,
@@ -562,7 +577,8 @@ impl ArchiveReader {
 
         self.embedded_index_recovery_failed = false;
 
-        // Fast path: try V2.1 IndexReader recovery from volume footer
+        // Fast path: try every V2.1 index copy recorded in a volume footer.
+        let mut last_error = None;
         for reader in &self.volume_readers {
             if let Some(footer) = reader.footer() {
                 if footer.has_index() {
@@ -576,24 +592,34 @@ impl ArchiveReader {
                     .await
                     {
                         Ok(index_reader) => {
-                            debug!("V2.1 index recovered from volume footer");
+                            debug!(
+                                "V2.1 index recovered from volume {} footer",
+                                reader.header().volume_sequence()
+                            );
                             self.index_reader = Some(index_reader);
                             self.embedded_index_recovery_failed = false;
                             return Ok(true);
                         }
                         Err(e) => {
-                            self.embedded_index_recovery_failed = true;
                             warn!(
-                                "V2.1 index recovery failed, continuing without index: {}",
+                                "V2.1 index recovery failed on volume {}, trying next candidate: {}",
+                                reader.header().volume_sequence(),
                                 e
                             );
-                            // Don't fall through to legacy path — the footer's index location
-                            // points to V2.1 typed blocks which can't be unpacked as data blocks.
-                            return Ok(false);
+                            last_error = Some(e);
                         }
                     }
                 }
             }
+        }
+
+        if let Some(error) = last_error {
+            warn!(
+                "V2.1 index recovery failed, continuing without index: {}",
+                error
+            );
+            self.embedded_index_recovery_failed = true;
+            return Ok(false);
         }
 
         // No footer with index found — nothing to restore
@@ -860,6 +886,7 @@ impl ArchiveReader {
 
     /// Load the catalog from any available volume
     /// Each volume contains a copy of the catalog, enabling recovery from any volume
+    /// Primary copies across all eligible volumes are attempted before EC backups.
     pub async fn load_catalog(&mut self) -> Result<&Catalog> {
         if let Some(ref catalog) = self.catalog {
             return Ok(catalog);
@@ -885,6 +912,7 @@ impl ArchiveReader {
         }
 
         let mut last_error: Option<EraError> = None;
+        let mut backup_candidates = Vec::new();
 
         for reader_idx in catalog_candidates {
             let reader = &self.volume_readers[reader_idx];
@@ -892,98 +920,347 @@ impl ArchiveReader {
                 Some(f) => f,
                 None => continue,
             };
-
-            let catalog_offset = footer.catalog_offset();
-            let catalog_size = footer.catalog_size();
-            let catalog_block_id = footer.catalog_block_id();
+            let primary = CatalogBlockLocator {
+                reader_idx,
+                offset: footer.catalog_offset(),
+                expected_size: Some(footer.catalog_size()),
+                block_id: footer.catalog_block_id(),
+                require_manifest: false,
+            };
+            let erasure_enabled = reader.header().config().erasure.is_some();
 
             debug!(
                 "Attempting to load catalog from volume {} at offset={}, size={}, block_id={}",
-                reader_idx, catalog_offset, catalog_size, catalog_block_id
+                reader_idx,
+                primary.offset,
+                primary.expected_size.unwrap_or(0),
+                primary.block_id
             );
 
-            let catalog_location = BlockLocation::single(
-                reader.header().volume_id(),
-                catalog_block_id,
-                catalog_offset,
-                catalog_size,
-            );
-
-            match self.volume_readers[reader_idx]
-                .read_block(&catalog_location)
-                .await
-            {
-                Ok(encrypted_block) => {
-                    let unpacker = self.create_unpacker();
-                    let volume_index = u32::from(reader.header().volume_sequence());
-                    match unpacker.unpack_with_type(
-                        &encrypted_block,
-                        volume_index,
-                        era_common::BlockType::Catalog,
-                    ) {
-                        Ok(chunks) => {
-                            if chunks.index.entries.is_empty() {
-                                last_error = Some(EraError::EmptyCatalog);
-                                continue;
-                            }
-
-                            let first_entry = &chunks.index.entries[0];
-                            let start = first_entry.offset as usize;
-                            let end = start + first_entry.length as usize;
-                            if end > chunks.data.len() {
-                                last_error = Some(EraError::decompression(
-                                    "Catalog chunk offset exceeds data size",
-                                ));
-                                continue;
-                            }
-                            let first_chunk_data = chunks.data.slice(start..end);
-
-                            let catalog_data = match self
-                                .assemble_catalog_data(
-                                    reader_idx,
-                                    catalog_offset,
-                                    catalog_size,
-                                    catalog_block_id,
-                                    first_chunk_data,
-                                )
-                                .await
-                            {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    last_error = Some(e);
-                                    continue;
-                                }
-                            };
-
-                            let catalog: Catalog = match Catalog::from_bytes(&catalog_data) {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    last_error = Some(e);
-                                    continue;
-                                }
-                            };
-
-                            return Ok(self.catalog.insert(catalog));
-                        }
-                        Err(e) => {
-                            warn!("Failed to unpack catalog from volume {}: {}", reader_idx, e);
-                            last_error = Some(e);
-                            continue;
-                        }
-                    }
-                }
-                Err(e) => {
+            match self.try_load_catalog_from_offset(primary).await {
+                Ok(catalog) => return Ok(self.catalog.insert(catalog)),
+                Err(primary_error) => {
                     warn!(
-                        "Failed to read catalog block from volume {}: {}",
-                        reader_idx, e
+                        "Failed to load primary catalog from volume {}: {}",
+                        reader_idx, primary_error
                     );
-                    last_error = Some(e);
-                    continue;
+                    if !erasure_enabled {
+                        last_error = Some(primary_error);
+                        continue;
+                    }
+                    backup_candidates.push((primary, primary_error));
+                }
+            }
+        }
+
+        for (primary, primary_error) in backup_candidates {
+            let reader_idx = primary.reader_idx;
+            match self.recover_ec_catalog_backup(primary).await {
+                Ok(catalog) => {
+                    self.catalog_recovered_from_backup = true;
+                    warn!(
+                        "Catalog recovered from EC backup in volume {}; primary catalog still needs repair",
+                        reader_idx
+                    );
+                    return Ok(self.catalog.insert(catalog));
+                }
+                Err(backup_error) => {
+                    last_error = Some(EraError::IntegrityError(format!(
+                        "Catalog primary and EC backup both failed in volume {}: primary: {}; backup: {}",
+                        reader_idx, primary_error, backup_error
+                    )));
                 }
             }
         }
 
         Err(last_error.unwrap_or(EraError::EmptyArchive))
+    }
+
+    async fn try_load_catalog_from_offset(&self, locator: CatalogBlockLocator) -> Result<Catalog> {
+        let reader = self.volume_readers.get(locator.reader_idx).ok_or_else(|| {
+            EraError::InvalidFormat("Catalog volume index is out of bounds".into())
+        })?;
+        let location = BlockLocation::single(
+            reader.header().volume_id(),
+            locator.block_id,
+            locator.offset,
+            locator.expected_size.unwrap_or(0),
+        );
+        let (block_type, encrypted_block) = reader.read_typed_block(&location).await?;
+        if block_type != BlockType::Catalog {
+            return Err(EraError::InvalidFormat(
+                "Catalog candidate has a different block type".into(),
+            ));
+        }
+        if let Some(expected_size) = locator.expected_size {
+            if encrypted_block.compressed_size != expected_size {
+                return Err(EraError::IntegrityError(format!(
+                    "Catalog first block length {} differs from footer size {}",
+                    encrypted_block.compressed_size, expected_size
+                )));
+            }
+        }
+
+        let unpacker = self.create_unpacker();
+        let volume_index = u32::from(reader.header().volume_sequence());
+        let chunks =
+            unpacker.unpack_with_type(&encrypted_block, volume_index, BlockType::Catalog)?;
+        match chunks.index.entries.len() {
+            0 => return Err(EraError::EmptyCatalog),
+            1 => {}
+            _ => {
+                return Err(EraError::InvalidFormat(
+                    "Catalog block must contain exactly one chunk".into(),
+                ));
+            }
+        }
+
+        let first_entry = &chunks.index.entries[0];
+        let start = usize::try_from(first_entry.offset)
+            .map_err(|_| EraError::InvalidFormat("Catalog chunk offset exceeds usize".into()))?;
+        let length = usize::try_from(first_entry.length)
+            .map_err(|_| EraError::InvalidFormat("Catalog chunk length exceeds usize".into()))?;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| EraError::InvalidFormat("Catalog chunk range overflow".into()))?;
+        if end > chunks.data.len() {
+            return Err(EraError::decompression(
+                "Catalog chunk offset exceeds data size",
+            ));
+        }
+        let first_chunk_data = chunks.data.slice(start..end);
+        let assembly_locator = CatalogBlockLocator {
+            expected_size: Some(encrypted_block.compressed_size),
+            ..locator
+        };
+        let catalog_data = self
+            .assemble_catalog_data(assembly_locator, first_chunk_data)
+            .await?;
+
+        if locator.require_manifest && self.manifest.is_none() {
+            return Err(EraError::IntegrityError(
+                "EC backup Catalog recovery requires an authenticated manifest".into(),
+            ));
+        }
+        if let Some(manifest) = self.manifest.as_ref() {
+            era_crypto::verify_catalog_commitment(&catalog_data, &manifest.catalog_commitment)?;
+        }
+
+        Catalog::from_bytes(&catalog_data)
+    }
+
+    fn catalog_metadata_end(&self, reader_idx: usize, start: u64) -> Result<u64> {
+        let reader = self.volume_readers.get(reader_idx).ok_or_else(|| {
+            EraError::InvalidFormat("Catalog volume index is out of bounds".into())
+        })?;
+        let footer = reader
+            .footer()
+            .ok_or_else(|| EraError::InvalidFormat("Catalog volume has no footer".into()))?;
+        let mut end = footer.data_end_offset();
+        for boundary in [
+            footer.index_offset(),
+            footer.manifest_offset(),
+            footer.backup_header_offset(),
+        ] {
+            if boundary > start {
+                end = end.min(boundary);
+            }
+        }
+        if start >= end {
+            return Err(EraError::InvalidFormat(
+                "Catalog metadata range is empty or inverted".into(),
+            ));
+        }
+        Ok(end)
+    }
+
+    async fn catalog_header_chain(
+        &self,
+        reader_idx: usize,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u64>> {
+        let reader = &self.volume_readers[reader_idx];
+        let max_block_size = u64::try_from(era_volume::MAX_SHARD_SIZE)
+            .map_err(|_| EraError::InvalidFormat("Maximum block size exceeds u64".into()))?;
+        let header_size = u64::try_from(era_common::BlockHeader::SIZE)
+            .map_err(|_| EraError::InvalidFormat("Block header size exceeds u64".into()))?;
+        let mut offsets = Vec::new();
+        let mut offset = start;
+
+        while offsets.len() < MAX_CATALOG_SCAN_CANDIDATES
+            && offset <= end.saturating_sub(header_size)
+        {
+            let header_bytes = reader
+                .read_raw(offset, era_common::BlockHeader::SIZE)
+                .await?;
+            let Some(header) = era_common::BlockHeader::from_bytes(&header_bytes) else {
+                break;
+            };
+            if header.block_type != BlockType::Catalog || u64::from(header.length) > max_block_size
+            {
+                break;
+            }
+            let Some(block_end) = offset
+                .checked_add(header_size)
+                .and_then(|value| value.checked_add(u64::from(header.length)))
+            else {
+                break;
+            };
+            if block_end > end {
+                break;
+            }
+            offsets.push(offset);
+            offset = block_end;
+        }
+
+        Ok(offsets)
+    }
+
+    async fn scan_catalog_candidates(
+        &self,
+        reader_idx: usize,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u64>> {
+        let reader = &self.volume_readers[reader_idx];
+        let max_block_size = u64::try_from(era_volume::MAX_SHARD_SIZE)
+            .map_err(|_| EraError::InvalidFormat("Maximum block size exceeds u64".into()))?;
+        let header_size = u64::try_from(era_common::BlockHeader::SIZE)
+            .map_err(|_| EraError::InvalidFormat("Block header size exceeds u64".into()))?;
+        let mut candidates = Vec::new();
+        let mut window_start = start;
+
+        while window_start <= end.saturating_sub(header_size) {
+            let read_len =
+                usize::try_from((end - window_start).min(CATALOG_SCAN_WINDOW + header_size - 1))
+                    .map_err(|_| {
+                        EraError::InvalidFormat("Catalog scan window exceeds usize".into())
+                    })?;
+            let bytes = reader.read_raw(window_start, read_len).await?;
+            if bytes.len() < era_common::BlockHeader::SIZE {
+                break;
+            }
+
+            for relative in 0..=bytes.len() - era_common::BlockHeader::SIZE {
+                let relative_u64 = u64::try_from(relative).map_err(|_| {
+                    EraError::InvalidFormat("Catalog scan offset exceeds u64".into())
+                })?;
+                let offset = window_start + relative_u64;
+                if offset > end.saturating_sub(header_size) {
+                    break;
+                }
+                let Some(header) = era_common::BlockHeader::from_bytes(
+                    &bytes[relative..relative + era_common::BlockHeader::SIZE],
+                ) else {
+                    continue;
+                };
+                if header.block_type != BlockType::Catalog
+                    || u64::from(header.length) > max_block_size
+                    || candidates.last().is_some_and(|last| *last >= offset)
+                {
+                    continue;
+                }
+                let Some(data_offset) = offset.checked_add(header_size) else {
+                    continue;
+                };
+                let Some(block_end) = data_offset.checked_add(u64::from(header.length)) else {
+                    continue;
+                };
+                if block_end > end {
+                    continue;
+                }
+
+                let payload = reader
+                    .read_raw(
+                        data_offset,
+                        usize::try_from(header.length).map_err(|_| {
+                            EraError::InvalidFormat("Catalog block length exceeds usize".into())
+                        })?,
+                    )
+                    .await?;
+                if header.verify(&payload) {
+                    if candidates.len() >= MAX_CATALOG_SCAN_CANDIDATES {
+                        return Err(EraError::IntegrityError(
+                            "Catalog scan exceeded its candidate bound".into(),
+                        ));
+                    }
+                    candidates.push(offset);
+                }
+            }
+
+            window_start = window_start
+                .checked_add(CATALOG_SCAN_WINDOW.min(end - window_start))
+                .ok_or_else(|| EraError::InvalidFormat("Catalog scan offset overflow".into()))?;
+        }
+
+        Ok(candidates)
+    }
+
+    async fn recover_ec_catalog_backup(&self, primary: CatalogBlockLocator) -> Result<Catalog> {
+        if self.manifest.is_none() {
+            return Err(EraError::IntegrityError(
+                "EC backup Catalog recovery requires an authenticated manifest".into(),
+            ));
+        }
+        let metadata_end = self.catalog_metadata_end(primary.reader_idx, primary.offset)?;
+        let mut last_error =
+            EraError::IntegrityError("No EC backup Catalog candidate found".into());
+
+        let chain = self
+            .catalog_header_chain(primary.reader_idx, primary.offset, metadata_end)
+            .await?;
+        for (ordinal, offset) in chain.iter().copied().enumerate().skip(1) {
+            let chunk_count = u32::try_from(ordinal)
+                .map_err(|_| EraError::InvalidFormat("Catalog chunk count exceeds u32".into()))?;
+            let Some(block_id) = primary.block_id.checked_add(chunk_count) else {
+                continue;
+            };
+            let candidate = CatalogBlockLocator {
+                reader_idx: primary.reader_idx,
+                offset,
+                expected_size: None,
+                block_id,
+                require_manifest: true,
+            };
+            match self.try_load_catalog_from_offset(candidate).await {
+                Ok(catalog) => return Ok(catalog),
+                Err(error) => last_error = error,
+            }
+        }
+
+        let candidates = self
+            .scan_catalog_candidates(primary.reader_idx, primary.offset, metadata_end)
+            .await?;
+        let max_chunks = u32::try_from(candidates.len())
+            .unwrap_or(MAX_CATALOG_CHUNKS)
+            .min(MAX_CATALOG_CHUNKS);
+        for chunk_count in 1..=max_chunks {
+            let suffix_index = candidates.len()
+                - usize::try_from(chunk_count).map_err(|_| {
+                    EraError::InvalidFormat("Catalog chunk count exceeds usize".into())
+                })?;
+            let offset = candidates[suffix_index];
+            if offset <= primary.offset {
+                continue;
+            }
+            let Some(block_id) = primary.block_id.checked_add(chunk_count) else {
+                continue;
+            };
+            let candidate = CatalogBlockLocator {
+                reader_idx: primary.reader_idx,
+                offset,
+                expected_size: None,
+                block_id,
+                require_manifest: true,
+            };
+            match self.try_load_catalog_from_offset(candidate).await {
+                Ok(catalog) => return Ok(catalog),
+                Err(error) => last_error = error,
+            }
+        }
+
+        Err(last_error)
     }
 
     async fn load_manifest(&mut self) -> Result<()> {
@@ -1128,104 +1405,180 @@ impl ArchiveReader {
 
     async fn assemble_catalog_data(
         &self,
-        reader_idx: usize,
-        catalog_offset: u64,
-        catalog_size: u32,
-        catalog_block_id: u32,
+        locator: CatalogBlockLocator,
         first_chunk_data: bytes::Bytes,
     ) -> Result<Vec<u8>> {
-        if first_chunk_data.len() >= 12 {
-            let chunk_count =
-                u32::from_le_bytes(first_chunk_data[0..4].try_into().unwrap_or([0; 4]));
-            let total_len =
-                u64::from_le_bytes(first_chunk_data[4..12].try_into().unwrap_or([0; 8]));
-
-            if chunk_count > 1 && total_len > 0 {
-                debug!(
-                    "Multi-block catalog: {} blocks, {} total bytes",
-                    chunk_count, total_len
-                );
-                let mut catalog_buf = Vec::with_capacity(total_len as usize);
-                catalog_buf.extend_from_slice(&first_chunk_data[12..]);
-
-                let bh_size = era_common::BlockHeader::SIZE as u64;
-                let mut next_offset = catalog_offset + bh_size + catalog_size as u64;
-
-                for block_num in 1..chunk_count {
-                    let header_bytes = self.volume_readers[reader_idx]
-                        .read_raw(next_offset, era_common::BlockHeader::SIZE)
-                        .await?;
-                    let header =
-                        era_common::BlockHeader::from_bytes(&header_bytes).ok_or_else(|| {
-                            EraError::CorruptedHeader(format!(
-                                "Invalid catalog block header at offset {} (block {}/{})",
-                                next_offset, block_num, chunk_count
-                            ))
-                        })?;
-
-                    let next_block_id = catalog_block_id + block_num;
-                    let block_location = BlockLocation::single(
-                        self.volume_readers[reader_idx].header().volume_id(),
-                        next_block_id,
-                        next_offset,
-                        header.length,
-                    );
-
-                    let enc_block = self.volume_readers[reader_idx]
-                        .read_block(&block_location)
-                        .await?;
-
-                    let block_unpacker = self.create_unpacker();
-                    let volume_index =
-                        u32::from(self.volume_readers[reader_idx].header().volume_sequence());
-                    let block_chunks = block_unpacker.unpack_with_type(
-                        &enc_block,
-                        volume_index,
-                        era_common::BlockType::Catalog,
-                    )?;
-
-                    if block_chunks.index.entries.is_empty() {
-                        return Err(EraError::IntegrityError(format!(
-                            "Catalog continuation block {} has no index entries",
-                            block_num
-                        )));
-                    }
-                    let entry = &block_chunks.index.entries[0];
-                    let s = entry.offset as usize;
-                    let e = s + entry.length as usize;
-                    if e > block_chunks.data.len() {
-                        return Err(EraError::IntegrityError(format!(
-                            "Catalog continuation block {} chunk bounds exceed data: {} > {}",
-                            block_num,
-                            e,
-                            block_chunks.data.len()
-                        )));
-                    }
-                    catalog_buf.extend_from_slice(&block_chunks.data[s..e]);
-
-                    next_offset += bh_size + header.length as u64;
-                }
-
-                if catalog_buf.len() != total_len as usize {
-                    return Err(EraError::IntegrityError(format!(
-                        "Catalog reassembled length {} does not match advertised total {}",
-                        catalog_buf.len(),
-                        total_len
-                    )));
-                }
-
-                Ok(catalog_buf)
-            } else {
-                let stripped = first_chunk_data.slice(12..);
-                if Catalog::from_bytes(&stripped).is_ok() {
-                    Ok(stripped.to_vec())
-                } else {
-                    Ok(first_chunk_data.to_vec())
-                }
-            }
-        } else {
-            Ok(first_chunk_data.to_vec())
+        if first_chunk_data.len() < 12 {
+            return Ok(first_chunk_data.to_vec());
         }
+
+        let chunk_count = u32::from_le_bytes(
+            first_chunk_data[0..4]
+                .try_into()
+                .map_err(|_| EraError::InvalidFormat("Catalog chunk count is invalid".into()))?,
+        );
+        let total_len = u64::from_le_bytes(
+            first_chunk_data[4..12]
+                .try_into()
+                .map_err(|_| EraError::InvalidFormat("Catalog total length is invalid".into()))?,
+        );
+
+        if chunk_count <= 1 || total_len == 0 {
+            let stripped = first_chunk_data.slice(12..);
+            if Catalog::from_bytes(&stripped).is_ok() {
+                return Ok(stripped.to_vec());
+            }
+            return Ok(first_chunk_data.to_vec());
+        }
+        if chunk_count > MAX_CATALOG_CHUNKS || total_len > MAX_CATALOG_PLAINTEXT_SIZE {
+            return Err(EraError::InvalidFormat(
+                "Catalog framing exceeds its chunk or plaintext bound".into(),
+            ));
+        }
+
+        let max_chunk_size = u64::try_from(era_volume::MAX_SHARD_SIZE / 2)
+            .map_err(|_| EraError::InvalidFormat("Catalog chunk bound exceeds u64".into()))?;
+        let expected_chunks = total_len.div_ceil(max_chunk_size).max(1);
+        if u64::from(chunk_count) != expected_chunks {
+            return Err(EraError::InvalidFormat(format!(
+                "Catalog chunk count {} does not match total length {}",
+                chunk_count, total_len
+            )));
+        }
+
+        let reader = self.volume_readers.get(locator.reader_idx).ok_or_else(|| {
+            EraError::InvalidFormat("Catalog volume index is out of bounds".into())
+        })?;
+        let metadata_end = self.catalog_metadata_end(locator.reader_idx, locator.offset)?;
+        let header_size = u64::try_from(era_common::BlockHeader::SIZE)
+            .map_err(|_| EraError::InvalidFormat("Block header size exceeds u64".into()))?;
+        let available_span = metadata_end - locator.offset;
+        if u64::from(chunk_count) > available_span / header_size {
+            return Err(EraError::InvalidFormat(
+                "Catalog chunk count exceeds its metadata span".into(),
+            ));
+        }
+
+        debug!(
+            "Multi-block catalog: {} blocks, {} total bytes",
+            chunk_count, total_len
+        );
+        let capacity = usize::try_from(total_len)
+            .map_err(|_| EraError::InvalidFormat("Catalog total length exceeds usize".into()))?;
+        let mut catalog_buf = Vec::with_capacity(capacity);
+        let first_payload = &first_chunk_data[12..];
+        if u64::try_from(first_payload.len()).unwrap_or(u64::MAX) > total_len {
+            return Err(EraError::IntegrityError(
+                "Catalog first chunk exceeds advertised total".into(),
+            ));
+        }
+        catalog_buf.extend_from_slice(first_payload);
+
+        let first_size = locator.expected_size.ok_or_else(|| {
+            EraError::InvalidFormat("Catalog first block length is unavailable".into())
+        })?;
+        let mut next_offset = locator
+            .offset
+            .checked_add(header_size)
+            .and_then(|value| value.checked_add(u64::from(first_size)))
+            .ok_or_else(|| EraError::InvalidFormat("Catalog offset overflow".into()))?;
+
+        for block_num in 1..chunk_count {
+            if next_offset > metadata_end.saturating_sub(header_size) {
+                return Err(EraError::IntegrityError(
+                    "Catalog continuation exceeds its metadata range".into(),
+                ));
+            }
+            let header_bytes = reader
+                .read_raw(next_offset, era_common::BlockHeader::SIZE)
+                .await?;
+            let header = era_common::BlockHeader::from_bytes(&header_bytes).ok_or_else(|| {
+                EraError::CorruptedHeader(format!(
+                    "Invalid catalog block header at offset {} (block {}/{})",
+                    next_offset, block_num, chunk_count
+                ))
+            })?;
+            if header.block_type != BlockType::Catalog {
+                return Err(EraError::IntegrityError(format!(
+                    "Catalog continuation block {} has a different block type",
+                    block_num
+                )));
+            }
+            let block_end = next_offset
+                .checked_add(header_size)
+                .and_then(|value| value.checked_add(u64::from(header.length)))
+                .ok_or_else(|| EraError::InvalidFormat("Catalog block offset overflow".into()))?;
+            if block_end > metadata_end {
+                return Err(EraError::IntegrityError(
+                    "Catalog continuation block exceeds its metadata range".into(),
+                ));
+            }
+
+            let next_block_id = locator.block_id.checked_add(block_num).ok_or_else(|| {
+                EraError::InvalidFormat("Catalog continuation block ID overflow".into())
+            })?;
+            let block_location = BlockLocation::single(
+                reader.header().volume_id(),
+                next_block_id,
+                next_offset,
+                header.length,
+            );
+            let (block_type, enc_block) = reader.read_typed_block(&block_location).await?;
+            if block_type != BlockType::Catalog {
+                return Err(EraError::IntegrityError(
+                    "Catalog continuation type changed during read".into(),
+                ));
+            }
+
+            let block_unpacker = self.create_unpacker();
+            let volume_index = u32::from(reader.header().volume_sequence());
+            let block_chunks =
+                block_unpacker.unpack_with_type(&enc_block, volume_index, BlockType::Catalog)?;
+            if block_chunks.index.entries.len() != 1 {
+                return Err(EraError::IntegrityError(format!(
+                    "Catalog continuation block {} must contain exactly one chunk",
+                    block_num
+                )));
+            }
+            let entry = &block_chunks.index.entries[0];
+            let start = usize::try_from(entry.offset).map_err(|_| {
+                EraError::InvalidFormat("Catalog continuation offset exceeds usize".into())
+            })?;
+            let length = usize::try_from(entry.length).map_err(|_| {
+                EraError::InvalidFormat("Catalog continuation length exceeds usize".into())
+            })?;
+            let end = start.checked_add(length).ok_or_else(|| {
+                EraError::InvalidFormat("Catalog continuation chunk range overflow".into())
+            })?;
+            if end > block_chunks.data.len() {
+                return Err(EraError::IntegrityError(format!(
+                    "Catalog continuation block {} chunk bounds exceed data: {} > {}",
+                    block_num,
+                    end,
+                    block_chunks.data.len()
+                )));
+            }
+            let assembled_len = catalog_buf.len().checked_add(length).ok_or_else(|| {
+                EraError::InvalidFormat("Catalog assembled length overflow".into())
+            })?;
+            if u64::try_from(assembled_len).unwrap_or(u64::MAX) > total_len {
+                return Err(EraError::IntegrityError(
+                    "Catalog continuation exceeds advertised total".into(),
+                ));
+            }
+            catalog_buf.extend_from_slice(&block_chunks.data[start..end]);
+            next_offset = block_end;
+        }
+
+        if u64::try_from(catalog_buf.len()).unwrap_or(u64::MAX) != total_len {
+            return Err(EraError::IntegrityError(format!(
+                "Catalog reassembled length {} does not match advertised total {}",
+                catalog_buf.len(),
+                total_len
+            )));
+        }
+
+        Ok(catalog_buf)
     }
 
     fn check_read_bound(&self, volume_sequence: u16, offset: u64, read_len: u64) -> Result<()> {
@@ -2119,6 +2472,19 @@ impl ArchiveReader {
         };
 
         let mut stats = Self::verify_with_iterator(catalog, &mut iter).await?;
+        for reader in &self.volume_readers {
+            if reader.header_recovered_from_backup() {
+                stats.warnings.push(format!(
+                    "Volume {}: using backup header; primary header still requires repair",
+                    reader.header().volume_sequence()
+                ));
+            }
+        }
+        if self.catalog_recovered_from_backup {
+            stats.warnings.push(
+                "Catalog recovered from EC backup; primary Catalog still requires repair".into(),
+            );
+        }
         stats.archive_health = self.classify_archive_health(&stats);
         self.log_verify_result(&stats);
         Ok(stats)

@@ -702,7 +702,7 @@ fn nv8_writer_mk_zeroize_not_volatile() {
 // SECTION 9: BEHAVIORAL ATTACKS — E2E INTEGRATION
 // ============================================================================
 
-/// E2E: Verify that corrupted magic bytes are rejected on read
+/// E2E: Verify that corrupted magic bytes in both header copies are rejected on read
 #[tokio::test]
 async fn behavioral_corrupted_magic_rejected() {
     let temp = TempDir::new().unwrap();
@@ -719,16 +719,15 @@ async fn behavioral_corrupted_magic_rejected() {
     writer.add_file(&input_dir.join("test.txt")).await.unwrap();
     writer.finalize().await.unwrap();
 
-    // Corrupt the magic bytes
     let mut data = fs::read(&archive_path).unwrap();
-    // The protobuf length-delimited format starts with a varint length,
-    // then the message. We need to find and corrupt the magic field WITHIN
-    // the protobuf message, not just the first bytes of the file.
-    // But first, let's just verify that from_bytes properly validates.
+    let footer =
+        era_volume::Footer::from_bytes(&data[data.len() - era_volume::FOOTER_SIZE..]).unwrap();
+    let backup_header_offset = usize::try_from(footer.backup_header_offset()).unwrap();
 
-    // Simple approach: zero out first 32 bytes (destroys protobuf framing too)
-    for i in 0..32.min(data.len()) {
-        data[i] = 0xFF;
+    // FIND-03 recovers primary-only damage from the backup header. Preserve the
+    // original rejection check by destroying the framing of both header copies.
+    for header_offset in [0, backup_header_offset] {
+        data[header_offset..header_offset + 32].fill(0xFF);
     }
     fs::write(&archive_path, &data).unwrap();
 

@@ -6,10 +6,8 @@
 //! This module is part of the God Object decomposition effort (Phase 2).
 
 use era_common::{
-    BlockId, BlockLocation, BlockType, EncryptedMacroBlock, EraError, MatrixShardEntry, Result,
-    VolumeId,
+    BlockLocation, BlockType, EncryptedMacroBlock, EraError, MatrixShardEntry, Result, VolumeId,
 };
-use era_crypto::encrypt_with_context_for_type;
 use era_storage::StorageBackend;
 use era_volume::{VolumePool, VolumePoolStats, VolumeWriter};
 
@@ -390,87 +388,68 @@ impl<B: StorageBackend> VolumeStage<B> {
         Ok(manifest_locations)
     }
 
-    /// Write index block fanout to volumes 1..N-1.
+    /// Write a complete, independently recoverable index to every active volume.
     ///
-    /// Volume 0 is assumed to have already been written by the caller
-    /// (typically via `IndexBuilder::finalize_with_starting_block_id`).
-    /// This method re-encrypts the same plaintext for each remaining volume
-    /// using per-volume nonces to ensure proper AEAD context binding.
-    ///
-    /// # Arguments
-    /// * `index_plaintext` - The serialized MetaIndex plaintext bytes
-    /// * `index_block_id` - The logical block ID used for key derivation
-    /// * `session` - KeySession for block key derivation
-    /// * `volume_key` - VolumeKey for block key derivation
-    /// * `nonce_context` - 16-byte nonce context for per-volume nonce derivation
-    /// * `archive_id` - 16-byte archive ID for AAD binding
-    /// * `epoch_id` - Epoch ID for AAD binding
-    ///
-    /// # Returns
-    /// Per-volume locations for slots 1..N-1 as `(offset, size, block_id)` tuples.
-    #[allow(clippy::too_many_arguments)]
+    /// Returns volume 0's MetaIndex and each volume's manifest location.
     pub async fn write_index_fanout(
         &mut self,
-        index_plaintext: &[u8],
-        index_block_id: u32,
+        builder: &mut era_index::IndexBuilder,
         session: &era_crypto::KeySession,
         volume_key: &era_crypto::VolumeKey,
-        nonce_context: &[u8; 16],
-        archive_id: &[u8; 16],
-        epoch_id: u32,
-    ) -> Result<Vec<(u64, u32, u32)>> {
+        nonce_context: [u8; 16],
+        starting_block_id: u64,
+    ) -> Result<(era_index::MetaIndex, Vec<(u64, u32, u32)>)> {
         let volume_count = self.pool.volume_count();
-        if volume_count <= 1 {
-            return Ok(Vec::new());
+        if volume_count == 0 {
+            return Err(EraError::InvalidConfig(
+                "No volume writers available for index finalization".into(),
+            ));
         }
 
-        let block_key =
-            session.derive_block_key(volume_key, u64::from(index_block_id), nonce_context)?;
-        let derived_key = block_key.to_derived_key()?;
-        let original_size = u32::try_from(index_plaintext.len())
-            .map_err(|_| EraError::Other("MetaIndex size exceeds u32::MAX".into()))?;
+        let mut canonical_meta = None;
+        let mut expected_manifest_block_id = None;
+        let mut locations = Vec::with_capacity(volume_count);
 
-        let mut locations = Vec::with_capacity(volume_count - 1);
-
-        for slot in 1..volume_count {
+        for slot in 0..volume_count {
             let Some(writer) = self.pool.get_writer_mut(slot) else {
                 return Err(EraError::Other(format!(
                     "Missing index writer slot {slot} while writing index fanout"
                 )));
             };
-
-            let volume_index = u32::from(writer.volume_sequence());
-            let encrypted_data = encrypt_with_context_for_type(
-                &derived_key,
-                nonce_context,
-                archive_id,
-                epoch_id,
-                volume_index,
-                BlockType::IndexManifest,
-                BlockId::new(u64::from(index_block_id)),
-                index_plaintext,
-            )?;
-
-            let encrypted_index_block = EncryptedMacroBlock {
-                block_id: BlockId::new(u64::from(index_block_id)),
-                data: encrypted_data,
-                original_size,
-                compressed_size: original_size,
-                chunk_count: 0,
-            };
-
-            let mut location = writer
-                .write_canonical_block(&encrypted_index_block, BlockType::IndexManifest)
+            let (meta, location) = builder
+                .finalize_with_starting_block_id(
+                    writer,
+                    session,
+                    volume_key,
+                    nonce_context,
+                    starting_block_id,
+                )
                 .await?;
-            location.slot_index = index_block_id;
+
+            if let Some(expected) = expected_manifest_block_id {
+                if expected != location.slot_index {
+                    return Err(EraError::IntegrityError(format!(
+                        "Index manifest block ID diverged across volumes: {expected} != {}",
+                        location.slot_index
+                    )));
+                }
+            } else {
+                expected_manifest_block_id = Some(location.slot_index);
+            }
+            if slot == 0 {
+                canonical_meta = Some(meta);
+            }
             locations.push((
                 location.physical_offset,
                 location.encrypted_size,
-                index_block_id,
+                location.slot_index,
             ));
         }
 
-        Ok(locations)
+        let canonical_meta = canonical_meta.ok_or_else(|| {
+            EraError::IntegrityError("Missing canonical MetaIndex after fanout".into())
+        })?;
+        Ok((canonical_meta, locations))
     }
 
     /// Finalize all volumes with catalog location information.

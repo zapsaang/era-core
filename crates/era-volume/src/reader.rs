@@ -27,21 +27,22 @@ pub struct VolumeReader<R: StorageReader> {
     header: SuperHeader,
     /// Volume footer
     footer: Option<Footer>,
+    /// Whether the primary header was unreadable and the backup header was used
+    header_recovered_from_backup: bool,
 }
 
 impl<R: StorageReader> VolumeReader<R> {
     /// Open an existing volume for reading.
     ///
     /// Recovery Chain:
-    /// 1. Try primary header at offset 0
-    /// 2. If primary header fails, try to read backup footer to find backup_header_offset
-    /// 3. Read backup header from backup_header_offset
-    /// 4. Try primary footer at end of file
-    /// 5. If primary footer fails, try backup footer at offset HEADER_SIZE (4096)
+    /// 1. Recover the primary, backup, or floating footer without using the header
+    /// 2. Try the primary header at offset 0
+    /// 3. If it fails, read the backup header at the recovered footer's backup_header_offset
+    /// 4. Apply the existing footer and truncation validation
     ///
     /// # Errors
-    /// Returns `CorruptedHeader` if the volume is smaller than [`HEADER_SIZE`] or both
-    /// primary and backup headers are unreadable. Returns I/O errors from the storage backend.
+    /// Returns `CorruptedHeader` if the volume is smaller than [`HEADER_SIZE`]. If the
+    /// backup header cannot be used, returns the original primary header error.
     pub async fn open<B: StorageBackend<Reader = R>>(backend: &B, path: &Path) -> Result<Self> {
         let reader = backend.open_read(path).await?;
         let size = reader.size();
@@ -52,12 +53,6 @@ impl<R: StorageReader> VolumeReader<R> {
                 size, HEADER_SIZE
             )));
         }
-
-        // === HEADER ===
-        let header = Self::try_read_header(&reader, 0).await?;
-
-        // Check if erasure coding is likely enabled
-        let erasure_enabled = header.config().erasure.is_some();
 
         // === FOOTER RECOVERY ===
         // 1. Try primary footer (at end of file)
@@ -81,6 +76,39 @@ impl<R: StorageReader> VolumeReader<R> {
         } else {
             footer
         };
+
+        // === HEADER RECOVERY ===
+        let (header, header_recovered_from_backup) = match Self::try_read_header(&reader, 0).await {
+            Ok(header) => (header, false),
+            Err(primary_err) => {
+                let backup_offset = footer.as_ref().and_then(|footer| {
+                    let offset = footer.backup_header_offset();
+                    let end_in_bounds = offset
+                        .checked_add(HEADER_SIZE as u64)
+                        .is_some_and(|end| end <= size);
+                    (offset >= DATA_REGION_START && end_in_bounds).then_some(offset)
+                });
+
+                let Some(offset) = backup_offset else {
+                    return Err(primary_err);
+                };
+
+                match Self::try_read_header(&reader, offset).await {
+                    Ok(header) => {
+                        tracing::warn!(
+                            error = %primary_err,
+                            backup_offset = offset,
+                            "Primary header unreadable; using backup header"
+                        );
+                        (header, true)
+                    }
+                    Err(_) => return Err(primary_err),
+                }
+            }
+        };
+
+        // Check if erasure coding is likely enabled
+        let erasure_enabled = header.config().erasure.is_some();
 
         if footer.is_none() && !erasure_enabled {
             return Err(EraError::CorruptedHeader(
@@ -114,6 +142,7 @@ impl<R: StorageReader> VolumeReader<R> {
             reader,
             header,
             footer,
+            header_recovered_from_backup,
         })
     }
 
@@ -207,6 +236,12 @@ impl<R: StorageReader> VolumeReader<R> {
     #[must_use]
     pub fn header(&self) -> &SuperHeader {
         &self.header
+    }
+
+    /// Return whether the primary header was recovered from the backup header.
+    #[must_use]
+    pub fn header_recovered_from_backup(&self) -> bool {
+        self.header_recovered_from_backup
     }
 
     /// Get the volume footer
