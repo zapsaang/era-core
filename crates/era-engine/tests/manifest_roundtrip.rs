@@ -3,7 +3,10 @@
 //! Verifies end-to-end roundtrip of the full manifest pipeline:
 //! block_locations tracking, catalog, index, manifest, and footer fields.
 
-use era_common::BlockType;
+use era_common::{
+    ArchiveConfig, ArchiveManifest, BlockId, BlockLocation, BlockType, CompressionAlgorithm,
+};
+use era_crypto::{build_aad, AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_engine::{ArchiveReader, ArchiveWriter, ExtractOptions};
 use era_storage::LocalStorageBackend;
 use std::fs;
@@ -189,6 +192,97 @@ async fn test_v8p2_multi_volume_manifest_redundancy() {
 
     let extracted = fs::read(output_dir.join("large.bin")).unwrap();
     assert_eq!(extracted, data, "data integrity should be preserved");
+}
+
+#[tokio::test]
+async fn test_rotated_manifest_authenticates_final_header_and_keeps_dense_data_ends() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("rotated.era");
+    let mut config = ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    };
+    config.compression.algorithm = CompressionAlgorithm::None;
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("test_password")
+        .config(config)
+        .max_volume_size(110_000)
+        .target_block_size(64 * 1024)
+        .enable_cdc(false)
+        .build()
+        .await
+        .unwrap();
+    for i in 1..=3u8 {
+        writer
+            .add_bytes(&format!("{i}.bin"), &vec![i; 64 * 1024])
+            .await
+            .unwrap();
+    }
+    writer.finalize().await.unwrap();
+
+    let mut archive = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
+    archive.preflight_metadata_recovery().await.unwrap();
+    let manifest = archive.manifest().unwrap();
+    let total = archive.header().total_volumes();
+    assert!(total >= 3);
+    assert_eq!(manifest.volume_committed_ends.len(), usize::from(total));
+    let backend = LocalStorageBackend::new(temp_dir.path());
+    let base = Path::new(archive_path.file_name().unwrap());
+    let mut expected_ends = Vec::new();
+    for sequence in 0..total {
+        let reader =
+            era_volume::VolumeReader::open(&backend, &era_volume::volume_path(base, sequence))
+                .await
+                .unwrap();
+        let header = reader.header();
+        let footer = reader.footer().unwrap();
+        assert_eq!(footer.has_manifest(), sequence == total - 1);
+        if sequence < total - 1 {
+            expected_ends.push(footer.backup_header_offset());
+            continue;
+        }
+        expected_ends.push(footer.catalog_offset());
+
+        let block_id = BlockId::new(u64::from(footer.manifest_block_id()));
+        let location = BlockLocation::single(
+            header.volume_id(),
+            footer.manifest_block_id(),
+            footer.manifest_offset(),
+            0,
+        );
+        let (block_type, block) = reader.read_typed_block(&location).await.unwrap();
+        assert_eq!(block_type, BlockType::Manifest);
+        let key = archive
+            .session()
+            .derive_block_key(archive.volume_key(), block_id.sequence(), header.salt())
+            .unwrap();
+        let aead =
+            XChaCha20Poly1305Context::from_derived_key(&key.to_derived_key().unwrap()).unwrap();
+        let aad = build_aad(
+            header.archive_id().0.as_bytes(),
+            header.epoch_id(),
+            block_type,
+            u32::from(sequence),
+            block_id,
+        );
+        let plaintext = aead
+            .decrypt(
+                block.data.first_chunk::<NONCE_SIZE>().unwrap(),
+                &aad,
+                &block.data[NONCE_SIZE..],
+            )
+            .unwrap();
+        let (replica, digest) = ArchiveManifest::from_bytes_with_header_digest(&plaintext).unwrap();
+        assert_eq!(&replica, manifest);
+        let backup = reader
+            .read_raw(footer.backup_header_offset(), era_volume::HEADER_SIZE)
+            .await
+            .unwrap();
+        assert_eq!(digest.unwrap(), *blake3::hash(&backup).as_bytes());
+    }
+    assert_eq!(manifest.volume_committed_ends, expected_ends);
 }
 
 #[tokio::test]

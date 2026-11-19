@@ -21,6 +21,20 @@ use crate::{
     extract_filename, SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE,
     MIN_VOLUME_SIZE,
 };
+
+// ArchiveManifest's v8.2 decoder accepts at most this many committed ends.
+const MAX_MANIFEST_VOLUMES: usize = 1024;
+
+fn checked_manifest_volume_count(count: usize) -> Result<u16> {
+    if !(1..=MAX_MANIFEST_VOLUMES).contains(&count) {
+        return Err(era_common::EraError::InvalidConfig(format!(
+            "volume count {count} is outside the manifest limit (1..={MAX_MANIFEST_VOLUMES})"
+        )));
+    }
+    u16::try_from(count)
+        .map_err(|_| era_common::EraError::InvalidConfig("volume count exceeds u16".into()))
+}
+
 /// Configuration for the volume pool.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -110,6 +124,8 @@ pub struct VolumePool<B: StorageBackend> {
     writers: Vec<VolumeWriter<B::Writer>>,
     /// Sequence numbers for each writer (for tracking across rotations)
     sequences: Vec<u16>,
+    /// Retired writers are kept open until the final archive count is known.
+    retired_writers: Vec<VolumeWriter<B::Writer>>,
     /// Block sequence counter for rotation calculation
     block_sequence: u64,
     /// Statistics
@@ -124,7 +140,7 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Create a new volume pool.
     ///
     /// # Errors
-    /// Returns `InvalidConfig` if the volume count or sequence exceeds `u16`.
+    /// Returns `InvalidConfig` if the count is outside the manifest's volume limit.
     /// Returns `InvalidConfig` if a volume path has no filename.
     /// Returns `Serialization` if the header cannot be encoded.
     /// Returns I/O errors from creating volumes on the storage backend.
@@ -134,6 +150,7 @@ impl<B: StorageBackend> VolumePool<B> {
         template_header: SuperHeader,
     ) -> Result<Self> {
         let volume_count = config.initial_volume_count;
+        let total_volumes = checked_manifest_volume_count(volume_count)?;
         if let Some(erasure) = template_header.config().erasure {
             validate_erasure_volume_count(erasure, volume_count)?;
         }
@@ -141,21 +158,12 @@ impl<B: StorageBackend> VolumePool<B> {
         let mut sequences = Vec::with_capacity(volume_count);
 
         // Create initial volumes
-        for i in 0..volume_count {
+        for seq in 0..total_volumes {
             let mut header = template_header.clone();
             // Each volume must have a unique volume_id for identification
             header.set_volume_id(VolumeId::new());
-            header.set_volume_sequence(u16::try_from(i).map_err(|_| {
-                era_common::EraError::InvalidConfig(format!("volume index {} exceeds u16", i))
-            })?);
-            header.set_total_volumes(u16::try_from(volume_count).map_err(|_| {
-                era_common::EraError::InvalidConfig(format!(
-                    "volume count {} exceeds u16",
-                    volume_count
-                ))
-            })?);
-
-            let seq = header.volume_sequence();
+            header.set_volume_sequence(seq);
+            header.set_total_volumes(total_volumes);
             let volume_path = config.volume_path(seq);
             let volume_filename = extract_filename(&volume_path)?;
 
@@ -175,6 +183,7 @@ impl<B: StorageBackend> VolumePool<B> {
             template_header,
             writers,
             sequences,
+            retired_writers: Vec::new(),
             block_sequence: 0,
             stats,
             initial_committed_ends: Vec::new(),
@@ -187,7 +196,7 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Open an existing volume pool for appending.
     ///
     /// # Errors
-    /// Returns `InvalidConfig` if a volume sequence exceeds `u16` or a path has no filename.
+    /// Returns `InvalidConfig` if the count exceeds the manifest limit or a path has no filename.
     /// Returns `CorruptedFooter` if any volume is missing its footer.
     /// Returns `CorruptedHeader` or `CorruptedFooter` if any volume is corrupted.
     /// Returns I/O errors from opening volumes on the storage backend.
@@ -201,21 +210,25 @@ impl<B: StorageBackend> VolumePool<B> {
         } else {
             config.initial_volume_count
         };
-        config.initial_volume_count = volume_count.max(1);
+        let total_volumes = checked_manifest_volume_count(volume_count)?;
+        config.initial_volume_count = volume_count;
 
         // P8-02: Pre-allocate with known capacity to avoid reallocations
         let mut writers = Vec::with_capacity(config.initial_volume_count);
         let mut sequences = Vec::with_capacity(config.initial_volume_count);
         let mut max_block_count = 0u32;
 
-        for seq in 0..config.initial_volume_count {
-            let seq_u16 = u16::try_from(seq).map_err(|_| {
-                era_common::EraError::InvalidConfig(format!("volume sequence {} exceeds u16", seq))
-            })?;
-            let volume_path = config.volume_path(seq_u16);
+        for seq in 0..total_volumes {
+            let volume_path = config.volume_path(seq);
             let volume_filename = extract_filename(&volume_path)?;
 
             let reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
+            if reader.header().volume_sequence() != seq {
+                return Err(era_common::EraError::CorruptedHeader(format!(
+                    "volume at sequence {seq} has header sequence {}",
+                    reader.header().volume_sequence()
+                )));
+            }
             let footer = reader
                 .footer()
                 .ok_or_else(|| era_common::EraError::CorruptedFooter("Missing footer".into()))?;
@@ -230,7 +243,7 @@ impl<B: StorageBackend> VolumePool<B> {
 
             max_block_count = max_block_count.max(writer.block_count());
             writers.push(writer);
-            sequences.push(reader.header().volume_sequence());
+            sequences.push(seq);
         }
 
         let stats = VolumePoolStats {
@@ -244,6 +257,7 @@ impl<B: StorageBackend> VolumePool<B> {
             template_header,
             writers,
             sequences,
+            retired_writers: Vec::new(),
             // Note: block_sequence is initialized from max canonical block count.
             // This doesn't account for raw writes or erasure stripe count, which may
             // cause slightly suboptimal distribution on append. This is acceptable
@@ -258,7 +272,7 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Open a single-volume archive for appending using a known footer.
     ///
     /// # Errors
-    /// Returns `InvalidConfig` if the volume path has no filename.
+    /// Returns `InvalidConfig` if the volume path has no filename or the archive has multiple volumes.
     /// Returns `CorruptedFooter` if the footer's data_end_offset exceeds the file size.
     /// Returns I/O errors from opening the volume on the storage backend.
     pub async fn open_append_single(
@@ -268,6 +282,15 @@ impl<B: StorageBackend> VolumePool<B> {
         footer: &crate::Footer,
         initial_committed_ends: Vec<u64>,
     ) -> Result<Self> {
+        if header.volume_sequence() != 0
+            || header.total_volumes() > 1
+            || initial_committed_ends.len() > 1
+        {
+            return Err(era_common::EraError::InvalidConfig(
+                "single-volume append requires volume sequence 0 and at most one committed end"
+                    .into(),
+            ));
+        }
         config.initial_volume_count = 1;
         let volume_path = config.volume_path(0);
         let volume_filename = extract_filename(&volume_path)?;
@@ -289,6 +312,7 @@ impl<B: StorageBackend> VolumePool<B> {
             template_header: header,
             writers: vec![writer],
             sequences: vec![0],
+            retired_writers: Vec::new(),
             block_sequence,
             stats,
             initial_committed_ends,
@@ -314,11 +338,9 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Cancellation Safety
     ///
-    /// If cancelled during the padding/sync loop (step 1), some writers may be
-    /// padded and synced while others are not — but all are still valid since
-    /// padding doesn't corrupt data and partial sync is a no-op for unsynced volumes.
-    /// New writers are created in local vectors before replacing active state, so
-    /// cancellation cannot leave `self.writers` or `self.sequences` empty.
+    /// Sync existing data and create replacement writers before changing pool state.
+    /// Failure or cancellation may leave uncommitted replacement files on disk,
+    /// but the active writers and committed ends remain intact.
     async fn rotate_volumes(&mut self) -> Result<()> {
         let volume_count = self.writers.len();
         if volume_count == 0 {
@@ -327,33 +349,18 @@ impl<B: StorageBackend> VolumePool<B> {
             ));
         }
 
-        let old_sequences = self.sequences.clone();
+        let current_total = self.retired_writers.len() + volume_count;
+        let first_new_sequence = checked_manifest_volume_count(current_total)?;
+        let new_total = checked_manifest_volume_count(current_total + volume_count)?;
 
-        let vc_u16 = u16::try_from(volume_count).map_err(|_| {
-            era_common::EraError::InvalidConfig(format!(
-                "volume count {} exceeds u16",
-                volume_count
-            ))
-        })?;
-
-        // Compute the total_volumes that will exist after this rotation completes.
-        // The highest new sequence is old_sequences.last() + vc_u16, so total = that + 1.
-        let max_old_seq = old_sequences.iter().copied().max().unwrap_or(0);
-        let max_new_seq = max_old_seq.checked_add(vc_u16).ok_or_else(|| {
-            era_common::EraError::InvalidConfig("volume sequence overflow".into())
-        })?;
-        let new_total = max_new_seq
-            .checked_add(1)
-            .ok_or_else(|| era_common::EraError::InvalidConfig("total_volumes overflow".into()))?;
+        for writer in &mut self.writers {
+            writer.sync_data().await?;
+        }
 
         let mut new_writers = Vec::with_capacity(volume_count);
         let mut new_sequences = Vec::with_capacity(volume_count);
 
-        for &sequence in old_sequences.iter().take(volume_count) {
-            let next_sequence = sequence.checked_add(vc_u16).ok_or_else(|| {
-                era_common::EraError::InvalidConfig("volume sequence overflow".into())
-            })?;
-
+        for next_sequence in first_new_sequence..new_total {
             let mut header = self.template_header.clone();
             header.set_volume_id(VolumeId::new());
             header.set_volume_sequence(next_sequence);
@@ -370,26 +377,15 @@ impl<B: StorageBackend> VolumePool<B> {
         }
 
         let old_writers = std::mem::replace(&mut self.writers, new_writers);
-        self.sequences = new_sequences;
+        let old_sequences = std::mem::replace(&mut self.sequences, new_sequences);
+        self.stats.volume_sizes.extend(
+            old_sequences
+                .into_iter()
+                .zip(old_writers.iter().map(VolumeWriter::current_size)),
+        );
+        self.retired_writers.extend(old_writers);
 
-        // New volumes start from empty, so their append_start_position is 0.
-        for &next_sequence in &self.sequences {
-            self.append_start_positions.insert(next_sequence, 0);
-        }
-
-        for (i, mut writer) in old_writers.into_iter().enumerate() {
-            let size = writer.current_size();
-            let sequence = old_sequences[i];
-            self.stats.volume_sizes.push((sequence, size));
-
-            writer.update_total_volumes(new_total);
-            // Finalize writes backup header + primary/backup footers + sync + close.
-            // The active pool already points at replacement writers, so cancellation
-            // or failure here cannot leave `self.writers` empty.
-            writer.finalize().await?;
-        }
-
-        self.stats.volume_count += volume_count;
+        self.stats.volume_count = usize::from(new_total);
         debug_assert_eq!(
             self.writers.len(),
             self.sequences.len(),
@@ -404,7 +400,7 @@ impl<B: StorageBackend> VolumePool<B> {
         self.writers.len()
     }
 
-    /// Get total size of all volumes (active + closed)
+    /// Get total size of all volumes (active + retired)
     #[must_use]
     pub fn get_total_size(&self) -> u64 {
         let active_size: u64 = self.writers.iter().map(|w| w.current_size()).sum();
@@ -422,27 +418,30 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Returns `Vec<(volume_sequence, committed_end_offset)>` sorted by sequence.
     #[must_use]
     pub fn committed_ends(&self) -> Vec<(u16, u64)> {
-        let mut ends: Vec<(u16, u64)> = self.stats.volume_sizes.clone();
-        for (i, writer) in self.writers.iter().enumerate() {
-            let seq = self.sequences[i];
-            let current = writer.current_size();
-            let committed =
-                if let Some(&initial) = self.initial_committed_ends.get(usize::from(seq)) {
-                    if let Some(&start_pos) = self.append_start_positions.get(&seq) {
+        self.stats
+            .volume_sizes
+            .iter()
+            .copied()
+            .chain(
+                self.sequences
+                    .iter()
+                    .copied()
+                    .zip(self.writers.iter().map(VolumeWriter::current_size)),
+            )
+            .map(|(seq, current)| {
+                let committed = self
+                    .initial_committed_ends
+                    .get(usize::from(seq))
+                    .zip(self.append_start_positions.get(&seq))
+                    .and_then(|(&initial, &start_pos)| {
                         current
                             .checked_sub(start_pos)
                             .and_then(|delta| initial.checked_add(delta))
-                            .unwrap_or(current)
-                    } else {
-                        current
-                    }
-                } else {
-                    current
-                };
-            ends.push((seq, committed));
-        }
-        ends.sort_by_key(|(seq, _)| *seq);
-        ends
+                    })
+                    .unwrap_or(current);
+                (seq, committed)
+            })
+            .collect()
     }
 
     /// Get the current block sequence number.
@@ -519,17 +518,33 @@ impl<B: StorageBackend> VolumePool<B> {
         insufficient
     }
 
+    fn check_fresh_volume_space(&self, slot: usize, required: u64) -> Result<()> {
+        let available = self
+            .config
+            .max_volume_size
+            .saturating_sub(crate::DATA_REGION_START + crate::PER_VOLUME_OVERHEAD);
+        if required > available {
+            return Err(era_common::EraError::VolumeSpaceExhausted {
+                volume: slot,
+                required,
+                available,
+                message: "write does not fit in a fresh volume".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Precheck available space for catalog + index + manifest blocks and rotate if needed.
     ///
     /// Checks whether all volumes have sufficient space for the combined on-disk
     /// size of catalog, index, and manifest blocks. Callers must include typed
     /// block headers and encryption overhead in the size arguments.
-    /// If any volume lacks space, triggers rotation and rechecks.
+    /// If any volume lacks space, rotates only if the bundle fits a fresh volume.
     ///
     /// Returns `Ok(true)` if rotation was performed, `Ok(false)` if space was already sufficient.
     ///
     /// # Errors
-    /// Returns `VolumeSpaceExhausted` if space is insufficient even after rotation.
+    /// Returns `VolumeSpaceExhausted` if the bundle exceeds fresh volume capacity.
     pub async fn precheck_and_rotate_if_needed(
         &mut self,
         catalog_size: u64,
@@ -545,26 +560,12 @@ impl<B: StorageBackend> VolumePool<B> {
             .saturating_add(index_size)
             .saturating_add(manifest_size);
 
-        let need_rotation = self.check_typed_block_space(total_per_volume);
-        if need_rotation.is_empty() {
+        let insufficient = self.check_typed_block_space(total_per_volume);
+        let Some(&slot) = insufficient.first() else {
             return Ok(false);
-        }
-
+        };
+        self.check_fresh_volume_space(slot, total_per_volume)?;
         self.rotate_volumes().await?;
-
-        let still_insufficient = self.check_typed_block_space(total_per_volume);
-        if let Some(&volume) = still_insufficient.first() {
-            return Err(era_common::EraError::VolumeSpaceExhausted {
-                volume,
-                required: total_per_volume,
-                available: self.volume_remaining_space(volume),
-                message: format!(
-                    "typed block bundle still does not fit after rotation; insufficient slots {:?}",
-                    still_insufficient
-                ),
-            });
-        }
-
         Ok(true)
     }
 
@@ -600,8 +601,8 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Returns `InvalidConfig` if no volumes are available, the shard size exceeds
     /// `MAX_SHARD_SIZE` or the maximum per-volume capacity, or the shard size exceeds `u32`.
     /// Returns `InvalidConfig` if the calculated write size overflows.
-    /// Triggers volume rotation (which may fail with `InvalidConfig` on sequence overflow)
-    /// if all volumes are full.
+    /// Returns `VolumeSpaceExhausted` if the complete write cannot fit a fresh volume.
+    /// Returns `InvalidConfig` if a required rotation would exceed the manifest's volume limit.
     /// Returns I/O errors from writing to the storage backend.
     ///
     /// # Arguments
@@ -673,6 +674,7 @@ impl<B: StorageBackend> VolumePool<B> {
                 Some(s) => s,
                 None => {
                     // All volumes are full - rotate volumes
+                    self.check_fresh_volume_space(preferred_slot, total_size)?;
                     self.rotate_volumes().await?;
 
                     // After rotation, write to preferred_slot which maps to new volume
@@ -761,7 +763,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Errors
     /// Returns `InvalidConfig` if the block data exceeds `MAX_SHARD_SIZE` or `u32::MAX`.
-    /// Returns `VolumeFull` if a volume cannot fit the block after exhausting all slots.
+    /// Returns `VolumeSpaceExhausted` if the complete write cannot fit a fresh volume.
     /// Triggers volume rotation (which may fail) if all volumes are full.
     /// Returns I/O errors from writing to the storage backend.
     ///
@@ -803,6 +805,7 @@ impl<B: StorageBackend> VolumePool<B> {
                 Some(s) => s,
                 None => {
                     // All volumes are full - rotate volumes
+                    self.check_fresh_volume_space(preferred_slot, total_size)?;
                     self.rotate_volumes().await?;
                     preferred_slot
                 }
@@ -885,6 +888,27 @@ impl<B: StorageBackend> VolumePool<B> {
         Ok(location)
     }
 
+    fn install_final_volume_count(&mut self) -> Result<()> {
+        let count = checked_manifest_volume_count(self.retired_writers.len() + self.writers.len())?;
+        for writer in self.retired_writers.iter_mut().chain(&mut self.writers) {
+            writer.update_total_volumes(count);
+        }
+        Ok(())
+    }
+
+    /// Install the final count and digest the finalized headers of the active volumes in slot order.
+    /// Call only after the last possible rotation, before encrypting manifest replicas.
+    ///
+    /// # Errors
+    /// Returns an error if the pool has no writers or a header cannot be encoded.
+    pub fn finalized_header_digests(&mut self) -> Result<Vec<[u8; 32]>> {
+        self.install_final_volume_count()?;
+        self.writers
+            .iter()
+            .map(VolumeWriter::finalized_header_digest)
+            .collect()
+    }
+
     /// Finalize all volumes.
     ///
     /// # Errors
@@ -894,21 +918,17 @@ impl<B: StorageBackend> VolumePool<B> {
         self.finalize_with_catalog(0, 0, 0, 0, 0, 0).await
     }
 
-    /// Finalize all volumes with the same catalog information.
+    /// Finalize all volumes with the same catalog information on active volumes.
     ///
-    /// This method broadcasts the same catalog offset to all volumes. This is appropriate
+    /// This method broadcasts the same catalog offset to all active volumes. This is appropriate
     /// when using a single catalog location shared across all volumes (the typical case).
     ///
     /// For per-volume catalog locations, use [`Self::finalize_with_catalogs`] instead.
     ///
     /// # Cancellation Safety
     ///
-    /// This is a terminal operation — the pool must not be reused after calling.
-    /// If cancelled mid-loop, some writers may be consumed (dropped) without
-    /// finalization, leaving orphaned volume files on disk. Recovery: the engine
-    /// detects the incomplete archive and either retries or cleans up. Both
-    /// `writers` and `sequences` are drained upfront so the pool's internal
-    /// invariants remain consistent regardless of cancellation point.
+    /// Once finalization takes the writers, the pool is terminal, including on
+    /// cancellation or I/O failure. A subsequent finalize returns `InvalidConfig`.
     ///
     /// # Errors
     /// Returns `InvalidConfig` if catalog or index offsets exceed a volume's write position.
@@ -923,39 +943,16 @@ impl<B: StorageBackend> VolumePool<B> {
         index_size: u32,
         index_block_id: u32,
     ) -> Result<VolumePoolStats> {
-        let mut stats = std::mem::take(&mut self.stats);
-
-        // Drain both writers and sequences upfront so internal state is consistent
-        // even if the future is cancelled mid-finalization loop.
-        let old_sequences: Vec<u16> = std::mem::take(&mut self.sequences);
-        let writers: Vec<_> = std::mem::take(&mut self.writers);
-
-        for (i, writer) in writers.into_iter().enumerate() {
-            let size = writer.current_size();
-            let sequence = old_sequences[i];
-            stats.volume_sizes.push((sequence, size));
-            writer
-                .finalize_with_catalog(
-                    catalog_offset,
-                    catalog_size,
-                    catalog_block_id,
-                    index_offset,
-                    index_size,
-                    index_block_id,
-                )
-                .await?;
-        }
-
-        Ok(stats)
+        let catalogs = vec![(catalog_offset, catalog_size, catalog_block_id); self.writers.len()];
+        let indexes = vec![(index_offset, index_size, index_block_id); self.writers.len()];
+        self.finalize_with_catalogs(&catalogs, Some(&indexes)).await
     }
 
     /// Finalize all volumes with per-volume catalog information.
     ///
     /// # Cancellation Safety
     ///
-    /// Same as [`Self::finalize_with_catalog`]: terminal operation, both `writers`
-    /// and `sequences` are drained upfront. If cancelled mid-loop, remaining
-    /// writers are dropped without finalization (orphaned files recoverable by engine).
+    /// Same as [`Self::finalize_with_catalog`].
     ///
     /// # Errors
     /// Returns `InvalidConfig` if `catalog_locations` or `index_locations` length does
@@ -975,9 +972,8 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Cancellation Safety
     ///
-    /// Terminal operation: both `writers` and `sequences` are drained upfront.
-    /// If cancelled mid-loop, remaining writers are dropped without finalization
-    /// (orphaned files are recoverable by the engine).
+    /// Same as [`Self::finalize_with_catalog`]. Retired volumes are finalized
+    /// before any active volume publishes the new manifest in its footer.
     ///
     /// # Errors
     /// Returns `InvalidConfig` if `catalog_locations`, `index_locations`, or
@@ -1028,12 +1024,18 @@ impl<B: StorageBackend> VolumePool<B> {
             }
         }
 
+        self.install_final_volume_count()?;
         let mut stats = std::mem::take(&mut self.stats);
 
-        // Drain both writers and sequences upfront so internal state is consistent
-        // even if the future is cancelled mid-finalization loop.
+        let retired_writers = std::mem::take(&mut self.retired_writers);
         let old_sequences: Vec<u16> = std::mem::take(&mut self.sequences);
         let writers: Vec<_> = std::mem::take(&mut self.writers);
+
+        for mut writer in retired_writers {
+            // A retired append volume can still point at a manifest for its old header.
+            writer.set_manifest_info(0, 0)?;
+            writer.finalize().await?;
+        }
 
         for (i, mut writer) in writers.into_iter().enumerate() {
             let size = writer.current_size();
@@ -1251,15 +1253,17 @@ mod tests {
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
         let mut config = VolumePoolConfig::new(&base_path, 1);
-        config.max_volume_size = 2048;
+        config.max_volume_size = 16_000;
         let header = create_test_header();
         let mut pool = VolumePool::create(backend, config, header).await.unwrap();
 
         let data = vec![0u8; 4096];
-        pool.write_to_current(&data).await.unwrap();
+        for _ in 0..2 {
+            pool.write_to_current(&data).await.unwrap();
+        }
 
         let ends = pool.committed_ends();
-        assert!(ends.len() >= 2);
+        assert_eq!(ends.len(), 2);
         assert_eq!(ends[0].0, 0);
         assert_eq!(ends[1].0, 1);
     }
@@ -1270,7 +1274,7 @@ mod tests {
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
         let mut config = VolumePoolConfig::new(&base_path, 1);
-        config.max_volume_size = 1024;
+        config.max_volume_size = 12_000;
         let header = create_test_header();
         let mut pool = VolumePool::create(backend, config, header).await.unwrap();
 
@@ -1291,7 +1295,7 @@ mod tests {
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
         let mut config = VolumePoolConfig::new(&base_path, 1);
-        config.max_volume_size = 1024;
+        config.max_volume_size = 12_000;
         let header = create_test_header();
         let mut pool = VolumePool::create(backend, config, header).await.unwrap();
 
@@ -1350,19 +1354,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_volume_pool_finalization() {
+    async fn test_volume_pool_finalizes_all_three_generations() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
 
-        let config = VolumePoolConfig::new(&base_path, 2);
-        let header = create_test_header();
+        let config = VolumePoolConfig::new(&base_path, 2).with_max_size(80_000);
+        let mut pool = VolumePool::create(backend, config.clone(), create_test_header())
+            .await
+            .unwrap();
+        let mut expected_ends = Vec::new();
+        for sequence in 0..6u16 {
+            let payload = vec![0; 40_000 + usize::from(sequence)];
+            pool.write_to_current(&payload).await.unwrap();
+            let end = crate::DATA_REGION_START
+                + u64::try_from(BlockHeader::SIZE + payload.len()).unwrap();
+            expected_ends.push((sequence, end));
+        }
+        assert_eq!(pool.committed_ends(), expected_ends);
 
-        let mut pool = VolumePool::create(backend, config, header).await.unwrap();
         let stats = pool.finalize().await.unwrap();
-
-        assert_eq!(stats.volume_count, 2);
-        assert_eq!(stats.volume_sizes.len(), 2);
+        assert_eq!(stats.volume_count, 6);
+        assert_eq!(stats.volume_sizes, expected_ends);
+        for (sequence, _) in expected_ends {
+            let bytes = tokio::fs::read(config.volume_path(sequence)).await.unwrap();
+            let footer_start = bytes.len() - crate::FOOTER_SIZE;
+            let footer = crate::Footer::from_bytes(&bytes[footer_start..]).unwrap();
+            let backup = usize::try_from(footer.backup_header_offset()).unwrap();
+            let front_footer = &bytes[crate::HEADER_SIZE..crate::HEADER_SIZE + crate::FOOTER_SIZE];
+            assert_eq!(front_footer, &bytes[footer_start..]);
+            assert_eq!(footer.block_count(), 1);
+            for header_bytes in [&bytes[..crate::HEADER_SIZE], &bytes[backup..footer_start]] {
+                let header = SuperHeader::from_bytes(header_bytes).unwrap();
+                assert_eq!(header.volume_sequence(), sequence);
+                assert_eq!(header.total_volumes(), 6, "volume {sequence}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1423,6 +1450,7 @@ mod tests {
         let header = create_test_header();
 
         let mut pool = VolumePool::create(backend, config, header).await.unwrap();
+        let ends_before = pool.committed_ends();
 
         let err = pool
             .precheck_and_rotate_if_needed(50_000, 0, 0)
@@ -1442,6 +1470,100 @@ mod tests {
             }
             other => panic!("expected VolumeSpaceExhausted, got {other:?}"),
         }
+        assert_eq!(pool.committed_ends(), ends_before);
+        assert!(!temp_dir
+            .path()
+            .join("typed_block_space_exhausted.era.001")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn test_unfit_data_writes_leave_volume_generation_intact() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let config = VolumePoolConfig::new(temp_dir.path().join("unfit"), 1).with_max_size(25_000);
+        let available =
+            config.max_volume_size - crate::DATA_REGION_START - crate::PER_VOLUME_OVERHEAD;
+        let mut pool = VolumePool::create(backend, config.clone(), create_test_header())
+            .await
+            .unwrap();
+        let payload = vec![0; usize::try_from(available).unwrap()];
+        let ends_before = pool.committed_ends();
+
+        let canonical = pool.write_to_current(&payload).await.unwrap_err();
+        let shard = pool
+            .write_shard(0, &payload, true, 0, Some(&[1, 2]))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(canonical, EraError::VolumeSpaceExhausted { available: actual, .. } if actual == available)
+        );
+        assert!(
+            matches!(shard, EraError::VolumeSpaceExhausted { available: actual, .. } if actual == available)
+        );
+        assert_eq!(pool.committed_ends(), ends_before);
+        assert!(!config.volume_path(1).exists());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_volume_bound_rejects_create_and_rotation_before_allocating() {
+        let backend = era_storage::MemoryStorageBackend::new();
+        let config = VolumePoolConfig::new("too_many", MAX_MANIFEST_VOLUMES + 1);
+        assert!(matches!(
+            VolumePool::create(backend.clone(), config.clone(), create_test_header()).await,
+            Err(EraError::InvalidConfig(_))
+        ));
+        assert!(!backend.exists(&config.volume_path(0)).await);
+
+        let config = VolumePoolConfig::new("bound", MAX_MANIFEST_VOLUMES / 2);
+        let mut pool = VolumePool::create(backend.clone(), config.clone(), create_test_header())
+            .await
+            .unwrap();
+        pool.rotate_volumes().await.unwrap();
+        let ends = pool.committed_ends();
+        assert_eq!(ends.len(), MAX_MANIFEST_VOLUMES);
+        assert!(matches!(
+            pool.rotate_volumes().await,
+            Err(EraError::InvalidConfig(_))
+        ));
+        assert!(
+            !backend
+                .exists(&config.volume_path(u16::try_from(MAX_MANIFEST_VOLUMES).unwrap()))
+                .await
+        );
+        assert_eq!(pool.committed_ends(), ends);
+    }
+
+    #[tokio::test]
+    async fn test_retired_finalize_failure_is_terminal_before_active_footer() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let config = VolumePoolConfig::new(temp_dir.path().join("failed"), 1);
+        let mut pool = VolumePool::create(backend, config.clone(), create_test_header())
+            .await
+            .unwrap();
+        pool.get_writer_mut(0)
+            .unwrap()
+            .set_max_size(0)
+            .await
+            .unwrap();
+        pool.rotate_volumes().await.unwrap();
+
+        assert!(
+            matches!(pool.finalize().await, Err(EraError::InvalidConfig(msg)) if msg.contains("backup_header_offset"))
+        );
+        assert!(matches!(
+            pool.finalize().await,
+            Err(EraError::InvalidConfig(_))
+        ));
+        assert_eq!(
+            tokio::fs::metadata(config.volume_path(1))
+                .await
+                .unwrap()
+                .len(),
+            crate::DATA_REGION_START
+        );
     }
 
     // ── Iteration 26: Builder Pattern & Fluent API Safety Tests ──

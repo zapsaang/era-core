@@ -2334,17 +2334,11 @@ impl ArchiveWriter {
                 volume_committed_ends,
             )?
         };
-        let volume_stage = self.pipeline.volume_mut();
-        let header_digests = (0..volume_indices.len())
-            .map(|slot| {
-                volume_stage
-                    .get_writer_mut(slot)
-                    .ok_or_else(|| {
-                        EraError::IntegrityError(format!("Missing volume writer for slot {slot}"))
-                    })?
-                    .finalized_header_digest()
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let header_digests = self
+            .pipeline
+            .volume_mut()
+            .pool_mut()
+            .finalized_header_digests()?;
 
         let manifest_block_id = self.pipeline.reserve_block_id()?;
 
