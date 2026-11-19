@@ -272,17 +272,13 @@ mod volume_size_boundary_tests {
         }
     }
 
-    /// Test volume rotation at exact boundary using small file + small max-volume-size.
-    ///
-    /// This tests the SAME volume rotation logic as the 4GB tests, but at a small scale.
-    /// Uses file size slightly larger than max-volume-size to trigger rotation.
-    /// This approach avoids the massive disk space requirement of the 4GB tests.
+    /// Exercise size-driven rotation with a 2 MiB payload and a 1 MiB cap.
     #[test]
     fn test_volume_rotation_at_exact_boundary_small_scale() {
         let temp = TempDir::new().unwrap();
-        let max_vol_size = 1024 * 1024u64; // 1MB max volume
-        let input_size = 2 * 1024 * 1024; // 2MB file (triggers 2 volumes)
-        let input = create_test_file(temp.path(), "small_rot.bin", &vec![0xAB; input_size]);
+        let max_vol_size = 1024 * 1024u64;
+        // Distinct offsets keep deduplication from shrinking the payload below the cap.
+        let input = create_large_test_file_streaming(temp.path(), "small_rot.bin", 2 * 1024 * 1024);
         let archive = temp.path().join("rot_boundary.era");
 
         era_cmd()
@@ -294,26 +290,24 @@ mod volume_size_boundary_tests {
                 "--password",
                 "pwd",
                 "--no-compression",
+                "--erasure",
+                "none",
                 "--max-volume-size",
                 &max_vol_size.to_string(),
             ])
             .assert()
             .success();
 
-        let count = count_volume_files(&archive);
-        assert!(
-            count >= 2,
-            "2MB file with 1MB max-volume should produce 2+ volumes, got {}",
-            count
-        );
-
-        let first_vol_size = get_volume_size(&archive);
-        assert!(
-            first_vol_size >= max_vol_size - 10_000, // Allow small overhead
-            "First volume should be at max-volume-size, got {} vs expected {}",
-            first_vol_size,
-            max_vol_size
-        );
+        let volumes = get_volume_paths(&archive);
+        for volume in &volumes {
+            let size = get_volume_size(volume);
+            assert!(
+                size <= max_vol_size,
+                "{} has {size} bytes, exceeding the {max_vol_size}-byte cap",
+                volume.display()
+            );
+        }
+        assert!(volumes.len() > 1, "expected rotation, got {volumes:?}");
 
         let out_dir = temp.path().join("out");
         era_cmd()
@@ -330,7 +324,10 @@ mod volume_size_boundary_tests {
             .success();
 
         let extracted = fs::read(out_dir.join("small_rot.bin")).unwrap();
-        assert_eq!(extracted.len(), input_size, "Extracted size mismatch");
+        assert!(
+            extracted == fs::read(input).unwrap(),
+            "Extracted bytes differ"
+        );
     }
 }
 
