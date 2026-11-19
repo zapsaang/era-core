@@ -222,15 +222,21 @@ impl ArchiveReader {
         };
 
         // 4. Build the base path for volume 0 (strip any .NNN suffix)
-        let base_str = base_filename.to_string_lossy();
+        let is_backup = path.extension().is_some_and(|ext| ext == "bak");
+        let volume_filename = if is_backup {
+            path.file_stem().unwrap_or(base_filename)
+        } else {
+            base_filename
+        };
+        let base_str = volume_filename.to_string_lossy();
         let base_path = if base_str.ends_with(".era") {
-            PathBuf::from(base_filename)
+            PathBuf::from(volume_filename)
         } else {
             let s = base_str.to_string();
             if let Some(idx) = s.rfind(".era.") {
                 PathBuf::from(&s[..idx + 4])
             } else {
-                PathBuf::from(base_filename)
+                PathBuf::from(volume_filename)
             }
         };
 
@@ -242,13 +248,14 @@ impl ArchiveReader {
         let mut i = 0;
 
         while i < scan_limit {
-            let volume_path = if i == 0 {
-                base_path.clone()
-            } else {
-                let mut p = base_path.as_os_str().to_os_string();
-                p.push(format!(".{:03}", i));
-                PathBuf::from(p)
-            };
+            let mut volume_filename = base_path.as_os_str().to_os_string();
+            if i != 0 {
+                volume_filename.push(format!(".{:03}", i));
+            }
+            if is_backup {
+                volume_filename.push(".bak");
+            }
+            let volume_path = PathBuf::from(volume_filename);
 
             let full_path = parent_dir.join(&volume_path);
 
