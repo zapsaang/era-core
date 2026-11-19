@@ -691,6 +691,11 @@ impl<W: StorageWriter> VolumeWriter<W> {
         Ok(self.header)
     }
 
+    /// Digest the bytes that finalization writes to both header locations.
+    pub fn finalized_header_digest(&self) -> Result<[u8; 32]> {
+        Ok(*blake3::hash(&self.header.to_bytes()?).as_bytes())
+    }
+
     /// Get the header for creating the next volume
     pub fn next_volume_header(&self) -> era_common::Result<SuperHeader> {
         self.header.next_volume()
