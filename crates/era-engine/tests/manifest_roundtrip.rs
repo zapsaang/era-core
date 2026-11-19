@@ -286,6 +286,89 @@ async fn test_rotated_manifest_authenticates_final_header_and_keeps_dense_data_e
 }
 
 #[tokio::test]
+async fn test_non_ec_generations_roundtrip_from_first_and_last_volume() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("non-ec-generations.era");
+    let mut config = ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    };
+    config.compression.algorithm = CompressionAlgorithm::None;
+    let files: Vec<(String, Vec<u8>)> = (1..=3u8)
+        .map(|value| (format!("{value}.bin"), vec![value; 64 * 1024]))
+        .collect();
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password("test_password")
+        .config(config)
+        .max_volume_size(110_000)
+        .target_block_size(64 * 1024)
+        .enable_cdc(false)
+        .build()
+        .await
+        .unwrap();
+    for (name, contents) in &files {
+        writer.add_bytes(name, contents).await.unwrap();
+    }
+    writer.finalize().await.unwrap();
+
+    let mut first_archive = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
+    first_archive.preflight_metadata_recovery().await.unwrap();
+    let total = first_archive.header().total_volumes();
+    let committed_ends = first_archive
+        .manifest()
+        .unwrap()
+        .volume_committed_ends
+        .clone();
+    assert!(total >= 3);
+    assert_eq!(committed_ends.len(), usize::from(total));
+    assert!(committed_ends
+        .iter()
+        .all(|end| *end > era_volume::DATA_REGION_START));
+
+    let backend = LocalStorageBackend::new(temp_dir.path());
+    let base = Path::new(archive_path.file_name().unwrap());
+    for sequence in 0..total {
+        let volume =
+            era_volume::VolumeReader::open(&backend, &era_volume::volume_path(base, sequence))
+                .await
+                .unwrap();
+        let footer = volume.footer().unwrap();
+        let expected_end = if sequence == total - 1 {
+            assert!(footer.has_manifest());
+            footer.catalog_offset()
+        } else {
+            assert!(!footer.has_manifest());
+            footer.backup_header_offset()
+        };
+        assert_eq!(committed_ends[usize::from(sequence)], expected_end);
+    }
+
+    let last_path = era_volume::volume_path(&archive_path, total - 1);
+    for (opening_path, output_name) in [
+        (archive_path.clone(), "from-first"),
+        (last_path, "from-last"),
+    ] {
+        let mut archive = ArchiveReader::open(&opening_path, "test_password")
+            .await
+            .unwrap();
+        assert_eq!(
+            archive.manifest().unwrap().volume_committed_ends,
+            committed_ends
+        );
+        let output_dir = temp_dir.path().join(output_name);
+        archive
+            .extract_all(&ExtractOptions::new(&output_dir))
+            .await
+            .unwrap();
+        for (name, expected) in &files {
+            assert_eq!(fs::read(output_dir.join(name)).unwrap(), *expected);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_v8p2_corrupt_volume_manifest_archive_still_readable() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("v8p2_corrupt.era");

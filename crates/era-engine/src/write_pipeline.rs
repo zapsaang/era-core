@@ -116,8 +116,6 @@ impl<B: StorageBackend> WritePipeline<B> {
     ) -> Result<()> {
         let mut hashes: Vec<ChunkHash> = chunks.iter().map(|c| c.hash).collect();
         hashes.extend(extra_hashes);
-        let retry_chunks =
-            (!self.erasure.is_enabled() && self.volume.volume_count() == 1).then(|| chunks.clone());
 
         // Create encrypted block
         let active_volume_sequence = if self.erasure.is_enabled() {
@@ -138,27 +136,9 @@ impl<B: StorageBackend> WritePipeline<B> {
         self.encryption.set_volume_index(active_volume_sequence);
         let compressor = self.create_compressor();
         let builder = self.encryption.create_block_builder(compressor)?;
-        let mut encrypted_block = builder.pack_chunks(chunks)?;
-
-        if !self.erasure.is_enabled() && self.volume.volume_count() == 1 {
-            let total_size = BlockHeader::SIZE as u64 + encrypted_block.data.len() as u64;
-            if self.volume.needs_expansion(total_size)? {
-                self.encryption.set_volume_index(0);
-                let compressor = self.create_compressor();
-                let builder = self.encryption.create_block_builder_with_block_id(
-                    compressor,
-                    0,
-                    encrypted_block.block_id.sequence(),
-                )?;
-                encrypted_block = builder.pack_chunks(retry_chunks.ok_or_else(|| {
-                    EraError::IntegrityError(
-                        "retry chunk buffer unavailable during volume rebinding".into(),
-                    )
-                })?)?;
-            }
-        }
 
         if self.erasure.is_enabled() {
+            let encrypted_block = builder.pack_chunks(chunks)?;
             let block_meta = BlockMeta {
                 chunk_hashes: hashes,
                 chunk_entries: Vec::new(),
@@ -172,10 +152,19 @@ impl<B: StorageBackend> WritePipeline<B> {
                 self.pending_erasure_shard_index += 1;
             }
         } else {
-            // Non-erasure path: write directly
+            let prepared = builder.prepare_chunks(&chunks)?;
+            let sealed_size = u64::try_from(prepared.sealed_len())
+                .map_err(|_| EraError::InvalidConfig("sealed block length exceeds u64".into()))?;
+            let total_size = sealed_size
+                .checked_add(BlockHeader::SIZE as u64)
+                .ok_or_else(|| EraError::InvalidConfig("canonical block size overflow".into()))?;
+            let (slot, _) = self.volume.select_canonical_volume(total_size).await?;
+            // Canonical non-EC Data keeps its legacy volume-0 AEAD context.
+            let encrypted_block = builder.seal_prepared(&prepared, 0)?;
+
             let (mut location, _volume_id) = self
                 .volume
-                .write_block(&encrypted_block, BlockType::Data)
+                .write_block_to_slot(slot, &encrypted_block, BlockType::Data)
                 .await?;
             location.slot_index = encrypted_block.block_id.sequence() as u32;
             self.written_blocks.push(location.clone());

@@ -778,51 +778,105 @@ impl<B: StorageBackend> VolumePool<B> {
         block: &EncryptedMacroBlock,
         block_type: BlockType,
     ) -> Result<(BlockLocation, VolumeId)> {
-        // V27-15: Use round-robin for canonical blocks to spread load across volumes
-        let preferred_slot = (self.block_sequence as usize) % self.writers.len().max(1);
+        let total_size = Self::canonical_block_disk_size(block.data.len())?;
+        let (slot, _) = self.select_canonical_volume(total_size).await?;
+        self.write_canonical_block_to_slot(slot, block, block_type)
+            .await
+    }
 
-        let block_size = block.data.len() as u64;
-        let total_size = BlockHeader::SIZE as u64 + block_size;
+    /// Select a canonical target by exact on-disk size, rotating at most once.
+    ///
+    /// The size must include both the sealed payload and [`BlockHeader`]. The
+    /// returned slot remains stable until the matching slot write; its actual
+    /// volume sequence is returned for callers whose AEAD context binds it.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if the pool has no writers, or
+    /// `VolumeSpaceExhausted` before rotation if the block cannot fit a fresh
+    /// volume. Rotation and writer creation errors are also propagated.
+    pub async fn select_canonical_volume(&mut self, on_disk_size: u64) -> Result<(usize, u16)> {
+        if self.writers.is_empty() {
+            return Err(era_common::EraError::InvalidConfig(
+                "no writable volumes available for canonical block selection".into(),
+            ));
+        }
 
-        // Try preferred slot first, then find any available volume
-        let slot = if self.volume_can_fit(preferred_slot, total_size) {
+        // V27-15: Use round-robin for canonical blocks to spread load across volumes.
+        let preferred_slot = (self.block_sequence as usize) % self.writers.len();
+        let slot = if self.volume_can_fit(preferred_slot, on_disk_size) {
             preferred_slot
         } else {
-            // Find any volume with enough space
             let mut found_slot = None;
-            debug_assert!(
-                !self.writers.is_empty(),
-                "writers must be non-empty for modulo"
-            );
             for i in 0..self.writers.len() {
                 let candidate = (preferred_slot + i) % self.writers.len();
-                if self.volume_can_fit(candidate, total_size) {
+                if self.volume_can_fit(candidate, on_disk_size) {
                     found_slot = Some(candidate);
                     break;
                 }
             }
             match found_slot {
-                Some(s) => s,
+                Some(slot) => slot,
                 None => {
-                    // All volumes are full - rotate volumes
-                    self.check_fresh_volume_space(preferred_slot, total_size)?;
+                    self.check_fresh_volume_space(preferred_slot, on_disk_size)?;
                     self.rotate_volumes().await?;
                     preferred_slot
                 }
             }
         };
 
-        let writer = &mut self.writers[slot];
-        let volume_id = writer.volume_id();
+        let sequence = self.volume_sequence(slot).ok_or_else(|| {
+            era_common::EraError::InvalidConfig(format!(
+                "missing volume sequence for selected canonical slot {slot}"
+            ))
+        })?;
+        Ok((slot, sequence))
+    }
 
-        // Write using BlockHeader format
+    /// Write a canonical block to a previously selected slot without reselecting.
+    ///
+    /// # Errors
+    /// Returns `VolumeSpaceExhausted` if the exact block no longer fits the
+    /// selected slot. No other slot or generation is tried. Writer validation
+    /// and I/O errors are also propagated.
+    pub async fn write_canonical_block_to_slot(
+        &mut self,
+        slot: usize,
+        block: &EncryptedMacroBlock,
+        block_type: BlockType,
+    ) -> Result<(BlockLocation, VolumeId)> {
+        let total_size = Self::canonical_block_disk_size(block.data.len())?;
+        if !self.volume_can_fit(slot, total_size) {
+            return Err(era_common::EraError::VolumeSpaceExhausted {
+                volume: slot,
+                required: total_size,
+                available: self.volume_remaining_space(slot),
+                message: "canonical block does not fit the selected volume slot".into(),
+            });
+        }
+
+        let writer = self.writers.get_mut(slot).ok_or_else(|| {
+            era_common::EraError::InvalidConfig(format!(
+                "selected canonical volume slot {slot} does not exist"
+            ))
+        })?;
+        let volume_id = writer.volume_id();
         let location = writer.write_canonical_block(block, block_type).await?;
 
-        // Update stats
         self.stats.total_bytes_written += total_size;
         self.stats.total_blocks_written += 1;
 
         Ok((location, volume_id))
+    }
+
+    fn canonical_block_disk_size(payload_len: usize) -> Result<u64> {
+        let payload_size = u64::try_from(payload_len).map_err(|_| {
+            era_common::EraError::InvalidConfig("canonical payload length exceeds u64".into())
+        })?;
+        payload_size
+            .checked_add(BlockHeader::SIZE as u64)
+            .ok_or_else(|| {
+                era_common::EraError::InvalidConfig("canonical block disk size overflow".into())
+            })
     }
 
     /// Write a complete erasure-coded block with matrix distribution.
@@ -1390,6 +1444,108 @@ mod tests {
                 assert_eq!(header.total_volumes(), 6, "volume {sequence}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_canonical_selection_exact_fit_rotates_once_for_next_block() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let config = VolumePoolConfig::new(temp_dir.path().join("exact"), 1).with_max_size(25_000);
+        let available =
+            config.max_volume_size - crate::DATA_REGION_START - crate::PER_VOLUME_OVERHEAD;
+        let exact_payload_len = usize::try_from(available)
+            .unwrap()
+            .checked_sub(BlockHeader::SIZE)
+            .unwrap();
+        let exact_block = EncryptedMacroBlock {
+            block_id: BlockId::new(7),
+            data: Bytes::from(vec![0x5A; exact_payload_len]),
+            original_size: u32::try_from(exact_payload_len).unwrap(),
+            compressed_size: u32::try_from(exact_payload_len).unwrap(),
+            chunk_count: 1,
+        };
+        let mut pool = VolumePool::create(backend, config.clone(), create_test_header())
+            .await
+            .unwrap();
+
+        let (slot, sequence) = pool.select_canonical_volume(available).await.unwrap();
+        assert_eq!((slot, sequence), (0, 0));
+        let (location, _) = pool
+            .write_canonical_block_to_slot(slot, &exact_block, BlockType::Data)
+            .await
+            .unwrap();
+        assert_eq!(location.physical_offset, crate::DATA_REGION_START);
+        assert_eq!(
+            usize::try_from(location.encrypted_size).unwrap(),
+            exact_payload_len
+        );
+
+        let next_block = EncryptedMacroBlock {
+            block_id: BlockId::new(8),
+            data: Bytes::from(vec![0xA5; 32]),
+            original_size: 32,
+            compressed_size: 32,
+            chunk_count: 1,
+        };
+        let next_size = BlockHeader::SIZE as u64 + next_block.data.len() as u64;
+        let (slot, sequence) = pool.select_canonical_volume(next_size).await.unwrap();
+        assert_eq!((slot, sequence), (0, 1));
+        let (location, _) = pool
+            .write_canonical_block_to_slot(slot, &next_block, BlockType::Data)
+            .await
+            .unwrap();
+        assert_eq!(location.physical_offset, crate::DATA_REGION_START);
+
+        assert_eq!(
+            pool.committed_ends(),
+            vec![
+                (0, crate::DATA_REGION_START + available),
+                (1, crate::DATA_REGION_START + next_size),
+            ]
+        );
+        assert!(config.volume_path(1).exists());
+        assert!(!config.volume_path(2).exists());
+    }
+
+    #[tokio::test]
+    async fn test_canonical_selection_fresh_unfit_leaves_paths_and_generation_untouched() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let config =
+            VolumePoolConfig::new(temp_dir.path().join("unfit-selection"), 1).with_max_size(25_000);
+        let available =
+            config.max_volume_size - crate::DATA_REGION_START - crate::PER_VOLUME_OVERHEAD;
+        let mut pool = VolumePool::create(backend, config.clone(), create_test_header())
+            .await
+            .unwrap();
+        let ends_before = pool.committed_ends();
+        let paths_before: std::collections::BTreeSet<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+
+        let err = pool
+            .select_canonical_volume(available + 1)
+            .await
+            .expect_err("block must be rejected before creating a fresh generation");
+
+        assert!(matches!(
+            err,
+            EraError::VolumeSpaceExhausted {
+                volume: 0,
+                required,
+                available: actual,
+                ..
+            } if required == available + 1 && actual == available
+        ));
+        assert_eq!(pool.volume_sequence(0), Some(0));
+        assert_eq!(pool.committed_ends(), ends_before);
+        let paths_after: std::collections::BTreeSet<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(paths_after, paths_before);
+        assert!(!config.volume_path(1).exists());
     }
 
     #[tokio::test]

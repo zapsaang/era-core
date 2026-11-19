@@ -83,6 +83,11 @@ impl<B: StorageBackend> VolumeStage<B> {
             .await
     }
 
+    /// Select a canonical target using its exact on-disk size.
+    pub async fn select_canonical_volume(&mut self, on_disk_size: u64) -> Result<(usize, u16)> {
+        self.pool.select_canonical_volume(on_disk_size).await
+    }
+
     /// Write a single canonical block (non-erasure path).
     ///
     /// This writes a block using the BlockHeader format directly to storage.
@@ -100,6 +105,18 @@ impl<B: StorageBackend> VolumeStage<B> {
         block_type: BlockType,
     ) -> Result<(BlockLocation, VolumeId)> {
         self.pool.write_canonical_block(block, block_type).await
+    }
+
+    /// Write a canonical block to the slot returned by target selection.
+    pub async fn write_block_to_slot(
+        &mut self,
+        slot: usize,
+        block: &EncryptedMacroBlock,
+        block_type: BlockType,
+    ) -> Result<(BlockLocation, VolumeId)> {
+        self.pool
+            .write_canonical_block_to_slot(slot, block, block_type)
+            .await
     }
 
     /// Write an erasure shard with matrix distribution.
