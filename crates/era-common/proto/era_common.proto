@@ -18,6 +18,8 @@ message MatrixDistributionConfig {
     STRATEGY_ROTATING_OFFSET = 0;
   }
   Strategy strategy = 1;
+  // Volumes per EC generation. Zero means an older header did not specify a width.
+  uint64 target_volumes = 2;
 }
 
 message CompressionConfig {

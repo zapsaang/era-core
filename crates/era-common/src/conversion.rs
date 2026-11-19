@@ -50,7 +50,7 @@ impl TryFrom<proto::ArchiveConfig> for ArchiveConfig {
                 .ok_or_else(|| {
                     crate::EraError::CorruptedHeader("Missing distribution config".into())
                 })?
-                .into(),
+                .try_into()?,
             chunking: proto
                 .chunking
                 .ok_or_else(|| crate::EraError::CorruptedHeader("Missing chunking config".into()))?
@@ -363,20 +363,35 @@ impl From<MatrixDistributionConfig> for proto::MatrixDistributionConfig {
                     proto::matrix_distribution_config::Strategy::RotatingOffset.into()
                 }
             },
+            target_volumes: u64::try_from(config.target_volumes).unwrap_or(u64::MAX),
         }
     }
 }
 
-impl From<proto::MatrixDistributionConfig> for MatrixDistributionConfig {
-    fn from(proto: proto::MatrixDistributionConfig) -> Self {
-        Self {
+impl TryFrom<proto::MatrixDistributionConfig> for MatrixDistributionConfig {
+    type Error = crate::EraError;
+
+    fn try_from(proto: proto::MatrixDistributionConfig) -> Result<Self, Self::Error> {
+        let defaults = Self::default();
+        let target_volumes = match proto.target_volumes {
+            0 => defaults.target_volumes,
+            width => usize::from(u16::try_from(width).map_err(|_| {
+                crate::EraError::CorruptedHeader(format!(
+                    "Matrix generation width {width} exceeds the volume count limit {}",
+                    u16::MAX
+                ))
+            })?),
+        };
+
+        Ok(Self {
             strategy: match proto.strategy() {
                 proto::matrix_distribution_config::Strategy::RotatingOffset => {
                     MatrixDistributionStrategy::RotatingOffset
                 }
             },
-            ..Default::default()
-        }
+            target_volumes,
+            ..defaults
+        })
     }
 }
 
