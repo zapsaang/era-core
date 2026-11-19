@@ -124,11 +124,12 @@ pub struct ArchiveReader {
     embedded_index_recovery_failed: bool,
 }
 
-struct DiscoveredVolumes {
-    volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>>,
-    volume_indices: Vec<usize>,
-    expected_volume_count: usize,
-    missing_volume_indices: Vec<usize>,
+pub(crate) struct DiscoveredVolumes {
+    pub(crate) volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>>,
+    pub(crate) volume_paths: Vec<PathBuf>,
+    pub(crate) volume_indices: Vec<usize>,
+    pub(crate) expected_volume_count: usize,
+    pub(crate) missing_volume_indices: Vec<usize>,
 }
 
 impl ArchiveReader {
@@ -187,7 +188,7 @@ impl ArchiveReader {
     }
 
     /// Discover and open all volumes belonging to the same archive.
-    async fn discover_volumes(path: &Path) -> Result<DiscoveredVolumes> {
+    pub(crate) async fn discover_volumes(path: &Path) -> Result<DiscoveredVolumes> {
         let parent_dir = path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(parent_dir);
         let base_filename = path.file_name().unwrap_or_default();
@@ -234,8 +235,7 @@ impl ArchiveReader {
         };
 
         // 5. Scan for all available volumes
-        let mut found_readers: Vec<(usize, VolumeReader<era_storage::LocalStorageReader>)> =
-            Vec::new();
+        let mut found_readers = Vec::new();
         let mut seen_sequences = HashSet::from([first_vol_sequence]);
         let mut missing_count: usize = 0;
         let mut first_reader_opt = Some(first_reader);
@@ -261,7 +261,7 @@ impl ArchiveReader {
                     )));
                 }
                 if let Some(reader) = first_reader_opt.take() {
-                    found_readers.push((first_vol_sequence, reader));
+                    found_readers.push((first_vol_sequence, full_path, reader));
                     missing_count = 0;
                 }
                 i = i.saturating_add(1);
@@ -305,7 +305,7 @@ impl ArchiveReader {
                             scan_limit =
                                 scan_limit.max(sibling_total.saturating_add(scan_tolerance));
                         }
-                        found_readers.push((vol_seq, reader));
+                        found_readers.push((vol_seq, full_path, reader));
                     } else {
                         tracing::warn!(
                             "Volume {} has different archive_id, skipping",
@@ -322,15 +322,17 @@ impl ArchiveReader {
         }
 
         if let Some(reader) = first_reader_opt {
-            found_readers.push((first_vol_sequence, reader));
+            found_readers.push((first_vol_sequence, path.to_path_buf(), reader));
         }
 
         // 6. Sort by volume sequence and build final structures
-        found_readers.sort_by_key(|(seq, _)| *seq);
+        found_readers.sort_by_key(|(seq, _, _)| *seq);
 
-        let volume_indices: Vec<usize> = found_readers.iter().map(|(seq, _)| *seq).collect();
-        let volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>> =
-            found_readers.into_iter().map(|(_, r)| r).collect();
+        let volume_indices: Vec<usize> = found_readers.iter().map(|(seq, _, _)| *seq).collect();
+        let (volume_paths, volume_readers): (Vec<_>, Vec<_>) = found_readers
+            .into_iter()
+            .map(|(_, path, reader)| (path, reader))
+            .unzip();
 
         if volume_readers.is_empty() {
             return Err(EraError::Io(std::io::Error::new(
@@ -380,6 +382,7 @@ impl ArchiveReader {
 
         Ok(DiscoveredVolumes {
             volume_readers,
+            volume_paths,
             volume_indices,
             expected_volume_count,
             missing_volume_indices,
@@ -757,7 +760,7 @@ impl ArchiveReader {
                 SessionErasureBlockIteratorArgs {
                     volume_readers: &self.volume_readers,
                     volume_indices: &self.volume_indices,
-                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
+                    original_volume_count: self.expected_volume_count,
                     session: &self.session,
                     volume_key: &self.volume_key,
                     nonce_context: self.nonce_context,
@@ -769,7 +772,7 @@ impl ArchiveReader {
                     distribution_strategy: dist_strategy,
                     committed_ends: self.committed_ends_for_iterators(),
                 },
-            ))
+            )?)
         } else {
             Box::new(MultiVolumeSessionBlockIterator::new(
                 &self.volume_readers,
@@ -2427,7 +2430,7 @@ impl ArchiveReader {
                 SessionErasureBlockIteratorArgs {
                     volume_readers: &self.volume_readers,
                     volume_indices: &self.volume_indices,
-                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
+                    original_volume_count: self.expected_volume_count,
                     session: &self.session,
                     volume_key: &self.volume_key,
                     nonce_context: self.nonce_context,
@@ -2439,7 +2442,7 @@ impl ArchiveReader {
                     distribution_strategy: dist_strategy,
                     committed_ends: self.committed_ends_for_iterators(),
                 },
-            ))
+            )?)
         } else {
             Box::new(MultiVolumeSessionBlockIterator::new(
                 &self.volume_readers,
@@ -2491,7 +2494,7 @@ impl ArchiveReader {
                 SessionErasureBlockIteratorArgs {
                     volume_readers: &self.volume_readers,
                     volume_indices: &self.volume_indices,
-                    original_volume_count: self.volume_readers[0].header().total_volumes().into(),
+                    original_volume_count: self.expected_volume_count,
                     session: &self.session,
                     volume_key: &self.volume_key,
                     nonce_context: self.nonce_context,
@@ -2503,7 +2506,7 @@ impl ArchiveReader {
                     distribution_strategy: dist_strategy,
                     committed_ends: self.committed_ends_for_iterators(),
                 },
-            ))
+            )?)
         } else {
             Box::new(MultiVolumeSessionBlockIterator::new(
                 &self.volume_readers,

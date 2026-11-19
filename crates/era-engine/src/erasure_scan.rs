@@ -1,4 +1,131 @@
 use bytes::Bytes;
+use era_common::{ArchiveConfig, EraError, MatrixDistributionStrategy, Result, ShardHeader};
+use era_volume::{DistributionCalculator, VolumeReader};
+
+pub(crate) struct MatrixScanGeometry {
+    width: usize,
+    strategy: MatrixDistributionStrategy,
+    readers_by_sequence: Vec<Option<usize>>,
+    generation_start: usize,
+}
+
+impl MatrixScanGeometry {
+    pub(crate) fn new(
+        config: &ArchiveConfig,
+        expected_volumes: usize,
+        sequences: &[usize],
+        strategy: MatrixDistributionStrategy,
+    ) -> Result<Self> {
+        let mut volume_count = expected_volumes;
+        for &sequence in sequences {
+            if sequence > usize::from(u16::MAX) {
+                return Err(EraError::InvalidFormat(
+                    "Volume sequence exceeds u16".into(),
+                ));
+            }
+            volume_count = volume_count.max(sequence + 1);
+        }
+        if volume_count > usize::from(u16::MAX) + 1 {
+            return Err(EraError::InvalidFormat(
+                "Volume count exceeds sequence range".into(),
+            ));
+        }
+
+        let target = config.distribution.target_volumes;
+        let width = if target == 0 {
+            config.erasure.map_or(1, |ec| ec.total_shards())
+        } else {
+            target
+        };
+        // Legacy single-generation headers advertised K+M even for a narrower pool.
+        let width = if expected_volumes > 0 {
+            width.min(volume_count)
+        } else {
+            width
+        };
+        if width == 0 || width > usize::from(u16::MAX) {
+            return Err(EraError::InvalidFormat(
+                "Invalid EC generation width".into(),
+            ));
+        }
+
+        let mut readers_by_sequence = vec![None; volume_count];
+        for (reader_idx, &sequence) in sequences.iter().enumerate() {
+            if readers_by_sequence[sequence].replace(reader_idx).is_some() {
+                return Err(EraError::InvalidFormat(format!(
+                    "Duplicate volume sequence {sequence}"
+                )));
+            }
+        }
+        Ok(Self {
+            width,
+            strategy,
+            readers_by_sequence,
+            generation_start: 0,
+        })
+    }
+
+    pub(crate) fn advance_to_data(&mut self, offsets: &[u64], ends: &[u64]) -> Result<bool> {
+        while self.generation_start < self.readers_by_sequence.len() {
+            let end = (self.generation_start + self.width).min(self.readers_by_sequence.len());
+            let mut readers = self.readers_by_sequence[self.generation_start..end]
+                .iter()
+                .flatten();
+            let Some(&first) = readers.next() else {
+                // The global stripe number after a wholly missing generation is unknowable.
+                let generation = self.generation_start / self.width;
+                self.finish();
+                return Err(EraError::ErasureError(format!(
+                    "No surviving volumes in EC generation {generation}"
+                )));
+            };
+            if offsets[first] < ends[first] || readers.any(|&idx| offsets[idx] < ends[idx]) {
+                return Ok(true);
+            }
+            self.generation_start += self.width;
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn volume_sequence(&self, shard: usize, global_stripe: u64) -> Result<usize> {
+        Ok(self.generation_start
+            + self
+                .strategy
+                .calculate_volume(shard, global_stripe, self.width)?)
+    }
+
+    pub(crate) fn reader_index(&self, sequence: usize) -> Option<usize> {
+        self.readers_by_sequence.get(sequence).copied().flatten()
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.generation_start = self.readers_by_sequence.len();
+    }
+
+    pub(crate) fn has_generation(&self) -> bool {
+        self.generation_start < self.readers_by_sequence.len()
+    }
+}
+
+pub(crate) async fn read_matrix_shard_header<R: era_storage::StorageReader>(
+    reader: &VolumeReader<R>,
+    offset: u64,
+    end: u64,
+    prefix_len: usize,
+) -> Option<(Bytes, ShardHeader)> {
+    let len = prefix_len + ShardHeader::SIZE;
+    let len_u64 = u64::try_from(len).ok()?;
+    if len_u64 > end.saturating_sub(offset) {
+        return None;
+    }
+    match reader.read_raw(offset, len).await {
+        Ok(bytes) if bytes.len() == len => {
+            let header = ShardHeader::from_bytes(&bytes[prefix_len..])?;
+            Some((bytes.slice(..prefix_len), header))
+        }
+        Ok(_) | Err(_) => None,
+    }
+}
 
 pub(crate) fn parse_stripe_lengths(prefix_bytes: &[u8], data_shards: usize) -> Vec<u32> {
     let mut lengths = Vec::with_capacity(data_shards);
@@ -89,13 +216,17 @@ pub(crate) fn erasure_data_end<R: era_storage::StorageReader>(
     };
 
     let mut limit = if footer.has_catalog_location() {
-        footer.catalog_offset()
+        end.min(footer.catalog_offset())
     } else {
         end
     };
 
     if footer.has_index() && footer.index_offset() < limit {
         limit = footer.index_offset();
+    }
+
+    if footer.has_manifest() {
+        limit = limit.min(footer.manifest_offset());
     }
 
     let ckpt_off = footer.last_checkpoint_offset();

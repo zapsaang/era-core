@@ -1,9 +1,20 @@
-use era_common::ErasureCodeConfig;
+use bytes::Bytes;
+use era_codec::{ErasureCoder, ErasureConfig, NoCompressor};
+use era_common::{
+    compute_shard_crc, ArchiveConfig, ArchiveId, BlockId, ChunkHash, CompressionAlgorithm,
+    ErasureCodeConfig, ShardHeader, UniqueChunk, VolumeId,
+};
+use era_crypto::{AeadContext, KdfParams, KeySession, Nonce, Salt, XChaCha20Poly1305Context};
+use era_engine::auth::{PasswordSlotParams, MK_WRAP_AAD_DOMAIN};
 use era_engine::{
     repair_archive_matrix, ArchiveReader, ArchiveWriterBuilder, ExtractOptions, RepairOptions,
 };
+use era_packing::SessionBlockBuilder;
 use era_storage::LocalStorageBackend;
-use era_volume::{DistributionCalculator, VolumeReader};
+use era_volume::{
+    AccessPolicy, DistributionCalculator, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot,
+    RecipientType, SuperHeader, VolumeReader, VolumeWriter,
+};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +25,218 @@ const ERASURE_4_PLUS_2: ErasureCodeConfig = ErasureCodeConfig {
     data_shards: 4,
     parity_shards: 2,
 };
+
+const STRIPES_PER_GENERATION: usize = 2;
+
+fn synthetic_password_slot(master_key: &[u8; 32]) -> RecipientSlot {
+    let params = KdfParams::fast();
+    let salt = Salt::generate();
+    let key = era_crypto::derive_key(PASSWORD.as_bytes(), &salt, &params).unwrap();
+    let context = XChaCha20Poly1305Context::from_derived_key(&key).unwrap();
+    let nonce = Nonce::generate();
+    let wrapped = context
+        .encrypt(nonce.as_bytes(), MK_WRAP_AAD_DOMAIN, master_key)
+        .unwrap();
+    let mut encrypted = nonce.as_bytes().to_vec();
+    encrypted.extend_from_slice(&wrapped);
+    let slot_params = rkyv::to_bytes::<rkyv::rancor::Error>(&PasswordSlotParams {
+        salt: *salt.as_bytes(),
+        kdf_memory_cost: params.memory_cost,
+        kdf_time_cost: params.time_cost,
+        kdf_parallelism: params.parallelism,
+    })
+    .unwrap();
+    RecipientSlot::new(
+        RecipientType::Argon2idPassword,
+        None,
+        slot_params.to_vec(),
+        encrypted,
+    )
+}
+
+async fn synthetic_generations(
+    dir: &TempDir,
+    width: usize,
+    generation_count: usize,
+) -> (Vec<PathBuf>, Vec<ChunkHash>) {
+    let fixture_master_key = [0x39; 32];
+    let session = KeySession::from_master_key(&fixture_master_key).unwrap();
+    let (volume_key, wrapped) = session.generate_and_wrap_volume_key().unwrap();
+    let archive_id = ArchiveId::new();
+    let salt = Salt::generate();
+    let mut config = ArchiveConfig {
+        erasure: Some(ERASURE_4_PLUS_2),
+        ..Default::default()
+    };
+    config.compression.algorithm = CompressionAlgorithm::None;
+    config.distribution.target_volumes = if generation_count == 1 { 0 } else { width };
+    let mut header = SuperHeader::new(
+        archive_id,
+        vec![synthetic_password_slot(&fixture_master_key)],
+        config,
+        *salt.as_bytes(),
+        EncryptedVolumeKey::new(
+            KeyWrapAlgorithm::XChaCha20Poly1305,
+            wrapped.nonce,
+            wrapped.ciphertext,
+        ),
+        AccessPolicy::AnyOfN,
+    )
+    .unwrap();
+    let builder = SessionBlockBuilder::new(
+        &session,
+        &volume_key,
+        *salt.as_bytes(),
+        *archive_id.0.as_bytes(),
+        header.epoch_id(),
+        0,
+        Box::new(NoCompressor),
+    );
+    let backend = LocalStorageBackend::new(dir.path());
+    let mut paths = Vec::new();
+    let mut volumes = Vec::new();
+    for sequence in 0..generation_count * width {
+        let name = if sequence == 0 {
+            "generations.era".into()
+        } else {
+            format!("generations.era.{sequence:03}")
+        };
+        header.set_volume_sequence(u16::try_from(sequence).unwrap());
+        header.set_volume_id(VolumeId(uuid::Uuid::from_u128(
+            u128::try_from(sequence + 1).unwrap(),
+        )));
+        // Old generation headers can report their then-current total.
+        header.set_total_volumes(u16::try_from((sequence / width + 1) * width).unwrap());
+        volumes.push(
+            VolumeWriter::create(&backend, Path::new(&name), header.clone())
+                .await
+                .unwrap(),
+        );
+        paths.push(dir.path().join(name));
+    }
+
+    let coder = ErasureCoder::new(ErasureConfig::new(4, 2).unwrap()).unwrap();
+    let mut hashes = Vec::new();
+    for stripe in 0..generation_count * STRIPES_PER_GENERATION {
+        // Independent format oracle. Each volume receives its frames in shard order.
+        let sequence = |shard| (stripe / STRIPES_PER_GENERATION) * width + (stripe + shard) % width;
+        let mut data = Vec::new();
+        for shard in 0..4 {
+            let payload = Bytes::from(vec![
+                u8::try_from(stripe * 4 + shard).unwrap();
+                25 + 2 * stripe + shard
+            ]);
+            let hash = era_crypto::hash(&payload);
+            hashes.push(hash);
+            let prepared = builder
+                .prepare_chunks(&[UniqueChunk::new(payload, hash)])
+                .unwrap();
+            let sealed = builder
+                .seal_prepared(&prepared, u32::try_from(sequence(shard)).unwrap())
+                .unwrap();
+            data.push(sealed.data.to_vec());
+        }
+        let prefix: Vec<_> = data
+            .iter()
+            .flat_map(|shard| u32::try_from(shard.len()).unwrap().to_le_bytes())
+            .collect();
+        let encoded = coder.encode_shards(&data).unwrap();
+        for (shard, payload) in data.iter().chain(&encoded[4..]).enumerate() {
+            let shard_header = ShardHeader::new(
+                u32::try_from(payload.len()).unwrap(),
+                compute_shard_crc(payload),
+            );
+            let writer = &mut volumes[sequence(shard)];
+            writer.write_raw(&prefix).await.unwrap();
+            writer.write_raw(&shard_header.to_bytes()).await.unwrap();
+            writer.write_raw(payload).await.unwrap();
+        }
+    }
+    for writer in volumes {
+        writer.finalize().await.unwrap();
+    }
+    (paths, hashes)
+}
+
+async fn assert_generation_block_ids(width: usize, generation_count: usize) {
+    let dir = TempDir::new().unwrap();
+    let (paths, hashes) = synthetic_generations(&dir, width, generation_count).await;
+    for path in [&paths[0], paths.last().unwrap()] {
+        let reader = ArchiveReader::open(path, PASSWORD).await.unwrap();
+        for (stripe, stripe_hashes) in hashes.chunks_exact(4).enumerate() {
+            let ids = reader
+                .live_data_block_ids_from_hashes_via_iterator(stripe_hashes)
+                .await
+                .unwrap();
+            let expected: Vec<_> = (stripe * 4..(stripe + 1) * 4)
+                .map(|id| BlockId::new(u64::try_from(id).unwrap()))
+                .collect();
+            assert_eq!(ids, expected, "width {width}, stripe {stripe}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn generation_geometry_reads_full_width() {
+    assert_generation_block_ids(6, 2).await;
+}
+
+#[tokio::test]
+async fn generation_geometry_reads_colocated_shards() {
+    assert_generation_block_ids(3, 2).await;
+}
+
+#[tokio::test]
+async fn generation_geometry_reads_legacy_narrow_archive_without_width_field() {
+    assert_generation_block_ids(3, 1).await;
+}
+
+#[tokio::test]
+async fn generation_geometry_repairs_full_width() {
+    assert_generation_repair(6).await;
+}
+
+#[tokio::test]
+async fn generation_geometry_repairs_colocated_shards() {
+    assert_generation_repair(3).await;
+}
+
+async fn assert_generation_repair(width: usize) {
+    let dir = TempDir::new().unwrap();
+    let (paths, _) = synthetic_generations(&dir, width, 2).await;
+    // Stripe 2, shard 1 is the first frame on this volume. More frames follow it.
+    let damaged_path = &paths[width + 3 % width];
+    let pristine = fs::read(damaged_path).unwrap();
+    let payload_offset =
+        usize::try_from(era_volume::DATA_REGION_START).unwrap() + 4 * 4 + ShardHeader::SIZE;
+    let mut damaged = pristine.clone();
+    damaged[payload_offset] ^= 0xff;
+    fs::write(damaged_path, damaged).unwrap();
+
+    let stats = repair_archive_matrix(
+        &paths[0],
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        stats.blocks_scanned,
+        u64::try_from(2 * STRIPES_PER_GENERATION).unwrap(),
+        "width {width}"
+    );
+    assert_eq!(stats.corrupted_shards_found, 1, "width {width}");
+    assert_eq!(stats.shards_repaired, 1, "width {width}");
+    assert_eq!(stats.unrecoverable_blocks, 0, "width {width}");
+    assert!(
+        fs::read(damaged_path).unwrap() == pristine,
+        "repaired volume differs at width {width}"
+    );
+}
 
 fn deterministic_payload(len: usize) -> Vec<u8> {
     (0..len)

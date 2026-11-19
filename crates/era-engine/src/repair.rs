@@ -15,7 +15,8 @@
 //! - Single-volume: All shards in a single volume using `shard_idx % volume_count`
 //! - Matrix: Shards distributed using `(shard_idx + block_sequence) % volume_count`
 
-use crate::reader::{ArchiveHealthStatus, ArchiveReader};
+use crate::erasure_scan::{read_matrix_shard_header, MatrixScanGeometry};
+use crate::reader::{ArchiveHealthStatus, ArchiveReader, DiscoveredVolumes};
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{
@@ -24,11 +25,11 @@ use era_common::{
 };
 use era_crypto::{build_aad, AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_storage::LocalStorageBackend;
-use era_volume::{DistributionCalculator, VolumeReader, DATA_REGION_START, HEADER_SIZE};
+use era_volume::{VolumeReader, DATA_REGION_START, HEADER_SIZE};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -986,93 +987,15 @@ async fn repair_archive_matrix_with_providers(
         path.display()
     );
 
-    let parent_dir = path.parent().unwrap_or(Path::new("."));
-    let backend = LocalStorageBackend::new(parent_dir);
-
-    // Collect all volumes
-    let mut volume_readers: Vec<VolumeReader<era_storage::LocalStorageReader>> = Vec::new();
-    let mut volume_paths: Vec<PathBuf> = Vec::new();
-    let mut volume_sequences: Vec<u16> = Vec::new();
-
-    // Open first volume
-    let volume_filename = path.file_name().unwrap_or_default();
-    let first_reader = VolumeReader::open(&backend, Path::new(volume_filename)).await?;
-    let archive_id = first_reader.header().archive_id();
-    let header = first_reader.header().clone();
-    let total_volumes = first_reader.header().total_volumes();
-    let first_sequence = first_reader.header().volume_sequence();
-
-    let base_name = {
-        let base_str = volume_filename.to_string_lossy();
-        if base_str.ends_with(".era") {
-            base_str.to_string()
-        } else {
-            let owned = base_str.to_string();
-            if let Some(idx) = owned.rfind(".era.") {
-                owned[..idx + 4].to_string()
-            } else {
-                owned
-            }
-        }
-    };
-
-    volume_sequences.push(first_sequence);
-    volume_paths.push(path.to_path_buf());
-    volume_readers.push(first_reader);
-
-    // Find additional volumes - continue even if some are missing
-    let mut consecutive_missing = 0;
-    let max_gap = 5; // Allow up to 5 consecutive missing volumes before giving up
-
-    for seq in 0..usize::from(total_volumes.max(100)) {
-        if seq == usize::from(first_sequence) {
-            continue;
-        }
-
-        let relative_path = if seq == 0 {
-            PathBuf::from(&base_name)
-        } else {
-            PathBuf::from(format!("{base_name}.{seq:03}"))
-        };
-        let next_path = parent_dir.join(&relative_path);
-        let next_filename = relative_path.file_name().unwrap_or_default();
-
-        match VolumeReader::open(&backend, Path::new(next_filename)).await {
-            Ok(reader) => {
-                if reader.header().archive_id() != archive_id {
-                    break;
-                }
-                let discovered_seq = reader.header().volume_sequence();
-                volume_sequences.push(discovered_seq);
-                volume_paths.push(next_path);
-                volume_readers.push(reader);
-                consecutive_missing = 0;
-            }
-            Err(_) => {
-                consecutive_missing += 1;
-                if consecutive_missing > max_gap && seq >= usize::from(total_volumes) {
-                    break;
-                }
-            }
-        }
-    }
-
+    let DiscoveredVolumes {
+        volume_readers,
+        volume_paths,
+        volume_indices,
+        expected_volume_count,
+        missing_volume_indices,
+    } = ArchiveReader::discover_volumes(path).await?;
     let volume_count = volume_readers.len();
-    let expected_volumes = usize::from(total_volumes.max(1));
-    let missing_volume_indices: Vec<usize> = (0..expected_volumes)
-        .filter(|idx| !volume_sequences.iter().any(|seq| usize::from(*seq) == *idx))
-        .collect();
-    info!(
-        "Found {} volumes for matrix-distributed archive (expected {})",
-        volume_count, total_volumes
-    );
-
-    if !missing_volume_indices.is_empty() {
-        warn!(
-            "Matrix repair opened {} of {} expected volumes; missing sequences {:?}",
-            volume_count, expected_volumes, missing_volume_indices
-        );
-    }
+    let expected_volumes = expected_volume_count.max(1);
 
     if volume_count < 2 {
         return Err(EraError::ErasureError(
@@ -1081,6 +1004,7 @@ async fn repair_archive_matrix_with_providers(
     }
 
     // Verify erasure coding is enabled
+    let header = volume_readers[0].header();
     let erasure_config = header
         .config()
         .erasure
@@ -1095,7 +1019,7 @@ async fn repair_archive_matrix_with_providers(
 
     // Verify credentials before proceeding with repair
     let mut header_repairs = Vec::new();
-    if volume_readers
+    let session = if volume_readers
         .iter()
         .any(VolumeReader::header_recovered_from_backup)
     {
@@ -1106,12 +1030,17 @@ async fn repair_archive_matrix_with_providers(
                 header_repairs.push((volume_path.clone(), header_bytes));
             }
         }
+        archive.session().try_clone()?
     } else {
-        let _mk_array = try_unlock_with_providers(&header, &_providers)?;
-    }
-
-    let _compressor: Box<dyn era_codec::Compressor> =
-        Box::new(ZstdCompressor::new(header.config().compression.level));
+        let mk = zeroize::Zeroizing::new(try_unlock_with_providers(header, &_providers)?);
+        era_crypto::KeySession::from_master_key(&mk)?
+    };
+    let wrapped = header.encrypted_volume_key();
+    let volume_key = session.unwrap_volume_key(wrapped.nonce(), wrapped.ciphertext())?;
+    let keys = Arc::new((session, volume_key));
+    let archive_id = *header.archive_id().0.as_bytes();
+    let salt = *header.salt();
+    let epoch = header.epoch_id();
 
     // Create backups if requested
     if options.create_backup && !options.dry_run {
@@ -1169,17 +1098,12 @@ async fn repair_archive_matrix_with_providers(
     let mut volume_offsets: Vec<u64> = volume_readers.iter().map(|r| r.data_region().0).collect();
 
     let mut block_sequence: u64 = 0;
-    let distribution_strategy = header.config().distribution.strategy;
-    let total_volumes = header.total_volumes() as usize;
-
-    // Map volume sequence -> reader index
-    let mut vol_index_map = vec![None; total_volumes.max(1)];
-    for (reader_idx, seq) in volume_sequences.iter().enumerate() {
-        let seq_idx = *seq as usize;
-        if seq_idx < vol_index_map.len() {
-            vol_index_map[seq_idx] = Some(reader_idx);
-        }
-    }
+    let mut geometry = MatrixScanGeometry::new(
+        header.config(),
+        expected_volume_count,
+        &volume_indices,
+        header.config().distribution.strategy,
+    )?;
 
     let data_ends: Vec<u64> = volume_readers
         .iter()
@@ -1188,49 +1112,57 @@ async fn repair_archive_matrix_with_providers(
 
     let header_prefix_len = erasure_config.data_shards as usize * 4;
 
-    'stripe_loop: loop {
+    loop {
+        match geometry.advance_to_data(&volume_offsets, &data_ends) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) if options.continue_on_error => {
+                stats.unrecoverable_blocks += 1;
+                stats.errors.push(e.to_string());
+                break;
+            }
+            Err(e) => return Err(e),
+        }
         let mut shards: Vec<(usize, Bytes)> = Vec::with_capacity(total_shards);
         let mut shard_locations: Vec<(usize, usize, u64)> = Vec::new(); // (shard_idx, reader_idx, offset)
         let mut corrupted_indices: Vec<usize> = Vec::new();
         let mut data_lengths: Vec<Option<u32>> = vec![None; erasure_config.data_shards as usize];
         let mut max_len: usize = 0;
-        let mut any_shard_read = false;
+        let mut any_frame_seen = false;
 
         // Pre-pass: collect all readable prefix copies for multi-copy reconciliation.
         // We use header lengths for navigation so a corrupted prefix cannot cause drift.
         let mut prefix_copies: Vec<Bytes> = Vec::with_capacity(total_shards);
         let mut temp_offsets: Vec<u64> = volume_offsets.clone();
         for shard_idx in 0..total_shards {
-            let vol_idx = distribution_strategy.calculate_volume(
-                shard_idx,
-                block_sequence,
-                total_volumes.max(1),
-            )?;
-            let reader_idx_opt = vol_index_map.get(vol_idx).copied().flatten();
+            let vol_idx = geometry.volume_sequence(shard_idx, block_sequence)?;
+            let reader_idx_opt = geometry.reader_index(vol_idx);
             if let Some(reader_idx) = reader_idx_opt {
                 let reader = &volume_readers[reader_idx];
                 let shard_offset = temp_offsets[reader_idx];
                 if shard_offset >= data_ends[reader_idx] {
                     continue;
                 }
-                let prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len).await {
-                    Ok(bytes) if bytes.len() == header_prefix_len => bytes,
-                    _ => continue,
+                let Some((prefix_bytes, shard_header)) = read_matrix_shard_header(
+                    reader,
+                    shard_offset,
+                    data_ends[reader_idx],
+                    header_prefix_len,
+                )
+                .await
+                else {
+                    temp_offsets[reader_idx] = data_ends[reader_idx];
+                    continue;
                 };
-                let header_bytes = match reader
-                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE)
-                    .await
-                {
-                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
-                    _ => continue,
-                };
-                let shard_header = ShardHeader::from_bytes(&header_bytes);
-                let shard_len = shard_header.map_or(0, |h| h.length as usize);
+                if u64::from(shard_header.length) > MAX_SHARD_SIZE {
+                    temp_offsets[reader_idx] = data_ends[reader_idx];
+                    continue;
+                }
                 prefix_copies.push(prefix_bytes);
                 temp_offsets[reader_idx] = shard_offset
                     + header_prefix_len as u64
                     + ShardHeader::SIZE as u64
-                    + shard_len as u64;
+                    + u64::from(shard_header.length);
             }
         }
         let stripe_lengths = crate::erasure_scan::reconcile_stripe_prefixes(
@@ -1240,37 +1172,29 @@ async fn repair_archive_matrix_with_providers(
 
         // Scan all shards across volumes using matrix distribution
         for shard_idx in 0..total_shards {
-            let vol_idx = distribution_strategy.calculate_volume(
-                shard_idx,
-                block_sequence,
-                total_volumes.max(1),
-            )?;
+            let vol_idx = geometry.volume_sequence(shard_idx, block_sequence)?;
 
-            let reader_idx_opt = vol_index_map.get(vol_idx).copied().flatten();
+            let reader_idx_opt = geometry.reader_index(vol_idx);
             if let Some(reader_idx) = reader_idx_opt {
                 let reader = &volume_readers[reader_idx];
                 let shard_offset = volume_offsets[reader_idx];
 
-                if shard_offset >= data_ends[reader_idx] {
-                    if shard_idx == 0 {
-                        break 'stripe_loop;
-                    }
+                let Some((_, shard_header)) = read_matrix_shard_header(
+                    reader,
+                    shard_offset,
+                    data_ends[reader_idx],
+                    header_prefix_len,
+                )
+                .await
+                else {
+                    volume_offsets[reader_idx] = data_ends[reader_idx];
                     corrupted_indices.push(shard_idx);
                     stats.corrupted_shards_found += 1;
                     continue;
-                }
-
-                let _prefix_bytes = match reader.read_raw(shard_offset, header_prefix_len).await {
-                    Ok(bytes) if bytes.len() == header_prefix_len => bytes,
-                    _ => {
-                        if shard_idx == 0 {
-                            break 'stripe_loop;
-                        }
-                        corrupted_indices.push(shard_idx);
-                        stats.corrupted_shards_found += 1;
-                        continue;
-                    }
                 };
+                any_frame_seen = true;
+                let header_offset = shard_offset + header_prefix_len as u64;
+                let payload_offset = header_offset + ShardHeader::SIZE as u64;
 
                 // Determine authoritative shard length from reconciled stripe prefix for data shards
                 let is_data_shard = shard_idx < erasure_config.data_shards as usize;
@@ -1282,23 +1206,6 @@ async fn repair_archive_matrix_with_providers(
                     None
                 };
 
-                let header_bytes = match reader
-                    .read_raw(shard_offset + header_prefix_len as u64, ShardHeader::SIZE)
-                    .await
-                {
-                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
-                    _ => {
-                        if shard_idx == 0 {
-                            break 'stripe_loop;
-                        }
-                        corrupted_indices.push(shard_idx);
-                        stats.corrupted_shards_found += 1;
-                        continue;
-                    }
-                };
-
-                let shard_header = ShardHeader::from_bytes(&header_bytes);
-
                 // Compute the shard length to use for reading and offset advancement
                 let shard_len: usize = if let Some(auth_len) = authoritative_len {
                     // Data shard: stripe prefix is authoritative
@@ -1309,7 +1216,8 @@ async fn repair_archive_matrix_with_providers(
                         )));
                     }
                     auth_len as usize
-                } else if let Some(ref h) = shard_header {
+                } else {
+                    let h = &shard_header;
                     // Parity shard: use header length, sanity-bounded by max stripe length
                     if h.length as u64 > MAX_SHARD_SIZE {
                         return Err(EraError::ErasureError(format!(
@@ -1325,15 +1233,12 @@ async fn repair_archive_matrix_with_providers(
                     if parity_bound > 0 && h.length < parity_bound {
                         corrupted_indices.push(shard_idx);
                         stats.corrupted_shards_found += 1;
-                        shard_locations.push((
-                            shard_idx,
-                            reader_idx,
-                            shard_offset + header_prefix_len as u64,
-                        ));
-                        volume_offsets[reader_idx] = shard_offset
-                            + header_prefix_len as u64
-                            + ShardHeader::SIZE as u64
-                            + parity_bound as u64;
+                        if u64::from(parity_bound) <= data_ends[reader_idx] - payload_offset {
+                            shard_locations.push((shard_idx, reader_idx, header_offset));
+                        }
+                        volume_offsets[reader_idx] = payload_offset
+                            .saturating_add(u64::from(parity_bound))
+                            .min(data_ends[reader_idx]);
                         continue;
                     }
                     if parity_bound > 0 && h.length > parity_bound {
@@ -1341,34 +1246,14 @@ async fn repair_archive_matrix_with_providers(
                     } else {
                         h.length as usize
                     }
-                } else {
-                    // No header and no authoritative length (parity with corrupt header):
-                    // use padded max stripe length as best estimate
-                    let parity_estimate =
-                        crate::erasure_scan::parity_bound_from_lengths(stripe_lengths.as_deref())
-                            .unwrap_or(0);
-                    if parity_estimate == 0 {
-                        // Cannot determine length — mark corrupted and skip
-                        corrupted_indices.push(shard_idx);
-                        stats.corrupted_shards_found += 1;
-                        continue;
-                    }
-                    parity_estimate as usize
                 };
 
-                let Some(shard_header) = shard_header else {
-                    debug!(
-                        "Invalid shard header at block {}, shard {}",
-                        block_sequence, shard_idx
-                    );
+                if shard_len as u64 > data_ends[reader_idx] - payload_offset {
                     corrupted_indices.push(shard_idx);
                     stats.corrupted_shards_found += 1;
-                    volume_offsets[reader_idx] = shard_offset
-                        + header_prefix_len as u64
-                        + ShardHeader::SIZE as u64
-                        + shard_len as u64;
+                    volume_offsets[reader_idx] = data_ends[reader_idx];
                     continue;
-                };
+                }
 
                 if is_data_shard {
                     if let Some(slot) = data_lengths.get_mut(shard_idx) {
@@ -1379,15 +1264,8 @@ async fn repair_archive_matrix_with_providers(
                     max_len = shard_len;
                 }
 
-                any_shard_read = true;
-                match reader
-                    .read_raw(
-                        shard_offset + header_prefix_len as u64 + ShardHeader::SIZE as u64,
-                        shard_len,
-                    )
-                    .await
-                {
-                    Ok(shard_data) => {
+                match reader.read_raw(payload_offset, shard_len).await {
+                    Ok(shard_data) if shard_data.len() == shard_len => {
                         // When using authoritative prefix length for data shards,
                         // bypass ShardHeader.verify (which checks data.len() == header.length)
                         // since the header length field may be corrupted
@@ -1415,16 +1293,13 @@ async fn repair_archive_matrix_with_providers(
                             stats.corrupted_shards_found += 1;
                         }
                     }
-                    Err(_) => {
+                    Ok(_) | Err(_) => {
                         corrupted_indices.push(shard_idx);
                         stats.corrupted_shards_found += 1;
                     }
                 }
 
-                volume_offsets[reader_idx] = shard_offset
-                    + header_prefix_len as u64
-                    + ShardHeader::SIZE as u64
-                    + shard_len as u64;
+                volume_offsets[reader_idx] = payload_offset + shard_len as u64;
             } else {
                 corrupted_indices.push(shard_idx);
                 stats.corrupted_shards_found += 1;
@@ -1437,7 +1312,15 @@ async fn repair_archive_matrix_with_providers(
             &mut max_len,
         );
 
-        if !any_shard_read {
+        if !any_frame_seen {
+            let error = EraError::ErasureError(format!(
+                "No readable shard frames for stripe {block_sequence}"
+            ));
+            if !options.continue_on_error {
+                return Err(error);
+            }
+            stats.unrecoverable_blocks += 1;
+            stats.errors.push(error.to_string());
             break;
         }
 
@@ -1479,6 +1362,66 @@ async fn repair_archive_matrix_with_providers(
                 .await
                 {
                     Ok(repaired_shards) => {
+                        let data_blocks = (0..min_shards)
+                            .map(|shard_idx| {
+                                let ciphertext = shards
+                                    .iter()
+                                    .chain(&repaired_shards)
+                                    .find_map(|(idx, data)| {
+                                        (*idx == shard_idx).then_some(data.clone())
+                                    })
+                                    .ok_or_else(|| {
+                                        EraError::ErasureError(format!(
+                                            "Missing reconstructed data shard {shard_idx}"
+                                        ))
+                                    })?;
+                                let block_id = BlockId::new(
+                                    block_sequence * u64::from(erasure_config.data_shards)
+                                        + shard_idx as u64,
+                                );
+                                let sequence =
+                                    geometry.volume_sequence(shard_idx, block_sequence)?;
+                                let sequence = u32::try_from(sequence).map_err(|_| {
+                                    EraError::InvalidFormat("Volume sequence exceeds u32".into())
+                                })?;
+                                Ok((block_id, sequence, ciphertext))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        let keys = Arc::clone(&keys);
+                        let authentication = tokio::task::spawn_blocking(move || -> Result<()> {
+                            let (session, volume_key) = &*keys;
+                            for (block_id, sequence, ciphertext) in data_blocks {
+                                if ciphertext.iter().all(|&byte| byte == 0) {
+                                    continue;
+                                }
+                                let key = session
+                                    .derive_block_key(volume_key, block_id.sequence(), &salt)?
+                                    .to_derived_key()?;
+                                era_crypto::decrypt_with_context_for_type(
+                                    &key,
+                                    &salt,
+                                    &archive_id,
+                                    epoch,
+                                    sequence,
+                                    BlockType::Data,
+                                    block_id,
+                                    &ciphertext,
+                                )?;
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .map_err(|e| EraError::AsyncError(e.to_string()))?;
+                        if let Err(error) = authentication {
+                            let message = format!("Stripe {block_sequence}: reconstructed data failed authentication: {error}");
+                            if !options.continue_on_error {
+                                return Err(EraError::IntegrityError(message));
+                            }
+                            stats.unrecoverable_blocks += 1;
+                            stats.errors.push(message);
+                            block_sequence += 1;
+                            continue;
+                        }
                         for (shard_idx, shard_data) in repaired_shards {
                             if let Some(&(_, reader_idx, offset)) =
                                 shard_locations.iter().find(|(idx, _, _)| *idx == shard_idx)

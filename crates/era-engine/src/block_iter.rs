@@ -13,6 +13,7 @@
 //! Basic iterators (`StandardBlockIterator`, `ErasureBlockIterator`) use a single
 //! key for all blocks and are provided for simpler use cases.
 
+use crate::erasure_scan::{read_matrix_shard_header, MatrixScanGeometry};
 use async_trait::async_trait;
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig};
@@ -22,7 +23,7 @@ use era_common::{
 };
 use era_crypto::{KeySession, VolumeKey};
 use era_packing::{ErasureBlockUnpacker, MacroBlockUnpacker, SessionBlockUnpacker};
-use era_volume::{DistributionCalculator, VolumeReader};
+use era_volume::VolumeReader;
 use std::collections::VecDeque;
 
 /// Result of reading and decoding a block
@@ -1108,22 +1109,13 @@ pub struct SessionErasureBlockIterator<'a, R: era_storage::StorageReader> {
     data_shards: u8,
     parity_shards: u8,
     total_shards: usize,
-    /// Maps volume index in original sequence to index in volume_readers
-    vol_index_map: Vec<Option<usize>>,
-    /// Total number of volumes in original archive
-    original_volume_count: usize,
+    geometry: MatrixScanGeometry,
     /// Current offsets in the data region for each volume
     current_offsets: Vec<u64>,
     /// End of data region for each volume
     data_ends: Vec<u64>,
-    /// Manifest-committed end offsets by original volume sequence.
-    committed_ends: Option<Vec<u64>>,
-    /// Current block index
-    block_index: u32,
     /// Current stripe index (Virtual Striping)
     current_stripe_index: usize,
-    /// Matrix distribution strategy
-    distribution_strategy: MatrixDistributionStrategy,
     /// Iteration statistics
     stats: BlockIterStats,
     /// Pending decoded blocks from the current stripe
@@ -1175,9 +1167,9 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             distribution_strategy,
             committed_ends,
         } = args;
-        if volume_readers.is_empty() {
-            return Err(EraError::InvalidFormat("No volume readers provided".into()));
-        }
+        let first = volume_readers
+            .first()
+            .ok_or_else(|| EraError::InvalidFormat("No volume readers provided".into()))?;
         if volume_readers.len() != volume_indices.len() {
             return Err(EraError::InvalidFormat(
                 "volume_readers and volume_indices length mismatch".to_string(),
@@ -1187,23 +1179,34 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
         let mut current_offsets = Vec::with_capacity(volume_readers.len());
         let mut data_ends = Vec::with_capacity(volume_readers.len());
 
-        for reader in volume_readers {
+        for (reader, &sequence) in volume_readers.iter().zip(volume_indices) {
+            if usize::from(reader.header().volume_sequence()) != sequence {
+                return Err(EraError::InvalidFormat(format!(
+                    "Volume reader does not match sequence {sequence}"
+                )));
+            }
             let (start, _) = reader.data_region();
             current_offsets.push(start);
-            data_ends.push(crate::erasure_scan::erasure_data_end(reader));
+            let end = crate::erasure_scan::erasure_data_end(reader);
+            let end = match committed_ends.as_deref() {
+                Some(ends) => end.min(*ends.get(sequence).ok_or_else(|| {
+                    EraError::InvalidFormat(format!(
+                        "Missing committed end for volume sequence {sequence}"
+                    ))
+                })?),
+                None => end,
+            };
+            data_ends.push(end);
         }
 
         let total_shards = data_shards as usize + parity_shards as usize;
 
-        // Build reverse map: original_vol_index -> position in volume_readers
-        let inferred_volume_count = volume_indices.iter().copied().max().unwrap_or(0) + 1;
-        let original_volume_count = original_volume_count.max(inferred_volume_count).max(1);
-        let mut vol_index_map = vec![None; original_volume_count];
-        for (reader_idx, &orig_idx) in volume_indices.iter().enumerate() {
-            if orig_idx < original_volume_count {
-                vol_index_map[orig_idx] = Some(reader_idx);
-            }
-        }
+        let geometry = MatrixScanGeometry::new(
+            first.header().config(),
+            original_volume_count,
+            volume_indices,
+            distribution_strategy,
+        )?;
 
         let unpacker = SessionBlockUnpacker::new(
             session,
@@ -1220,52 +1223,13 @@ impl<'a, R: era_storage::StorageReader> SessionErasureBlockIterator<'a, R> {
             data_shards,
             parity_shards,
             total_shards,
-            vol_index_map,
-            original_volume_count,
+            geometry,
             current_offsets,
             data_ends,
-            committed_ends,
-            block_index: 0,
             current_stripe_index: 0,
-            distribution_strategy,
             stats: BlockIterStats::default(),
             pending_blocks: VecDeque::new(),
         })
-    }
-}
-
-#[async_trait(?Send)]
-impl<'a, R: era_storage::StorageReader> BlockIterator
-    for Result<SessionErasureBlockIterator<'a, R>>
-{
-    async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
-        match self {
-            Ok(iter) => iter.next_block().await,
-            Err(e) => Some(Err(std::mem::replace(
-                e,
-                EraError::InvalidFormat("Session erasure iterator initialization failed".into()),
-            ))),
-        }
-    }
-
-    fn has_more(&self) -> bool {
-        match self {
-            Ok(iter) => iter.has_more(),
-            Err(_) => true,
-        }
-    }
-
-    fn stats(&self) -> &BlockIterStats {
-        static EMPTY_STATS: BlockIterStats = BlockIterStats {
-            blocks_read: 0,
-            blocks_failed: 0,
-            corrupted_shards: 0,
-        };
-
-        match self {
-            Ok(iter) => iter.stats(),
-            Err(_) => &EMPTY_STATS,
-        }
     }
 }
 
@@ -1274,6 +1238,18 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
     async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
         if let Some(result) = self.pending_blocks.pop_front() {
             return Some(result);
+        }
+
+        match self
+            .geometry
+            .advance_to_data(&self.current_offsets, &self.data_ends)
+        {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(e) => {
+                self.stats.blocks_failed += 1;
+                return Some(Err(e));
+            }
         }
 
         let stripe_size = self.total_shards;
@@ -1286,23 +1262,20 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         let header_prefix_len = data_shards * 4;
         let header_prefix_len_u64 = header_prefix_len as u64;
 
-        let mut any_shard_seen = false;
-
         // Pre-pass: collect all readable prefix copies for multi-copy reconciliation.
         // We use header lengths for navigation so a corrupted prefix cannot cause drift.
         let mut prefix_copies: Vec<Bytes> = Vec::with_capacity(stripe_size);
         let mut temp_offsets: Vec<u64> = self.current_offsets.clone();
         for shard_idx in 0..stripe_size {
-            let vol_idx = match self.distribution_strategy.calculate_volume(
-                shard_idx,
-                self.current_stripe_index as u64,
-                self.original_volume_count,
-            ) {
+            let vol_idx = match self
+                .geometry
+                .volume_sequence(shard_idx, self.current_stripe_index as u64)
+            {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
-            let reader_idx_opt = self.vol_index_map.get(vol_idx).copied().flatten();
+            let reader_idx_opt = self.geometry.reader_index(vol_idx);
             if let Some(idx) = reader_idx_opt {
                 let reader = &self.volume_readers[idx];
 
@@ -1311,90 +1284,41 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 }
 
                 let shard_start = temp_offsets[idx];
-                check_commit_or_end!(
-                    self.committed_ends.as_deref(),
+                let Some((prefix_bytes, shard_header)) = read_matrix_shard_header(
                     reader,
                     shard_start,
-                    header_prefix_len_u64
-                );
-
-                let prefix_bytes = match reader.read_raw(shard_start, header_prefix_len).await {
-                    Ok(bytes) if bytes.len() == header_prefix_len => bytes,
-                    Ok(_) => {
-                        temp_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                    Err(_) => {
-                        temp_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                };
-
-                let header_offset = match shard_start.checked_add(header_prefix_len_u64) {
-                    Some(offset) => offset,
-                    None => {
-                        return Some(Err(EraError::InvalidFormat(
-                            "Shard header offset overflow".into(),
-                        )))
-                    }
-                };
-                check_commit_or_end!(
-                    self.committed_ends.as_deref(),
-                    reader,
-                    header_offset,
-                    ShardHeader::SIZE as u64
-                );
-
-                let header_bytes = match reader.read_raw(header_offset, ShardHeader::SIZE).await {
-                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
-                    Ok(_) => {
-                        temp_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                    Err(_) => {
-                        temp_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                };
-
-                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
-                    Some(h) => h,
-                    None => {
-                        temp_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
+                    self.data_ends[idx],
+                    header_prefix_len,
+                )
+                .await
+                else {
+                    temp_offsets[idx] = self.data_ends[idx];
+                    continue;
                 };
 
                 if shard_header.length > MAX_SHARD_SIZE {
                     temp_offsets[idx] = self.data_ends[idx];
                     continue;
                 }
-                let shard_len = shard_header.length as usize;
-                check_commit_or_end!(
-                    self.committed_ends.as_deref(),
-                    reader,
-                    shard_start,
-                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64
-                );
                 prefix_copies.push(prefix_bytes);
-                temp_offsets[idx] +=
-                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+                temp_offsets[idx] += header_prefix_len_u64
+                    + ShardHeader::SIZE as u64
+                    + u64::from(shard_header.length);
             }
         }
         let stripe_lengths =
             crate::erasure_scan::reconcile_stripe_prefixes(&prefix_copies, data_shards);
 
         for shard_idx in 0..stripe_size {
-            let vol_idx = match self.distribution_strategy.calculate_volume(
-                shard_idx,
-                self.current_stripe_index as u64,
-                self.original_volume_count,
-            ) {
+            let vol_idx = match self
+                .geometry
+                .volume_sequence(shard_idx, self.current_stripe_index as u64)
+            {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
 
-            let reader_idx_opt = self.vol_index_map.get(vol_idx).copied().flatten();
+            let reader_idx_opt = self.geometry.reader_index(vol_idx);
             if let Some(idx) = reader_idx_opt {
                 let reader = &self.volume_readers[idx];
 
@@ -1403,62 +1327,18 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 }
 
                 let shard_start = self.current_offsets[idx];
-                check_commit_or_end!(
-                    self.committed_ends.as_deref(),
+                let Some((_, shard_header)) = read_matrix_shard_header(
                     reader,
                     shard_start,
-                    header_prefix_len_u64
-                );
-
-                let _prefix_bytes = match reader.read_raw(shard_start, header_prefix_len).await {
-                    Ok(bytes) if bytes.len() == header_prefix_len => {
-                        any_shard_seen = true;
-                        bytes
-                    }
-                    Ok(_) => {
-                        self.current_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                    Err(_) => {
-                        self.current_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
+                    self.data_ends[idx],
+                    header_prefix_len,
+                )
+                .await
+                else {
+                    self.current_offsets[idx] = self.data_ends[idx];
+                    continue;
                 };
-
-                let header_offset = match shard_start.checked_add(header_prefix_len_u64) {
-                    Some(offset) => offset,
-                    None => {
-                        return Some(Err(EraError::InvalidFormat(
-                            "Shard header offset overflow".into(),
-                        )))
-                    }
-                };
-                check_commit_or_end!(
-                    self.committed_ends.as_deref(),
-                    reader,
-                    header_offset,
-                    ShardHeader::SIZE as u64
-                );
-
-                let header_bytes = match reader.read_raw(header_offset, ShardHeader::SIZE).await {
-                    Ok(bytes) if bytes.len() == ShardHeader::SIZE => bytes,
-                    Ok(_) => {
-                        self.current_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                    Err(_) => {
-                        self.current_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                };
-
-                let shard_header = match ShardHeader::from_bytes(&header_bytes) {
-                    Some(h) => h,
-                    None => {
-                        self.current_offsets[idx] = self.data_ends[idx];
-                        continue;
-                    }
-                };
+                let payload_offset = shard_start + header_prefix_len_u64 + ShardHeader::SIZE as u64;
 
                 let is_data_shard = shard_idx < data_shards;
                 let authoritative_len: Option<u32> = if is_data_shard {
@@ -1478,15 +1358,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     let header_len = shard_header.length;
                     if let Some(pb) = parity_bound {
                         if pb > 0 && header_len < pb {
-                            check_commit_or_end!(
-                                self.committed_ends.as_deref(),
-                                reader,
-                                shard_start,
-                                header_prefix_len_u64 + ShardHeader::SIZE as u64 + pb as u64
-                            );
                             self.stats.corrupted_shards += 1;
-                            self.current_offsets[idx] +=
-                                header_prefix_len_u64 + ShardHeader::SIZE as u64 + pb as u64;
+                            self.current_offsets[idx] = payload_offset
+                                .saturating_add(u64::from(pb))
+                                .min(self.data_ends[idx]);
                             continue;
                         }
                         if pb > 0 && header_len > pb {
@@ -1502,6 +1377,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                 };
 
                 if shard_len as u32 > MAX_SHARD_SIZE {
+                    self.geometry.finish();
                     return Some(Err(EraError::InvalidFormat(
                         "Shard size exceeds maximum".into(),
                     )));
@@ -1513,26 +1389,16 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     max_len = shard_len;
                 }
 
-                check_commit_or_end!(
-                    self.committed_ends.as_deref(),
-                    reader,
-                    shard_start,
-                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64
-                );
-
-                let shard_data = match reader
-                    .read_raw(
-                        self.current_offsets[idx]
-                            + header_prefix_len_u64
-                            + ShardHeader::SIZE as u64,
-                        shard_len,
-                    )
-                    .await
-                {
-                    Ok(data) => data,
-                    Err(_) => {
-                        self.current_offsets[idx] +=
-                            header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64;
+                if shard_len as u64 > self.data_ends[idx] - payload_offset {
+                    self.current_offsets[idx] = self.data_ends[idx];
+                    self.stats.corrupted_shards += 1;
+                    continue;
+                }
+                self.current_offsets[idx] = payload_offset + shard_len as u64;
+                let shard_data = match reader.read_raw(payload_offset, shard_len).await {
+                    Ok(data) if data.len() == shard_len => data,
+                    Ok(_) | Err(_) => {
+                        self.stats.corrupted_shards += 1;
                         continue;
                     }
                 };
@@ -1559,9 +1425,6 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         crc_valid: false,
                     });
                 }
-
-                self.current_offsets[idx] +=
-                    header_prefix_len_u64 + ShardHeader::SIZE as u64 + shard_len as u64;
             }
         }
 
@@ -1572,14 +1435,12 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
         );
 
         if max_len == 0 {
-            return if any_shard_seen {
-                self.pending_blocks.push_back(Err(EraError::ErasureError(
-                    "Unexpected EOF while reading stripe".into(),
-                )));
-                self.pending_blocks.pop_front()
-            } else {
-                None
-            };
+            self.geometry.finish();
+            self.stats.blocks_failed += 1;
+            return Some(Err(EraError::ErasureError(format!(
+                "No readable shard lengths for stripe {}",
+                self.current_stripe_index
+            ))));
         }
 
         // Shard data must be even-aligned for RS recovery.
@@ -1612,7 +1473,6 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                     self.pending_blocks
                         .push_back(Err(EraError::ErasureError(msg.clone())));
                     self.stats.blocks_failed += 1;
-                    self.block_index += 1;
                 }
                 self.current_stripe_index += 1;
                 return self.pending_blocks.pop_front();
@@ -1621,16 +1481,14 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
         for (i, shard_data) in recovered.into_iter().enumerate().take(data_shards) {
             let block_index = (self.current_stripe_index * data_shards + i) as u32;
-            let volume_index = match self.distribution_strategy.calculate_volume(
-                i,
-                self.current_stripe_index as u64,
-                self.original_volume_count,
-            ) {
+            let volume_index = match self
+                .geometry
+                .volume_sequence(i, self.current_stripe_index as u64)
+            {
                 Ok(volume_index) => volume_index as u32,
                 Err(e) => {
                     self.pending_blocks.push_back(Err(e));
                     self.stats.blocks_failed += 1;
-                    self.block_index += 1;
                     continue;
                 }
             };
@@ -1822,8 +1680,6 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
                         })));
                 }
             }
-
-            self.block_index += 1;
         }
 
         self.current_stripe_index += 1;
@@ -1831,10 +1687,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
     }
 
     fn has_more(&self) -> bool {
-        self.current_offsets
-            .iter()
-            .zip(self.data_ends.iter())
-            .any(|(offset, end)| offset < end)
+        !self.pending_blocks.is_empty() || self.geometry.has_generation()
     }
 
     fn stats(&self) -> &BlockIterStats {
