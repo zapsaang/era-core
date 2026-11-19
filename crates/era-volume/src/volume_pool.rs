@@ -35,6 +35,20 @@ fn checked_manifest_volume_count(count: usize) -> Result<u16> {
         .map_err(|_| era_common::EraError::InvalidConfig("volume count exceeds u16".into()))
 }
 
+fn check_retained_volume_size(retained_end: u64, max_volume_size: u64) -> Result<()> {
+    const FINAL_TRAILER_SIZE: u64 = (crate::HEADER_SIZE + crate::FOOTER_SIZE) as u64;
+    if retained_end
+        .checked_add(FINAL_TRAILER_SIZE)
+        .is_none_or(|finalized_size| finalized_size > max_volume_size)
+    {
+        return Err(EraError::InvalidConfig(format!(
+            "cannot append: retained volume ({retained_end} bytes) plus final trailer \
+             ({FINAL_TRAILER_SIZE} bytes) exceeds the volume size limit ({max_volume_size} bytes)"
+        )));
+    }
+    Ok(())
+}
+
 /// Configuration for the volume pool.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -199,6 +213,7 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Returns `InvalidConfig` if the count exceeds the manifest limit or a path has no filename.
     /// Returns `CorruptedFooter` if any volume is missing its footer.
     /// Returns `CorruptedHeader` or `CorruptedFooter` if any volume is corrupted.
+    /// Returns `InvalidConfig` if a single retained volume cannot fit with its final trailer.
     /// Returns I/O errors from opening volumes on the storage backend.
     pub async fn open_append(
         backend: B,
@@ -233,6 +248,9 @@ impl<B: StorageBackend> VolumePool<B> {
                 .footer()
                 .ok_or_else(|| era_common::EraError::CorruptedFooter("Missing footer".into()))?;
 
+            if volume_count == 1 {
+                check_retained_volume_size(footer.data_end_offset(), config.max_volume_size)?;
+            }
             let writer = VolumeWriter::open_append(
                 &backend,
                 Path::new(volume_filename),
@@ -273,6 +291,7 @@ impl<B: StorageBackend> VolumePool<B> {
     ///
     /// # Errors
     /// Returns `InvalidConfig` if the volume path has no filename or the archive has multiple volumes.
+    /// Returns `InvalidConfig` if the retained volume cannot fit with its final trailer.
     /// Returns `CorruptedFooter` if the footer's data_end_offset exceeds the file size.
     /// Returns I/O errors from opening the volume on the storage backend.
     pub async fn open_append_single(
@@ -295,11 +314,12 @@ impl<B: StorageBackend> VolumePool<B> {
         let volume_path = config.volume_path(0);
         let volume_filename = extract_filename(&volume_path)?;
 
+        let append_start_position = footer.data_end_offset();
+        check_retained_volume_size(append_start_position, config.max_volume_size)?;
         let writer =
             VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)
                 .await?;
         let block_sequence = writer.block_count() as u64;
-        let append_start_position = footer.data_end_offset();
 
         let stats = VolumePoolStats {
             volume_count: 1,
@@ -557,8 +577,11 @@ impl<B: StorageBackend> VolumePool<B> {
             ));
         }
         let total_per_volume = catalog_size
-            .saturating_add(index_size)
-            .saturating_add(manifest_size);
+            .checked_add(index_size)
+            .and_then(|size| size.checked_add(manifest_size))
+            .ok_or_else(|| {
+                era_common::EraError::InvalidConfig("typed-block precheck size overflow".into())
+            })?;
 
         let insufficient = self.check_typed_block_space(total_per_volume);
         let Some(&slot) = insufficient.first() else {
@@ -1262,6 +1285,78 @@ mod tests {
             self.write_canonical_block(&block, BlockType::Data)
                 .await
                 .map(|_| ())
+        }
+    }
+
+    #[tokio::test]
+    async fn append_rejects_cap_below_retained_volume_plus_trailer_without_truncating() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let config = VolumePoolConfig::new(temp_dir.path().join("test_archive"), 1);
+        let path = config.volume_path(0);
+        let mut pool = VolumePool::create(backend.clone(), config.clone(), create_test_header())
+            .await
+            .unwrap();
+        pool.write_to_current(&vec![0x42; 32 * 1024]).await.unwrap();
+        pool.finalize().await.unwrap();
+
+        let original = tokio::fs::read(&path).await.unwrap();
+        let reader = VolumeReader::open(&backend, Path::new(path.file_name().unwrap()))
+            .await
+            .unwrap();
+        let header = reader.header().clone();
+        let footer = reader.footer().unwrap();
+        let retained_end = footer.data_end_offset();
+        let finalized_size = u64::try_from(original.len()).unwrap();
+        let config = config.with_max_size(finalized_size - 1);
+
+        let result = VolumePool::open_append_single(
+            backend.clone(),
+            config.clone(),
+            header.clone(),
+            footer,
+            vec![crate::DATA_REGION_START],
+        )
+        .await;
+        assert!(matches!(result, Err(EraError::InvalidConfig(_))));
+        assert!(tokio::fs::read(&path).await.unwrap() == original);
+
+        let result = VolumePool::open_append(backend.clone(), config.clone(), header.clone()).await;
+        assert!(matches!(result, Err(EraError::InvalidConfig(_))));
+        assert!(tokio::fs::read(&path).await.unwrap() == original);
+
+        let mut pool = VolumePool::open_append(
+            backend.clone(),
+            config.with_max_size(finalized_size),
+            header.clone(),
+        )
+        .await
+        .unwrap();
+        pool.finalize().await.unwrap();
+
+        let finalized = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(u64::try_from(finalized.len()).unwrap(), finalized_size);
+        let data_start = usize::try_from(crate::DATA_REGION_START).unwrap();
+        let data_end = usize::try_from(retained_end).unwrap();
+        assert!(finalized[data_start..data_end] == original[data_start..data_end]);
+
+        let footer_start = finalized.len() - crate::FOOTER_SIZE;
+        let primary_footer = crate::Footer::from_bytes(&finalized[footer_start..]).unwrap();
+        let backup_footer =
+            crate::Footer::from_bytes(&finalized[crate::HEADER_SIZE..data_start]).unwrap();
+        assert_eq!(primary_footer, backup_footer);
+        assert_eq!(
+            primary_footer.sequence_number(),
+            footer.sequence_number() + 1
+        );
+        assert_eq!(primary_footer.data_end_offset(), retained_end);
+        assert_eq!(primary_footer.backup_header_offset(), retained_end);
+        for bytes in [
+            &finalized[..crate::HEADER_SIZE],
+            &finalized[data_end..footer_start],
+        ] {
+            let finalized_header = SuperHeader::from_bytes(bytes).unwrap();
+            assert_eq!(finalized_header.volume_id(), header.volume_id());
         }
     }
 
