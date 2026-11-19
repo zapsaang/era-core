@@ -396,8 +396,10 @@ mod large_file_tests {
     fn test_large_file_no_compression() {
         let temp = TempDir::new().unwrap();
         let size = 2 * 1024 * 1024;
-        let input = create_large_test_file(temp.path(), "nocomp.bin", size);
+        // Offsets give compression a predictable pattern without repeating whole chunks.
+        let input = create_large_test_file_streaming(temp.path(), "nocomp.bin", size);
         let archive = temp.path().join("nocomp.era");
+        let compressed_archive = temp.path().join("compressed.era");
         let out_dir = temp.path().join("out");
 
         era_cmd()
@@ -409,16 +411,41 @@ mod large_file_tests {
                 "--password",
                 "pwd",
                 "--no-compression",
+                "--erasure",
+                "none",
             ])
             .assert()
             .success();
 
-        let archive_size = fs::metadata(&archive).unwrap().len();
+        let volumes = get_volume_paths(&archive);
+        assert_eq!(volumes.as_slice(), std::slice::from_ref(&archive));
+        let archive_size = get_volume_size(&archive);
         assert!(
-            archive_size > (size as u64) / 2,
-            "uncompressed archive should be substantial ({} vs input {})",
-            archive_size,
-            size
+            archive_size >= u64::try_from(size).unwrap(),
+            "uncompressed archive should contain at least {size} bytes, got {archive_size}"
+        );
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                compressed_archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--level",
+                "3",
+                "--erasure",
+                "none",
+            ])
+            .assert()
+            .success();
+
+        assert_eq!(count_volume_files(&compressed_archive), 1);
+        let compressed_size = get_volume_size(&compressed_archive);
+        assert!(
+            compressed_size < u64::try_from(size).unwrap(),
+            "compressed control should be smaller than {size} bytes, got {compressed_size}"
         );
 
         era_cmd()
@@ -435,8 +462,10 @@ mod large_file_tests {
             .success();
 
         let restored = fs::read(out_dir.join("nocomp.bin")).unwrap();
-        assert_eq!(restored.len(), size);
-        assert_eq!(restored, generate_deterministic_data(size));
+        assert!(
+            restored == fs::read(input).unwrap(),
+            "Restored bytes differ"
+        );
     }
 }
 
@@ -2844,7 +2873,7 @@ mod header_footer_recovery_tests {
     use super::*;
 
     #[test]
-    fn test_corrupted_primary_header_hard_failure() {
+    fn test_corrupted_headers_hard_failure() {
         let temp = TempDir::new().unwrap();
         let input = create_test_file(temp.path(), "hdr_fail.bin", &vec![0xAA; 64 * 1024]);
         let archive = temp.path().join("hdr_fail.era");
@@ -2862,7 +2891,16 @@ mod header_footer_recovery_tests {
             .assert()
             .success();
 
+        // Originally only the primary was damaged; FIND-03 recovers that fixture.
+        // Damage both independently stored headers to retain the hard-failure check.
+        let backup_header_offset = {
+            let data = fs::read(&archive).unwrap();
+            era_volume::Footer::from_bytes(&data[data.len() - era_volume::FOOTER_SIZE..])
+                .unwrap()
+                .backup_header_offset()
+        };
         corrupt_header_magic(&archive);
+        corrupt_archive_shard(&archive, backup_header_offset);
 
         era_cmd()
             .args([
