@@ -214,7 +214,7 @@ impl IndexBuilder {
     ///
     /// The estimate serializes the same IndexPage and MetaIndex payloads that
     /// `finalize_with_starting_block_id` will encrypt later, then adds the AEAD
-    /// nonce/tag and typed block header overhead. It does not mutate or consume
+    /// authentication tag and typed block header overhead. It does not mutate or consume
     /// the staged Redb entries beyond flushing buffered writes.
     pub fn estimated_finalized_disk_size(&mut self) -> Result<u64> {
         self.flush_buffer()?;
@@ -227,8 +227,7 @@ impl IndexBuilder {
                 .map_err(|e| EraError::Serialization(e.to_string()))?;
             let encrypted_size = page_bytes
                 .len()
-                .checked_add(era_crypto::NONCE_SIZE)
-                .and_then(|n| n.checked_add(era_crypto::TAG_SIZE))
+                .checked_add(era_crypto::TAG_SIZE)
                 .ok_or_else(|| EraError::IndexError("IndexPage size overflow".into()))?;
             total = total
                 .checked_add(BlockHeader::SIZE as u64)
@@ -248,20 +247,14 @@ impl IndexBuilder {
             Ok(())
         })?;
 
-        // Use a right-sized bloom filter based on actual entry count for accurate
-        // disk size estimation, avoiding oversized estimates from default sizing.
-        let entry_count = self.store.entry_count();
-        let right_sized_bloom =
-            Bloom::new_for_fp_rate(entry_count.max(1024), crate::store::BLOOM_FP_RATE)
-                .map_err(|e| EraError::IndexError(e.to_string()))?;
-        let bloom_bytes = super::serialize_bloom(&right_sized_bloom)?;
+        // Serialize the exact Bloom filter that finalization will write.
+        let bloom_bytes = super::serialize_bloom(&self.store.build_right_sized_bloom()?)?;
         meta.set_bloom_filter(bloom_bytes)?;
         let meta_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&meta)
             .map_err(|e| EraError::Serialization(e.to_string()))?;
         let encrypted_meta_size = meta_bytes
             .len()
-            .checked_add(era_crypto::NONCE_SIZE)
-            .and_then(|n| n.checked_add(era_crypto::TAG_SIZE))
+            .checked_add(era_crypto::TAG_SIZE)
             .ok_or_else(|| EraError::IndexError("MetaIndex size overflow".into()))?;
 
         total
@@ -348,6 +341,20 @@ impl IndexBuilder {
         let estimated_pages = (self.store.entry_count() / crate::ENTRIES_PER_PAGE).max(1);
         let mut encrypted_blocks: Vec<(EncryptedMacroBlock, ChunkHash, ChunkHash, BlockId)> =
             Vec::with_capacity(estimated_pages);
+
+        let page_count = self.store.entry_count().div_ceil(crate::ENTRIES_PER_PAGE);
+        let page_count_u64 = u64::try_from(page_count)
+            .map_err(|_| EraError::IndexError("Index page count exceeds u64::MAX".into()))?;
+        let final_manifest_block_id = starting_block_id
+            .checked_add(page_count_u64)
+            .ok_or_else(|| EraError::IndexError("Index block ID range overflow".into()))?;
+        u32::try_from(final_manifest_block_id).map_err(|_| {
+            EraError::IndexError(format!(
+                "Index block ID range starting at {} with {} pages exceeds u32::MAX",
+                starting_block_id, page_count
+            ))
+        })?;
+
         let mut block_id_counter = starting_block_id;
         let volume_index = volume_writer.volume_sequence() as u32;
         {
@@ -423,8 +430,8 @@ impl IndexBuilder {
             )?;
         }
 
-        // Reuse the builder's existing bloom — it already contains all entries.
-        let bloom_bytes = super::serialize_bloom(self.store.bloom())?;
+        // Use the same right-sized Bloom filter as the disk-space estimate.
+        let bloom_bytes = super::serialize_bloom(&self.store.build_right_sized_bloom()?)?;
         meta.set_bloom_filter(bloom_bytes)?;
 
         // Encrypt and write MetaIndex as IndexManifest block

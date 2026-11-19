@@ -406,6 +406,35 @@ impl IndexStore {
         &self.bloom
     }
 
+    /// Build the Bloom filter used by both size estimation and finalization.
+    ///
+    /// Small indexes do not need the staging filter's full pre-allocation. Rebuild
+    /// from the committed Redb keys so the serialized filter remains right-sized
+    /// without introducing false negatives.
+    pub(crate) fn build_right_sized_bloom(&self) -> Result<Bloom<ChunkHash>> {
+        if self.entry_count >= self.bloom_sized_for {
+            return Ok(self.bloom.clone());
+        }
+
+        let mut bloom = Bloom::new_for_fp_rate(self.entry_count.max(1024), BLOOM_FP_RATE)
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+        let table = read_txn
+            .open_table(TABLE_CHUNKS)
+            .map_err(|e| EraError::IndexError(e.to_string()))?;
+        for result in table
+            .iter()
+            .map_err(|e| EraError::IndexError(e.to_string()))?
+        {
+            let (key, _) = result.map_err(|e| EraError::IndexError(e.to_string()))?;
+            bloom.set(&ChunkHash::from_bytes(*key.value()));
+        }
+        Ok(bloom)
+    }
+
     /// Get entry count.
     #[must_use]
     pub fn entry_count(&self) -> usize {
