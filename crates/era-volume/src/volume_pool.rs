@@ -5,7 +5,7 @@
 //! when volumes reach their size limit.
 
 use era_common::{
-    compute_shard_crc, BlockHeader, BlockLocation, BlockType, EncryptedMacroBlock,
+    compute_shard_crc, BlockHeader, BlockLocation, BlockType, EncryptedMacroBlock, EraError,
     ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig, MatrixShardEntry, Result,
     ShardHeader, VolumeId,
 };
@@ -595,7 +595,65 @@ impl<B: StorageBackend> VolumePool<B> {
         Ok(())
     }
 
-    /// Write a shard to its designated volume with matrix distribution.
+    /// Reserve a whole matrix stripe and return its absolute volume sequences in shard order.
+    ///
+    /// `payload_lengths` contains the exact unpadded data and aligned parity lengths.
+    /// `stripe_prefix_count` is the number of `u32` lengths repeated in every frame.
+    /// Write the stripe with [`Self::write_shard`] before advancing the stripe sequence.
+    ///
+    /// # Errors
+    /// Returns a size error before rotation if any shard or slot total exceeds capacity,
+    /// or propagates an error creating the next generation.
+    pub async fn reserve_stripe(
+        &mut self,
+        payload_lengths: &[u32],
+        stripe_prefix_count: usize,
+    ) -> Result<Vec<u16>> {
+        let mut per_slot_bytes = vec![0u64; self.writers.len()];
+        let mut slots = Vec::with_capacity(payload_lengths.len());
+        for (shard, &length) in payload_lengths.iter().enumerate() {
+            let slot = self.shard_volume_slot(shard)?;
+            let size = self.shard_disk_size(u64::from(length), stripe_prefix_count, false)?;
+            per_slot_bytes[slot] = per_slot_bytes[slot].checked_add(size).ok_or_else(|| {
+                EraError::InvalidConfig("stripe disk size overflow for volume slot".into())
+            })?;
+            slots.push(slot);
+        }
+        self.ensure_stripe_capacity(&per_slot_bytes).await?;
+        Ok(slots.into_iter().map(|slot| self.sequences[slot]).collect())
+    }
+
+    async fn ensure_stripe_capacity(&mut self, per_slot_bytes: &[u64]) -> Result<()> {
+        if per_slot_bytes
+            .iter()
+            .enumerate()
+            .any(|(slot, &size)| size != 0 && !self.volume_can_fit(slot, size))
+        {
+            for (slot, &size) in per_slot_bytes.iter().enumerate() {
+                self.check_fresh_volume_space(slot, size)?;
+            }
+            self.rotate_volumes().await?;
+        }
+        Ok(())
+    }
+
+    fn shard_disk_size(
+        &self,
+        payload_size: u64,
+        stripe_prefix_count: usize,
+        include_original_len: bool,
+    ) -> Result<u64> {
+        self.validate_shard_size(payload_size)?;
+        u64::try_from(stripe_prefix_count)
+            .ok()
+            .and_then(|count| count.checked_add(u64::from(include_original_len)))
+            .and_then(|count| count.checked_mul(size_of::<u32>() as u64))
+            .and_then(|prefix| prefix.checked_add(ShardHeader::SIZE as u64))
+            .and_then(|header| header.checked_add(payload_size))
+            .ok_or_else(|| EraError::InvalidConfig("calculated shard write size overflow".into()))
+    }
+
+    /// Write a shard to its designated volume without spilling or rotating.
     ///
     /// # Errors
     /// Returns `InvalidConfig` if no volumes are available, the shard size exceeds
@@ -620,87 +678,30 @@ impl<B: StorageBackend> VolumePool<B> {
         original_len: u32,
         stripe_lengths: Option<&[u32]>,
     ) -> Result<(MatrixShardEntry, VolumeId)> {
-        let preferred_slot = self.shard_volume_slot(shard_idx)?;
-
-        // Validate shard size against max volume constraints
-        self.validate_shard_size(shard_data.len() as u64)?;
-
-        // Check if the volume can fit this shard
-        let shard_size = shard_data.len() as u64;
-        let length_prefix_size = stripe_lengths
-            .map(|lens| {
-                (lens.len() as u64)
-                    .checked_mul(size_of::<u32>() as u64)
-                    .ok_or_else(|| {
-                        era_common::EraError::InvalidConfig(
-                            "stripe_lengths header too large".into(),
-                        )
-                    })
-            })
-            .transpose()?
-            .unwrap_or(0);
-        let header_size = if include_original_len_header {
-            size_of::<u32>() as u64
-        } else {
-            0u64
-        };
-        let total_size = length_prefix_size
-            .checked_add(header_size)
-            .and_then(|v| v.checked_add(ShardHeader::SIZE as u64))
-            .and_then(|v| v.checked_add(shard_size))
-            .ok_or_else(|| {
-                era_common::EraError::InvalidConfig("calculated shard write size overflow".into())
-            })?;
-
-        // Try preferred slot first, then find any available volume
-        let slot = if self.volume_can_fit(preferred_slot, total_size) {
-            preferred_slot
-        } else {
-            // Find any volume with enough space (overflow strategy)
-            let mut found_slot = None;
-            debug_assert!(
-                !self.writers.is_empty(),
-                "writers must be non-empty for modulo"
-            );
-            for i in 0..self.writers.len() {
-                // Start from preferred slot and wrap around
-                let candidate = (preferred_slot + i) % self.writers.len();
-                if self.volume_can_fit(candidate, total_size) {
-                    found_slot = Some(candidate);
-                    break;
-                }
-            }
-            match found_slot {
-                Some(s) => s,
-                None => {
-                    // All volumes are full - rotate volumes
-                    self.check_fresh_volume_space(preferred_slot, total_size)?;
-                    self.rotate_volumes().await?;
-
-                    // After rotation, write to preferred_slot which maps to new volume
-                    preferred_slot
-                }
-            }
-        };
-        debug_assert!(
-            slot < self.writers.len() && slot < self.sequences.len(),
-            "slot {} out of bounds (writers: {}, sequences: {})",
-            slot,
-            self.writers.len(),
-            self.sequences.len()
-        );
-
-        let writer = &mut self.writers[slot];
-        let volume_sequence = self.sequences[slot];
-        let volume_id = writer.volume_id();
-
-        // V28-04: Compute shard length as u32 once and reuse
+        let slot = self.shard_volume_slot(shard_idx)?;
         let shard_len_u32 = u32::try_from(shard_data.len()).map_err(|_| {
             era_common::EraError::InvalidConfig(format!(
                 "shard size {} exceeds u32",
                 shard_data.len()
             ))
         })?;
+        let total_size = self.shard_disk_size(
+            u64::from(shard_len_u32),
+            stripe_lengths.map_or(0, <[u32]>::len),
+            include_original_len_header,
+        )?;
+        if !self.volume_can_fit(slot, total_size) {
+            return Err(EraError::VolumeSpaceExhausted {
+                volume: slot,
+                required: total_size,
+                available: self.volume_remaining_space(slot),
+                message: "shard does not fit its preferred volume slot".into(),
+            });
+        }
+
+        let writer = &mut self.writers[slot];
+        let volume_sequence = self.sequences[slot];
+        let volume_id = writer.volume_id();
 
         // P8-01: Coalesce metadata writes into a single buffer to reduce syscall
         // amplification. Previously N+3 separate write_raw() calls per shard (N stripe
@@ -902,14 +903,18 @@ impl<B: StorageBackend> VolumePool<B> {
         original_len: u32,
         erasure_config: ErasureCodeConfig,
     ) -> Result<MatrixBlockLocation> {
-        // Validate that shards can fit in volumes
-        if let Some(first_shard) = shards.first() {
-            self.validate_shard_size(first_shard.len() as u64)?;
+        let mut per_slot_bytes = vec![0u64; self.writers.len()];
+        let mut original_len_headers = Vec::with_capacity(shards.len());
+        for (shard_idx, shard_data) in shards.iter().enumerate() {
+            let slot = self.shard_volume_slot(shard_idx)?;
+            let need_header = per_slot_bytes[slot] == 0;
+            let size = self.shard_disk_size(shard_data.len() as u64, 0, need_header)?;
+            per_slot_bytes[slot] = per_slot_bytes[slot].checked_add(size).ok_or_else(|| {
+                EraError::InvalidConfig("stripe disk size overflow for volume slot".into())
+            })?;
+            original_len_headers.push(need_header);
         }
-
-        // Track which volumes we've written to for this block
-        // We need to write the original_len header to the first shard on each volume
-        let mut volumes_with_header: Vec<bool> = vec![false; self.writers.len()];
+        self.ensure_stripe_capacity(&per_slot_bytes).await?;
 
         let mut location = MatrixBlockLocation::new(
             block_id,
@@ -919,21 +924,13 @@ impl<B: StorageBackend> VolumePool<B> {
             original_len,
         );
 
-        for (shard_idx, shard_data) in shards.iter().enumerate() {
-            let slot = self.shard_volume_slot(shard_idx)?;
-            // V27-09: Ensure volumes_with_header is large enough after potential rotation
-            if slot >= volumes_with_header.len() {
-                volumes_with_header.resize(self.writers.len(), false);
-            }
-            let need_header = !volumes_with_header[slot];
+        for (shard_idx, (shard_data, need_header)) in
+            shards.iter().zip(original_len_headers).enumerate()
+        {
             let (entry, _) = self
                 .write_shard(shard_idx, shard_data, need_header, original_len, None)
                 .await?;
             location.add_shard(entry);
-
-            if need_header {
-                volumes_with_header[slot] = true;
-            }
         }
 
         // Increment block sequence for next block (consistent with write_canonical_block path)
@@ -1660,6 +1657,70 @@ mod tests {
         );
         assert_eq!(pool.committed_ends(), ends_before);
         assert!(!config.volume_path(1).exists());
+    }
+
+    #[tokio::test]
+    async fn test_stripe_reservation_counts_colocated_frames_at_capacity_boundary() {
+        let dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(dir.path());
+        let frame_overhead = u32::try_from(4 * size_of::<u32>() + ShardHeader::SIZE).unwrap();
+        let lengths = [10_001u32, 10_000, 10_000, 10_000, 10_002, 10_002];
+        let available = u64::from(lengths[1] + lengths[4] + 2 * frame_overhead);
+        let config = VolumePoolConfig::new(dir.path().join("stripe"), 3)
+            .for_erasure(ErasureCodeConfig::new(4, 2))
+            .with_max_size(crate::DATA_REGION_START + crate::PER_VOLUME_OVERHEAD + available);
+        let mut pool = VolumePool::create(backend, config.clone(), create_test_header())
+            .await
+            .unwrap();
+
+        let mut oversized = lengths;
+        oversized[4] += 1;
+        let original_ends = pool.committed_ends();
+        assert!(matches!(
+            pool.reserve_stripe(&oversized, 4).await,
+            Err(EraError::VolumeSpaceExhausted { volume: 1, required, available: remaining, .. })
+                if required == available + 1 && remaining == available
+        ));
+        assert_eq!(pool.committed_ends(), original_ends);
+        assert!(!config.volume_path(3).exists());
+
+        pool.get_writer_mut(1)
+            .unwrap()
+            .write_raw(&[0])
+            .await
+            .unwrap();
+        assert_eq!(
+            pool.reserve_stripe(&lengths, 4).await.unwrap(),
+            [3, 4, 5, 3, 4, 5]
+        );
+        for (shard, length) in lengths.into_iter().enumerate() {
+            let (entry, _) = pool
+                .write_shard(
+                    shard,
+                    &vec![0; usize::try_from(length).unwrap()],
+                    false,
+                    0,
+                    Some(&lengths[..4]),
+                )
+                .await
+                .unwrap();
+            assert_eq!(entry.volume_sequence, 3 + u16::try_from(shard % 3).unwrap());
+        }
+        assert_eq!(
+            pool.committed_ends()[4],
+            (4, crate::DATA_REGION_START + available)
+        );
+        assert!(matches!(
+            pool.write_shard(1, &[], false, 0, Some(&lengths[..4]))
+                .await,
+            Err(EraError::VolumeSpaceExhausted {
+                volume: 1,
+                available: 0,
+                ..
+            })
+        ));
+        assert!(!config.volume_path(6).exists());
+        assert_eq!(pool.stats().total_shards_written, 6);
     }
 
     #[tokio::test]
