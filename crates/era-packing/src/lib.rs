@@ -49,7 +49,7 @@ pub use erasure_builder::ErasureBlockBuilder;
 pub use erasure_unpacker::ErasureBlockUnpacker;
 pub use packed_chunk::{pack_files, unpack_file, PackedChunk, PackedEntry, PackedHeader};
 pub use resilient_aead::{AeadRecoveryResult, ResilientBlockUnpacker};
-pub use session_builder::{SessionBlockBuilder, SessionBlockUnpacker};
+pub use session_builder::{PreparedMacroBlock, SessionBlockBuilder, SessionBlockUnpacker};
 pub use session_erasure_builder::{SessionErasureBlockBuilder, SessionErasureBlockUnpacker};
 pub use staging_pool::{PackedBlock, StagingPool, StagingPoolStats};
 pub use stripe::{BlockMeta, Stripe, StripeBuffer};

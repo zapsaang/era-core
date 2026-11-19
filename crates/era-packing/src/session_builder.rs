@@ -14,14 +14,62 @@
 //! - **Backward Security**: Past blocks remain secure
 //! - **Key Isolation**: Blocks are cryptographically independent
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use era_codec::Compressor;
 use era_common::{
-    BlockChunkIndex, BlockId, BlockType, ChunkIndexEntry, ChunkVec, EncryptedMacroBlock, Result,
-    UniqueChunk,
+    BlockChunkIndex, BlockId, BlockType, ChunkIndexEntry, ChunkVec, EncryptedMacroBlock, EraError,
+    Result, UniqueChunk,
 };
 use era_crypto::{BlockKey, KeySession, VolumeKey};
 use std::cell::Cell;
+
+/// A serialized and compressed MacroBlock with volume-independent identity.
+///
+/// The block ID and key are allocated during preparation. Sealing binds this
+/// preimage to a selected volume without reallocating either one.
+pub struct PreparedMacroBlock {
+    block_id: BlockId,
+    block_key: BlockKey,
+    compressed: Bytes,
+    original_size: u32,
+    compressed_size: u32,
+    chunk_count: u16,
+    sealed_len: usize,
+}
+
+impl PreparedMacroBlock {
+    /// Return the block ID allocated during preparation.
+    #[must_use]
+    pub fn block_id(&self) -> BlockId {
+        self.block_id
+    }
+
+    /// Return the uncompressed serialized size.
+    #[must_use]
+    pub fn original_size(&self) -> u32 {
+        self.original_size
+    }
+
+    /// Return the compressed size before AEAD sealing.
+    #[must_use]
+    pub fn compressed_size(&self) -> u32 {
+        self.compressed_size
+    }
+
+    /// Return the number of chunks in the block.
+    #[must_use]
+    pub fn chunk_count(&self) -> u16 {
+        self.chunk_count
+    }
+
+    /// Return the exact sealed payload length, including the AEAD tag.
+    ///
+    /// This excludes the separate volume-level `BlockHeader`.
+    #[must_use]
+    pub fn sealed_len(&self) -> usize {
+        self.sealed_len
+    }
+}
 
 /// A session-aware MacroBlock builder that derives a unique key for each block.
 ///
@@ -139,65 +187,124 @@ impl<'a> SessionBlockBuilder<'a> {
         chunks: Vec<UniqueChunk>,
         block_type: BlockType,
     ) -> Result<EncryptedMacroBlock> {
+        let prepared = self.prepare_chunks(&chunks)?;
+        self.seal_prepared_with_type(&prepared, self.volume_index, block_type)
+    }
+
+    /// Serialize and compress chunks without binding them to a volume.
+    ///
+    /// This consumes the next block ID and derives its volume-independent key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for block ID or size overflow, key derivation,
+    /// serialization, or compression failures.
+    pub fn prepare_chunks(&self, chunks: &[UniqueChunk]) -> Result<PreparedMacroBlock> {
         let id = self.next_block_id.get();
-        self.next_block_id.set(id + 1);
+        self.next_block_id.set(
+            id.checked_add(1)
+                .ok_or_else(|| EraError::InvalidConfig("Block ID overflow".into()))?,
+        );
         let block_id = BlockId::new(id);
-
-        // 1. Derive a unique key for this block
         let block_key = self.derive_block_key(block_id)?;
+        let chunk_count = u16::try_from(chunks.len())
+            .map_err(|_| EraError::InvalidConfig("chunk count exceeds u16".into()))?;
 
-        // 2. Build chunk index
         let mut index_entries = Vec::with_capacity(chunks.len());
         let mut data = BytesMut::new();
-
-        for chunk in &chunks {
+        for chunk in chunks {
             let entry = ChunkIndexEntry {
                 hash: chunk.hash,
-                offset: data.len() as u32,
-                length: chunk.data.len() as u32,
+                offset: u32::try_from(data.len())
+                    .map_err(|_| EraError::InvalidConfig("chunk offset exceeds u32".into()))?,
+                length: u32::try_from(chunk.data.len())
+                    .map_err(|_| EraError::InvalidConfig("chunk length exceeds u32".into()))?,
             };
             index_entries.push(entry);
             data.put_slice(&chunk.data);
         }
 
         let chunk_index = BlockChunkIndex {
-            count: chunks.len() as u16,
+            count: chunk_count,
             entries: index_entries,
         };
-
-        // 3. Serialize: [index_length(4) | index_data | chunk_data]
         let proto_index: era_common::proto::BlockChunkIndex = chunk_index.into();
         let index_bytes = era_common::serialize_proto(&proto_index)?;
-        let original_size = 4 + index_bytes.len() + data.len();
+        let index_len = u32::try_from(index_bytes.len())
+            .map_err(|_| EraError::InvalidConfig("chunk index exceeds u32".into()))?;
+        let original_size = 4usize
+            .checked_add(index_bytes.len())
+            .and_then(|size| size.checked_add(data.len()))
+            .ok_or_else(|| EraError::InvalidConfig("MacroBlock plaintext size overflow".into()))?;
+        let original_size_u32 = u32::try_from(original_size)
+            .map_err(|_| EraError::InvalidConfig("MacroBlock plaintext exceeds u32".into()))?;
 
         let mut full_data = BytesMut::with_capacity(original_size);
-        full_data.put_u32_le(index_bytes.len() as u32);
+        full_data.put_u32_le(index_len);
         full_data.put_slice(&index_bytes);
         full_data.put_slice(&data);
 
-        // 4. Compress
         let compressed = self.compressor.compress(&full_data)?;
-        let compressed_size = compressed.len();
+        let compressed_size = u32::try_from(compressed.len())
+            .map_err(|_| EraError::InvalidConfig("compressed block exceeds u32".into()))?;
+        let sealed_len = compressed
+            .len()
+            .checked_add(era_crypto::TAG_SIZE)
+            .ok_or_else(|| EraError::InvalidConfig("sealed block length overflow".into()))?;
 
-        // 5. Encrypt with the per-block key
-        let derived_key = block_key.to_derived_key()?;
+        Ok(PreparedMacroBlock {
+            block_id,
+            block_key,
+            compressed,
+            original_size: original_size_u32,
+            compressed_size,
+            chunk_count,
+            sealed_len,
+        })
+    }
+
+    /// Seal a prepared data block for the selected volume.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key conversion or AEAD encryption fails.
+    pub fn seal_prepared(
+        &self,
+        prepared: &PreparedMacroBlock,
+        volume_index: u32,
+    ) -> Result<EncryptedMacroBlock> {
+        self.seal_prepared_with_type(prepared, volume_index, BlockType::Data)
+    }
+
+    /// Seal a prepared block with its type and the selected volume as AEAD context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key conversion or AEAD encryption fails.
+    pub fn seal_prepared_with_type(
+        &self,
+        prepared: &PreparedMacroBlock,
+        volume_index: u32,
+        block_type: BlockType,
+    ) -> Result<EncryptedMacroBlock> {
+        let derived_key = prepared.block_key.to_derived_key()?;
         let encrypted = era_crypto::encrypt_with_context_for_type(
             &derived_key,
             &self.nonce_context,
             &self.archive_id,
             self.epoch_id,
-            self.volume_index,
+            volume_index,
             block_type,
-            block_id,
-            &compressed,
+            prepared.block_id,
+            &prepared.compressed,
         )?;
 
         Ok(EncryptedMacroBlock {
-            block_id,
+            block_id: prepared.block_id,
             data: encrypted,
-            original_size: original_size as u32,
-            compressed_size: compressed_size as u32,
-            chunk_count: chunks.len() as u16,
+            original_size: prepared.original_size,
+            compressed_size: prepared.compressed_size,
+            chunk_count: prepared.chunk_count,
         })
     }
 
@@ -494,6 +601,204 @@ mod tests {
         assert_eq!(unpacked.get_chunk(0).unwrap().as_ref(), &[1u8; 512]);
         assert_eq!(unpacked.get_chunk(1).unwrap().as_ref(), &[2u8; 512]);
         assert_eq!(unpacked.get_chunk(2).unwrap().as_ref(), &[3u8; 512]);
+    }
+
+    fn prepared_test_builder<'a>(
+        session: &'a KeySession,
+        volume_key: &'a VolumeKey,
+        compressor: Box<dyn Compressor>,
+    ) -> SessionBlockBuilder<'a> {
+        SessionBlockBuilder::new(
+            session,
+            volume_key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            TEST_VOLUME_INDEX,
+            compressor,
+        )
+    }
+
+    fn prepared_test_unpacker<'a>(
+        session: &'a KeySession,
+        volume_key: &'a VolumeKey,
+        compressor: Box<dyn Compressor>,
+    ) -> SessionBlockUnpacker<'a> {
+        SessionBlockUnpacker::new(
+            session,
+            volume_key,
+            TEST_NONCE_CONTEXT,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            compressor,
+        )
+    }
+
+    fn assert_same_block(expected: &EncryptedMacroBlock, actual: &EncryptedMacroBlock) {
+        assert_eq!(expected.block_id, actual.block_id);
+        assert_eq!(expected.data, actual.data);
+        assert_eq!(expected.original_size, actual.original_size);
+        assert_eq!(expected.compressed_size, actual.compressed_size);
+        assert_eq!(expected.chunk_count, actual.chunk_count);
+    }
+
+    #[test]
+    fn test_prepared_block_exact_sealed_len_for_supported_codecs() {
+        use era_codec::{LZ4Compressor, NoCompressor, ZstdCompressor};
+
+        let (session, _salt) = test_session();
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
+        let compressors: Vec<Box<dyn Compressor>> = vec![
+            Box::new(NoCompressor),
+            Box::new(ZstdCompressor::default()),
+            Box::new(LZ4Compressor::default()),
+        ];
+
+        for compressor in compressors {
+            let algorithm = compressor.algorithm();
+            let builder = prepared_test_builder(&session, &volume_key, compressor);
+            let chunk = UniqueChunk::new(
+                Bytes::from_static(b"prepared block size check"),
+                ChunkHash::from_bytes([9u8; 32]),
+            );
+
+            let prepared = builder
+                .prepare_chunks(std::slice::from_ref(&chunk))
+                .unwrap();
+            let expected_len = usize::try_from(prepared.compressed_size())
+                .unwrap()
+                .checked_add(era_crypto::TAG_SIZE)
+                .unwrap();
+            assert_eq!(prepared.sealed_len(), expected_len, "{algorithm:?}");
+
+            let sealed = builder.seal_prepared(&prepared, 19).unwrap();
+            assert_eq!(sealed.data.len(), expected_len, "{algorithm:?}");
+            assert_eq!(sealed.block_id, prepared.block_id());
+            assert_eq!(sealed.original_size, prepared.original_size());
+            assert_eq!(sealed.compressed_size, prepared.compressed_size());
+            assert_eq!(sealed.chunk_count, prepared.chunk_count());
+        }
+    }
+
+    #[test]
+    fn test_prepared_empty_padding_block_has_exact_sealed_len() {
+        let (session, _salt) = test_session();
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
+        let builder =
+            prepared_test_builder(&session, &volume_key, Box::new(era_codec::NoCompressor));
+
+        let prepared = builder.prepare_chunks(&[]).unwrap();
+        assert_eq!(prepared.original_size(), 4);
+        assert_eq!(prepared.compressed_size(), 4);
+        assert_eq!(prepared.chunk_count(), 0);
+        assert_eq!(prepared.sealed_len(), 4 + era_crypto::TAG_SIZE);
+
+        let sealed = builder.seal_prepared(&prepared, 23).unwrap();
+        assert_eq!(sealed.data.len(), 4 + era_crypto::TAG_SIZE);
+        let unpacker =
+            prepared_test_unpacker(&session, &volume_key, Box::new(era_codec::NoCompressor));
+        let unpacked = unpacker.unpack(&sealed, 23).unwrap();
+        assert_eq!(unpacked.chunk_count(), 0);
+    }
+
+    #[test]
+    fn test_prepared_block_roundtrips_at_nonzero_volume_sequence() {
+        let (session, _salt) = test_session();
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
+        let builder =
+            prepared_test_builder(&session, &volume_key, Box::new(era_codec::NoCompressor));
+        let original_data = vec![42u8; 256];
+        let chunk = UniqueChunk::new(
+            Bytes::from(original_data.clone()),
+            ChunkHash::from_bytes([3u8; 32]),
+        );
+
+        let prepared = builder
+            .prepare_chunks(std::slice::from_ref(&chunk))
+            .unwrap();
+        let sealed = builder
+            .seal_prepared_with_type(&prepared, 37, BlockType::Catalog)
+            .unwrap();
+
+        let unpacker =
+            prepared_test_unpacker(&session, &volume_key, Box::new(era_codec::NoCompressor));
+        let unpacked = unpacker
+            .unpack_with_type(&sealed, 37, BlockType::Catalog)
+            .unwrap();
+        assert_eq!(unpacked.chunk_count(), 1);
+        assert_eq!(
+            unpacked.get_chunk(0).unwrap().as_ref(),
+            original_data.as_slice()
+        );
+    }
+
+    #[test]
+    fn test_prepared_block_rejects_wrong_volume_sequence() {
+        let (session, _salt) = test_session();
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
+        let builder =
+            prepared_test_builder(&session, &volume_key, Box::new(era_codec::NoCompressor));
+        let chunk = UniqueChunk::new(
+            Bytes::from_static(b"volume bound"),
+            ChunkHash::from_bytes([4u8; 32]),
+        );
+
+        let prepared = builder
+            .prepare_chunks(std::slice::from_ref(&chunk))
+            .unwrap();
+        let sealed = builder.seal_prepared(&prepared, 41).unwrap();
+
+        let unpacker =
+            prepared_test_unpacker(&session, &volume_key, Box::new(era_codec::NoCompressor));
+        let result = unpacker.unpack(&sealed, 42);
+        assert!(matches!(result, Err(era_common::EraError::Decryption(_))));
+    }
+
+    #[test]
+    fn test_pack_chunks_wrappers_match_prepare_then_seal() {
+        let (session, _salt) = test_session();
+        let volume_key = session.generate_and_wrap_volume_key().unwrap().0;
+        let chunks = vec![UniqueChunk::new(
+            Bytes::from_static(b"wrapper compatibility"),
+            ChunkHash::from_bytes([5u8; 32]),
+        )];
+
+        let direct_data_builder =
+            prepared_test_builder(&session, &volume_key, Box::new(era_codec::NoCompressor))
+                .with_starting_block_id(41);
+        let split_data_builder =
+            prepared_test_builder(&session, &volume_key, Box::new(era_codec::NoCompressor))
+                .with_starting_block_id(41);
+        let direct_data = direct_data_builder.pack_chunks(chunks.clone()).unwrap();
+        let prepared_data = split_data_builder.prepare_chunks(&chunks).unwrap();
+        let split_data = split_data_builder
+            .seal_prepared(&prepared_data, TEST_VOLUME_INDEX)
+            .unwrap();
+        assert_same_block(&direct_data, &split_data);
+        assert_eq!(prepared_data.block_id(), direct_data.block_id);
+        assert_eq!(
+            direct_data_builder.blocks_created(),
+            split_data_builder.blocks_created()
+        );
+
+        let direct_typed_builder =
+            prepared_test_builder(&session, &volume_key, Box::new(era_codec::NoCompressor))
+                .with_starting_block_id(41);
+        let split_typed_builder =
+            prepared_test_builder(&session, &volume_key, Box::new(era_codec::NoCompressor))
+                .with_starting_block_id(41);
+        let direct_typed = direct_typed_builder
+            .pack_chunks_with_type(chunks.clone(), BlockType::Catalog)
+            .unwrap();
+        let prepared_typed = split_typed_builder.prepare_chunks(&chunks).unwrap();
+        let split_typed = split_typed_builder
+            .seal_prepared_with_type(&prepared_typed, TEST_VOLUME_INDEX, BlockType::Catalog)
+            .unwrap();
+        assert_same_block(&direct_typed, &split_typed);
+        assert_eq!(
+            direct_typed_builder.blocks_created(),
+            split_typed_builder.blocks_created()
+        );
     }
 
     #[test]
