@@ -99,20 +99,24 @@ impl EncryptionContext {
     ///
     /// This is used to ensure each block gets a unique encryption key.
     pub fn next_block_id(&self) -> era_common::Result<u64> {
-        self.next_block_id
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                if current <= MAX_BLOCK_INDEX {
-                    Some(current + 1)
-                } else {
-                    None
-                }
-            })
-            .map_err(|current| {
-                EraError::IntegrityError(format!(
+        loop {
+            let current = self.next_block_id.load(Ordering::Acquire);
+            if current > MAX_BLOCK_INDEX {
+                return Err(EraError::IntegrityError(format!(
                     "Block index {} exceeds maximum u32 capacity ({})",
                     current, MAX_BLOCK_INDEX
-                ))
-            })
+                )));
+            }
+            match self.next_block_id.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(current),
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Get the current block count without incrementing.
@@ -127,22 +131,25 @@ impl EncryptionContext {
     /// Used when typed blocks (catalog, index, manifest) are encrypted
     /// outside the normal pipeline but still consume logical block IDs.
     pub fn advance_block_id(&self, n: u64) -> era_common::Result<()> {
-        self.next_block_id
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                let new = current.saturating_add(n);
-                if new <= MAX_BLOCK_INDEX {
-                    Some(new)
-                } else {
-                    None
-                }
-            })
-            .map_err(|current| {
-                EraError::IntegrityError(format!(
+        loop {
+            let current = self.next_block_id.load(Ordering::Acquire);
+            let new = current.saturating_add(n);
+            if new > MAX_BLOCK_INDEX {
+                return Err(EraError::IntegrityError(format!(
                     "Block index {} + {} exceeds maximum u32 capacity ({})",
                     current, n, MAX_BLOCK_INDEX
-                ))
-            })?;
-        Ok(())
+                )));
+            }
+            match self.next_block_id.compare_exchange_weak(
+                current,
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Get a reference to the key session.
