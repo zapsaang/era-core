@@ -196,24 +196,28 @@ impl ArchiveReader {
         let first_reader = VolumeReader::open(&backend, Path::new(base_filename)).await?;
 
         // Read volume metadata from header (copy values before moving reader)
-        let first_vol_sequence = first_reader.header().volume_sequence() as usize;
-        let total_volumes = first_reader.header().total_volumes() as usize;
+        let first_vol_sequence = usize::from(first_reader.header().volume_sequence());
+        let opening_scan_count = first_vol_sequence.saturating_add(1);
+        let mut expected_volume_count = usize::from(first_reader.header().total_volumes());
         let erasure_config = first_reader.header().config().erasure;
         let first_archive_id = first_reader.header().archive_id();
 
         // 2. Determine scan tolerance based on erasure configuration
         let scan_tolerance = if let Some(config) = erasure_config {
-            (config.parity_shards as usize + 1).max(2)
+            usize::from(config.parity_shards).saturating_add(1).max(2)
         } else {
             2
         };
 
-        // 3. Determine how many volumes to scan for
+        // 3. Scan the promised set plus a bounded probe for newer generations.
+        // A larger total from a matching sibling extends both the promise and probe.
         const MAX_SCAN: usize = 32;
-        let scan_limit = if total_volumes > 0 {
-            total_volumes
+        let mut scan_limit = if expected_volume_count > 0 {
+            expected_volume_count
+                .max(opening_scan_count)
+                .saturating_add(scan_tolerance)
         } else {
-            MAX_SCAN
+            MAX_SCAN.max(opening_scan_count.saturating_add(scan_tolerance))
         };
 
         // 4. Build the base path for volume 0 (strip any .NNN suffix)
@@ -232,10 +236,12 @@ impl ArchiveReader {
         // 5. Scan for all available volumes
         let mut found_readers: Vec<(usize, VolumeReader<era_storage::LocalStorageReader>)> =
             Vec::new();
-        let mut missing_count = 0;
+        let mut seen_sequences = HashSet::from([first_vol_sequence]);
+        let mut missing_count: usize = 0;
         let mut first_reader_opt = Some(first_reader);
+        let mut i = 0;
 
-        for i in 0..scan_limit {
+        while i < scan_limit {
             let volume_path = if i == 0 {
                 base_path.clone()
             } else {
@@ -247,20 +253,27 @@ impl ArchiveReader {
             let full_path = parent_dir.join(&volume_path);
 
             if i == first_vol_sequence {
+                if volume_path.as_os_str() != base_filename {
+                    return Err(EraError::InvalidFormat(format!(
+                        "Opening volume {} does not match header sequence {}",
+                        path.display(),
+                        first_vol_sequence
+                    )));
+                }
                 if let Some(reader) = first_reader_opt.take() {
                     found_readers.push((first_vol_sequence, reader));
                     missing_count = 0;
                 }
+                i = i.saturating_add(1);
                 continue;
             }
 
             if !tokio::fs::try_exists(&full_path).await.unwrap_or(false) {
-                missing_count += 1;
-                if total_volumes > 0 {
-                    continue;
-                } else if missing_count >= scan_tolerance {
+                missing_count = missing_count.saturating_add(1);
+                if expected_volume_count == 0 && missing_count >= scan_tolerance {
                     break;
                 }
+                i = i.saturating_add(1);
                 continue;
             }
 
@@ -269,7 +282,29 @@ impl ArchiveReader {
             match VolumeReader::open(&backend, &volume_path).await {
                 Ok(reader) => {
                     if reader.header().archive_id() == first_archive_id {
-                        let vol_seq = reader.header().volume_sequence() as usize;
+                        let vol_seq = usize::from(reader.header().volume_sequence());
+                        if !seen_sequences.insert(vol_seq) {
+                            return Err(EraError::InvalidFormat(format!(
+                                "Duplicate volume sequence {} at {}",
+                                vol_seq,
+                                volume_path.display()
+                            )));
+                        }
+                        if vol_seq != i {
+                            return Err(EraError::InvalidFormat(format!(
+                                "Volume {} has sequence {}, expected {}",
+                                volume_path.display(),
+                                vol_seq,
+                                i
+                            )));
+                        }
+
+                        let sibling_total = usize::from(reader.header().total_volumes());
+                        if sibling_total > expected_volume_count {
+                            expected_volume_count = sibling_total;
+                            scan_limit =
+                                scan_limit.max(sibling_total.saturating_add(scan_tolerance));
+                        }
                         found_readers.push((vol_seq, reader));
                     } else {
                         tracing::warn!(
@@ -282,6 +317,8 @@ impl ArchiveReader {
                     tracing::warn!("Failed to open volume {}: {}", volume_path.display(), e);
                 }
             }
+
+            i = i.saturating_add(1);
         }
 
         if let Some(reader) = first_reader_opt {
@@ -302,18 +339,27 @@ impl ArchiveReader {
             )));
         }
 
+        if expected_volume_count > 0 {
+            let highest_found_count = volume_indices
+                .last()
+                .map(|seq| seq.saturating_add(1))
+                .unwrap_or(0);
+            expected_volume_count = expected_volume_count
+                .max(opening_scan_count)
+                .max(highest_found_count);
+        }
+
         info!(
             "Opened {} volumes at sequences {:?} (total expected: {})",
             volume_readers.len(),
             volume_indices,
-            if total_volumes > 0 {
-                total_volumes.to_string()
+            if expected_volume_count > 0 {
+                expected_volume_count.to_string()
             } else {
                 "unknown".to_string()
             },
         );
 
-        let expected_volume_count = total_volumes;
         let missing_volume_indices = if expected_volume_count > 0 {
             let present: HashSet<usize> = volume_indices.iter().copied().collect();
             (0..expected_volume_count)
@@ -2502,7 +2548,11 @@ fn is_internal_entry(entry: &FileEntry) -> bool {
 mod tests {
     use super::*;
     use crate::ArchiveWriter;
-    use era_common::ArchiveConfig;
+    use era_common::{ArchiveConfig, ArchiveId, VolumeId};
+    use era_volume::{
+        AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType,
+        VolumeWriter,
+    };
     use tempfile::TempDir;
 
     /// Helper: Create a config with EC disabled for single-volume tests
@@ -2511,6 +2561,190 @@ mod tests {
             erasure: None,
             ..Default::default()
         }
+    }
+
+    const DISCOVERY_ARCHIVE_ID: u128 = 0x4552415f444953434f56455259;
+    const FOREIGN_ARCHIVE_ID: u128 = 0x4552415f464f524549474e;
+
+    fn discovery_header(archive_id: ArchiveId, sequence: u16, total_volumes: u16) -> SuperHeader {
+        let mut header = SuperHeader::new(
+            archive_id,
+            vec![RecipientSlot::new(
+                RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
+            test_config_no_ec(),
+            [0u8; 16],
+            EncryptedVolumeKey::new(
+                KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0u8; 24],
+                vec![0u8; 48],
+            ),
+            AccessPolicy::AnyOfN,
+        )
+        .unwrap();
+        header.set_volume_sequence(sequence);
+        header.set_total_volumes(total_volumes);
+        header
+    }
+
+    struct DiscoveryFixture {
+        temp_dir: TempDir,
+        base_name: String,
+        archive_id: ArchiveId,
+    }
+
+    impl DiscoveryFixture {
+        fn new(base_name: &str) -> Self {
+            Self {
+                temp_dir: TempDir::new().unwrap(),
+                base_name: base_name.to_string(),
+                archive_id: ArchiveId::from_uuid(uuid::Uuid::from_u128(DISCOVERY_ARCHIVE_ID)),
+            }
+        }
+
+        fn file_name(&self, sequence: u16) -> String {
+            if sequence == 0 {
+                self.base_name.clone()
+            } else {
+                format!("{}.{:03}", self.base_name, sequence)
+            }
+        }
+
+        fn volume_path(&self, sequence: u16) -> PathBuf {
+            self.temp_dir.path().join(self.file_name(sequence))
+        }
+
+        async fn write_volumes(&self, volumes: &[(u16, u16)]) {
+            for &(sequence, total_volumes) in volumes {
+                self.write_volume(sequence, total_volumes).await;
+            }
+        }
+
+        async fn write_volume(&self, sequence: u16, total_volumes: u16) {
+            let header = discovery_header(self.archive_id, sequence, total_volumes);
+            self.write_header_at(sequence, header).await;
+        }
+
+        async fn write_foreign_volume(&self, sequence: u16, total_volumes: u16) {
+            let archive_id = ArchiveId::from_uuid(uuid::Uuid::from_u128(FOREIGN_ARCHIVE_ID));
+            let header = discovery_header(archive_id, sequence, total_volumes);
+            self.write_header_at(sequence, header).await;
+        }
+
+        async fn write_header_at(&self, path_sequence: u16, mut header: SuperHeader) {
+            header.set_volume_id(VolumeId(uuid::Uuid::from_u128(u128::from(path_sequence))));
+            let backend = LocalStorageBackend::new(self.temp_dir.path());
+            let file_name = self.file_name(path_sequence);
+            let writer = VolumeWriter::create(&backend, Path::new(&file_name), header)
+                .await
+                .unwrap();
+            writer.finalize().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_volumes_from_first_finds_stale_generation_chain() {
+        let fixture = DiscoveryFixture::new("generations.era");
+        fixture
+            .write_volumes(&[(0, 2), (1, 2), (2, 4), (3, 4), (4, 7), (5, 7), (6, 7)])
+            .await;
+
+        let discovered = ArchiveReader::discover_volumes(&fixture.volume_path(0))
+            .await
+            .unwrap();
+
+        assert_eq!(discovered.volume_indices, vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(discovered.expected_volume_count, 7);
+        assert_eq!(discovered.missing_volume_indices, Vec::<usize>::new());
+    }
+
+    #[tokio::test]
+    async fn test_discover_volumes_from_last_finds_stale_generation_chain() {
+        let fixture = DiscoveryFixture::new("last.era");
+        fixture
+            .write_volumes(&[(0, 2), (1, 2), (2, 4), (3, 4), (4, 7), (5, 7), (6, 7)])
+            .await;
+
+        let discovered = ArchiveReader::discover_volumes(&fixture.volume_path(6))
+            .await
+            .unwrap();
+
+        assert_eq!(discovered.volume_indices, vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(discovered.expected_volume_count, 7);
+        assert_eq!(discovered.missing_volume_indices, Vec::<usize>::new());
+    }
+
+    #[tokio::test]
+    async fn test_discover_volumes_reports_exact_gaps_in_extended_promise() {
+        let fixture = DiscoveryFixture::new("gaps.era");
+        fixture
+            .write_volumes(&[(0, 2), (2, 7), (3, 7), (6, 7)])
+            .await;
+
+        let discovered = ArchiveReader::discover_volumes(&fixture.volume_path(0))
+            .await
+            .unwrap();
+
+        assert_eq!(discovered.volume_indices, vec![0, 2, 3, 6]);
+        assert_eq!(discovered.expected_volume_count, 7);
+        assert_eq!(discovered.missing_volume_indices, vec![1, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn test_discover_volumes_ignores_unrelated_archive_totals() {
+        let fixture = DiscoveryFixture::new("foreign.era");
+        fixture.write_volumes(&[(0, 2), (1, 2)]).await;
+        fixture.write_foreign_volume(2, 7).await;
+        fixture.write_foreign_volume(3, 7).await;
+
+        let discovered = ArchiveReader::discover_volumes(&fixture.volume_path(0))
+            .await
+            .unwrap();
+
+        assert_eq!(discovered.volume_indices, vec![0, 1]);
+        assert_eq!(discovered.expected_volume_count, 2);
+        assert_eq!(discovered.missing_volume_indices, Vec::<usize>::new());
+    }
+
+    #[tokio::test]
+    async fn test_discover_volumes_forward_probe_is_bounded() {
+        let fixture = DiscoveryFixture::new("bounded.era");
+        fixture.write_volumes(&[(0, 2), (1, 2), (4, 9)]).await;
+
+        let discovered = ArchiveReader::discover_volumes(&fixture.volume_path(0))
+            .await
+            .unwrap();
+
+        assert_eq!(discovered.volume_indices, vec![0, 1]);
+        assert_eq!(discovered.expected_volume_count, 2);
+        assert_eq!(discovered.missing_volume_indices, Vec::<usize>::new());
+    }
+
+    #[tokio::test]
+    async fn test_discover_volumes_rejects_duplicate_sequences() {
+        let fixture = DiscoveryFixture::new("duplicate.era");
+        fixture.write_volume(0, 2).await;
+        let duplicate = discovery_header(fixture.archive_id, 0, 2);
+        fixture.write_header_at(1, duplicate).await;
+
+        let result = ArchiveReader::discover_volumes(&fixture.volume_path(0)).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_discover_volumes_rejects_path_sequence_mismatch() {
+        let fixture = DiscoveryFixture::new("inconsistent.era");
+        fixture.write_volume(0, 2).await;
+        let inconsistent = discovery_header(fixture.archive_id, 2, 7);
+        fixture.write_header_at(1, inconsistent).await;
+
+        let result = ArchiveReader::discover_volumes(&fixture.volume_path(0)).await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
