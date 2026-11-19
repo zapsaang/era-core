@@ -913,23 +913,6 @@ impl ArchiveWriterBuilder {
         // Always use RotatingOffset strategy for optimal fault tolerance
         config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
-        // Calculate optimal volume counts for erasure coding
-        if enable_erasure {
-            let total_shards = (erasure_config.data_shards + erasure_config.parity_shards) as usize;
-            config.distribution.min_volumes = 1;
-            config.distribution.target_volumes = total_shards;
-        }
-
-        // Create volume header
-        let header = SuperHeader::new(
-            archive_id,
-            recipients,
-            config.clone(),
-            *archive_salt.as_bytes(),
-            encrypted_volume_key,
-            self.access_policy,
-        )?;
-
         let base_filename = self.output_path.file_name().unwrap_or_default();
 
         // Determine volume count based on erasure config
@@ -967,6 +950,19 @@ impl ArchiveWriterBuilder {
         } else {
             volume_count.unwrap_or(1)
         };
+
+        if enable_erasure {
+            config.distribution.min_volumes = 1;
+            config.distribution.target_volumes = resolved_volume_count;
+        }
+        let header = SuperHeader::new(
+            archive_id,
+            recipients,
+            config.clone(),
+            *archive_salt.as_bytes(),
+            encrypted_volume_key,
+            self.access_policy,
+        )?;
 
         // Unified Volume Management
         let base_path = self

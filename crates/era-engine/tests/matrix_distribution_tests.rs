@@ -707,3 +707,33 @@ async fn test_matrix_distribution_large_archive() {
 
     println!("✅ Large multi-file archive test passed!");
 }
+
+#[tokio::test]
+async fn test_matrix_distribution_persists_reduced_target_volumes() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_path = temp_dir.path().join("reduced_width.era");
+    let config = ArchiveConfig {
+        erasure: Some(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        }),
+        ..Default::default()
+    };
+
+    let mut writer = ArchiveWriterBuilder::new(&base_path)
+        .config(config)
+        .enable_erasure(true)
+        .volume_count(3)
+        .enable_cdc(false)
+        .build()
+        .await
+        .unwrap();
+    writer
+        .add_bytes("single_generation.bin", &[0x5a; 4096])
+        .await
+        .unwrap();
+    writer.finalize().await.unwrap();
+
+    let reader = ArchiveReader::open(&base_path, "").await.unwrap();
+    assert_eq!(reader.header().config().distribution.target_volumes, 3);
+}
