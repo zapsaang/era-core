@@ -328,4 +328,6 @@ message ArchiveManifest {
   //   - Each value must be >= 4224 (DATA_REGION_START = SuperHeader + BackupFooter)
   //     or exactly 0 (sentinel: volume exists but has no committed data yet)
   repeated uint64 volume_committed_ends = 6;
+  // BLAKE3 of the exact finalized SuperHeader bytes for this manifest replica's volume.
+  optional bytes volume_header_digest = 7;
 }

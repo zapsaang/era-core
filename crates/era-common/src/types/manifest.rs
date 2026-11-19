@@ -69,8 +69,18 @@ impl ArchiveManifest {
 
     /// Serialize the manifest to protobuf bytes.
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
-        let proto: crate::proto::ArchiveManifest = self.into();
-        Ok(prost::Message::encode_to_vec(&proto))
+        Ok(self.encode_proto(None))
+    }
+
+    /// Serialize a manifest replica with its volume-local header commitment.
+    pub fn to_bytes_with_header_digest(&self, digest: [u8; 32]) -> Vec<u8> {
+        self.encode_proto(Some(digest))
+    }
+
+    fn encode_proto(&self, digest: Option<[u8; 32]>) -> Vec<u8> {
+        let mut proto = crate::proto::ArchiveManifest::from(self);
+        proto.volume_header_digest = digest.map(|digest| digest.to_vec());
+        prost::Message::encode_to_vec(&proto)
     }
 
     /// Deserialize a manifest from protobuf bytes.
@@ -78,11 +88,30 @@ impl ArchiveManifest {
     /// Enforces a maximum size limit of 16 MB to prevent DoS attacks
     /// from malicious inputs.
     pub fn from_bytes(data: &[u8]) -> crate::Result<Self> {
-        let proto = crate::serde::deserialize_proto::<crate::proto::ArchiveManifest>(data)
-            .map_err(|e| {
-                crate::EraError::Deserialization(format!("Failed to decode manifest: {}", e))
-            })?;
-        proto.try_into()
+        Self::decode_proto(data)?.try_into()
+    }
+
+    /// Decode the archive-wide state and this replica's optional header commitment.
+    pub fn from_bytes_with_header_digest(data: &[u8]) -> crate::Result<(Self, Option<[u8; 32]>)> {
+        let mut proto = Self::decode_proto(data)?;
+        let digest = proto
+            .volume_header_digest
+            .take()
+            .map(|bytes| {
+                bytes.try_into().map_err(|_| {
+                    crate::EraError::Deserialization(
+                        "volume_header_digest must be exactly 32 bytes".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        Ok((proto.try_into()?, digest))
+    }
+
+    fn decode_proto(data: &[u8]) -> crate::Result<crate::proto::ArchiveManifest> {
+        crate::serde::deserialize_proto::<crate::proto::ArchiveManifest>(data).map_err(|e| {
+            crate::EraError::Deserialization(format!("Failed to decode manifest: {}", e))
+        })
     }
 
     /// Check if this manifest has a valid index commitment (not all zeros).
@@ -109,6 +138,7 @@ impl From<&ArchiveManifest> for crate::proto::ArchiveManifest {
             catalog_commitment: m.catalog_commitment.to_vec(),
             index_commitment: m.index_commitment.to_vec(),
             volume_committed_ends: m.volume_committed_ends.clone(),
+            volume_header_digest: None,
         }
     }
 }
@@ -165,6 +195,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_manifest_decodes_without_a_header_commitment() {
+        let manifest = ArchiveManifest::new(1, 5, 5000, [0xAA; 32], [0xBB; 32], vec![5000]);
+        let legacy = manifest.to_bytes().unwrap();
+
+        assert_eq!(
+            ArchiveManifest::from_bytes_with_header_digest(&legacy).unwrap(),
+            (manifest, None)
+        );
+    }
+
+    #[test]
     fn new_manifest() {
         let m = ArchiveManifest::new(1, 5, 10, [0xAA; 32], [0xBB; 32], vec![5000, 6000]);
         assert_eq!(m.epoch_id, 1);
@@ -218,6 +259,7 @@ mod tests {
             catalog_commitment: vec![0xAA; 31],
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![],
+            volume_header_digest: None,
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -233,6 +275,7 @@ mod tests {
             catalog_commitment: vec![0xAA; 32],
             index_commitment: vec![0xBB; 33],
             volume_committed_ends: vec![],
+            volume_header_digest: None,
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -248,6 +291,7 @@ mod tests {
             catalog_commitment: vec![0; 32],
             index_commitment: vec![0; 32],
             volume_committed_ends: vec![1, 2],
+            volume_header_digest: None,
         };
 
         let bytes = prost::Message::encode_to_vec(&proto);
@@ -330,6 +374,7 @@ mod tests {
             catalog_commitment: vec![0xAA; 32],
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![5000; 1025],
+            volume_header_digest: None,
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -351,6 +396,7 @@ mod tests {
             catalog_commitment: vec![0xAA; 32],
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![100, 5000],
+            volume_header_digest: None,
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -375,6 +421,7 @@ mod tests {
             catalog_commitment: vec![0xAA; 32],
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![0, 5000],
+            volume_header_digest: None,
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
