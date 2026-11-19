@@ -59,9 +59,9 @@ impl StorageBackend for LocalStorageBackend {
     async fn open_append(&self, path: &Path) -> Result<Self::Writer> {
         let full_path = self.resolve_path(path);
 
+        // O_APPEND would override write_at's seek; append already seeks to the tracked end.
         let file = OpenOptions::new()
             .write(true)
-            .append(true)
             .open(&full_path)
             .await
             .map_err(EraError::Io)?;
@@ -260,6 +260,31 @@ mod tests {
         let data = reader.read_all_from(0).await.unwrap();
 
         assert_eq!(data.as_ref(), b"00000HELLO");
+    }
+
+    #[tokio::test]
+    async fn test_local_storage_open_append_write_at_then_append() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let path = Path::new("test.dat");
+
+        let mut writer = backend.create(path).await.unwrap();
+        writer.append(b"0123456789").await.unwrap();
+        writer.close().await.unwrap();
+
+        let mut writer = backend.open_append(path).await.unwrap();
+        writer.write_at(2, b"abc").await.unwrap();
+        let offset = writer.append(b"XYZ").await.unwrap();
+        assert_eq!(offset, 10);
+        assert_eq!(writer.current_size(), 13);
+        writer.close().await.unwrap();
+
+        let reader = backend.open_read(path).await.unwrap();
+        assert_eq!(reader.size(), 13);
+        assert_eq!(
+            reader.read_all_from(0).await.unwrap().as_ref(),
+            b"01abc56789XYZ"
+        );
     }
 
     #[tokio::test]
