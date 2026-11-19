@@ -252,9 +252,14 @@ async fn synthetic_generations(
 async fn assert_generation_block_ids(width: usize, generation_count: usize) {
     let dir = TempDir::new().unwrap();
     let (paths, hashes) = synthetic_generations(&dir, width, generation_count).await;
+    let (stripes, remainder) = hashes.as_chunks::<4>();
+    assert!(
+        remainder.is_empty(),
+        "hash list must contain only complete four-hash stripes"
+    );
     for path in [&paths[0], paths.last().unwrap()] {
         let reader = ArchiveReader::open(path, PASSWORD).await.unwrap();
-        for (stripe, stripe_hashes) in hashes.chunks_exact(4).enumerate() {
+        for (stripe, stripe_hashes) in stripes.iter().enumerate() {
             let ids = reader
                 .live_data_block_ids_from_hashes_via_iterator(stripe_hashes)
                 .await
