@@ -28,6 +28,97 @@ const ERASURE_4_PLUS_2: ErasureCodeConfig = ErasureCodeConfig {
 
 const STRIPES_PER_GENERATION: usize = 2;
 
+#[tokio::test]
+async fn writer_generations_full_width_roundtrip_and_repair() {
+    assert_writer_generations(6, 110_000).await;
+}
+
+#[tokio::test]
+async fn writer_generations_colocated_shards_roundtrip_and_repair() {
+    assert_writer_generations(3, 160_000).await;
+}
+
+async fn assert_writer_generations(width: usize, cap: u64) {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().join("rotated.era");
+    let mut config = ArchiveConfig {
+        erasure: Some(ERASURE_4_PLUS_2),
+        ..Default::default()
+    };
+    config.compression.algorithm = CompressionAlgorithm::None;
+    let files: Vec<_> = (1..=15u8)
+        .map(|i| (format!("{i}.bin"), vec![i; 64 * 1024 - usize::from(i % 2)]))
+        .collect();
+    let mut writer = ArchiveWriterBuilder::new(&base)
+        .password(PASSWORD)
+        .config(config)
+        .volume_count(width)
+        .max_volume_size(cap)
+        .target_block_size(64 * 1024)
+        .enable_cdc(false)
+        .build()
+        .await
+        .unwrap();
+    for (name, bytes) in &files {
+        writer.add_bytes(name, bytes).await.unwrap();
+    }
+    writer.finalize().await.unwrap();
+
+    // Each generation has room for one stripe with these payloads and caps.
+    let total = u16::try_from(4 * width).unwrap();
+    let last = era_volume::volume_path(&base, total - 1);
+    for (path, output) in [(&base, "first"), (&last, "last")] {
+        let mut reader = ArchiveReader::open(path, PASSWORD).await.unwrap();
+        let stats = reader.verify().await.unwrap();
+        assert!(stats.is_healthy(), "{}: {stats:?}", path.display());
+        assert_eq!(reader.header().total_volumes(), total);
+        assert_eq!(reader.header().config().distribution.target_volumes, width);
+        let output = dir.path().join(output);
+        reader
+            .extract_all(&ExtractOptions::new(&output))
+            .await
+            .unwrap();
+        for (name, expected) in &files {
+            assert!(fs::read(output.join(name)).unwrap() == *expected, "{name}");
+        }
+    }
+
+    // In generation 1, stripe 1, damage shard 0 and parity shard 4. At W=3
+    // shard 4 follows shard 1 on the same volume, so step over that frame.
+    let mut damaged_volumes = Vec::new();
+    for shard in [0, 4] {
+        let sequence = u16::try_from(width + (1 + shard) % width).unwrap();
+        let path = era_volume::volume_path(&base, sequence);
+        let pristine = fs::read(&path).unwrap();
+        let mut damaged = pristine.clone();
+        let mut header_offset = usize::try_from(era_volume::DATA_REGION_START).unwrap() + 16;
+        if shard == 4 && width == 3 {
+            let preceding =
+                ShardHeader::from_bytes(&pristine[header_offset..][..ShardHeader::SIZE]).unwrap();
+            header_offset += ShardHeader::SIZE + usize::try_from(preceding.length).unwrap() + 16;
+        }
+        damaged[header_offset + ShardHeader::SIZE] ^= 0xff;
+        fs::write(&path, damaged).unwrap();
+        damaged_volumes.push((path, pristine));
+    }
+    let stats = repair_archive_matrix(
+        &last,
+        PASSWORD,
+        RepairOptions {
+            create_backup: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.corrupted_shards_found, 2);
+    assert_eq!(stats.shards_repaired, 2);
+    assert_eq!(stats.unrecoverable_blocks, 0);
+    for (path, pristine) in damaged_volumes {
+        assert!(fs::read(&path).unwrap() == pristine, "{}", path.display());
+    }
+}
+
 fn synthetic_password_slot(master_key: &[u8; 32]) -> RecipientSlot {
     let params = KdfParams::fast();
     let salt = Salt::generate();

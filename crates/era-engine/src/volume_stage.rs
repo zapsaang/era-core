@@ -119,6 +119,16 @@ impl<B: StorageBackend> VolumeStage<B> {
             .await
     }
 
+    pub async fn reserve_stripe(
+        &mut self,
+        shard_lengths: &[u32],
+        stripe_prefix_count: usize,
+    ) -> Result<Vec<u16>> {
+        self.pool
+            .reserve_stripe(shard_lengths, stripe_prefix_count)
+            .await
+    }
+
     /// Write an erasure shard with matrix distribution.
     ///
     /// Shards are distributed across volumes according to the matrix distribution
@@ -127,9 +137,7 @@ impl<B: StorageBackend> VolumeStage<B> {
     /// # Arguments
     /// * `shard_index` - The shard index (0..total_shards)
     /// * `data` - The shard data to write
-    /// * `include_original_len` - Whether to include the original length header
-    /// * `original_len` - The original data length (used if include_original_len is true)
-    /// * `stripe_lengths` - Optional stripe length prefix for recovery
+    /// * `stripe_lengths` - Stripe length prefix for recovery
     ///
     /// # Returns
     /// A tuple of (MatrixShardEntry, VolumeId) with location information.
@@ -137,18 +145,10 @@ impl<B: StorageBackend> VolumeStage<B> {
         &mut self,
         shard_index: usize,
         data: &[u8],
-        include_original_len: bool,
-        original_len: u32,
-        stripe_lengths: Option<&[u32]>,
+        stripe_lengths: &[u32],
     ) -> Result<(MatrixShardEntry, VolumeId)> {
         self.pool
-            .write_shard(
-                shard_index,
-                data,
-                include_original_len,
-                original_len,
-                stripe_lengths,
-            )
+            .write_shard(shard_index, data, false, 0, Some(stripe_lengths))
             .await
     }
 

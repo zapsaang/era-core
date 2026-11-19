@@ -5,8 +5,8 @@
 //!
 //! This module is part of the God Object decomposition effort (Phase 4).
 
-use era_common::{EncryptedMacroBlock, ErasureCodeConfig, Result};
-use era_packing::{BlockMeta, Stripe, StripeBuffer};
+use era_common::{ErasureCodeConfig, Result};
+use era_packing::{BlockMeta, PreparedMacroBlock, Stripe, StripeBuffer};
 
 /// Erasure coding stage for stripe buffering and parity computation.
 ///
@@ -93,7 +93,7 @@ impl ErasureStage {
         self.config.as_ref()
     }
 
-    /// Buffer an encrypted block for stripe formation.
+    /// Buffer a prepared block for stripe formation.
     ///
     /// Returns `Some(Stripe)` when K blocks have been collected and a complete
     /// stripe is ready for writing. Returns `None` if more blocks are needed.
@@ -108,11 +108,11 @@ impl ErasureStage {
     /// * `Err(_)` - Erasure coding is disabled (should not call this method)
     pub fn buffer_block(
         &mut self,
-        block: EncryptedMacroBlock,
+        block: PreparedMacroBlock,
         meta: BlockMeta,
     ) -> Result<Option<Stripe>> {
         match &mut self.stripe_buffer {
-            Some(buffer) => buffer.push(block, meta),
+            Some(buffer) => Ok(buffer.push(block, meta)),
             None => Err(era_common::EraError::InvalidFormat(
                 "Erasure coding is not enabled".into(),
             )),
@@ -126,11 +126,8 @@ impl ErasureStage {
     /// than K data blocks and will be padded during writing.
     ///
     /// Returns `None` if the buffer is empty or erasure coding is disabled.
-    pub fn flush(&mut self) -> Result<Option<Stripe>> {
-        match &mut self.stripe_buffer {
-            Some(buffer) if !buffer.is_empty() => Ok(Some(buffer.flush()?)),
-            _ => Ok(None),
-        }
+    pub fn flush(&mut self) -> Option<Stripe> {
+        self.stripe_buffer.as_mut().and_then(StripeBuffer::flush)
     }
 
     /// Check if there are buffered blocks waiting to be flushed.
@@ -178,20 +175,25 @@ mod tests {
         let mut stage = ErasureStage::new(Some(config)).unwrap();
 
         // Flushing empty buffer should return None
-        let result = stage.flush().unwrap();
+        let result = stage.flush();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_buffer_block_disabled() {
         let mut stage = ErasureStage::disabled();
-        let block = EncryptedMacroBlock {
-            block_id: era_common::BlockId::new(0),
-            data: bytes::Bytes::new(),
-            original_size: 0,
-            compressed_size: 0,
-            chunk_count: 0,
-        };
+        let session = era_crypto::KeySession::from_master_key(&[1; 32]).unwrap();
+        let (key, _) = session.generate_and_wrap_volume_key().unwrap();
+        let builder = era_packing::SessionBlockBuilder::new(
+            &session,
+            &key,
+            [0; 16],
+            [0; 16],
+            0,
+            0,
+            Box::new(era_codec::NoCompressor),
+        );
+        let block = builder.prepare_chunks(&[]).unwrap();
         let meta = BlockMeta {
             chunk_hashes: vec![],
             chunk_entries: vec![],

@@ -1188,7 +1188,6 @@ impl ArchiveWriterBuilder {
             volume,
             index,
             config.compression.clone(),
-            config.distribution.strategy,
         );
 
         Ok(ArchiveWriter {

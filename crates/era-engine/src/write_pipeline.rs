@@ -9,12 +9,10 @@
 use era_codec::{Compressor, ErasureCoder, ErasureConfig, NoCompressor, ZstdCompressor};
 use era_common::{
     BlockHeader, BlockLocation, BlockType, ChunkHash, CompressionAlgorithm, CompressionConfig,
-    EncryptedMacroBlock, EraError, ErasureBlockInfo, MatrixDistributionStrategy, Result,
-    UniqueChunk,
+    EraError, ErasureBlockInfo, Result, UniqueChunk,
 };
 use era_packing::{BlockMeta, Stripe};
 use era_storage::StorageBackend;
-use era_volume::DistributionCalculator;
 
 use crate::encryption_context::EncryptionContext;
 use crate::erasure_stage::ErasureStage;
@@ -57,10 +55,6 @@ pub struct WritePipeline<B: StorageBackend> {
     index: IndexStage,
     /// Compression configuration
     compression_config: CompressionConfig,
-    /// Shard placement strategy used when erasure coding is enabled.
-    distribution_strategy: MatrixDistributionStrategy,
-    /// Next data-shard position within the in-flight stripe.
-    pending_erasure_shard_index: usize,
     /// Cached erasure coder: (data_shards, parity_shards, coder)
     /// Reused across stripes with matching RS parameters
     cached_erasure_coder: Option<(usize, usize, ErasureCoder)>,
@@ -83,7 +77,6 @@ impl<B: StorageBackend> WritePipeline<B> {
         volume: VolumeStage<B>,
         index: IndexStage,
         compression_config: CompressionConfig,
-        distribution_strategy: MatrixDistributionStrategy,
     ) -> Self {
         Self {
             encryption,
@@ -91,8 +84,6 @@ impl<B: StorageBackend> WritePipeline<B> {
             volume,
             index,
             compression_config,
-            distribution_strategy,
-            pending_erasure_shard_index: 0,
             cached_erasure_coder: None,
             written_blocks: Vec::new(),
         }
@@ -117,42 +108,20 @@ impl<B: StorageBackend> WritePipeline<B> {
         let mut hashes: Vec<ChunkHash> = chunks.iter().map(|c| c.hash).collect();
         hashes.extend(extra_hashes);
 
-        // Create encrypted block
-        let active_volume_sequence = if self.erasure.is_enabled() {
-            let shard_slot = self.distribution_strategy.calculate_volume(
-                self.pending_erasure_shard_index,
-                self.volume.block_sequence(),
-                self.volume.volume_count(),
-            )?;
-            self.volume.volume_sequence(shard_slot).ok_or_else(|| {
-                EraError::InvalidFormat(format!(
-                    "Missing volume sequence for shard slot {}",
-                    shard_slot
-                ))
-            })? as u32
-        } else {
-            0u32
-        };
-        self.encryption.set_volume_index(active_volume_sequence);
         let compressor = self.create_compressor();
         let builder = self.encryption.create_block_builder(compressor)?;
+        let prepared = builder.prepare_chunks(&chunks)?;
 
         if self.erasure.is_enabled() {
-            let encrypted_block = builder.pack_chunks(chunks)?;
             let block_meta = BlockMeta {
                 chunk_hashes: hashes,
                 chunk_entries: Vec::new(),
             };
             // Erasure Coding Path: buffer block until stripe is complete
-            let maybe_stripe = self.erasure.buffer_block(encrypted_block, block_meta)?;
-            if let Some(stripe) = maybe_stripe {
-                self.pending_erasure_shard_index = 0;
+            if let Some(stripe) = self.erasure.buffer_block(prepared, block_meta)? {
                 self.flush_stripe_internal(stripe).await?;
-            } else {
-                self.pending_erasure_shard_index += 1;
             }
         } else {
-            let prepared = builder.prepare_chunks(&chunks)?;
             let sealed_size = u64::try_from(prepared.sealed_len())
                 .map_err(|_| EraError::InvalidConfig("sealed block length exceeds u64".into()))?;
             let total_size = sealed_size
@@ -183,8 +152,7 @@ impl<B: StorageBackend> WritePipeline<B> {
     /// This should be called during finalization to ensure all buffered
     /// blocks are written (with padding if necessary).
     pub async fn flush_stripe(&mut self) -> Result<()> {
-        if let Some(stripe) = self.erasure.flush()? {
-            self.pending_erasure_shard_index = 0;
+        if let Some(stripe) = self.erasure.flush() {
             self.flush_stripe_internal(stripe).await?;
         }
         Ok(())
@@ -196,61 +164,57 @@ impl<B: StorageBackend> WritePipeline<B> {
     /// 1. Writing data blocks (and padding blocks for partial stripes)
     /// 2. Computing and writing parity shards
     /// 3. Updating the index with erasure metadata
-    #[allow(clippy::needless_range_loop)]
     async fn flush_stripe_internal(&mut self, stripe: Stripe) -> Result<()> {
-        let volume_count = self.volume.volume_count();
-        let written_blocks_start = self.written_blocks.len();
+        let Stripe {
+            mut data_blocks,
+            block_meta,
+            config,
+        } = stripe;
+        let data_shards_count = usize::from(config.data_shards);
+        let parity_shards_count = usize::from(config.parity_shards);
 
-        if volume_count == 0 {
-            return Err(era_common::EraError::Io(std::io::Error::other(
-                "No volume writers available",
-            )));
+        while data_blocks.len() < data_shards_count {
+            let builder = self
+                .encryption
+                .create_block_builder(self.create_compressor())?;
+            data_blocks.push(builder.prepare_chunks(&[])?);
         }
+        let mut shard_lengths = data_blocks
+            .iter()
+            .map(|block| {
+                u32::try_from(block.sealed_len())
+                    .map_err(|_| EraError::InvalidConfig("sealed shard length exceeds u32".into()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let max_len = shard_lengths.iter().copied().max().unwrap_or(0);
+        // Match encode_shards' two-byte alignment; only parity is stored padded.
+        let shard_size = max_len
+            .checked_add(max_len % 2)
+            .ok_or_else(|| EraError::InvalidConfig("aligned parity length exceeds u32".into()))?
+            .max(2);
+        shard_lengths.resize(data_shards_count + parity_shards_count, shard_size);
+        let volume_sequences = self
+            .volume
+            .reserve_stripe(&shard_lengths, data_shards_count)
+            .await?;
+        let stripe_lengths = &shard_lengths[..data_shards_count];
 
-        let data_shards_count = stripe.config.data_shards as usize;
-        let parity_shards_count = stripe.config.parity_shards as usize;
-
-        // Prepare stripe lengths and padding blocks
-        let mut stripe_lengths: Vec<u32> = vec![0; data_shards_count];
-        let mut padding_blocks: Vec<Option<EncryptedMacroBlock>> = vec![None; data_shards_count];
-
-        for i in 0..data_shards_count {
-            if i < stripe.data_blocks.len() {
-                stripe_lengths[i] = stripe.data_blocks[i].data.len() as u32;
-            } else {
-                // Create padding block for partial stripe
-                let shard_slot = self.distribution_strategy.calculate_volume(
-                    i,
-                    self.volume.block_sequence(),
-                    volume_count,
-                )?;
-                let volume_sequence = self.volume.volume_sequence(shard_slot).ok_or_else(|| {
-                    EraError::InvalidFormat(format!(
-                        "Missing volume sequence for padding shard slot {}",
-                        shard_slot
-                    ))
-                })? as u32;
-                self.encryption.set_volume_index(volume_sequence);
-                let compressor = self.create_compressor();
-                let builder = self.encryption.create_block_builder(compressor)?;
-                let encrypted_block = builder.pack_chunks(vec![])?;
-                stripe_lengths[i] = encrypted_block.data.len() as u32;
-                padding_blocks[i] = Some(encrypted_block);
-            }
-        }
-
-        // Prepare shard inputs for parity computation
-        let mut shard_inputs: Vec<Vec<u8>> = Vec::with_capacity(data_shards_count);
-        for i in 0..data_shards_count {
-            if i < stripe.data_blocks.len() {
-                shard_inputs.push(stripe.data_blocks[i].data.to_vec());
-            } else {
-                let padding_block = padding_blocks[i].as_ref().ok_or_else(|| {
-                    era_common::EraError::Other("Padding block not prepared".into())
-                })?;
-                shard_inputs.push(padding_block.data.to_vec());
-            }
-        }
+        let sealed_blocks = {
+            let builder = self.encryption.create_block_builder_with_block_id(
+                Box::new(NoCompressor),
+                0,
+                data_blocks[0].block_id().sequence(),
+            )?;
+            data_blocks
+                .into_iter()
+                .zip(volume_sequences)
+                .map(|(block, sequence)| builder.seal_prepared(&block, u32::from(sequence)))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let shard_inputs: Vec<_> = sealed_blocks
+            .iter()
+            .map(|block| block.data.to_vec())
+            .collect();
 
         // Compute parity shards (with cached erasure coder)
         // Check if cached coder matches current parameters
@@ -273,41 +237,26 @@ impl<B: StorageBackend> WritePipeline<B> {
             .ok_or_else(|| era_common::EraError::Other("Erasure coder not initialized".into()))?
             .2;
         let all_shards = coder.encode_shards(&shard_inputs)?;
-        let parity_shards = all_shards[data_shards_count..].to_vec();
+        let parity_shards = &all_shards[data_shards_count..];
 
         // Write data blocks and collect location info
-        let mut locations = Vec::new();
+        let mut locations = Vec::with_capacity(block_meta.len());
         let mut data_info: Vec<(u16, u64)> = Vec::with_capacity(data_shards_count);
 
-        for i in 0..data_shards_count {
-            if i < stripe.data_blocks.len() {
-                let block = &stripe.data_blocks[i];
-                let (entry, volume_id) = self
-                    .volume
-                    .write_shard(i, &block.data, false, 0, Some(&stripe_lengths))
-                    .await?;
-
-                let loc = BlockLocation::single(
+        for (i, block) in sealed_blocks.iter().enumerate() {
+            let (entry, volume_id) = self
+                .volume
+                .write_shard(i, &block.data, stripe_lengths)
+                .await?;
+            if i < block_meta.len() {
+                locations.push(BlockLocation::single(
                     volume_id,
                     block.block_id.0 as u32,
                     entry.physical_offset,
-                    block.data.len() as u32,
-                );
-                locations.push(loc.clone());
-                self.written_blocks.push(loc);
-                data_info.push((entry.volume_sequence, entry.physical_offset));
-            } else {
-                // Write padding block
-                let encrypted_block = padding_blocks[i].take().ok_or_else(|| {
-                    era_common::EraError::Other("Padding block not prepared".into())
-                })?;
-
-                let (entry, _) = self
-                    .volume
-                    .write_shard(i, &encrypted_block.data, false, 0, Some(&stripe_lengths))
-                    .await?;
-                data_info.push((entry.volume_sequence, entry.physical_offset));
+                    stripe_lengths[i],
+                ));
             }
+            data_info.push((entry.volume_sequence, entry.physical_offset));
         }
 
         // Write parity shards
@@ -315,13 +264,7 @@ impl<B: StorageBackend> WritePipeline<B> {
         for (i, shard) in parity_shards.iter().enumerate() {
             let (entry, _) = self
                 .volume
-                .write_shard(
-                    data_shards_count + i,
-                    shard,
-                    false,
-                    0,
-                    Some(&stripe_lengths),
-                )
+                .write_shard(data_shards_count + i, shard, stripe_lengths)
                 .await?;
             parity_locations.push((entry.volume_sequence, entry.physical_offset));
         }
@@ -330,10 +273,8 @@ impl<B: StorageBackend> WritePipeline<B> {
         self.volume.advance_block_sequence();
 
         // Update index for data blocks with stripe information
-        let mut erasure_written_blocks = Vec::with_capacity(stripe.block_meta.len());
-        for (i, meta) in stripe.block_meta.iter().enumerate() {
-            let base = &locations[i];
-
+        let mut erasure_written_blocks = Vec::with_capacity(block_meta.len());
+        for (i, (meta, base)) in block_meta.iter().zip(locations).enumerate() {
             // Build shard_offsets and shard_volumes (excluding self)
             let mut shard_offsets = Vec::new();
             let mut shard_volumes = Vec::new();
@@ -356,9 +297,9 @@ impl<B: StorageBackend> WritePipeline<B> {
                 base.physical_offset,
                 base.encrypted_size,
                 ErasureBlockInfo {
-                    data_shards: stripe.config.data_shards,
-                    parity_shards: stripe.config.parity_shards,
-                    shard_size: stripe.shard_size,
+                    data_shards: config.data_shards,
+                    parity_shards: config.parity_shards,
+                    shard_size,
                     original_len: base.encrypted_size,
                 },
                 shard_offsets,
@@ -372,7 +313,6 @@ impl<B: StorageBackend> WritePipeline<B> {
             }
         }
 
-        self.written_blocks.truncate(written_blocks_start);
         self.written_blocks.extend(erasure_written_blocks);
 
         Ok(())
@@ -599,14 +539,7 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(
-            encryption,
-            erasure,
-            volume,
-            index,
-            compression,
-            MatrixDistributionStrategy::default(),
-        );
+        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 
         // Process a chunk
         let chunk = create_test_chunk(b"Hello, World!");
@@ -637,14 +570,7 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(
-            encryption,
-            erasure,
-            volume,
-            index,
-            compression,
-            MatrixDistributionStrategy::default(),
-        );
+        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 
         // Process a chunk with extra hashes (simulating packed small files)
         let chunk = create_test_chunk(b"Packed data");
@@ -676,14 +602,7 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(
-            encryption,
-            erasure,
-            volume,
-            index,
-            compression,
-            MatrixDistributionStrategy::default(),
-        );
+        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 
         assert!(pipeline.erasure_enabled());
 
@@ -719,14 +638,7 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(
-            encryption,
-            erasure,
-            volume,
-            index,
-            compression,
-            MatrixDistributionStrategy::default(),
-        );
+        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 
         assert!(pipeline.written_block_locations().is_empty());
 
@@ -770,14 +682,7 @@ mod tests {
         let index = IndexStage::without_checkpoint(Arc::new(MemoryChunkIndex::new()));
         let compression = CompressionConfig::default();
 
-        let mut pipeline = WritePipeline::new(
-            encryption,
-            erasure,
-            volume,
-            index,
-            compression,
-            MatrixDistributionStrategy::default(),
-        );
+        let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 
         assert!(pipeline.written_block_locations().is_empty());
 

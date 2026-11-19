@@ -1,5 +1,5 @@
-use era_codec::ErasureCoder;
-use era_common::{ChunkHash, EncryptedMacroBlock, ErasureCodeConfig, Result};
+use crate::PreparedMacroBlock;
+use era_common::{ChunkHash, ErasureCodeConfig};
 
 /// Metadata for a block to allow index updates after writing.
 #[derive(Debug)]
@@ -13,29 +13,20 @@ pub struct BlockMeta {
     pub chunk_entries: Vec<(ChunkHash, u32, u32)>,
 }
 
-/// A stripe of data blocks and their corresponding parity shards.
-///
-/// In Virtual Striping, K MacroBlocks are treated as data shards,
-/// and M parity shards are generated from them.
-#[derive(Debug)]
+/// Prepared data blocks awaiting volume selection, sealing, and parity encoding.
 pub struct Stripe {
     /// The data blocks (MacroBlocks) in this stripe
-    pub data_blocks: Vec<EncryptedMacroBlock>,
+    pub data_blocks: Vec<PreparedMacroBlock>,
     /// Metadata for each data block (1-to-1 correspondence with data_blocks)
     pub block_meta: Vec<BlockMeta>,
-    /// The generated parity shards
-    pub parity_shards: Vec<Vec<u8>>,
-    /// Padded shard size used for erasure coding
-    pub shard_size: u32,
     /// The erasure code configuration used
     pub config: ErasureCodeConfig,
 }
 
 /// Buffer for accumulating MacroBlocks to form a stripe.
-#[derive(Debug)]
 pub struct StripeBuffer {
     /// Pending data blocks
-    data_blocks: Vec<EncryptedMacroBlock>,
+    data_blocks: Vec<PreparedMacroBlock>,
     /// Metadata for pending blocks
     block_meta: Vec<BlockMeta>,
     /// Erasure code configuration
@@ -56,60 +47,28 @@ impl StripeBuffer {
     ///
     /// If enough blocks are collected (equal to data_shards), returns a complete Stripe.
     /// Otherwise returns None.
-    pub fn push(&mut self, block: EncryptedMacroBlock, meta: BlockMeta) -> Result<Option<Stripe>> {
+    pub fn push(&mut self, block: PreparedMacroBlock, meta: BlockMeta) -> Option<Stripe> {
         self.data_blocks.push(block);
         self.block_meta.push(meta);
 
         if self.data_blocks.len() >= self.config.data_shards as usize {
-            Ok(Some(self.flush()?))
+            self.flush()
         } else {
-            Ok(None)
+            None
         }
     }
 
     /// Flush pending blocks as a partial stripe.
     ///
-    /// This should be called when finalizing the archive.
-    /// If there are any pending blocks, they will be encoded (padding will be used for missing blocks).
-    pub fn flush(&mut self) -> Result<Stripe> {
+    /// An empty buffer returns `None`.
+    pub fn flush(&mut self) -> Option<Stripe> {
         if self.data_blocks.is_empty() {
-            return Ok(Stripe {
-                data_blocks: Vec::new(),
-                block_meta: Vec::new(),
-                parity_shards: Vec::new(),
-                shard_size: 0,
-                config: self.config,
-            });
+            return None;
         }
 
-        let blocks = std::mem::take(&mut self.data_blocks);
-        let meta = std::mem::take(&mut self.block_meta);
-
-        // Prepare shards for encoding
-        // We need to extract the data bytes from EncryptedMacroBlock
-        let shards: Vec<Vec<u8>> = blocks.iter().map(|b| b.data.to_vec()).collect();
-
-        let coder = ErasureCoder::new(era_codec::ErasureConfig::new(
-            self.config.data_shards as usize,
-            self.config.parity_shards as usize,
-        )?)?;
-
-        // Encode using our new encode_shards method
-        // Note: encode_shards returns (padded_data_shards + parity_shards)
-        let all_shards = coder.encode_shards(&shards)?;
-
-        let shard_size = all_shards.first().map(|s| s.len() as u32).unwrap_or(0);
-
-        // Extract parity shards (they are at the end)
-        let parity_count = self.config.parity_shards as usize;
-        let total_count = all_shards.len();
-        let parity_shards = all_shards[total_count - parity_count..].to_vec();
-
-        Ok(Stripe {
-            data_blocks: blocks,
-            block_meta: meta,
-            parity_shards,
-            shard_size,
+        Some(Stripe {
+            data_blocks: std::mem::take(&mut self.data_blocks),
+            block_meta: std::mem::take(&mut self.block_meta),
             config: self.config,
         })
     }
