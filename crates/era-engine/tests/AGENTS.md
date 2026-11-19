@@ -26,7 +26,7 @@
 
 ## Repair / Recovery
 
-- `single_volume_repair_scan_tests.rs` (501), `cold_recovery_bulletproof.rs` (322), `fault_tolerance_test.rs`, `simple_fault_test.rs` — RS repair scans, cold recovery, failure-mode handling
+- `single_volume_repair_scan_tests.rs` (501), `cold_recovery_bulletproof.rs` (322), `fault_tolerance_test.rs`, `simple_fault_test.rs`, `find04_catalog_recovery.rs` — RS repair scans, cold recovery, EC Catalog backup recovery, failure-mode handling
 
 ## Resilience / Auth / Core Topics
 
