@@ -47,6 +47,10 @@ pub struct ExtractionContext {
     pub packed_chunks: HashMap<ChunkHash, Vec<(usize, usize, PathBuf)>>,
     /// Canonical output directory for path containment checking
     pub canonical_output_dir: Option<PathBuf>,
+    /// Whether existing target files/symlinks should be unlinked before extraction
+    overwrite: bool,
+    /// Output files opened or overwritten by `process_chunks`
+    created_output_paths: Vec<PathBuf>,
 }
 
 impl ExtractionContext {
@@ -58,12 +62,24 @@ impl ExtractionContext {
             chunk_to_files: HashMap::new(),
             packed_chunks: HashMap::new(),
             canonical_output_dir: None,
+            overwrite: false,
+            created_output_paths: Vec::new(),
         }
     }
 
     /// Set the canonical output directory for path containment checking
     pub fn set_canonical_output_dir(&mut self, path: PathBuf) {
         self.canonical_output_dir = Some(path);
+    }
+
+    /// Configure whether existing files should be unlinked and replaced
+    pub fn set_overwrite(&mut self, overwrite: bool) {
+        self.overwrite = overwrite;
+    }
+
+    /// Return paths opened or overwritten during `process_chunks`
+    pub fn created_output_paths(&self) -> &[PathBuf] {
+        &self.created_output_paths
     }
 
     fn ensure_contained_output_target(&self, output_path: &Path) -> Result<()> {
@@ -98,7 +114,8 @@ impl ExtractionContext {
                     self.ensure_contained_output_target(&output_path)?;
 
                     // Write file
-                    let mut file = File::create(&output_path)?;
+                    let mut file = open_output_for_extract(&output_path, self.overwrite)?;
+                    self.created_output_paths.push(output_path.clone());
                     file.write_all(&file_data)?;
 
                     debug!("Extracted (packed): {}", output_path.display());
@@ -114,7 +131,8 @@ impl ExtractionContext {
                     self.ensure_contained_output_target(&output_path)?;
 
                     // Write file directly
-                    let mut file = File::create(&output_path)?;
+                    let mut file = open_output_for_extract(&output_path, self.overwrite)?;
+                    self.created_output_paths.push(output_path.clone());
                     file.write_all(&data)?;
 
                     debug!("Extracted: {}", output_path.display());
@@ -187,6 +205,36 @@ impl ExtractionContext {
             }
         }
     }
+}
+
+/// Open a new output file for extraction after output containment has been verified.
+///
+/// When `overwrite` is true, any existing regular file or symlink at `output_path` is removed
+/// first so read-only targets (e.g. `0444`) can be replaced cleanly and existing symlinks are
+/// unlinked rather than followed.
+pub(crate) fn open_output_for_extract(
+    output_path: &Path,
+    overwrite: bool,
+) -> std::io::Result<File> {
+    if overwrite {
+        match fs::symlink_metadata(output_path) {
+            Ok(meta) => {
+                if meta.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::IsADirectory,
+                        format!("Cannot overwrite directory '{}'", output_path.display()),
+                    ));
+                }
+                fs::remove_file(output_path)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
 }
 
 pub(crate) fn enforce_output_containment(

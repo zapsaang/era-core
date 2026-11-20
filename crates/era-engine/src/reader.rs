@@ -14,7 +14,8 @@ use crate::block_iter::{
     SessionErasureBlockIteratorArgs,
 };
 use crate::chunk_processor::{
-    enforce_output_containment, ExtractionContext, MultiChunkState, VerificationContext,
+    enforce_output_containment, open_output_for_extract, ExtractionContext, MultiChunkState,
+    VerificationContext,
 };
 pub use crate::chunk_processor::{ArchiveHealthStatus, ExtractStats, VerifyStats};
 use bytes::Bytes;
@@ -1917,6 +1918,7 @@ impl ArchiveReader {
         // Build maps for extraction
         let mut context = ExtractionContext::new();
         context.set_canonical_output_dir(canonical_output_dir.clone());
+        context.set_overwrite(options.overwrite);
         let mut planned_targets: HashSet<PathBuf> = HashSet::new();
 
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
@@ -1959,7 +1961,7 @@ impl ArchiveReader {
                 .components()
                 .filter(|c| !matches!(c, std::path::Component::CurDir))
                 .collect();
-            let already_exists = tokio::fs::try_exists(&output_path).await.unwrap_or(false)
+            let already_exists = tokio::fs::symlink_metadata(&output_path).await.is_ok()
                 || planned_targets.contains(&target_key);
             if already_exists && !options.overwrite {
                 debug!("Skipping existing file: {}", output_path.display());
@@ -1967,8 +1969,6 @@ impl ArchiveReader {
                 continue;
             }
             planned_targets.insert(target_key);
-
-            tracked_output_files.push(output_path.clone());
 
             if entry.size > MAX_DECLARED_FILE_SIZE {
                 return Self::fail_extraction_with_cleanup(
@@ -2014,6 +2014,7 @@ impl ArchiveReader {
                     let output_path_for_create = output_path.clone();
                     let expected_size = entry.size;
                     let canonical_output_dir_for_create = canonical_output_dir.clone();
+                    let overwrite = options.overwrite;
                     let file =
                         match tokio::task::spawn_blocking(move || -> std::io::Result<File> {
                             enforce_output_containment(
@@ -2021,8 +2022,12 @@ impl ArchiveReader {
                                 &canonical_output_dir_for_create,
                             )
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
-                            let file = File::create(&output_path_for_create)?;
-                            file.set_len(expected_size)?;
+                            let file = open_output_for_extract(&output_path_for_create, overwrite)?;
+                            if let Err(err) = file.set_len(expected_size) {
+                                drop(file);
+                                let _ = std::fs::remove_file(&output_path_for_create);
+                                return Err(err);
+                            }
                             Ok(file)
                         })
                         .await
@@ -2031,7 +2036,10 @@ impl ArchiveReader {
                         })
                         .and_then(|res| res.map_err(EraError::Io))
                         {
-                            Ok(file) => file,
+                            Ok(file) => {
+                                tracked_output_files.push(output_path.clone());
+                                file
+                            }
                             Err(err) => {
                                 return Self::fail_extraction_with_cleanup(
                                     err,
@@ -2086,12 +2094,13 @@ impl ArchiveReader {
                     let block_bytes = match block_bytes {
                         Some(v) => v,
                         None => {
-                            return Self::fail_extraction_with_cleanup(
+                            return Self::fail_extraction_with_context(
                                 EraError::Security(
                                     "Extraction memory budget exceeded: possible decompression bomb"
                                         .to_string(),
                                 ),
                                 &tracked_output_files,
+                                &context,
                             )
                             .await;
                         }
@@ -2102,45 +2111,57 @@ impl ArchiveReader {
                     {
                         Some(v) => v,
                         None => {
-                            return Self::fail_extraction_with_cleanup(
+                            return Self::fail_extraction_with_context(
                                     EraError::Security(
                                         "Extraction memory budget exceeded: possible decompression bomb"
                                             .to_string(),
                                     ),
                                     &tracked_output_files,
+                                    &context,
                                 )
                                 .await;
                         }
                     };
 
                     if cumulative_bytes_extracted > MAX_EXTRACTION_MEMORY {
-                        return Self::fail_extraction_with_cleanup(
+                        return Self::fail_extraction_with_context(
                             EraError::Security(
                                 "Extraction memory budget exceeded: possible decompression bomb"
                                     .to_string(),
                             ),
                             &tracked_output_files,
+                            &context,
                         )
                         .await;
                     }
 
                     if let Err(err) = context.process_chunks(decoded.chunks, &mut stats) {
-                        return Self::fail_extraction_with_cleanup(err, &tracked_output_files)
-                            .await;
+                        return Self::fail_extraction_with_context(
+                            err,
+                            &tracked_output_files,
+                            &context,
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
                     if matches!(&e, EraError::ShardTooLarge { .. }) {
-                        return Self::fail_extraction_with_cleanup(e, &tracked_output_files).await;
+                        return Self::fail_extraction_with_context(
+                            e,
+                            &tracked_output_files,
+                            &context,
+                        )
+                        .await;
                     }
                     consecutive_failures += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                        return Self::fail_extraction_with_cleanup(
+                        return Self::fail_extraction_with_context(
                             EraError::Security(format!(
                                 "Aborting: {} consecutive block failures: {}",
                                 consecutive_failures, e
                             )),
                             &tracked_output_files,
+                            &context,
                         )
                         .await;
                     }
@@ -2160,13 +2181,14 @@ impl ArchiveReader {
         context.log_incomplete_files();
 
         if context.has_pending() {
-            return Self::fail_extraction_with_cleanup(
+            return Self::fail_extraction_with_context(
                 EraError::ErasureError(
                     "Not enough shards for recovery: extraction incomplete due to \
                      too many missing or corrupted volumes."
                         .into(),
                 ),
                 &tracked_output_files,
+                &context,
             )
             .await;
         }
@@ -2307,6 +2329,16 @@ impl ArchiveReader {
             }
         }
         Err(err)
+    }
+
+    async fn fail_extraction_with_context(
+        err: EraError,
+        tracked_paths: &[PathBuf],
+        context: &ExtractionContext,
+    ) -> Result<ExtractStats> {
+        let mut paths = tracked_paths.to_vec();
+        paths.extend_from_slice(context.created_output_paths());
+        Self::fail_extraction_with_cleanup(err, &paths).await
     }
 
     /// Verify using the provided block iterator
