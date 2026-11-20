@@ -1319,18 +1319,26 @@ pub async fn repair(
                 Err(e) => {
                     info!("❌ Repair failed: {}", e);
                     info!("");
-                    info!("To extract recoverable data, use: era extract --force <archive>");
+                    info!(
+                        "Corrupted blocks cannot be repaired beyond available erasure parity \
+                         (--force only authorizes applying valid EC repairs)."
+                    );
                 }
             }
+            anyhow::bail!("Archive has unrecoverable errors that could not be repaired.");
         } else {
             info!("Note: This archive was created without erasure coding.");
             info!("Consider recreating with erasure coding for better protection:");
             info!("  era create --erasure 4:2 <inputs> -o <output>.era");
             info!("");
-            info!("To extract what's possible, try: era extract --force <archive>");
+            info!(
+                "Damaged blocks in archives without erasure coding cannot be repaired (even with --force); \
+                 'era extract --force' only overwrites existing output files and does not bypass corruption."
+            );
+            anyhow::bail!(
+                "Archive has errors and was created without erasure coding; damaged blocks cannot be repaired."
+            );
         }
-
-        anyhow::bail!("Archive has errors. Use 'era extract --force' to recover what's possible.");
     }
 
     info!("Recovery checkpoint found from interrupted archive creation.");
