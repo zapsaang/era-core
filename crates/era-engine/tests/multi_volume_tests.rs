@@ -3,11 +3,20 @@
 //! These tests verify that erasure-coded shards are TRULY distributed
 //! across physically separate files, and can recover from extreme failures.
 
-use era_common::ErasureCodeConfig;
+use bytes::Bytes;
+use era_codec::{ErasureCoder, ErasureConfig, NoCompressor};
+use era_common::{
+    compute_shard_crc, ArchiveId, BlockLocation, ChunkHash, ErasureBlockInfo, ErasureCodeConfig,
+    ShardHeader, ShardLayout, UniqueChunk, VolumeId,
+};
+use era_crypto::{AeadContext, KeySession};
 use era_engine::{
     repair_archive_matrix, ArchiveReader, ArchiveWriterBuilder, ExtractOptions, RepairOptions,
 };
+use era_packing::SessionBlockBuilder;
+use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use tempfile::TempDir;
 
 /// Test that multi-volume mode creates separate physical files
@@ -1166,4 +1175,335 @@ async fn test_non_erasure_multi_volume_monotonic_rotation_verify_and_extract() {
     for (name, expected) in &payloads {
         assert_eq!(fs::read(extract_dir.join(name)).unwrap(), *expected);
     }
+}
+
+const RANDOM_READ_BLOCK_SIZE: usize = 128 * 1024;
+const RANDOM_READ_BLOCK_COUNT: usize = 24;
+
+async fn create_rotated_random_read_archive(
+    temp_dir: &TempDir,
+) -> (std::path::PathBuf, HashMap<ChunkHash, Vec<u8>>) {
+    let archive_path = temp_dir.path().join("random_read_rotated.era");
+    let mut config = era_common::ArchiveConfig::default();
+    config.compression.algorithm = era_common::CompressionAlgorithm::None;
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+        .password("test_password")
+        .config(config)
+        .enable_erasure(true)
+        .erasure_config(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        })
+        .enable_cdc(false)
+        .enable_small_file_packing(false)
+        .volume_count(3)
+        .max_volume_size(1_048_576)
+        .target_block_size(RANDOM_READ_BLOCK_SIZE)
+        .build()
+        .await
+        .unwrap();
+
+    let mut payload = Vec::new();
+    for block_idx in 0..RANDOM_READ_BLOCK_COUNT {
+        let len = if block_idx + 1 == RANDOM_READ_BLOCK_COUNT {
+            32 * 1024
+        } else {
+            RANDOM_READ_BLOCK_SIZE
+        };
+        payload.extend((0..len).map(|i| ((i * 31 + block_idx * 17) % 251) as u8));
+    }
+    let expected = payload
+        .chunks(RANDOM_READ_BLOCK_SIZE)
+        .map(|chunk| (era_crypto::hash(chunk), chunk.to_vec()))
+        .collect();
+    writer.add_bytes("payload.bin", &payload).await.unwrap();
+    writer.finalize().await.unwrap();
+    (archive_path, expected)
+}
+
+async fn primary_volume_sequence(
+    reader: &ArchiveReader,
+    archive_path: &Path,
+    location: &BlockLocation,
+) -> u16 {
+    let backend = era_storage::LocalStorageBackend::new(archive_path.parent().unwrap());
+    for sequence in 0..reader.expected_volume_count() {
+        let sequence = u16::try_from(sequence).unwrap();
+        let path = era_volume::volume_path(archive_path, sequence);
+        let volume = era_volume::VolumeReader::open(&backend, Path::new(path.file_name().unwrap()))
+            .await
+            .unwrap();
+        if volume.header().volume_id() == location.volume_id {
+            return sequence;
+        }
+    }
+    panic!("primary volume must exist before the simulated loss");
+}
+
+fn valid_shard_length(archive_path: &Path, sequence: u16, offset: u64) -> u32 {
+    let bytes = fs::read(era_volume::volume_path(archive_path, sequence)).unwrap();
+    let offset = usize::try_from(offset).unwrap();
+    ShardHeader::from_bytes(&bytes[offset..offset + ShardHeader::SIZE])
+        .unwrap()
+        .length
+}
+
+fn assert_chunks_byte_exact(chunks: era_common::ChunkVec, expected: &HashMap<ChunkHash, Vec<u8>>) {
+    assert!(!chunks.is_empty());
+    for (hash, data) in chunks {
+        assert_eq!(data.as_ref(), expected.get(&hash).unwrap().as_slice());
+    }
+}
+
+#[tokio::test]
+async fn resid_med01_random_read_accepts_short_final_data_shard() {
+    let temp_dir = TempDir::new().unwrap();
+    let (archive_path, expected) = create_rotated_random_read_archive(&temp_dir).await;
+    let mut reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
+    reader.preflight_metadata_recovery().await.unwrap();
+    assert!(reader.expected_volume_count() > 3);
+
+    let committed_ends = &reader.manifest().unwrap().volume_committed_ends;
+    let mut selected = None;
+    for location in &reader.catalog().unwrap().block_locations {
+        let ShardLayout::Erasure { info, .. } = &location.shard_layout else {
+            continue;
+        };
+        let sequence = primary_volume_sequence(&reader, &archive_path, location).await;
+        let length = valid_shard_length(&archive_path, sequence, location.physical_offset);
+        let shard_end = location.physical_offset + ShardHeader::SIZE as u64 + u64::from(length);
+        if length < info.shard_size && shard_end == committed_ends[usize::from(sequence)] {
+            selected = Some(location.clone());
+            break;
+        }
+    }
+    let location = selected.expect("fixture must end a volume with a short valid data shard");
+
+    let chunks = reader.read_and_extract_chunks(&location).await.unwrap();
+
+    assert_chunks_byte_exact(chunks, &expected);
+}
+
+#[tokio::test]
+async fn resid_med01_random_read_recovers_missing_nonzero_rotated_primary() {
+    let temp_dir = TempDir::new().unwrap();
+    let (archive_path, expected) = create_rotated_random_read_archive(&temp_dir).await;
+    let mut reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
+    reader.preflight_metadata_recovery().await.unwrap();
+
+    let mut selected = None;
+    for location in &reader.catalog().unwrap().block_locations {
+        let ShardLayout::Erasure { info, .. } = &location.shard_layout else {
+            continue;
+        };
+        let sequence = primary_volume_sequence(&reader, &archive_path, location).await;
+        let global_stripe = location.slot_index / 4;
+        let length = valid_shard_length(&archive_path, sequence, location.physical_offset);
+        if sequence >= 3 && global_stripe < 5 && length == info.shard_size {
+            selected = Some((location.clone(), sequence));
+            break;
+        }
+    }
+    let (location, sequence) =
+        selected.expect("fixture must have a full primary shard in a rotated generation");
+    drop(reader);
+    fs::remove_file(era_volume::volume_path(&archive_path, sequence)).unwrap();
+
+    let reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
+    assert!(reader
+        .missing_volume_indices()
+        .contains(&usize::from(sequence)));
+    let chunks = reader.read_and_extract_chunks(&location).await.unwrap();
+
+    assert_chunks_byte_exact(chunks, &expected);
+}
+
+async fn create_legacy_wide_random_read_fixture(
+    temp_dir: &TempDir,
+) -> (std::path::PathBuf, KeySession, BlockLocation, Vec<u8>) {
+    const WIDTH: usize = 7;
+    const SELECTED_SHARD: usize = 1;
+
+    let archive_path = temp_dir.path().join("legacy_wide.era");
+    let session = KeySession::from_master_key(&[0x42; 32]).unwrap();
+    let (volume_key, wrapped) = session.generate_and_wrap_volume_key().unwrap();
+    let archive_id = ArchiveId::new();
+    let salt = [0x24; 16];
+    let mut config = era_common::ArchiveConfig {
+        erasure: Some(ErasureCodeConfig {
+            data_shards: 4,
+            parity_shards: 2,
+        }),
+        ..Default::default()
+    };
+    config.compression.algorithm = era_common::CompressionAlgorithm::None;
+    // Pre-5776987 writers advertised K+M instead of the resolved pool width.
+    config.distribution.target_volumes = 6;
+    let recipient = {
+        let params = era_crypto::KdfParams::fast();
+        let salt = era_crypto::Salt::generate();
+        let key = era_crypto::derive_key(b"legacy", &salt, &params).unwrap();
+        let context = era_crypto::XChaCha20Poly1305Context::from_derived_key(&key).unwrap();
+        let nonce = era_crypto::Nonce::generate();
+        let wrapped = context
+            .encrypt(
+                nonce.as_bytes(),
+                era_engine::auth::MK_WRAP_AAD_DOMAIN,
+                &[0x42; 32],
+            )
+            .unwrap();
+        let mut encrypted = nonce.as_bytes().to_vec();
+        encrypted.extend_from_slice(&wrapped);
+        let slot_params =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&era_engine::auth::PasswordSlotParams {
+                salt: *salt.as_bytes(),
+                kdf_memory_cost: params.memory_cost,
+                kdf_time_cost: params.time_cost,
+                kdf_parallelism: params.parallelism,
+            })
+            .unwrap();
+        era_volume::RecipientSlot::new(
+            era_volume::RecipientType::Argon2idPassword,
+            None,
+            slot_params.to_vec(),
+            encrypted,
+        )
+    };
+    let mut header = era_volume::SuperHeader::new(
+        archive_id,
+        vec![recipient],
+        config,
+        salt,
+        era_volume::EncryptedVolumeKey::new(
+            era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+            wrapped.nonce,
+            wrapped.ciphertext,
+        ),
+        era_volume::AccessPolicy::AnyOfN,
+    )
+    .unwrap();
+
+    let backend = era_storage::LocalStorageBackend::new(temp_dir.path());
+    let mut volumes = Vec::new();
+    let mut volume_ids = Vec::new();
+    for sequence in 0..WIDTH {
+        let sequence = u16::try_from(sequence).unwrap();
+        header.set_volume_sequence(sequence);
+        header.set_total_volumes(u16::try_from(WIDTH).unwrap());
+        header.set_volume_id(VolumeId::new());
+        volume_ids.push(header.volume_id());
+        let path = era_volume::volume_path(&archive_path, sequence);
+        let writer = era_volume::VolumeWriter::create(
+            &backend,
+            Path::new(path.file_name().unwrap()),
+            header.clone(),
+        )
+        .await
+        .unwrap();
+        volumes.push(writer);
+    }
+
+    let builder = SessionBlockBuilder::new(
+        &session,
+        &volume_key,
+        salt,
+        *archive_id.0.as_bytes(),
+        header.epoch_id(),
+        0,
+        Box::new(NoCompressor),
+    )
+    .with_starting_block_id(4);
+    let mut data_blocks = Vec::new();
+    for shard in 0..4 {
+        let payload = Bytes::from(vec![u8::try_from(shard + 1).unwrap(); 256]);
+        let hash = era_crypto::hash(&payload);
+        let prepared = builder
+            .prepare_chunks(&[UniqueChunk::new(payload, hash)])
+            .unwrap();
+        let sequence = (shard + 1) % WIDTH;
+        let sealed = builder
+            .seal_prepared(&prepared, u32::try_from(sequence).unwrap())
+            .unwrap();
+        data_blocks.push(sealed.data.to_vec());
+    }
+    let expected = vec![2; 256];
+    let max_len = data_blocks.iter().map(Vec::len).max().unwrap();
+    let shard_size = u32::try_from(max_len + max_len % 2).unwrap();
+    let coder = ErasureCoder::new(ErasureConfig::new(4, 2).unwrap()).unwrap();
+    let encoded = coder.encode_shards(&data_blocks).unwrap();
+    let prefix: Vec<u8> = data_blocks
+        .iter()
+        .flat_map(|block| u32::try_from(block.len()).unwrap().to_le_bytes())
+        .collect();
+
+    let mut offsets = Vec::new();
+    for (shard, payload) in data_blocks.iter().chain(&encoded[4..]).enumerate() {
+        let offset = era_volume::DATA_REGION_START + u64::try_from(prefix.len()).unwrap();
+        let shard_header = ShardHeader::new(
+            u32::try_from(payload.len()).unwrap(),
+            compute_shard_crc(payload),
+        );
+        let sequence = (shard + 1) % WIDTH;
+        volumes[sequence].write_raw(&prefix).await.unwrap();
+        volumes[sequence]
+            .write_raw(&shard_header.to_bytes())
+            .await
+            .unwrap();
+        volumes[sequence].write_raw(payload).await.unwrap();
+        offsets.push(offset);
+    }
+    for writer in volumes {
+        writer.finalize().await.unwrap();
+    }
+
+    let shard_volumes = (0..6)
+        .filter(|shard| *shard != SELECTED_SHARD)
+        .map(|shard| u16::try_from((shard + 1) % WIDTH).unwrap())
+        .collect();
+    let shard_offsets = (0..6)
+        .filter(|shard| *shard != SELECTED_SHARD)
+        .map(|shard| offsets[shard])
+        .collect();
+    let location = BlockLocation::erasure(
+        volume_ids[(SELECTED_SHARD + 1) % WIDTH],
+        u32::try_from(4 + SELECTED_SHARD).unwrap(),
+        offsets[SELECTED_SHARD],
+        u32::try_from(data_blocks[SELECTED_SHARD].len()).unwrap(),
+        ErasureBlockInfo {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size,
+            original_len: u32::try_from(data_blocks[SELECTED_SHARD].len()).unwrap(),
+        },
+        shard_offsets,
+        shard_volumes,
+    )
+    .unwrap();
+    (archive_path, session, location, expected)
+}
+
+#[tokio::test]
+async fn resid_med01_random_read_supports_legacy_understated_pool_width() {
+    let temp_dir = TempDir::new().unwrap();
+    let (archive_path, session, location, expected) =
+        create_legacy_wide_random_read_fixture(&temp_dir).await;
+    assert_eq!(location.slot_index, 5);
+    fs::remove_file(era_volume::volume_path(&archive_path, 2)).unwrap();
+
+    let reader = ArchiveReader::open_with_session(&archive_path, &session)
+        .await
+        .unwrap();
+    assert_eq!(reader.header().config().distribution.target_volumes, 6);
+    assert_eq!(reader.expected_volume_count(), 7);
+    assert!(reader.missing_volume_indices().contains(&2));
+    let chunks = reader.read_and_extract_chunks(&location).await.unwrap();
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].1.as_ref(), expected);
 }

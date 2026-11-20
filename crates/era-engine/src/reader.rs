@@ -32,7 +32,7 @@ use era_index::IndexReader;
 use era_ingest::{Catalog, FileEntry};
 use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
-use era_volume::{Footer, SuperHeader, VolumeReader};
+use era_volume::{DistributionCalculator, Footer, SuperHeader, VolumeReader};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -1819,15 +1819,10 @@ impl ArchiveReader {
                     };
 
                     let shard_reader = &self.volume_readers[vol_idx];
-                    let vol_seq = shard_reader.header().volume_sequence();
-                    let shard_size = u64::from(erasure_info.shard_size);
-                    self.check_read_bound(
-                        vol_seq,
-                        offset,
-                        shard_size + era_common::ShardHeader::SIZE as u64,
-                    )?;
-
-                    match self.read_shard(shard_reader, offset).await {
+                    match self
+                        .read_shard(shard_reader, offset, erasure_info.shard_size)
+                        .await
+                    {
                         Ok(shard) => {
                             available_shards.push((shard_idx, shard));
                         }
@@ -1841,12 +1836,80 @@ impl ArchiveReader {
             let block_id = BlockId::new(location.slot_index as u64);
             // Create temporary session-based erasure unpacker
             let erasure_unpacker = self.create_erasure_unpacker();
-            let volume_index = self
+            let volume_index = if let Some(reader) = self
                 .volume_readers
                 .iter()
                 .find(|r| r.header().volume_id() == location.volume_id)
-                .map(|r| r.header().volume_sequence() as u32)
-                .unwrap_or(0);
+            {
+                u32::from(reader.header().volume_sequence())
+            } else {
+                let config = self.header().config();
+                let strategy = config.distribution.strategy;
+                let geometry = crate::erasure_scan::MatrixScanGeometry::new(
+                    config,
+                    self.expected_volume_count,
+                    &self.volume_indices,
+                    strategy,
+                )?;
+                let configured_width = geometry.generation_width();
+                let global_stripe =
+                    u64::from(location.slot_index / u32::from(erasure_info.data_shards));
+                let generation_for_width = |width: usize| -> Result<Option<usize>> {
+                    let mut generation_start = None;
+                    for sibling_shard in (0..total_shards).filter(|&idx| idx != my_shard_idx) {
+                        let sibling_idx = if sibling_shard < my_shard_idx {
+                            sibling_shard
+                        } else {
+                            sibling_shard - 1
+                        };
+                        let sibling_sequence =
+                            usize::from(*shard_volumes.get(sibling_idx).ok_or_else(|| {
+                                EraError::InvalidFormat(
+                                    "Missing sibling volume for erasure geometry".into(),
+                                )
+                            })?);
+                        let sibling_slot =
+                            strategy.calculate_volume(sibling_shard, global_stripe, width)?;
+                        if sibling_sequence % width != sibling_slot {
+                            return Ok(None);
+                        }
+                        let sibling_generation = sibling_sequence - sibling_slot;
+                        if generation_start.is_some_and(|start| start != sibling_generation) {
+                            return Ok(None);
+                        }
+                        generation_start = Some(sibling_generation);
+                    }
+                    Ok(generation_start)
+                };
+                let (width, generation_start) =
+                    if let Some(generation) = generation_for_width(configured_width)? {
+                        (configured_width, generation)
+                    } else {
+                        let legacy_width = self.expected_volume_count;
+                        if legacy_width <= configured_width {
+                            return Err(EraError::InvalidFormat(
+                                "Sibling volumes do not match configured erasure geometry".into(),
+                            ));
+                        }
+                        let generation = generation_for_width(legacy_width)?.ok_or_else(|| {
+                            EraError::InvalidFormat(
+                                "Sibling volumes do not match legacy erasure geometry".into(),
+                            )
+                        })?;
+                        (legacy_width, generation)
+                    };
+                let target_slot = strategy.calculate_volume(my_shard_idx, global_stripe, width)?;
+                let target_sequence = generation_start
+                    .checked_add(target_slot)
+                    .ok_or_else(|| EraError::InvalidFormat("Volume sequence overflow".into()))?;
+                if target_sequence >= self.expected_volume_count {
+                    return Err(EraError::InvalidFormat(
+                        "Inferred volume sequence exceeds archive volume count".into(),
+                    ));
+                }
+                u32::try_from(target_sequence)
+                    .map_err(|_| EraError::InvalidFormat("Volume sequence exceeds u32".into()))?
+            };
             erasure_unpacker.decode_and_extract_all_for_shard(
                 available_shards,
                 erasure_info,
@@ -1880,22 +1943,36 @@ impl ArchiveReader {
         &self,
         reader: &VolumeReader<R>,
         offset: u64,
+        stripe_shard_size: u32,
     ) -> Result<Bytes> {
+        let volume_sequence = reader.header().volume_sequence();
+        self.check_read_bound(
+            volume_sequence,
+            offset,
+            era_common::ShardHeader::SIZE as u64,
+        )?;
         let header_bytes = reader
             .read_raw(offset, era_common::ShardHeader::SIZE)
             .await?;
         if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
-            if header.length as u64 > MAX_SHARD_SIZE {
+            let shard_len = usize::try_from(header.length)
+                .map_err(|_| EraError::InvalidFormat("Shard length exceeds usize".into()))?;
+            let shard_limit = u64::from(stripe_shard_size).min(MAX_SHARD_SIZE);
+            if u64::from(header.length) > shard_limit {
                 return Err(EraError::ShardTooLarge {
-                    size: header.length as usize,
-                    max_size: MAX_SHARD_SIZE as usize,
+                    size: shard_len,
+                    max_size: usize::try_from(shard_limit).map_err(|_| {
+                        EraError::InvalidFormat("Shard size limit exceeds usize".into())
+                    })?,
                 });
             }
+            self.check_read_bound(
+                volume_sequence,
+                offset,
+                u64::from(header.length) + era_common::ShardHeader::SIZE as u64,
+            )?;
             let data = reader
-                .read_raw(
-                    offset + era_common::ShardHeader::SIZE as u64,
-                    header.length as usize,
-                )
+                .read_raw(offset + era_common::ShardHeader::SIZE as u64, shard_len)
                 .await?;
             if header.verify(&data) {
                 return Ok(data);
@@ -3468,7 +3545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_shard_returns_shard_too_large_on_oversized_shard() {
+    async fn test_read_shard_enforces_stripe_and_global_size_limits() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("reader.era");
         let mut writer = ArchiveWriter::builder(&archive_path)
@@ -3503,7 +3580,7 @@ mod tests {
             .await
             .unwrap();
         let err = archive_reader
-            .read_shard(&vol_reader, era_volume::DATA_REGION_START)
+            .read_shard(&vol_reader, era_volume::DATA_REGION_START, u32::MAX)
             .await
             .expect_err("oversized shard header must return ShardTooLarge");
         match err {
