@@ -16,7 +16,7 @@
 //! - Matrix: Shards distributed using `(shard_idx + block_sequence) % volume_count`
 
 use crate::erasure_scan::{read_matrix_shard_header, MatrixScanGeometry};
-use crate::reader::{ArchiveHealthStatus, ArchiveReader, DiscoveredVolumes};
+use crate::reader::{ArchiveHealthStatus, ArchiveReader, CatalogRepair, DiscoveredVolumes};
 use bytes::Bytes;
 use era_codec::{ErasureCoder, ErasureConfig, ZstdCompressor};
 use era_common::{
@@ -497,18 +497,31 @@ pub async fn repair_archive_with_providers(
     }
 
     // Verify credentials before proceeding with repair
-    let header_repair = if volume_reader.header_recovered_from_backup() {
+    let needs_header = volume_reader.header_recovered_from_backup();
+    let has_catalog = volume_reader
+        .footer()
+        .is_some_and(|footer| footer.has_catalog_location());
+    let (header_repair, catalog_repairs) = if needs_header || has_catalog {
         let mut archive = ArchiveReader::open_with_providers(path, providers).await?;
-        let bytes = recovered_header_bytes(&volume_reader, &archive).await?;
+        let bytes = if needs_header {
+            Some(recovered_header_bytes(&volume_reader, &archive).await?)
+        } else {
+            None
+        };
         if erasure_config.is_none() && !archive.verify().await?.is_ok() {
             return Err(EraError::IntegrityError(
                 "Non-erasure archive has damage beyond its recoverable primary header".into(),
             ));
         }
-        Some(bytes)
+        let catalogs = if erasure_config.is_some() {
+            archive.plan_catalog_repairs().await?
+        } else {
+            Vec::new()
+        };
+        (bytes, catalogs)
     } else {
         let _mk_array = try_unlock_with_providers(header, &providers)?;
-        None
+        (None, Vec::new())
     };
 
     // Create compressor (kept for future decode-based validation if needed)
@@ -541,6 +554,9 @@ pub async fn repair_archive_with_providers(
             info!("Restoring primary header from its authenticated backup");
             apply_primary_header_repair(path, header_bytes).await?;
         }
+    }
+    for repair in catalog_repairs {
+        apply_catalog_repair(path, repair, &options, &cancel_flag).await?;
     }
 
     let Some(erasure_config) = erasure_config else {
@@ -939,16 +955,37 @@ async fn repair_shards_rs(
 }
 
 async fn apply_primary_header_repair(path: &Path, header_bytes: Bytes) -> Result<()> {
+    apply_metadata_repair(path, 0, header_bytes).await
+}
+
+async fn apply_catalog_repair(
+    path: &Path,
+    repair: CatalogRepair,
+    options: &RepairOptions,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<()> {
+    if options.dry_run {
+        info!(
+            "Dry run: would restore the primary Catalog in {}",
+            path.display()
+        );
+        return Ok(());
+    }
+    check_cancelled(cancel_flag, "primary Catalog repair")?;
+    apply_metadata_repair(path, repair.offset, Bytes::from(repair.bytes)).await
+}
+
+async fn apply_metadata_repair(path: &Path, offset: u64, bytes: Bytes) -> Result<()> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&header_bytes)?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(&bytes)?;
         file.sync_all()?;
         Ok(())
     })
     .await
-    .map_err(|e| EraError::Other(format!("Primary header repair task failed: {e}")))?
+    .map_err(|e| EraError::Other(format!("Metadata repair task failed: {e}")))?
 }
 
 /// Apply shard repairs to the archive file
@@ -1063,7 +1100,13 @@ async fn repair_archive_matrix_with_providers(
 
     // Verify credentials before proceeding with repair
     let mut header_repairs = Vec::new();
-    let session = if header_repair_needed {
+    let mut catalog_repairs = Vec::new();
+    let has_catalog = volume_readers.iter().any(|reader| {
+        reader
+            .footer()
+            .is_some_and(|footer| footer.has_catalog_location())
+    });
+    let session = if header_repair_needed || has_catalog {
         let mut archive = ArchiveReader::open_with_providers(path, _providers).await?;
         for (reader, volume_path) in volume_readers.iter().zip(&volume_paths) {
             if reader.header_recovered_from_backup() {
@@ -1075,6 +1118,17 @@ async fn repair_archive_matrix_with_providers(
             return Err(EraError::IntegrityError(
                 "Non-erasure archive has damage beyond its recoverable primary headers".into(),
             ));
+        }
+        if erasure_config.is_some() {
+            for repair in archive.plan_catalog_repairs().await? {
+                let index = volume_indices
+                    .iter()
+                    .position(|&index| index == usize::from(repair.sequence))
+                    .ok_or_else(|| {
+                        EraError::IntegrityError("Catalog repair volume not found".into())
+                    })?;
+                catalog_repairs.push((index, repair));
+            }
         }
         archive.session().try_clone()?
     } else {
@@ -1124,6 +1178,9 @@ async fn repair_archive_matrix_with_providers(
             info!("Restoring primary header for {}", volume_path.display());
             apply_primary_header_repair(&volume_path, header_bytes).await?;
         }
+    }
+    for (index, repair) in catalog_repairs {
+        apply_catalog_repair(&volume_paths[index], repair, &options, &cancel_flag).await?;
     }
 
     let Some(erasure_config) = erasure_config else {

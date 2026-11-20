@@ -47,6 +47,9 @@ const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
 /// Maximum total decoded bytes accepted during one extraction pass (8 GB)
 const MAX_EXTRACTION_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
 
+mod catalog_repair;
+pub(crate) use catalog_repair::CatalogRepair;
+
 const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_CATALOG_PLAINTEXT_SIZE: u64 = 1024 * 1024 * 1024;
 pub(crate) const MAX_CATALOG_CHUNKS: u32 = 128;
@@ -1024,7 +1027,7 @@ impl ArchiveReader {
         for (primary, primary_error) in backup_candidates {
             let reader_idx = primary.reader_idx;
             match self.recover_ec_catalog_backup(primary).await {
-                Ok(catalog) => {
+                Ok((catalog, ..)) => {
                     self.catalog_recovered_from_backup = true;
                     warn!(
                         "Catalog recovered from EC backup in volume {}; primary catalog still needs repair",
@@ -1045,6 +1048,12 @@ impl ArchiveReader {
     }
 
     async fn try_load_catalog_from_offset(&self, locator: CatalogBlockLocator) -> Result<Catalog> {
+        self.read_catalog_copy(locator)
+            .await
+            .map(|(catalog, _)| catalog)
+    }
+
+    async fn read_catalog_copy(&self, locator: CatalogBlockLocator) -> Result<(Catalog, Vec<u32>)> {
         let reader = self.volume_readers.get(locator.reader_idx).ok_or_else(|| {
             EraError::InvalidFormat("Catalog volume index is out of bounds".into())
         })?;
@@ -1101,8 +1110,9 @@ impl ArchiveReader {
             expected_size: Some(encrypted_block.compressed_size),
             ..locator
         };
+        let mut lengths = vec![encrypted_block.compressed_size];
         let catalog_data = self
-            .assemble_catalog_data(assembly_locator, first_chunk_data)
+            .assemble_catalog_data(assembly_locator, first_chunk_data, &mut lengths)
             .await?;
 
         if locator.require_manifest && self.manifest.is_none() {
@@ -1114,7 +1124,7 @@ impl ArchiveReader {
             era_crypto::verify_catalog_commitment(&catalog_data, &manifest.catalog_commitment)?;
         }
 
-        Catalog::from_bytes(&catalog_data)
+        Ok((Catalog::from_bytes(&catalog_data)?, lengths))
     }
 
     fn catalog_metadata_end(&self, reader_idx: usize, start: u64) -> Result<u64> {
@@ -1265,7 +1275,10 @@ impl ArchiveReader {
         Ok(candidates)
     }
 
-    async fn recover_ec_catalog_backup(&self, primary: CatalogBlockLocator) -> Result<Catalog> {
+    async fn recover_ec_catalog_backup(
+        &self,
+        primary: CatalogBlockLocator,
+    ) -> Result<(Catalog, CatalogBlockLocator, Vec<u32>)> {
         if self.manifest.is_none() {
             return Err(EraError::IntegrityError(
                 "EC backup Catalog recovery requires an authenticated manifest".into(),
@@ -1291,8 +1304,8 @@ impl ArchiveReader {
                 block_id,
                 require_manifest: true,
             };
-            match self.try_load_catalog_from_offset(candidate).await {
-                Ok(catalog) => return Ok(catalog),
+            match self.read_catalog_copy(candidate).await {
+                Ok((catalog, lengths)) => return Ok((catalog, candidate, lengths)),
                 Err(error) => last_error = error,
             }
         }
@@ -1322,8 +1335,8 @@ impl ArchiveReader {
                 block_id,
                 require_manifest: true,
             };
-            match self.try_load_catalog_from_offset(candidate).await {
-                Ok(catalog) => return Ok(catalog),
+            match self.read_catalog_copy(candidate).await {
+                Ok((catalog, lengths)) => return Ok((catalog, candidate, lengths)),
                 Err(error) => last_error = error,
             }
         }
@@ -1490,6 +1503,7 @@ impl ArchiveReader {
         &self,
         locator: CatalogBlockLocator,
         first_chunk_data: bytes::Bytes,
+        lengths: &mut Vec<u32>,
     ) -> Result<Vec<u8>> {
         if first_chunk_data.len() < 12 {
             return Ok(first_chunk_data.to_vec());
@@ -1614,6 +1628,7 @@ impl ArchiveReader {
                     "Catalog continuation type changed during read".into(),
                 ));
             }
+            lengths.push(header.length);
 
             let block_unpacker = self.create_unpacker();
             let volume_index = u32::from(reader.header().volume_sequence());
