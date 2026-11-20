@@ -1961,7 +1961,8 @@ impl ArchiveReader {
                 .components()
                 .filter(|c| !matches!(c, std::path::Component::CurDir))
                 .collect();
-            let already_exists = tokio::fs::symlink_metadata(&output_path).await.is_ok()
+            let already_exists = tokio::fs::try_exists(&output_path).await.unwrap_or(false)
+                || tokio::fs::symlink_metadata(&output_path).await.is_ok()
                 || planned_targets.contains(&target_key);
             if already_exists && !options.overwrite {
                 debug!("Skipping existing file: {}", output_path.display());
