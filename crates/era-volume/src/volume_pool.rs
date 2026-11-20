@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::distribution::{
     validate_erasure_volume_count, DistributionCalculator, DistributionConfigExt,
 };
+use crate::writer::RetiredVolumeState;
 use crate::{
     extract_filename, SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE,
     MIN_VOLUME_SIZE,
@@ -138,8 +139,8 @@ pub struct VolumePool<B: StorageBackend> {
     writers: Vec<VolumeWriter<B::Writer>>,
     /// Sequence numbers for each writer (for tracking across rotations)
     sequences: Vec<u16>,
-    /// Retired writers are kept open until the final archive count is known.
-    retired_writers: Vec<VolumeWriter<B::Writer>>,
+    /// Retired volume metadata retained after closing handles until finalization.
+    retired_volumes: Vec<(u16, RetiredVolumeState)>,
     /// Active canonical slot index for monotonic non-EC volume selection.
     active_canonical_slot: usize,
     /// Block sequence counter for rotation calculation
@@ -199,7 +200,7 @@ impl<B: StorageBackend> VolumePool<B> {
             template_header,
             writers,
             sequences,
-            retired_writers: Vec::new(),
+            retired_volumes: Vec::new(),
             active_canonical_slot: 0,
             block_sequence: 0,
             stats,
@@ -283,7 +284,7 @@ impl<B: StorageBackend> VolumePool<B> {
             template_header,
             writers,
             sequences,
-            retired_writers: Vec::new(),
+            retired_volumes: Vec::new(),
             // Note: block_sequence is initialized from max canonical block count.
             // This doesn't account for raw writes or erasure stripe count, which may
             // cause slightly suboptimal distribution on append. This is acceptable
@@ -341,7 +342,7 @@ impl<B: StorageBackend> VolumePool<B> {
             template_header: header,
             writers: vec![writer],
             sequences: vec![0],
-            retired_writers: Vec::new(),
+            retired_volumes: Vec::new(),
             active_canonical_slot: 0,
             block_sequence,
             stats,
@@ -379,7 +380,7 @@ impl<B: StorageBackend> VolumePool<B> {
             ));
         }
 
-        let current_total = self.retired_writers.len() + volume_count;
+        let current_total = self.retired_volumes.len() + volume_count;
         let first_new_sequence = checked_manifest_volume_count(current_total)?;
         let new_total = checked_manifest_volume_count(current_total + volume_count)?;
 
@@ -408,12 +409,13 @@ impl<B: StorageBackend> VolumePool<B> {
 
         let old_writers = std::mem::replace(&mut self.writers, new_writers);
         let old_sequences = std::mem::replace(&mut self.sequences, new_sequences);
-        self.stats.volume_sizes.extend(
-            old_sequences
-                .into_iter()
-                .zip(old_writers.iter().map(VolumeWriter::current_size)),
-        );
-        self.retired_writers.extend(old_writers);
+        for (seq, old_writer) in old_sequences.into_iter().zip(old_writers) {
+            self.stats
+                .volume_sizes
+                .push((seq, old_writer.current_size()));
+            let retired = old_writer.close_for_later_finalize().await?;
+            self.retired_volumes.push((seq, retired));
+        }
         self.active_canonical_slot = 0;
 
         self.stats.volume_count = usize::from(new_total);
@@ -964,8 +966,11 @@ impl<B: StorageBackend> VolumePool<B> {
     }
 
     fn install_final_volume_count(&mut self) -> Result<()> {
-        let count = checked_manifest_volume_count(self.retired_writers.len() + self.writers.len())?;
-        for writer in self.retired_writers.iter_mut().chain(&mut self.writers) {
+        let count = checked_manifest_volume_count(self.retired_volumes.len() + self.writers.len())?;
+        for (_, retired) in &mut self.retired_volumes {
+            retired.header.set_total_volumes(count);
+        }
+        for writer in &mut self.writers {
             writer.update_total_volumes(count);
         }
         Ok(())
@@ -1102,11 +1107,16 @@ impl<B: StorageBackend> VolumePool<B> {
         self.install_final_volume_count()?;
         let mut stats = std::mem::take(&mut self.stats);
 
-        let retired_writers = std::mem::take(&mut self.retired_writers);
+        let retired_volumes = std::mem::take(&mut self.retired_volumes);
         let old_sequences: Vec<u16> = std::mem::take(&mut self.sequences);
         let writers: Vec<_> = std::mem::take(&mut self.writers);
 
-        for mut writer in retired_writers {
+        for (seq, state) in retired_volumes {
+            let volume_path = self.config.volume_path(seq);
+            let volume_filename = extract_filename(&volume_path)?;
+            let mut writer =
+                VolumeWriter::reopen_for_finalize(&self.backend, Path::new(volume_filename), state)
+                    .await?;
             // A retired append volume can still point at a manifest for its old header.
             writer.set_manifest_info(0, 0)?;
             writer.finalize().await?;
@@ -2046,5 +2056,180 @@ mod tests {
             (0, 3),
             "smaller block after filling slot 2 must rotate to gen 1 slot 0 rather than backfilling slot 0"
         );
+    }
+
+    #[tokio::test]
+    async fn test_rotation_closes_retired_writers_bounding_open_handles() {
+        use era_storage::{StorageBackend, StorageMetadata, StorageWriter};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct HandleTracker {
+            open_writers: AtomicUsize,
+            peak_open_writers: AtomicUsize,
+        }
+
+        impl HandleTracker {
+            fn new() -> Arc<Self> {
+                Arc::new(Self {
+                    open_writers: AtomicUsize::new(0),
+                    peak_open_writers: AtomicUsize::new(0),
+                })
+            }
+
+            fn acquire(&self) {
+                let current = self.open_writers.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak_open_writers.fetch_max(current, Ordering::SeqCst);
+            }
+
+            fn release(&self) {
+                self.open_writers.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        struct TrackedWriter<W: StorageWriter> {
+            inner: Option<W>,
+            tracker: Arc<HandleTracker>,
+        }
+
+        impl<W: StorageWriter> Drop for TrackedWriter<W> {
+            fn drop(&mut self) {
+                if self.inner.take().is_some() {
+                    self.tracker.release();
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl<W: StorageWriter> StorageWriter for TrackedWriter<W> {
+            async fn append(&mut self, data: &[u8]) -> Result<u64> {
+                self.inner.as_mut().unwrap().append(data).await
+            }
+
+            async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+                self.inner.as_mut().unwrap().write_at(offset, data).await
+            }
+
+            async fn sync(&mut self) -> Result<()> {
+                self.inner.as_mut().unwrap().sync().await
+            }
+
+            async fn sync_data(&mut self) -> Result<()> {
+                self.inner.as_mut().unwrap().sync_data().await
+            }
+
+            fn current_size(&self) -> u64 {
+                self.inner.as_ref().unwrap().current_size()
+            }
+
+            async fn truncate(&mut self, size: u64) -> Result<()> {
+                self.inner.as_mut().unwrap().truncate(size).await
+            }
+
+            async fn close(mut self) -> Result<()> {
+                let inner = self.inner.take().unwrap();
+                let res = inner.close().await;
+                self.tracker.release();
+                res
+            }
+        }
+
+        #[derive(Clone)]
+        struct TrackedBackend {
+            inner: era_storage::MemoryStorageBackend,
+            tracker: Arc<HandleTracker>,
+        }
+
+        #[async_trait::async_trait]
+        impl StorageBackend for TrackedBackend {
+            type Writer = TrackedWriter<era_storage::MemoryStorageWriter>;
+            type Reader = era_storage::MemoryStorageReader;
+
+            async fn create(&self, path: &Path) -> Result<Self::Writer> {
+                let inner = self.inner.create(path).await?;
+                self.tracker.acquire();
+                Ok(TrackedWriter {
+                    inner: Some(inner),
+                    tracker: self.tracker.clone(),
+                })
+            }
+
+            async fn open_append(&self, path: &Path) -> Result<Self::Writer> {
+                let inner = self.inner.open_append(path).await?;
+                self.tracker.acquire();
+                Ok(TrackedWriter {
+                    inner: Some(inner),
+                    tracker: self.tracker.clone(),
+                })
+            }
+
+            async fn open_read(&self, path: &Path) -> Result<Self::Reader> {
+                self.inner.open_read(path).await
+            }
+
+            async fn exists(&self, path: &Path) -> bool {
+                self.inner.exists(path).await
+            }
+
+            async fn delete(&self, path: &Path) -> Result<()> {
+                self.inner.delete(path).await
+            }
+
+            async fn stat(&self, path: &Path) -> Result<StorageMetadata> {
+                self.inner.stat(path).await
+            }
+        }
+
+        let tracker = HandleTracker::new();
+        let backend = TrackedBackend {
+            inner: era_storage::MemoryStorageBackend::new(),
+            tracker: tracker.clone(),
+        };
+        let pool_width = 3usize;
+        let generations = 26usize;
+        let total_volumes = u16::try_from(pool_width * generations).unwrap();
+        let config = VolumePoolConfig::new("retired_handles", pool_width).with_max_size(30_000);
+        let mut pool = VolumePool::create(backend.clone(), config.clone(), create_test_header())
+            .await
+            .unwrap();
+
+        let block_payload = vec![0x7E; 18_000];
+        let block = EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from(block_payload),
+            original_size: 18_000,
+            compressed_size: 18_000,
+            chunk_count: 1,
+        };
+        let disk_size = BlockHeader::SIZE as u64 + block.data.len() as u64;
+
+        for _ in 0..total_volumes {
+            let (slot, _) = pool.select_canonical_volume(disk_size).await.unwrap();
+            pool.write_canonical_block_to_slot(slot, &block, BlockType::Data)
+                .await
+                .unwrap();
+        }
+
+        let stats = pool.finalize().await.unwrap();
+        assert_eq!(stats.volume_count, usize::from(total_volumes));
+        assert_eq!(tracker.open_writers.load(Ordering::SeqCst), 0);
+        assert!(
+            tracker.peak_open_writers.load(Ordering::SeqCst) <= pool_width * 2,
+            "peak open writers ({}) exceeded O(W) bound ({})",
+            tracker.peak_open_writers.load(Ordering::SeqCst),
+            pool_width * 2
+        );
+
+        for seq in 0..total_volumes {
+            let vol_path = config.volume_path(seq);
+            let vol_name = extract_filename(&vol_path).unwrap();
+            let reader = VolumeReader::open(&backend, Path::new(vol_name))
+                .await
+                .unwrap();
+            assert_eq!(reader.header().volume_sequence(), seq);
+            assert_eq!(reader.header().total_volumes(), total_volumes);
+            assert!(!reader.header_recovered_from_backup());
+            assert!(reader.footer().is_some());
+        }
     }
 }

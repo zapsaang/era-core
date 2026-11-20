@@ -21,6 +21,26 @@ use rand::RngCore;
 /// Space reserved at the end of a fixed-size volume for the backup header + primary footer.
 const BACKUP_HEADER_FOOTER_RESERVED: u64 = (HEADER_SIZE + FOOTER_SIZE) as u64;
 
+/// Metadata snapshot of a retired volume whose write handle was closed to bound file descriptors.
+pub(crate) struct RetiredVolumeState {
+    pub(crate) header: SuperHeader,
+    position: u64,
+    block_count: u32,
+    raw_bytes_written: u64,
+    sequence: u64,
+    max_size: Option<u64>,
+    last_checkpoint_offset: u64,
+    last_checkpoint_block_id: u32,
+    last_catalog_offset: u64,
+    last_catalog_size: u32,
+    last_catalog_block_id: u32,
+    last_index_offset: u64,
+    last_index_size: u32,
+    last_index_block_id: u32,
+    last_manifest_offset: u64,
+    last_manifest_block_id: u32,
+}
+
 /// Writer for a single volume
 pub struct VolumeWriter<W: StorageWriter> {
     /// Underlying storage writer
@@ -694,6 +714,68 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// Digest the bytes that finalization writes to both header locations.
     pub fn finalized_header_digest(&self) -> Result<[u8; 32]> {
         Ok(*blake3::hash(&self.header.to_bytes()?).as_bytes())
+    }
+
+    /// Close the underlying writer handle while preserving state for deferred finalization.
+    pub(crate) async fn close_for_later_finalize(self) -> Result<RetiredVolumeState> {
+        let state = RetiredVolumeState {
+            header: self.header,
+            position: self.position,
+            block_count: self.block_count,
+            raw_bytes_written: self.raw_bytes_written,
+            sequence: self.sequence,
+            max_size: self.max_size,
+            last_checkpoint_offset: self.last_checkpoint_offset,
+            last_checkpoint_block_id: self.last_checkpoint_block_id,
+            last_catalog_offset: self.last_catalog_offset,
+            last_catalog_size: self.last_catalog_size,
+            last_catalog_block_id: self.last_catalog_block_id,
+            last_index_offset: self.last_index_offset,
+            last_index_size: self.last_index_size,
+            last_index_block_id: self.last_index_block_id,
+            last_manifest_offset: self.last_manifest_offset,
+            last_manifest_block_id: self.last_manifest_block_id,
+        };
+        self.writer.close().await?;
+        Ok(state)
+    }
+
+    /// Reopen a previously retired volume to rewrite its final header and trailers.
+    pub(crate) async fn reopen_for_finalize<B: StorageBackend<Writer = W>>(
+        backend: &B,
+        path: &Path,
+        state: RetiredVolumeState,
+    ) -> Result<Self> {
+        let mut writer = backend.open_append(path).await?;
+        let actual_size = writer.current_size();
+        if actual_size < state.position {
+            return Err(era_common::EraError::CorruptedHeader(format!(
+                "retired volume size {} is less than expected position {}",
+                actual_size, state.position
+            )));
+        }
+        if state.max_size.is_none() && actual_size != state.position {
+            writer.truncate(state.position).await?;
+        }
+        Ok(Self {
+            writer,
+            header: state.header,
+            position: state.position,
+            block_count: state.block_count,
+            raw_bytes_written: state.raw_bytes_written,
+            sequence: state.sequence,
+            max_size: state.max_size,
+            last_checkpoint_offset: state.last_checkpoint_offset,
+            last_checkpoint_block_id: state.last_checkpoint_block_id,
+            last_catalog_offset: state.last_catalog_offset,
+            last_catalog_size: state.last_catalog_size,
+            last_catalog_block_id: state.last_catalog_block_id,
+            last_index_offset: state.last_index_offset,
+            last_index_size: state.last_index_size,
+            last_index_block_id: state.last_index_block_id,
+            last_manifest_offset: state.last_manifest_offset,
+            last_manifest_block_id: state.last_manifest_block_id,
+        })
     }
 
     /// Get the header for creating the next volume
