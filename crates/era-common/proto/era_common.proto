@@ -332,4 +332,7 @@ message ArchiveManifest {
   repeated uint64 volume_committed_ends = 6;
   // BLAKE3 of the exact finalized SuperHeader bytes for this manifest replica's volume.
   optional bytes volume_header_digest = 7;
+  // The same BLAKE3 digest for every finalized volume, indexed by volume sequence.
+  // Absent in older manifests; otherwise one 32-byte entry per committed end (max 1024).
+  repeated bytes volume_header_digests = 8;
 }

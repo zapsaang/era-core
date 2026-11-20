@@ -47,7 +47,19 @@ pub struct ArchiveManifest {
     pub volume_committed_ends: Vec<u64>,
 }
 
+/// Header commitments carried by an individual manifest replica.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ManifestHeaderDigests {
+    /// Legacy commitment to the replica's own volume header.
+    pub local: Option<[u8; 32]>,
+    /// Full table indexed by volume sequence, or empty if absent in a legacy manifest.
+    pub by_sequence: Vec<[u8; 32]>,
+}
+
 impl ArchiveManifest {
+    /// Maximum number of volumes represented by a manifest.
+    pub const MAX_VOLUMES: usize = 1024;
+
     /// Create a new ArchiveManifest with the given parameters.
     pub fn new(
         epoch_id: u32,
@@ -77,6 +89,33 @@ impl ArchiveManifest {
         self.encode_proto(Some(digest))
     }
 
+    /// Serialize a replica with the full header digest table and its legacy local digest.
+    /// `digests` must be indexed by volume sequence.
+    ///
+    /// # Errors
+    /// Returns `Serialization` if the table count is invalid, does not match the committed
+    /// ends, or does not cover this replica's sequence.
+    pub fn to_bytes_with_header_digests(
+        &self,
+        volume_sequence: u16,
+        digests: &[[u8; 32]],
+    ) -> crate::Result<Vec<u8>> {
+        if !valid_digest_count(digests.len(), self.volume_committed_ends.len()) {
+            return Err(crate::EraError::Serialization(
+                "header digest table must have one entry per committed end (1..=1024)".into(),
+            ));
+        }
+        let local = digests.get(usize::from(volume_sequence)).ok_or_else(|| {
+            crate::EraError::Serialization(format!(
+                "manifest replica sequence {volume_sequence} is outside the header digest table"
+            ))
+        })?;
+        let mut proto = crate::proto::ArchiveManifest::from(self);
+        proto.volume_header_digest = Some(local.to_vec());
+        proto.volume_header_digests = digests.iter().map(|digest| digest.to_vec()).collect();
+        Ok(prost::Message::encode_to_vec(&proto))
+    }
+
     fn encode_proto(&self, digest: Option<[u8; 32]>) -> Vec<u8> {
         let mut proto = crate::proto::ArchiveManifest::from(self);
         proto.volume_header_digest = digest.map(|digest| digest.to_vec());
@@ -93,19 +132,19 @@ impl ArchiveManifest {
 
     /// Decode the archive-wide state and this replica's optional header commitment.
     pub fn from_bytes_with_header_digest(data: &[u8]) -> crate::Result<(Self, Option<[u8; 32]>)> {
-        let mut proto = Self::decode_proto(data)?;
-        let digest = proto
-            .volume_header_digest
-            .take()
-            .map(|bytes| {
-                bytes.try_into().map_err(|_| {
-                    crate::EraError::Deserialization(
-                        "volume_header_digest must be exactly 32 bytes".into(),
-                    )
-                })
-            })
-            .transpose()?;
-        Ok((proto.try_into()?, digest))
+        let (manifest, digests) = Self::from_bytes_with_header_digests(data)?;
+        Ok((manifest, digests.local))
+    }
+
+    /// Decode the archive-wide state and both header commitments of this replica.
+    /// The caller must authenticate the replica before trusting either commitment.
+    ///
+    /// # Errors
+    /// Returns `Deserialization` for malformed manifests or header commitments.
+    pub fn from_bytes_with_header_digests(
+        data: &[u8],
+    ) -> crate::Result<(Self, ManifestHeaderDigests)> {
+        Self::from_proto_with_header_digests(Self::decode_proto(data)?)
     }
 
     fn decode_proto(data: &[u8]) -> crate::Result<crate::proto::ArchiveManifest> {
@@ -139,20 +178,41 @@ impl From<&ArchiveManifest> for crate::proto::ArchiveManifest {
             index_commitment: m.index_commitment.to_vec(),
             volume_committed_ends: m.volume_committed_ends.clone(),
             volume_header_digest: None,
+            volume_header_digests: Vec::new(),
         }
     }
+}
+
+fn valid_digest_count(digest_count: usize, committed_end_count: usize) -> bool {
+    (1..=ArchiveManifest::MAX_VOLUMES).contains(&digest_count)
+        && digest_count == committed_end_count
 }
 
 impl TryFrom<crate::proto::ArchiveManifest> for ArchiveManifest {
     type Error = crate::EraError;
 
     fn try_from(p: crate::proto::ArchiveManifest) -> crate::Result<Self> {
-        const MAX_VOLUMES: usize = 1024;
-        if p.volume_committed_ends.len() > MAX_VOLUMES {
+        Self::from_proto_with_header_digests(p).map(|(manifest, _)| manifest)
+    }
+}
+
+impl ArchiveManifest {
+    fn from_proto_with_header_digests(
+        p: crate::proto::ArchiveManifest,
+    ) -> crate::Result<(Self, ManifestHeaderDigests)> {
+        if p.volume_committed_ends.len() > Self::MAX_VOLUMES {
             return Err(crate::EraError::Deserialization(format!(
                 "volume_committed_ends count {} exceeds maximum {}",
                 p.volume_committed_ends.len(),
-                MAX_VOLUMES
+                Self::MAX_VOLUMES
+            )));
+        }
+        let digest_count = p.volume_header_digests.len();
+        if digest_count != 0 && !valid_digest_count(digest_count, p.volume_committed_ends.len()) {
+            return Err(crate::EraError::Deserialization(format!(
+                "volume_header_digests count {digest_count} must match the number of committed ends ({}) and not exceed {}",
+                p.volume_committed_ends.len(),
+                Self::MAX_VOLUMES,
             )));
         }
 
@@ -179,14 +239,40 @@ impl TryFrom<crate::proto::ArchiveManifest> for ArchiveManifest {
             crate::EraError::Deserialization("index_commitment must be exactly 32 bytes".into())
         })?;
 
-        Ok(Self {
-            epoch_id: p.epoch_id,
-            finalize_sequence: p.finalize_sequence,
-            committed_horizon: p.committed_horizon,
-            catalog_commitment,
-            index_commitment,
-            volume_committed_ends: p.volume_committed_ends,
-        })
+        let local = p
+            .volume_header_digest
+            .map(|bytes| {
+                bytes.try_into().map_err(|_| {
+                    crate::EraError::Deserialization(
+                        "volume_header_digest must be exactly 32 bytes".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        let by_sequence = p
+            .volume_header_digests
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, bytes)| {
+                bytes.try_into().map_err(|_| {
+                    crate::EraError::Deserialization(format!(
+                        "volume_header_digests entry {sequence} must be exactly 32 bytes"
+                    ))
+                })
+            })
+            .collect::<crate::Result<_>>()?;
+
+        Ok((
+            Self {
+                epoch_id: p.epoch_id,
+                finalize_sequence: p.finalize_sequence,
+                committed_horizon: p.committed_horizon,
+                catalog_commitment,
+                index_commitment,
+                volume_committed_ends: p.volume_committed_ends,
+            },
+            ManifestHeaderDigests { local, by_sequence },
+        ))
     }
 }
 
@@ -260,6 +346,7 @@ mod tests {
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![],
             volume_header_digest: None,
+            volume_header_digests: Vec::new(),
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -276,6 +363,7 @@ mod tests {
             index_commitment: vec![0xBB; 33],
             volume_committed_ends: vec![],
             volume_header_digest: None,
+            volume_header_digests: Vec::new(),
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -292,6 +380,7 @@ mod tests {
             index_commitment: vec![0; 32],
             volume_committed_ends: vec![1, 2],
             volume_header_digest: None,
+            volume_header_digests: Vec::new(),
         };
 
         let bytes = prost::Message::encode_to_vec(&proto);
@@ -375,6 +464,7 @@ mod tests {
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![5000; 1025],
             volume_header_digest: None,
+            volume_header_digests: Vec::new(),
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -397,6 +487,7 @@ mod tests {
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![100, 5000],
             volume_header_digest: None,
+            volume_header_digests: Vec::new(),
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
@@ -422,6 +513,7 @@ mod tests {
             index_commitment: vec![0xBB; 32],
             volume_committed_ends: vec![0, 5000],
             volume_header_digest: None,
+            volume_header_digests: Vec::new(),
         };
 
         let result: crate::Result<ArchiveManifest> = proto.try_into();
