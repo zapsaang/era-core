@@ -1104,3 +1104,66 @@ async fn test_volume_discovery_uses_total_volumes() {
         "Should fail with only 3 of 6 volumes (need 4)"
     );
 }
+
+#[tokio::test]
+async fn test_non_erasure_multi_volume_monotonic_rotation_verify_and_extract() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("non_ec_multi.era");
+    let mut config = era_common::ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    };
+    config.compression.algorithm = era_common::CompressionAlgorithm::None;
+
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+        .password("test_password")
+        .config(config)
+        .enable_erasure(false)
+        .enable_cdc(false)
+        .enable_small_file_packing(false)
+        .volume_count(3)
+        .max_volume_size(1_048_576)
+        .target_block_size(600 * 1024)
+        .build()
+        .await
+        .unwrap();
+
+    let payloads: Vec<(&str, Vec<u8>)> = vec![
+        ("a.bin", vec![0xA1; 600 * 1024]),
+        ("b.bin", vec![0xB2; 600 * 1024]),
+        ("c.bin", vec![0xC3; 600 * 1024]),
+        ("d.bin", vec![0xD4; 350 * 1024]),
+        ("e.bin", vec![0xE5; 300 * 1024]),
+    ];
+    for (name, data) in &payloads {
+        writer.add_bytes(name, data).await.unwrap();
+    }
+    writer.finalize().await.unwrap();
+
+    assert!(
+        era_volume::volume_path(&archive_path, 3).exists(),
+        "100 KiB trailing block must rotate into generation 1 volume 3"
+    );
+
+    let mut reader = ArchiveReader::open(&archive_path, "test_password")
+        .await
+        .unwrap();
+    let verify_stats = reader.verify().await.unwrap();
+    assert_eq!(
+        verify_stats.archive_health,
+        era_engine::ArchiveHealthStatus::Healthy,
+        "verify errors: {:?}, warnings: {:?}",
+        verify_stats.errors,
+        verify_stats.warnings
+    );
+
+    let extract_dir = temp_dir.path().join("extracted");
+    let extract_stats = reader
+        .extract_all(&ExtractOptions::new(&extract_dir))
+        .await
+        .unwrap();
+    assert_eq!(extract_stats.extracted, payloads.len() as u64);
+    for (name, expected) in &payloads {
+        assert_eq!(fs::read(extract_dir.join(name)).unwrap(), *expected);
+    }
+}

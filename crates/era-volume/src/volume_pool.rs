@@ -140,6 +140,8 @@ pub struct VolumePool<B: StorageBackend> {
     sequences: Vec<u16>,
     /// Retired writers are kept open until the final archive count is known.
     retired_writers: Vec<VolumeWriter<B::Writer>>,
+    /// Active canonical slot index for monotonic non-EC volume selection.
+    active_canonical_slot: usize,
     /// Block sequence counter for rotation calculation
     block_sequence: u64,
     /// Statistics
@@ -198,6 +200,7 @@ impl<B: StorageBackend> VolumePool<B> {
             writers,
             sequences,
             retired_writers: Vec::new(),
+            active_canonical_slot: 0,
             block_sequence: 0,
             stats,
             initial_committed_ends: Vec::new(),
@@ -264,6 +267,11 @@ impl<B: StorageBackend> VolumePool<B> {
             sequences.push(seq);
         }
 
+        let active_canonical_slot = writers
+            .iter()
+            .rposition(|w| w.block_count() > 0)
+            .unwrap_or(0);
+
         let stats = VolumePoolStats {
             volume_count: writers.len(),
             ..Default::default()
@@ -280,6 +288,7 @@ impl<B: StorageBackend> VolumePool<B> {
             // This doesn't account for raw writes or erasure stripe count, which may
             // cause slightly suboptimal distribution on append. This is acceptable
             // because the rotating offset strategy tolerates imprecise counters.
+            active_canonical_slot,
             block_sequence: max_block_count as u64,
             stats,
             initial_committed_ends: Vec::new(),
@@ -333,6 +342,7 @@ impl<B: StorageBackend> VolumePool<B> {
             writers: vec![writer],
             sequences: vec![0],
             retired_writers: Vec::new(),
+            active_canonical_slot: 0,
             block_sequence,
             stats,
             initial_committed_ends,
@@ -404,6 +414,7 @@ impl<B: StorageBackend> VolumePool<B> {
                 .zip(old_writers.iter().map(VolumeWriter::current_size)),
         );
         self.retired_writers.extend(old_writers);
+        self.active_canonical_slot = 0;
 
         self.stats.volume_count = usize::from(new_total);
         debug_assert_eq!(
@@ -825,28 +836,18 @@ impl<B: StorageBackend> VolumePool<B> {
             ));
         }
 
-        // V27-15: Use round-robin for canonical blocks to spread load across volumes.
-        let preferred_slot = (self.block_sequence as usize) % self.writers.len();
-        let slot = if self.volume_can_fit(preferred_slot, on_disk_size) {
-            preferred_slot
-        } else {
-            let mut found_slot = None;
-            for i in 0..self.writers.len() {
-                let candidate = (preferred_slot + i) % self.writers.len();
-                if self.volume_can_fit(candidate, on_disk_size) {
-                    found_slot = Some(candidate);
-                    break;
-                }
-            }
-            match found_slot {
-                Some(slot) => slot,
-                None => {
-                    self.check_fresh_volume_space(preferred_slot, on_disk_size)?;
-                    self.rotate_volumes().await?;
-                    preferred_slot
-                }
+        let start_slot = self.active_canonical_slot.min(self.writers.len() - 1);
+        let found_slot = (start_slot..self.writers.len())
+            .find(|&candidate| self.volume_can_fit(candidate, on_disk_size));
+        let slot = match found_slot {
+            Some(slot) => slot,
+            None => {
+                self.check_fresh_volume_space(0, on_disk_size)?;
+                self.rotate_volumes().await?;
+                0
             }
         };
+        self.active_canonical_slot = slot;
 
         let sequence = self.volume_sequence(slot).ok_or_else(|| {
             era_common::EraError::InvalidConfig(format!(
@@ -1159,8 +1160,7 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Get the volume sequence for the next canonical block write target.
     #[must_use]
     pub fn next_canonical_volume_sequence(&self) -> Option<u16> {
-        let slot = (self.block_sequence as usize) % self.writers.len().max(1);
-        self.sequences.get(slot).copied()
+        self.sequences.get(self.active_canonical_slot).copied()
     }
 
     /// Add a new volume to the pool.
@@ -1989,5 +1989,62 @@ mod tests {
             });
         assert_eq!(config.initial_volume_count, 1);
         assert_eq!(config.distribution.min_volumes, 7);
+    }
+
+    #[tokio::test]
+    async fn test_canonical_selection_is_monotonic_without_backfill() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let config =
+            VolumePoolConfig::new(temp_dir.path().join("monotonic"), 3).with_max_size(50_000);
+        let mut pool = VolumePool::create(backend, config, create_test_header())
+            .await
+            .unwrap();
+
+        let large_block = EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from(vec![0x11; 30_000]),
+            original_size: 30_000,
+            compressed_size: 30_000,
+            chunk_count: 1,
+        };
+        let large_disk_size = BlockHeader::SIZE as u64 + large_block.data.len() as u64;
+
+        for expected_seq in 0..2u16 {
+            let (slot, seq) = pool.select_canonical_volume(large_disk_size).await.unwrap();
+            assert_eq!((slot, seq), (usize::from(expected_seq), expected_seq));
+            pool.write_canonical_block_to_slot(slot, &large_block, BlockType::Data)
+                .await
+                .unwrap();
+        }
+        // Fill slot 2 nearly to capacity so ~500 bytes remain there while slots 0 and 1 still have ~11.5 KiB.
+        let fill_slot2 = EncryptedMacroBlock {
+            block_id: BlockId::new(2),
+            data: Bytes::from(vec![0x33; 41_000]),
+            original_size: 41_000,
+            compressed_size: 41_000,
+            chunk_count: 1,
+        };
+        let fill_slot2_size = BlockHeader::SIZE as u64 + fill_slot2.data.len() as u64;
+        let (slot, seq) = pool.select_canonical_volume(fill_slot2_size).await.unwrap();
+        assert_eq!((slot, seq), (2, 2));
+        pool.write_canonical_block_to_slot(slot, &fill_slot2, BlockType::Data)
+            .await
+            .unwrap();
+
+        let small_block = EncryptedMacroBlock {
+            block_id: BlockId::new(3),
+            data: Bytes::from(vec![0x22; 1_000]),
+            original_size: 1_000,
+            compressed_size: 1_000,
+            chunk_count: 1,
+        };
+        let small_disk_size = BlockHeader::SIZE as u64 + small_block.data.len() as u64;
+        let (slot, seq) = pool.select_canonical_volume(small_disk_size).await.unwrap();
+        assert_eq!(
+            (slot, seq),
+            (0, 3),
+            "smaller block after filling slot 2 must rotate to gen 1 slot 0 rather than backfilling slot 0"
+        );
     }
 }

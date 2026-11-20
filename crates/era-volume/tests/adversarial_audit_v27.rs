@@ -688,41 +688,42 @@ fn test_v27_14_volume_path_consistency() {
 // V27-15: non-erasure blocks distributed via round-robin
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// V27-15: VolumePool::write_canonical_block() uses round-robin distribution
-/// `(block_sequence as usize) % writers.len().max(1)` at volume_pool.rs:548.
-/// Verify that blocks are evenly distributed across all volumes.
+/// V27-15 → Phase 3.5.3: VolumePool::write_canonical_block() fills volumes
+/// monotonically via `active_canonical_slot` to match MultiVolumeSessionBlockIterator's
+/// sequential block_index order across volumes.
+/// Verify that 6 blocks sized at half a volume's usable capacity distribute across all 3 volumes.
 #[tokio::test]
 async fn test_v27_15_non_erasure_blocks_distributed() {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());
 
     let header = test_header();
+    // Each 8 KiB block takes 16 + 8192 = 8208 bytes on disk; 2 blocks = 16416 bytes.
+    // With DATA_REGION_START (4224) + PER_VOLUME_OVERHEAD (4248), max_size = 25000 fits
+    // exactly 2 blocks per volume (16528 available) and advances monotonically to the next slot.
     let config = VolumePoolConfig::new(temp_dir.path().join("rr").to_str().unwrap(), 3)
-        .with_max_size(1024 * 1024); // 1MB per volume
+        .with_max_size(25_000);
 
     let mut pool = VolumePool::create(backend, config, header).await.unwrap();
 
     // Confirm 3 writers created
     assert_eq!(pool.volume_count(), 3);
 
-    // Write 6 canonical blocks — with 3 volumes and round-robin,
-    // each volume should receive exactly 2 blocks.
+    // Write 6 canonical blocks — 2 per volume sequentially across the 3 slots.
     for i in 0..6u64 {
-        let block = test_block(i, 128);
+        let block = test_block(i, 8192);
         pool.write_canonical_block(&block, BlockType::Data)
             .await
             .unwrap();
         pool.advance_block_sequence();
     }
 
-    // After 6 blocks distributed round-robin across 3 volumes,
-    // each volume should have exactly 2 blocks.
     for slot in 0..3 {
         let writer = pool.get_writer_mut(slot).expect("writer must exist");
         assert_eq!(
             writer.block_count(),
             2,
-            "Volume slot {} should have exactly 2 blocks from round-robin",
+            "Volume slot {} should have exactly 2 blocks from monotonic canonical filling",
             slot
         );
     }
