@@ -101,16 +101,27 @@ fn try_unlock_with_providers(
     }
 }
 
-fn minimum_volumes_for_repair(erasure_config: ErasureCodeConfig, expected_volumes: usize) -> usize {
+fn minimum_volumes_for_repair(
+    erasure_config: ErasureCodeConfig,
+    expected_volumes: usize,
+    generation_width: usize,
+) -> usize {
     let data_shards = usize::from(erasure_config.data_shards);
     if expected_volumes == 0 || data_shards == 0 {
         return data_shards;
     }
     let total_shards = data_shards + usize::from(erasure_config.parity_shards);
-    let max_shards_per_vol = total_shards.div_ceil(expected_volumes).max(1);
-    data_shards
-        .div_ceil(max_shards_per_vol)
-        .min(expected_volumes)
+    let mut minimum_volumes = 0;
+    let mut generation_start = 0;
+    while generation_start < expected_volumes {
+        let generation_volumes = generation_width.min(expected_volumes - generation_start);
+        let max_shards_per_vol = total_shards.div_ceil(generation_volumes).max(1);
+        minimum_volumes += data_shards
+            .div_ceil(max_shards_per_vol)
+            .min(generation_volumes);
+        generation_start += generation_width;
+    }
+    minimum_volumes
 }
 
 fn classify_repair_archive_health(
@@ -1202,7 +1213,17 @@ async fn repair_archive_matrix_with_providers(
         erasure_config.data_shards, erasure_config.parity_shards, volume_count, total_shards
     );
 
-    let minimum_required_volumes = minimum_volumes_for_repair(erasure_config, expected_volumes);
+    let mut geometry = MatrixScanGeometry::new(
+        header.config(),
+        expected_volume_count,
+        &volume_indices,
+        header.config().distribution.strategy,
+    )?;
+    let minimum_required_volumes = minimum_volumes_for_repair(
+        erasure_config,
+        expected_volumes,
+        geometry.generation_width(),
+    );
     let mut stats = RepairStats {
         archive_health: classify_repair_archive_health(
             expected_volumes,
@@ -1221,12 +1242,6 @@ async fn repair_archive_matrix_with_providers(
     let mut volume_offsets: Vec<u64> = volume_readers.iter().map(|r| r.data_region().0).collect();
 
     let mut block_sequence: u64 = 0;
-    let mut geometry = MatrixScanGeometry::new(
-        header.config(),
-        expected_volume_count,
-        &volume_indices,
-        header.config().distribution.strategy,
-    )?;
 
     let data_ends: Vec<u64> = volume_readers
         .iter()
@@ -1720,24 +1735,38 @@ mod tests {
     #[test]
     fn test_minimum_volumes_for_repair() {
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 3),
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 3, 3),
             2
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(5, 1), 3),
+            minimum_volumes_for_repair(ErasureCodeConfig::new(5, 1), 3, 3),
             3
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 6),
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 6, 6),
             4
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 2),
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 2, 2),
             2
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 1),
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 1, 1),
             1
+        );
+    }
+
+    #[test]
+    fn test_minimum_volumes_for_repair_uses_generation_width() {
+        assert_eq!(
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 9, 3),
+            6,
+            "three narrow generations need two surviving volumes each"
+        );
+        assert_eq!(
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 4, 3),
+            3,
+            "a short final generation is capped by its actual width"
         );
     }
 }

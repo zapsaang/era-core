@@ -65,6 +65,10 @@ impl MatrixScanGeometry {
         })
     }
 
+    pub(crate) fn generation_width(&self) -> usize {
+        self.width
+    }
+
     pub(crate) fn advance_to_data(&mut self, offsets: &[u64], ends: &[u64]) -> Result<bool> {
         while self.generation_start < self.readers_by_sequence.len() {
             let end = (self.generation_start + self.width).min(self.readers_by_sequence.len());
