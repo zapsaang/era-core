@@ -101,6 +101,18 @@ fn try_unlock_with_providers(
     }
 }
 
+fn minimum_volumes_for_repair(erasure_config: ErasureCodeConfig, expected_volumes: usize) -> usize {
+    let data_shards = usize::from(erasure_config.data_shards);
+    if expected_volumes == 0 || data_shards == 0 {
+        return data_shards;
+    }
+    let total_shards = data_shards + usize::from(erasure_config.parity_shards);
+    let max_shards_per_vol = total_shards.div_ceil(expected_volumes).max(1);
+    data_shards
+        .div_ceil(max_shards_per_vol)
+        .min(expected_volumes)
+}
+
 fn classify_repair_archive_health(
     expected_volumes: usize,
     found_volumes: usize,
@@ -1080,13 +1092,14 @@ async fn repair_archive_matrix_with_providers(
         }
     }
 
+    let minimum_required_volumes = minimum_volumes_for_repair(erasure_config, expected_volumes);
     let mut stats = RepairStats {
         archive_health: classify_repair_archive_health(
             expected_volumes,
             volume_count,
             missing_volume_indices.clone(),
             0,
-            erasure_config.data_shards as usize,
+            minimum_required_volumes,
         ),
         ..Default::default()
     };
@@ -1479,7 +1492,7 @@ async fn repair_archive_matrix_with_providers(
         volume_count,
         missing_volume_indices,
         stats.unrecoverable_blocks,
-        erasure_config.data_shards as usize,
+        minimum_required_volumes,
     );
 
     info!(
@@ -1592,5 +1605,29 @@ mod tests {
         assert!(opts.create_backup);
         assert!(!opts.dry_run);
         assert!(opts.continue_on_error);
+    }
+
+    #[test]
+    fn test_minimum_volumes_for_repair() {
+        assert_eq!(
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 3),
+            2
+        );
+        assert_eq!(
+            minimum_volumes_for_repair(ErasureCodeConfig::new(5, 1), 3),
+            3
+        );
+        assert_eq!(
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 6),
+            4
+        );
+        assert_eq!(
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 2),
+            2
+        );
+        assert_eq!(
+            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 1),
+            1
+        );
     }
 }

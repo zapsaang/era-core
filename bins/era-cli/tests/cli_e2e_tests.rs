@@ -1233,6 +1233,66 @@ mod repair_chain_tests {
             );
         }
     }
+
+    #[test]
+    fn test_repair_narrow_volumes_fewer_than_data_shards() {
+        let temp = TempDir::new().unwrap();
+        let data: Vec<u8> = (0..(128 * 1024)).map(|i| ((i * 37) % 251) as u8).collect();
+        let input = create_test_file(temp.path(), "narrow_t8a.bin", &data);
+        let archive = temp.path().join("narrow_t8a.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "-o",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--erasure",
+                "4:2",
+                "--volumes",
+                "3",
+                "--no-compression",
+            ])
+            .assert()
+            .success();
+
+        let vol1 = temp.path().join("narrow_t8a.era.001");
+        corrupt_archive_shard(&vol1, 4480);
+
+        era_cmd()
+            .args([
+                "repair",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--force",
+            ])
+            .assert()
+            .success();
+
+        era_cmd()
+            .args(["verify", archive.to_str().unwrap(), "--password", "pwd"])
+            .assert()
+            .success();
+
+        let out_dir = temp.path().join("out");
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                archive.to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "pwd",
+            ])
+            .assert()
+            .success();
+
+        assert_file_content_eq(&out_dir.join("narrow_t8a.bin"), &data);
+    }
 }
 
 // ===========================================================================
