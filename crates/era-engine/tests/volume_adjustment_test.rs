@@ -1,4 +1,6 @@
-use era_common::{ArchiveConfig, CompressionAlgorithm, CompressionConfig, ErasureCodeConfig};
+use era_common::{
+    ArchiveConfig, CompressionAlgorithm, CompressionConfig, EraError, ErasureCodeConfig,
+};
 use era_engine::ArchiveWriterBuilder;
 use std::path::Path;
 use tempfile::TempDir;
@@ -24,6 +26,28 @@ fn count_volume_files(base_path: &Path, max_scan: usize) -> usize {
             path.exists()
         })
         .count()
+}
+
+#[tokio::test]
+async fn test_build_rejects_volume_capacity_below_fastcdc_minimum_without_creating_output() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_path = temp_dir.path().join("colocated.era");
+
+    let result = ArchiveWriterBuilder::new(&base_path)
+        .password("test_password")
+        .enable_cdc(true)
+        .erasure_config(ErasureCodeConfig::new(16, 4))
+        .volume_count(1)
+        .max_volume_size(era_volume::MIN_VOLUME_SIZE)
+        .build()
+        .await;
+
+    let entries = std::fs::read_dir(temp_dir.path()).unwrap().count();
+    let error = result.err();
+    assert!(
+        matches!(error, Some(EraError::InvalidConfig(_))) && entries == 0,
+        "expected InvalidConfig and an empty output directory, got {error:?} and {entries} entries"
+    );
 }
 
 #[tokio::test]

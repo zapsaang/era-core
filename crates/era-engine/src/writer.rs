@@ -39,6 +39,7 @@ use era_volume::{
 use rand::rngs::OsRng;
 use rand::RngCore;
 use std::collections::{HashMap, HashSet};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -55,10 +56,13 @@ use crate::encryption_context::EncryptionContext;
 use crate::erasure_stage::ErasureStage;
 use crate::index_stage::IndexStage;
 use crate::packing_stage::PackingStage;
-use crate::reader::ArchiveReader;
+use crate::reader::{
+    ArchiveReader, MAX_CATALOG_CHUNKS, MAX_CATALOG_CHUNK_SIZE, MAX_CATALOG_PLAINTEXT_SIZE,
+};
 use crate::recovery::{RecoveryOptions, RecoveryStrategy};
 use crate::sequence::{next_finalize_sequence, INITIAL_FINALIZE_SEQUENCE};
 use crate::small_file_packer::{SmallFileEntry, SmallFilePacker};
+use crate::volume_capacity::VolumeCapacity;
 use crate::volume_stage::VolumeStage;
 use crate::write_pipeline::WritePipeline;
 
@@ -135,6 +139,44 @@ fn chunker_config_from_archive(config: &ArchiveConfig) -> Result<ChunkerConfig> 
         chunking.normalization_level,
         chunking.rolling_hash_seed,
     ))
+}
+
+fn bounded_small_file_batches(
+    entries: Vec<SmallFileEntry>,
+    max_packed_size: usize,
+) -> Result<Vec<Vec<SmallFileEntry>>> {
+    let mut pending = vec![entries];
+    let mut batches = Vec::new();
+    while let Some(mut batch) = pending.pop() {
+        if batch.is_empty() {
+            continue;
+        }
+        let entries_size = size_of::<era_packing::PackedEntry>()
+            .checked_mul(batch.len())
+            .ok_or_else(|| EraError::InvalidConfig("packed file index size overflow".into()))?;
+        let data_size = batch.iter().try_fold(0usize, |total, entry| {
+            total
+                .checked_add(entry.data.len())
+                .ok_or_else(|| EraError::InvalidConfig("packed file data size overflow".into()))
+        })?;
+        let packed_size = size_of::<era_packing::PackedHeader>()
+            .checked_add(entries_size)
+            .and_then(|size| size.checked_add(data_size))
+            .ok_or_else(|| EraError::InvalidConfig("packed file size overflow".into()))?;
+        if packed_size > max_packed_size && batch.len() > 1 {
+            let second = batch.split_off(batch.len() / 2);
+            pending.push(second);
+            pending.push(batch);
+            continue;
+        }
+        if packed_size > max_packed_size {
+            return Err(EraError::InvalidConfig(format!(
+                "one packed small file requires {packed_size} bytes, exceeding the {max_packed_size}-byte producer limit"
+            )));
+        }
+        batches.push(batch);
+    }
+    Ok(batches)
 }
 
 /// Builder for creating an ArchiveWriter
@@ -317,8 +359,8 @@ impl ArchiveWriterBuilder {
 
     /// Set maximum volume size for fixed-size splitting.
     ///
-    /// When set, volumes will automatically split when reaching this size limit.
-    /// Default is 4GB.
+    /// Overrides the archive configuration's volume limit (1 GiB by default).
+    /// Limits below [`era_volume::MIN_VOLUME_SIZE`] are raised to that minimum.
     pub fn max_volume_size(mut self, size: u64) -> Self {
         self.max_volume_size = Some(size);
         self
@@ -955,6 +997,33 @@ impl ArchiveWriterBuilder {
             config.distribution.min_volumes = 1;
             config.distribution.target_volumes = resolved_volume_count;
         }
+        let max_volume_size = max_volume_size
+            .unwrap_or(config.volume.max_size)
+            .max(era_volume::MIN_VOLUME_SIZE);
+        config.volume.max_size = max_volume_size;
+        let capacity = VolumeCapacity::new(
+            max_volume_size,
+            config.compression.algorithm,
+            enable_erasure.then_some(erasure_config),
+            resolved_volume_count,
+        )?;
+        let (file_reader, chunker_max_size) = if enable_cdc {
+            let mut config = match chunker_override {
+                Some(cfg) => cfg,
+                None => chunker_config_from_archive(&config)?,
+            };
+            config.max_size = config.max_size.min(capacity.max_data_chunk_size());
+            config.avg_size = config.avg_size.min(config.max_size);
+            config.min_size = config.min_size.min(config.avg_size);
+            config.validate()?;
+            let max_size = config.max_size;
+            (
+                FileReader::with_cdc().with_chunker_config(config),
+                Some(max_size),
+            )
+        } else {
+            (FileReader::new(), None)
+        };
         let header = SuperHeader::new(
             archive_id,
             recipients,
@@ -977,9 +1046,7 @@ impl ArchiveWriterBuilder {
             pool_config = pool_config.for_erasure(erasure_config);
         }
 
-        if let Some(max_size) = max_volume_size {
-            pool_config = pool_config.with_max_size(max_size);
-        }
+        pool_config = pool_config.with_max_size(max_volume_size);
 
         // Initialize catalog - MUST be done before VolumePool creation (truncation)
         let mut catalog = Catalog::new();
@@ -1025,25 +1092,6 @@ impl ArchiveWriterBuilder {
             "Created VolumePool with {} volumes (Strategy: RotatingOffset)",
             volume_pool.volume_count()
         );
-
-        // Configure file reader with CDC if enabled
-
-        let chunker_config = if enable_cdc {
-            let config = match chunker_override {
-                Some(cfg) => cfg,
-                None => chunker_config_from_archive(&config)?,
-            };
-            Some(config)
-        } else {
-            None
-        };
-
-        let chunker_max_size = chunker_config.as_ref().map(|cfg| cfg.max_size);
-        let file_reader = if let Some(cfg) = chunker_config {
-            FileReader::with_cdc().with_chunker_config(cfg)
-        } else {
-            FileReader::new()
-        };
 
         // Set up checkpoint manager if enabled
         let checkpoint_manager = if self.enable_checkpoint {
@@ -1139,17 +1187,7 @@ impl ArchiveWriterBuilder {
             4 * 1024 * 1024
         };
 
-        if let Some(max_volume_size) = max_volume_size {
-            if enable_erasure {
-                let prefix_len = erasure_config.data_shards as usize * 4;
-                let reserved =
-                    era_volume::FOOTER_SIZE + 4096 + era_common::ShardHeader::SIZE + prefix_len;
-                if max_volume_size as usize > reserved {
-                    let max_block = max_volume_size as usize - reserved;
-                    target_block_size = target_block_size.min(max_block);
-                }
-            }
-        }
+        target_block_size = target_block_size.min(capacity.max_data_chunk_size()).max(1);
 
         let next_block_id = if self.append_existing {
             volume_pool.current_block_count() as u64
@@ -1190,6 +1228,13 @@ impl ArchiveWriterBuilder {
             config.compression.clone(),
         );
 
+        let data_chunk_limit = u64::try_from(capacity.max_data_chunk_size())
+            .map_err(|_| EraError::InvalidConfig("data chunk limit exceeds u64".into()))?;
+        let packed_file_overhead = u64::try_from(
+            size_of::<era_packing::PackedHeader>() + size_of::<era_packing::PackedEntry>(),
+        )
+        .map_err(|_| EraError::InvalidConfig("packed file overhead exceeds u64".into()))?;
+
         Ok(ArchiveWriter {
             archive_id,
             output_path: self.output_path,
@@ -1205,11 +1250,16 @@ impl ArchiveWriterBuilder {
             )?,
             // Small file packing
             small_file_packer: if self.enable_small_file_packing {
-                SmallFilePacker::new(16 * 1024, 1024 * 1024, 1000)
+                SmallFilePacker::new(
+                    (16 * 1024).min(data_chunk_limit.saturating_sub(packed_file_overhead)),
+                    (1024 * 1024).min(data_chunk_limit),
+                    1000,
+                )
             } else {
                 SmallFilePacker::disabled()
             },
             pipeline,
+            capacity,
             pending_hashes: HashSet::new(),
             finalize_sequence: INITIAL_FINALIZE_SEQUENCE,
             existing_manifest,
@@ -1263,6 +1313,7 @@ pub struct ArchiveWriter {
     // Write pipeline (handles encryption, erasure, volume, index)
     /// Coordinates the flow: chunks → encryption → erasure → volume → index
     pipeline: WritePipeline<LocalStorageBackend>,
+    capacity: VolumeCapacity,
 
     pending_hashes: HashSet<ChunkHash>,
 
@@ -1781,6 +1832,31 @@ impl ArchiveWriter {
 
         debug!("File size: {} bytes, hash: {}", size, hash);
 
+        let target_block_size = self.packing.target_block_size();
+        if chunk.data.len() > target_block_size {
+            let mut chunk_refs = Vec::new();
+            let mut offset = 0u64;
+            for data in chunk.data.chunks(target_block_size) {
+                let chunk_hash = era_crypto::hash(data);
+                if !self.contains_or_pending(&chunk_hash)? {
+                    self.add_to_pending(UniqueChunk::new(Bytes::copy_from_slice(data), chunk_hash))
+                        .await?;
+                }
+                let chunk_len = u32::try_from(data.len())
+                    .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
+                chunk_refs.push(ChunkRef::new(chunk_hash, offset, chunk_len));
+                offset = offset
+                    .checked_add(u64::from(chunk_len))
+                    .ok_or_else(|| EraError::Other("File chunk offset overflow".into()))?;
+            }
+            let mut entry = FileEntry::file(relative_path, size).with_chunks(chunk_refs);
+            entry.permissions = permissions;
+            entry.mtime = mtime;
+            entry.xattrs = xattrs;
+            self.catalog.add(entry);
+            return Ok(());
+        }
+
         // Check for dedup: skip if we already have this chunk
         if !self.contains_or_pending(&hash)? {
             // Add to pending batch
@@ -1905,9 +1981,9 @@ impl ArchiveWriter {
         );
 
         // Use the pipeline to process chunks (handles encryption, erasure, volume, index)
-        self.pipeline
-            .process_chunks(packed.chunks, Vec::new())
-            .await?;
+        for chunks in self.capacity.chunk_groups(packed.chunks)? {
+            self.pipeline.process_chunks(chunks, Vec::new()).await?;
+        }
 
         Ok(())
     }
@@ -1923,6 +1999,13 @@ impl ArchiveWriter {
 
     /// Flush a batch of small files by packing them together
     async fn flush_packed_files_batch(&mut self, buffered: Vec<SmallFileEntry>) -> Result<()> {
+        for batch in bounded_small_file_batches(buffered, self.capacity.max_data_chunk_size())? {
+            self.write_packed_files_batch(batch).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_packed_files_batch(&mut self, buffered: Vec<SmallFileEntry>) -> Result<()> {
         if buffered.is_empty() {
             return Ok(());
         }
@@ -2116,15 +2199,26 @@ impl ArchiveWriter {
         // Serialize catalog
         let catalog_bytes = self.catalog.to_bytes()?;
 
-        // Split catalog into chunks that fit within MAX_SHARD_SIZE after compression.
-        // Conservative limit: half of MAX_SHARD_SIZE to account for compression overhead.
-        let max_catalog_chunk = era_volume::MAX_SHARD_SIZE / 2;
+        // Split catalog data so every compressed, encrypted canonical block fits a fresh volume.
+        // The first chunk carries the 12-byte catalog framing in the same producer budget.
+        let max_catalog_chunk = self
+            .capacity
+            .max_catalog_chunk_size()
+            .min(MAX_CATALOG_CHUNK_SIZE);
         let catalog_chunk_count = catalog_bytes.len().div_ceil(max_catalog_chunk).max(1);
+        let catalog_chunk_count_u32 = u32::try_from(catalog_chunk_count)
+            .map_err(|_| EraError::Other("Catalog chunk count exceeds u32::MAX".into()))?;
 
         // Prepend header: [u32 chunk_count][u64 total_len] = 12 bytes
-        let total_len = catalog_bytes.len() as u64;
+        let total_len = u64::try_from(catalog_bytes.len())
+            .map_err(|_| EraError::InvalidConfig("Catalog plaintext length exceeds u64".into()))?;
+        if catalog_chunk_count_u32 > MAX_CATALOG_CHUNKS || total_len > MAX_CATALOG_PLAINTEXT_SIZE {
+            return Err(EraError::InvalidConfig(
+                "Catalog framing exceeds its chunk or plaintext bound".into(),
+            ));
+        }
         let mut first_chunk_prefix = Vec::with_capacity(12);
-        first_chunk_prefix.extend_from_slice(&(catalog_chunk_count as u32).to_le_bytes());
+        first_chunk_prefix.extend_from_slice(&catalog_chunk_count_u32.to_le_bytes());
         first_chunk_prefix.extend_from_slice(&total_len.to_le_bytes());
 
         // Pre-chunk catalog data to avoid double iteration in erasure mode
@@ -2574,6 +2668,13 @@ mod tests {
     use std::path::Path;
     use tempfile::{NamedTempFile, TempDir};
 
+    fn finalized_volume_paths(archive_path: &Path) -> Vec<PathBuf> {
+        (0..1024u16)
+            .map(|sequence| volume_path(archive_path, sequence))
+            .take_while(|path| path.exists())
+            .collect()
+    }
+
     async fn read_primary_manifest(archive_path: &Path, password: &str) -> ArchiveManifest {
         let reader = ArchiveReader::open(archive_path, password).await.unwrap();
         let footer = reader.primary_footer().unwrap();
@@ -2795,6 +2896,113 @@ mod tests {
         assert!(!chunks.is_empty());
         for chunk in chunks {
             assert!(chunk.data.len() <= 16 * 1024);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_p3_7_builder_resolves_configured_capacity_and_override() {
+        for (configured_size, override_size) in [(64 * 1024, None), (128 * 1024, Some(64 * 1024))] {
+            let temp_dir = TempDir::new().unwrap();
+            let archive_path = temp_dir.path().join("resolved_capacity.era");
+            let mut config = ArchiveConfig::default();
+            config.volume.max_size = configured_size;
+            config.compression.algorithm = era_common::CompressionAlgorithm::None;
+            config.erasure = None;
+
+            let mut builder = ArchiveWriter::builder(&archive_path)
+                .password("test_password")
+                .config(config)
+                .enable_erasure(false)
+                .enable_cdc(false);
+            if let Some(size) = override_size {
+                builder = builder.max_volume_size(size);
+            }
+            let mut writer = builder.build().await.unwrap();
+            let data: Vec<u8> = (0..192 * 1024).map(|i| (i % 251) as u8).collect();
+            writer.add_bytes("payload.bin", &data).await.unwrap();
+            writer.finalize().await.unwrap();
+
+            let effective_size = override_size.unwrap_or(configured_size);
+            let volumes = finalized_volume_paths(&archive_path);
+            assert!(volumes.len() > 1, "expected rotation for {volumes:?}");
+            for volume in volumes {
+                assert!(
+                    std::fs::metadata(&volume).unwrap().len() <= effective_size,
+                    "{} exceeds the resolved {effective_size}-byte cap",
+                    volume.display()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_p3_7_small_cap_catalog_chunking_and_manifest_preflight() {
+        const MAX_VOLUME_SIZE: u64 = 32 * 1024;
+        const FILE_COUNT: usize = 128;
+
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("metadata_capacity.era");
+        let mut config = ArchiveConfig::default();
+        config.volume.max_size = MAX_VOLUME_SIZE;
+        config.compression.algorithm = era_common::CompressionAlgorithm::Zstd;
+        config.erasure = None;
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config)
+            .enable_erasure(false)
+            .enable_cdc(false)
+            .enable_small_file_packing(false)
+            .build()
+            .await
+            .unwrap();
+
+        for i in 0..FILE_COUNT {
+            let name = format!("{i:03}_{}.bin", "metadata".repeat(24));
+            let data = vec![u8::try_from(i).unwrap(); 96];
+            writer.add_bytes(&name, &data).await.unwrap();
+        }
+        writer.finalize().await.unwrap();
+
+        let volumes = finalized_volume_paths(&archive_path);
+        for volume in &volumes {
+            assert!(
+                std::fs::metadata(volume).unwrap().len() <= MAX_VOLUME_SIZE,
+                "{} exceeds the metadata-test cap",
+                volume.display()
+            );
+        }
+
+        let last_volume = volumes.last().unwrap();
+        let bytes = std::fs::read(last_volume).unwrap();
+        let footer = Footer::from_bytes(&bytes[bytes.len() - era_volume::FOOTER_SIZE..]).unwrap();
+        let mut offset = usize::try_from(footer.catalog_offset()).unwrap();
+        let mut catalog_blocks = 0;
+        while let Some(header) = era_common::BlockHeader::from_bytes(&bytes[offset..]) {
+            if header.block_type != BlockType::Catalog {
+                break;
+            }
+            catalog_blocks += 1;
+            offset += era_common::BlockHeader::SIZE + usize::try_from(header.length).unwrap();
+        }
+        assert_eq!(
+            catalog_blocks, 2,
+            "fixture must write a catalog continuation"
+        );
+
+        let mut reader = ArchiveReader::open(last_volume, "test_password")
+            .await
+            .unwrap();
+        let output_dir = temp_dir.path().join("out");
+        reader
+            .extract_all(&crate::ExtractOptions::new(&output_dir))
+            .await
+            .unwrap();
+        for i in 0..FILE_COUNT {
+            let name = format!("{i:03}_{}.bin", "metadata".repeat(24));
+            assert_eq!(
+                std::fs::read(output_dir.join(name)).unwrap(),
+                vec![u8::try_from(i).unwrap(); 96]
+            );
         }
     }
 

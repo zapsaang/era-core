@@ -437,84 +437,43 @@ async fn test_shard_size_validation() {
         ..Default::default()
     };
 
-    // Use a max_volume_size that can't fit 100KB shards
-    // MIN_VOLUME_SIZE is ~20KB, so we need to set something bigger than that
-    // but still too small for our shards
+    let max_volume_size = 30 * 1024;
     let mut writer = ArchiveWriterBuilder::new(&base_path)
         .config(config)
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(3)
-        .max_volume_size(30 * 1024) // 30KB - too small for 100KB shards
+        .max_volume_size(max_volume_size)
         .build()
         .await
         .unwrap();
 
-    // Try to add data - should fail with a clear error about shard size
-    // With 2 data shards, 200KB data generates ~100KB shards
-    let data = vec![0u8; 200 * 1024]; // 200KB - will generate ~100KB shards
-    println!("Adding {} bytes of data", data.len());
-    let add_result = writer.add_bytes("test.bin", &data).await;
+    let data = vec![0u8; 200 * 1024];
+    writer.add_bytes("test.bin", &data).await.unwrap();
+    writer.finalize().await.unwrap();
 
-    // Check add_bytes result first
-    if let Err(e) = add_result {
-        println!("add_bytes failed: {}", e);
-        let error_msg = format!("{}", e);
-        assert!(
-            error_msg.contains("exceeds")
-                || error_msg.contains("full")
-                || error_msg.contains("size")
-                || error_msg.contains("maximum"),
-            "Error should mention size issue: {}",
-            error_msg
-        );
-        return;
-    }
-
-    // If add_bytes succeeded, try to finalize - this should fail
-    println!("add_bytes succeeded, trying finalize...");
-    let result = writer.finalize().await;
-
-    // Debug: Print result and count volumes
-    match &result {
-        Ok(_) => {
-            // Count how many volumes were created and their sizes
-            let mut count = 0;
-            for entry in std::fs::read_dir(temp_dir.path()).unwrap() {
-                let entry = entry.unwrap();
-                if entry.path().to_string_lossy().contains("size_test") {
-                    count += 1;
-                    let size = entry.metadata().unwrap().len();
-                    println!(
-                        "Created: {:?}, size: {} bytes",
-                        entry.path().file_name(),
-                        size
-                    );
-                }
-            }
-            println!("Unexpectedly succeeded! Created {} volumes", count);
+    let mut volume_count = 0;
+    for entry in fs::read_dir(temp_dir.path()).unwrap() {
+        let entry = entry.unwrap();
+        if !entry.path().to_string_lossy().contains("size_test") {
+            continue;
         }
-        Err(e) => println!("Got error: {}", e),
-    }
-
-    // Should fail with a clear error
-    assert!(
-        result.is_err(),
-        "Should fail when shard size exceeds volume capacity"
-    );
-
-    if let Err(e) = result {
-        let error_msg = format!("{}", e);
-        println!("Got expected error: {}", error_msg);
+        volume_count += 1;
+        let size = entry.metadata().unwrap().len();
         assert!(
-            error_msg.contains("exceeds")
-                || error_msg.contains("full")
-                || error_msg.contains("size")
-                || error_msg.contains("maximum"),
-            "Error should mention size issue: {}",
-            error_msg
+            size <= max_volume_size,
+            "Volume {:?} is {size} bytes, exceeding the {max_volume_size}-byte cap",
+            entry.path()
         );
     }
+    assert_eq!(volume_count, 6, "Cap splitting should create six volumes");
+
+    let mut reader = ArchiveReader::open(&base_path, "").await.unwrap();
+    let extract_dir = temp_dir.path().join("extract");
+    let options = ExtractOptions::new(&extract_dir);
+    reader.extract_all(&options).await.unwrap();
+    let extracted = fs::read(extract_dir.join("test.bin")).unwrap();
+    assert_eq!(extracted, data, "Extracted data mismatch");
 }
 
 /// Test end-to-end: create archive, corrupt some shards, repair, verify

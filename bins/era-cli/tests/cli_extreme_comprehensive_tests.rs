@@ -205,9 +205,36 @@ mod large_file_extreme_tests {
 mod multivolume_extreme_scenarios {
     use super::*;
 
-    /// Multi-volume with very small volume size (16KB)
     #[test]
-    fn test_multivolume_tiny_16kb_with_large_file() {
+    fn test_multivolume_tiny_16kb_with_large_file_fails_capacity() {
+        let temp = TempDir::new().unwrap();
+        let size = 2 * 1024 * 1024; // 2MB file
+        let input = create_large_test_file(temp.path(), "tiny_vol.bin", size);
+        let archive = temp.path().join("tiny_vol.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--max-volume-size",
+                "16384", // 16KB per volume
+                "--erasure",
+                "4:2",
+                "--no-compression",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "available=12136: write does not fit in a fresh volume",
+            ));
+    }
+
+    #[test]
+    fn test_multivolume_64kb_with_large_file_roundtrip() {
         let temp = TempDir::new().unwrap();
         let size = 2 * 1024 * 1024; // 2MB file
         let input = create_large_test_file(temp.path(), "tiny_vol.bin", size);
@@ -223,18 +250,29 @@ mod multivolume_extreme_scenarios {
                 "--password",
                 "pwd",
                 "--max-volume-size",
-                "16384", // 16KB per volume
+                "65536",
+                "--erasure",
+                "4:2",
                 "--no-compression",
             ])
             .assert()
             .success();
 
-        let vol_count = count_volume_files(&archive);
+        let volume_paths = get_volume_paths(&archive);
         assert!(
-            vol_count >= 4,
-            "2MB with 16KB max should create multiple volumes, got {}",
-            vol_count
+            volume_paths.len() > 6,
+            "2MB with 64KB max should rotate beyond the initial six volumes, got {}",
+            volume_paths.len()
         );
+        for path in &volume_paths {
+            let len = get_volume_size(path);
+            assert!(
+                len <= 65536,
+                "volume {} is {} bytes, exceeding the 65536-byte cap",
+                path.display(),
+                len
+            );
+        }
 
         era_cmd()
             .args([
@@ -249,9 +287,7 @@ mod multivolume_extreme_scenarios {
             .assert()
             .success();
 
-        let restored = fs::read(out_dir.join("tiny_vol.bin")).unwrap();
-        assert_eq!(restored.len(), size);
-        assert_eq!(restored, generate_deterministic_data(size));
+        assert_extracted_file(&out_dir, "tiny_vol.bin", &generate_deterministic_data(size));
     }
 
     /// Extract from middle volume after primary deleted (catalog fallback strict regression)

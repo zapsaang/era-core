@@ -43,6 +43,7 @@ mod repack;
 mod repair;
 pub mod sequence;
 mod small_file_packer;
+mod volume_capacity;
 mod volume_stage;
 mod write_pipeline;
 mod writer;
