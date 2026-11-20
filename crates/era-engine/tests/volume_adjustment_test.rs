@@ -74,8 +74,10 @@ async fn test_build_rejects_invalid_chunker_config_without_creating_output() {
     let temp_dir = TempDir::new().unwrap();
     let base_path = temp_dir.path().join("invalid_chunker.era");
 
-    let mut invalid_chunker = ChunkerConfig::default();
-    invalid_chunker.min_size = 32;
+    let invalid_chunker = ChunkerConfig {
+        min_size: 32,
+        ..Default::default()
+    };
 
     let result = ArchiveWriterBuilder::new(&base_path)
         .password("test_password")
