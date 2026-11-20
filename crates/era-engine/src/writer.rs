@@ -14,19 +14,23 @@
 //! - **Password mode**: Traditional Argon2id key derivation (~50-300ms overhead)
 //! - **Certificate mode**: X25519 key exchange (~0.05ms overhead, ~1000x faster)
 
-use crate::auth::PasswordSlotParams;
+use crate::auth::{
+    AuthProvider, CertificateProvider, HybridCertificateProvider, PasswordProvider,
+    PasswordSlotParams,
+};
+use crate::block_iter::{BlockIterator, SessionBlockIterator};
 use bytes::Bytes;
 use era_common::{
-    ArchiveConfig, ArchiveId, ArchiveManifest, BlockId, BlockLocation, BlockType, ChunkHash,
-    EncryptedMacroBlock, EraError, ErasureCodeConfig, MatrixDistributionStrategy, Result,
-    UniqueChunk,
+    ArchiveConfig, ArchiveId, ArchiveManifest, BlockHeader, BlockId, BlockLocation, BlockType,
+    ChunkHash, EncryptedMacroBlock, EraError, ErasureCodeConfig, MatrixDistributionStrategy,
+    Result, UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::hybrid_certificate::{HybridCertificate, HybridKeyPair};
 use era_crypto::Nonce;
 use era_crypto::{
     build_aad, compute_catalog_commitment, compute_index_commitment,
-    derive_nonce_with_volume_index, AeadContext, KdfParams, KeySession, Salt,
+    derive_nonce_with_volume_index, AeadContext, KdfParams, KeySession, Salt, VolumeKey,
     XChaCha20Poly1305Context, NONCE_SIZE,
 };
 use era_ingest::{Catalog, ChunkRef, ChunkerConfig, FileEntry, FileReader};
@@ -212,6 +216,10 @@ pub struct ArchiveWriterBuilder {
     additional_passwords: Vec<String>,
     /// Additional hybrid certificates for threshold mode
     additional_hybrid_certificates: Vec<HybridCertificate>,
+    /// Private keypair for unlocking an existing legacy certificate archive in append mode
+    append_keypair: Option<EraKeyPair>,
+    /// Private hybrid keypair for unlocking an existing hybrid-cert archive in append mode
+    append_hybrid_keypair: Option<HybridKeyPair>,
 }
 
 impl ArchiveWriterBuilder {
@@ -236,6 +244,8 @@ impl ArchiveWriterBuilder {
             access_policy: era_volume::AccessPolicy::AnyOfN,
             additional_passwords: Vec::new(),
             additional_hybrid_certificates: Vec::new(),
+            append_keypair: None,
+            append_hybrid_keypair: None,
         }
     }
 
@@ -268,11 +278,39 @@ impl ArchiveWriterBuilder {
         self
     }
 
+    /// Set the legacy keypair for both creating and appending to a certificate-encrypted archive.
+    pub fn keypair(mut self, keypair: EraKeyPair) -> Self {
+        self.auth_mode = AuthMode::Certificate(keypair.certificate());
+        self.append_keypair = Some(keypair);
+        self
+    }
+
+    /// Provide a legacy private keypair solely for unlocking an existing archive in append mode
+    /// without altering the configured `auth_mode`.
+    pub fn append_keypair(mut self, keypair: EraKeyPair) -> Self {
+        self.append_keypair = Some(keypair);
+        self
+    }
+
     /// Set the recipient hybrid certificate (post-quantum certificate mode).
     ///
     /// This uses X25519 + Kyber-768 hybrid KEM for post-quantum security.
     pub fn hybrid_certificate(mut self, cert: HybridCertificate) -> Self {
         self.auth_mode = AuthMode::HybridKemCertificate(cert);
+        self
+    }
+
+    /// Set the hybrid keypair for both creating and appending to a hybrid-certificate archive.
+    pub fn hybrid_keypair(mut self, keypair: HybridKeyPair) -> Self {
+        self.auth_mode = AuthMode::HybridKemCertificate(keypair.certificate());
+        self.append_hybrid_keypair = Some(keypair);
+        self
+    }
+
+    /// Provide a hybrid private keypair solely for unlocking an existing archive in append mode
+    /// without altering the configured `auth_mode`.
+    pub fn append_hybrid_keypair(mut self, keypair: HybridKeyPair) -> Self {
+        self.append_hybrid_keypair = Some(keypair);
         self
     }
 
@@ -459,19 +497,18 @@ impl ArchiveWriterBuilder {
         let mut append_header: Option<SuperHeader> = None;
         let mut append_footer: Option<Footer> = None;
         let mut append_catalog: Option<Catalog> = None;
-        let mut append_manifest_data: Option<(EncryptedMacroBlock, u16, u32)> = None;
         let mut existing_manifest: Option<ArchiveManifest> = None;
         let mut key_encapsulation: Option<KeyEncapsulation> = None;
 
         // Extract Copy fields before moving config to avoid clone
         let config_erasure = self.config.erasure;
         let mut config = self.config;
-        // Determine erasure settings: explicit builder setting takes precedence over config default
-        let enable_erasure = match self.enable_erasure {
+        let explicit_enable_erasure = self.enable_erasure;
+        let mut enable_erasure = match explicit_enable_erasure {
             Some(explicit) => explicit, // Explicit .enable_erasure(true/false) call
             None => config_erasure.is_some(), // Fall back to config default
         };
-        let erasure_config = if self.enable_erasure == Some(true) {
+        let erasure_config = if explicit_enable_erasure == Some(true) {
             // Explicit builder setting takes precedence
             self.erasure_config
         } else if let Some(cfg) = config_erasure {
@@ -489,10 +526,16 @@ impl ArchiveWriterBuilder {
         let mut master_key = Zeroizing::new([0u8; 32]);
         let mut archive_salt = era_crypto::Salt::generate();
         let mut recipients = Vec::new();
-        let mut skip_auth_setup = false;
+        let mut recovered_session: Option<(KeySession, VolumeKey)> = None;
+        let mut append_retained_end = era_volume::DATA_REGION_START;
+        let mut append_data_block_count = 0u32;
+        let mut recovered_index_entries: Vec<(ChunkHash, BlockLocation)> = Vec::new();
 
-        if self.append_existing && tokio::fs::try_exists(&self.output_path).await? {
-            // 1. Locate existing volume (Volume 0) to get Valid DNA
+        let append_to_existing =
+            self.append_existing && tokio::fs::try_exists(&self.output_path).await?;
+
+        if append_to_existing {
+            // 1. Validate volume 0 DNA before unlocking credentials
             let base_filename = self
                 .output_path
                 .file_name()
@@ -513,13 +556,6 @@ impl ArchiveWriterBuilder {
             })?;
 
             let loaded_header = vol0_reader.header().clone();
-
-            // 2. DNA Check & Inheritance (Mandatory)
-            config = loaded_header.config().clone();
-            archive_id = loaded_header.archive_id();
-            archive_salt = Salt::from_bytes(*loaded_header.salt());
-            recipients = loaded_header.recipients().to_vec();
-
             if matches!(
                 loaded_header.access_policy(),
                 era_volume::AccessPolicy::Threshold(_)
@@ -528,128 +564,107 @@ impl ArchiveWriterBuilder {
                     "Threshold authentication not supported for append mode".into(),
                 ));
             }
-
-            // 3. Hydrate Key Session (Recover Master Key)
-            let mut recovered_mk: Option<[u8; 32]> = None;
-
-            for slot in &recipients {
-                if let (
-                    AuthMode::Password(pwd) | AuthMode::Hybrid { password: pwd, .. },
-                    RecipientType::Argon2idPassword,
-                ) = (&self.auth_mode, slot.r_type())
-                {
-                    if let Ok(archived) = rkyv::access::<
-                        rkyv::Archived<PasswordSlotParams>,
-                        rkyv::rancor::Error,
-                    >(slot.params())
-                    {
-                        let salt = Salt::from_bytes(archived.salt);
-                        let kdf_params = KdfParams {
-                            memory_cost: archived.kdf_memory_cost.into(),
-                            time_cost: archived.kdf_time_cost.into(),
-                            parallelism: archived.kdf_parallelism.into(),
-                        };
-                        if let Ok(kek) = era_crypto::derive_key(pwd.as_bytes(), &salt, &kdf_params)
-                        {
-                            if let Ok(ctx) = XChaCha20Poly1305Context::from_derived_key(&kek) {
-                                if slot.encrypted_master_key().len() >= 24 {
-                                    if let Ok(nonce_arr) =
-                                        slot.encrypted_master_key()[0..24].try_into()
-                                    {
-                                        let ct = &slot.encrypted_master_key()[24..];
-                                        if let Ok(mk) = ctx.decrypt(
-                                            nonce_arr,
-                                            crate::auth::MK_WRAP_AAD_DOMAIN,
-                                            ct,
-                                        ) {
-                                            if let Ok(mk_arr) = mk.try_into() {
-                                                recovered_mk = Some(mk_arr);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            *master_key = recovered_mk.ok_or(era_common::EraError::InvalidKey(
-                "No valid credentials found for append (password/key mismatch)".into(),
-            ))?;
-
-            // 4. Find Last Volume and load Footer/Catalog
-            // Identify total volumes by checking existence relative to backend
-            let mut last_valid_reader = vol0_reader;
-            let mut current_vol_idx = 0;
-
-            let stem = self.output_path.file_stem().unwrap_or_default();
-
-            loop {
-                let next_idx = current_vol_idx + 1;
-                // e.g. archive.era.001
-                let next_filename_str = format!("{}.era.{:03}", stem.to_string_lossy(), next_idx);
-                let next_filename = Path::new(&next_filename_str);
-
-                if let Ok(r) =
-                    VolumeReader::<era_storage::LocalStorageReader>::open(&backend, next_filename)
-                        .await
-                {
-                    last_valid_reader = r;
-                    current_vol_idx = next_idx;
-                } else {
-                    break;
-                }
-            }
-
-            // Read footer from the LAST volume
-            if let Some(f) = last_valid_reader.footer() {
-                append_footer = Some(f.clone());
-                // Load catalog if present
-                if f.catalog_offset() > 0 && f.catalog_size() > 0 {
-                    if let Ok(catalog_bytes) = last_valid_reader
-                        .read_raw(f.catalog_offset(), f.catalog_size() as usize)
-                        .await
-                    {
-                        if let Ok(catalog) = Catalog::from_bytes(&catalog_bytes) {
-                            append_catalog = Some(catalog);
-                        }
-                    }
-                }
-                if f.has_manifest() {
-                    let manifest_block_id = f.manifest_block_id();
-                    let manifest_location = BlockLocation::single(
-                        last_valid_reader.header().volume_id(),
-                        manifest_block_id,
-                        f.manifest_offset(),
-                        0,
-                    );
-                    if let Ok(block) = last_valid_reader.read_block(&manifest_location).await {
-                        append_manifest_data = Some((
-                            block,
-                            last_valid_reader.header().volume_sequence(),
-                            manifest_block_id,
-                        ));
-                    }
-                }
-            } else {
-                return Err(era_common::EraError::CorruptedHeader(
-                    "Existing archive has no footer - cannot append".into(),
+            if loaded_header.config().erasure.is_some() || explicit_enable_erasure == Some(true) {
+                return Err(era_common::EraError::InvalidFormat(
+                    "Append mode is not supported for erasure-coded archives".into(),
                 ));
             }
+            if loaded_header.total_volumes() > 1 {
+                return Err(era_common::EraError::InvalidFormat(
+                    "Append mode is only supported for single-volume archives".into(),
+                ));
+            }
+            drop(vol0_reader);
 
+            // 2. Inherit archive DNA
+            config = loaded_header.config().clone();
+            enable_erasure = false;
+            archive_id = loaded_header.archive_id();
+            archive_salt = Salt::from_bytes(*loaded_header.salt());
+            recipients = loaded_header.recipients().to_vec();
+
+            // 3. Unlock and recover authoritative metadata via ArchiveReader
+            let providers = build_append_auth_providers(
+                &self.auth_mode,
+                self.append_keypair.as_ref(),
+                self.append_hybrid_keypair.as_ref(),
+            )?;
+            let mut reader =
+                ArchiveReader::open_with_providers(&self.output_path, providers).await?;
+            reader.preflight_metadata_recovery().await?;
+
+            let session = reader.session().try_clone()?;
+            let volume_key = session.unwrap_volume_key(
+                loaded_header.encrypted_volume_key().nonce(),
+                loaded_header.encrypted_volume_key().ciphertext(),
+            )?;
+            recovered_session = Some((session, volume_key));
+
+            let footer = reader
+                .volume_readers()
+                .first()
+                .and_then(|vr| vr.footer().cloned())
+                .ok_or_else(|| {
+                    era_common::EraError::CorruptedHeader(
+                        "Existing archive has no footer - cannot append".into(),
+                    )
+                })?;
+
+            let manifest_opt = reader.manifest().cloned();
+            if let Some(ref manifest) = manifest_opt {
+                let seq = footer.sequence_number();
+                if let Some(&committed_end) = manifest.volume_committed_ends.get(seq as usize) {
+                    if footer.data_end_offset() < committed_end {
+                        return Err(EraError::IntegrityError(format!(
+                            "Volume {} footer data_end_offset {} is less than manifest committed end {}. \
+                             This indicates footer corruption or manifest mismatch.",
+                            seq, footer.data_end_offset(), committed_end
+                        )));
+                    }
+                }
+            }
+
+            let vol0 = reader.volume_readers().first().ok_or_else(|| {
+                era_common::EraError::CorruptedHeader("Missing volume 0 reader".into())
+            })?;
+            let manifest_committed_end = manifest_opt
+                .as_ref()
+                .and_then(|m| m.volume_committed_ends.first().copied());
+            let (committed_end, data_block_count, block_spans) =
+                scan_retained_data_region(vol0, footer.data_end_offset(), manifest_committed_end)
+                    .await?;
+            append_retained_end = committed_end;
+            append_data_block_count = data_block_count;
+
+            let catalog = reader.catalog().cloned().unwrap_or_default();
+            recovered_index_entries = recover_append_index_entries(
+                &reader,
+                &catalog,
+                committed_end,
+                &block_spans,
+                &config.compression,
+            )
+            .await?;
+
+            existing_manifest = manifest_opt;
+            append_catalog = Some(catalog);
+            append_footer = Some(footer);
             append_header = Some(loaded_header);
-            skip_auth_setup = true;
         } else {
             // Generate Master Key (DEK) for new archive
             OsRng.fill_bytes(master_key.as_mut());
         }
 
-        let session = KeySession::from_master_key(&master_key)?;
-
-        // 1. Password Mode (adds password recipient(s))
-        if !skip_auth_setup {
+        let (session, volume_key, encrypted_volume_key) = if let Some((session, volume_key)) =
+            recovered_session
+        {
+            let append = append_header.as_ref().ok_or_else(|| {
+                era_common::EraError::CorruptedHeader("Missing append header".into())
+            })?;
+            (session, volume_key, append.encrypted_volume_key().clone())
+        } else {
+            let session = KeySession::from_master_key(&master_key)?;
+            // 1. Password Mode (adds password recipient(s))
             let has_password = matches!(
                 self.auth_mode,
                 AuthMode::Password(_)
@@ -862,21 +877,6 @@ impl ArchiveWriterBuilder {
                     _ => unreachable!(),
                 }
             }
-        }
-
-        // Zeroize master key from stack
-        master_key.zeroize();
-
-        let (volume_key, encrypted_volume_key) = if self.append_existing {
-            let append = append_header.as_ref().ok_or_else(|| {
-                era_common::EraError::CorruptedHeader("Missing append header".into())
-            })?;
-            let existing_vk = session.unwrap_volume_key(
-                append.encrypted_volume_key().nonce(),
-                append.encrypted_volume_key().ciphertext(),
-            )?;
-            (existing_vk, append.encrypted_volume_key().clone())
-        } else {
             // Generate random Volume Key and wrap it with IK derived from MK
             let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key()?;
             let encrypted_volume_key = era_volume::EncryptedVolumeKey::new(
@@ -884,72 +884,17 @@ impl ArchiveWriterBuilder {
                 wrapped_vk.nonce,
                 wrapped_vk.ciphertext,
             );
-            (volume_key, encrypted_volume_key)
+            (session, volume_key, encrypted_volume_key)
         };
+
+        // Zeroize master key from stack
+        master_key.zeroize();
 
         // Store nonce context (salt) for block encryption
         let nonce_context = *archive_salt.as_bytes();
 
-        // Decrypt the prior manifest in append mode so finalize_sequence and
-        // per-volume committed ends remain monotonic across append finalizes.
-        if let Some((encrypted_block, vol_seq, manifest_block_id)) = append_manifest_data {
-            let block_key =
-                session.derive_block_key(&volume_key, manifest_block_id as u64, &nonce_context)?;
-            let derived_key = block_key.to_derived_key()?;
-            let aead_ctx = XChaCha20Poly1305Context::from_derived_key(&derived_key)?;
-            let nonce_slice = encrypted_block
-                .data
-                .get(..NONCE_SIZE)
-                .ok_or_else(|| EraError::IntegrityError("Manifest nonce too short".into()))?;
-            let nonce_bytes: [u8; NONCE_SIZE] = nonce_slice
-                .try_into()
-                .map_err(|_| EraError::IntegrityError("Manifest nonce too short".into()))?;
-            let ciphertext = encrypted_block
-                .data
-                .get(NONCE_SIZE..)
-                .ok_or_else(|| EraError::IntegrityError("Manifest ciphertext missing".into()))?;
-            let epoch_id = append_header
-                .as_ref()
-                .ok_or_else(|| {
-                    era_common::EraError::CorruptedHeader("Missing append header".into())
-                })?
-                .epoch_id();
-            let archive_id_bytes = *archive_id.0.as_bytes();
-            let aad = build_aad(
-                &archive_id_bytes,
-                epoch_id,
-                BlockType::Manifest,
-                vol_seq as u32,
-                BlockId::new(manifest_block_id as u64),
-            );
-            let decrypted = aead_ctx
-                .decrypt(&nonce_bytes, &aad, ciphertext)
-                .map_err(|e| {
-                    EraError::IntegrityError(format!("Failed to decrypt existing manifest: {}", e))
-                })?;
-            let manifest = ArchiveManifest::from_bytes(&decrypted).map_err(|e| {
-                EraError::IntegrityError(format!("Failed to deserialize existing manifest: {}", e))
-            })?;
-
-            // Verify footer data_end_offset >= manifest committed_end (integrity check)
-            if let Some(ref footer) = append_footer {
-                let seq = footer.sequence_number();
-                if let Some(&committed_end) = manifest.volume_committed_ends.get(seq as usize) {
-                    if footer.data_end_offset() < committed_end {
-                        return Err(EraError::IntegrityError(format!(
-                            "Volume {} footer data_end_offset {} is less than manifest committed end {}. \
-                             This indicates footer corruption or manifest mismatch.",
-                            seq, footer.data_end_offset(), committed_end
-                        )));
-                    }
-                }
-            }
-
-            existing_manifest = Some(manifest);
-        }
-
         // Build config with erasure setting
-        if !self.append_existing {
+        if !append_to_existing {
             if enable_erasure {
                 config.erasure = Some(erasure_config);
             } else {
@@ -1056,21 +1001,15 @@ impl ArchiveWriterBuilder {
         pool_config = pool_config.with_max_size(max_volume_size);
 
         // Initialize catalog - MUST be done before VolumePool creation (truncation)
-        let mut catalog = Catalog::new();
-        if let Some(existing) = append_catalog {
-            catalog = existing;
-        } else if self.append_existing {
-            let mut reader = ArchiveReader::open_with_session(&self.output_path, &session).await?;
-            catalog = reader.load_catalog().await?.clone();
-        }
+        let catalog = append_catalog.unwrap_or_default();
 
-        let active_header = if self.append_existing {
+        let active_header = if append_to_existing {
             append_header.clone().unwrap_or_else(|| header.clone())
         } else {
             header.clone()
         };
 
-        let volume_pool = if self.append_existing {
+        let volume_pool = if append_to_existing {
             if enable_erasure {
                 return Err(era_common::EraError::InvalidFormat(
                     "Append mode is not supported for erasure-coded archives".into(),
@@ -1079,16 +1018,14 @@ impl ArchiveWriterBuilder {
             let footer = append_footer
                 .as_ref()
                 .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
-            let initial_committed_ends = existing_manifest
-                .as_ref()
-                .map(|m| m.volume_committed_ends.clone())
-                .unwrap_or_default();
-            VolumePool::open_append_single(
+            VolumePool::open_append_single_at(
                 backend.clone(),
                 pool_config,
                 active_header.clone(),
                 footer,
-                initial_committed_ends,
+                append_retained_end,
+                append_data_block_count,
+                vec![append_retained_end],
             )
             .await?
         } else {
@@ -1163,6 +1100,14 @@ impl ArchiveWriterBuilder {
             active_header.epoch_id(),
         )?;
 
+        if !recovered_index_entries.is_empty() {
+            chunk_index.start_batch();
+            for (hash, location) in recovered_index_entries {
+                chunk_index.put(hash, location)?;
+            }
+            chunk_index.commit_batch()?;
+        }
+
         // Load existing chunk locations from checkpoint if resuming
         if let Some(ref mgr) = checkpoint_manager {
             let should_restore_checkpoint_state = if self.recovery_options_explicit {
@@ -1196,8 +1141,8 @@ impl ArchiveWriterBuilder {
 
         target_block_size = target_block_size.min(capacity.max_data_chunk_size()).max(1);
 
-        let next_block_id = if self.append_existing {
-            volume_pool.current_block_count() as u64
+        let next_block_id = if append_to_existing {
+            u64::from(append_data_block_count)
         } else {
             0
         };
@@ -2198,7 +2143,9 @@ impl ArchiveWriter {
         self.flush_pending().await?;
         self.pipeline.flush_stripe().await?;
 
-        self.catalog.block_locations = self.pipeline.take_written_block_locations();
+        self.catalog
+            .block_locations
+            .extend(self.pipeline.take_written_block_locations());
 
         self.pipeline.commit_durable_checkpoint().await?;
         debug!("Durable checkpoint committed before catalog write");
@@ -2642,6 +2589,178 @@ impl ArchiveWriter {
 
 fn is_internal_path(path: &Path) -> bool {
     path.to_string_lossy().starts_with(INTERNAL_META_PREFIX)
+}
+
+fn build_append_auth_providers(
+    auth_mode: &AuthMode,
+    append_keypair: Option<&EraKeyPair>,
+    append_hybrid_keypair: Option<&HybridKeyPair>,
+) -> Result<Vec<Box<dyn AuthProvider>>> {
+    let mut providers: Vec<Box<dyn AuthProvider>> = Vec::new();
+    match auth_mode {
+        AuthMode::Password(pwd)
+        | AuthMode::Hybrid { password: pwd, .. }
+        | AuthMode::HybridKemWithPassword { password: pwd, .. } => {
+            providers.push(Box::new(PasswordProvider::new(pwd.as_str().to_string())));
+        }
+        AuthMode::Certificate(_) | AuthMode::HybridKemCertificate(_) => {}
+    }
+    if let Some(kp) = append_keypair {
+        providers.push(Box::new(CertificateProvider::new(kp.clone())));
+    }
+    if let Some(kp) = append_hybrid_keypair {
+        providers.push(Box::new(HybridCertificateProvider::new(kp.clone())));
+    }
+    if providers.is_empty() {
+        return Err(EraError::InvalidKey(
+            "Appending to a certificate-encrypted archive requires a private keypair (.keypair() or .hybrid_keypair())"
+                .into(),
+        ));
+    }
+    Ok(providers)
+}
+
+async fn scan_retained_data_region(
+    vol_reader: &VolumeReader<era_storage::LocalStorageReader>,
+    data_end_offset: u64,
+    manifest_committed_end: Option<u64>,
+) -> Result<(u64, u32, Vec<(u64, u32)>)> {
+    const MAX_SCAN_BLOCK_SIZE: u32 = 64 * 1024 * 1024;
+    let start = era_volume::DATA_REGION_START;
+    let bound = match manifest_committed_end {
+        Some(end) => {
+            if end < start || end > data_end_offset {
+                return Err(EraError::IntegrityError(format!(
+                    "Manifest committed end {} out of bounds [{}..={}]",
+                    end, start, data_end_offset
+                )));
+            }
+            end
+        }
+        None => data_end_offset,
+    };
+
+    let mut offset = start;
+    let mut block_count = 0u32;
+    let mut block_spans = Vec::new();
+    while offset < bound {
+        if offset + BlockHeader::SIZE as u64 > bound {
+            return Err(EraError::CorruptedHeader(format!(
+                "Truncated BlockHeader at offset {} before retained boundary {}",
+                offset, bound
+            )));
+        }
+        let header_bytes = vol_reader.read_raw(offset, BlockHeader::SIZE).await?;
+        let header = BlockHeader::from_bytes(&header_bytes).ok_or_else(|| {
+            EraError::CorruptedHeader(format!("Invalid BlockHeader at offset {}", offset))
+        })?;
+        if header.block_type != BlockType::Data {
+            if manifest_committed_end.is_none() {
+                break;
+            }
+            return Err(EraError::IntegrityError(format!(
+                "Unexpected non-Data block {:?} inside committed data region at offset {}",
+                header.block_type, offset
+            )));
+        }
+        if header.length == 0 || header.length > MAX_SCAN_BLOCK_SIZE {
+            return Err(EraError::CorruptedHeader(format!(
+                "Invalid BlockHeader length {} at offset {}",
+                header.length, offset
+            )));
+        }
+        let next_offset = offset + BlockHeader::SIZE as u64 + u64::from(header.length);
+        if next_offset > bound {
+            return Err(EraError::CorruptedHeader(format!(
+                "Block at offset {} extends past retained boundary {}",
+                offset, bound
+            )));
+        }
+        block_spans.push((offset, header.length));
+        block_count = block_count
+            .checked_add(1)
+            .ok_or_else(|| EraError::InvalidFormat("data block count overflow".into()))?;
+        offset = next_offset;
+    }
+    Ok((offset, block_count, block_spans))
+}
+
+async fn recover_append_index_entries(
+    reader: &ArchiveReader,
+    catalog: &Catalog,
+    committed_end: u64,
+    block_spans: &[(u64, u32)],
+    compression: &era_common::CompressionConfig,
+) -> Result<Vec<(ChunkHash, BlockLocation)>> {
+    let mut loc_by_slot: HashMap<u32, BlockLocation> =
+        HashMap::with_capacity(catalog.block_locations.len());
+    for loc in &catalog.block_locations {
+        loc_by_slot.insert(loc.slot_index, loc.clone());
+    }
+
+    if let Some(index_reader) = reader.index_reader() {
+        let mut entries = Vec::with_capacity(index_reader.total_entry_count());
+        for entry in index_reader.iter_entries() {
+            let slot_index = u32::try_from(entry.block_id().sequence())
+                .map_err(|_| EraError::IntegrityError("Index block_id exceeds u32".into()))?;
+            let location = loc_by_slot.get(&slot_index).cloned().unwrap_or_else(|| {
+                let (offset, len) = block_spans
+                    .get(slot_index as usize)
+                    .copied()
+                    .unwrap_or((0, entry.length()));
+                BlockLocation::single(entry.volume_id(), slot_index, offset, len)
+            });
+            entries.push((*entry.hash(), location));
+        }
+        return Ok(entries);
+    }
+
+    if block_spans.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let vol0 = reader
+        .volume_readers()
+        .first()
+        .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing volume 0 reader".into()))?;
+    let compressor: Box<dyn era_codec::Compressor> = match compression.algorithm {
+        era_common::CompressionAlgorithm::None => Box::new(era_codec::NoCompressor),
+        era_common::CompressionAlgorithm::Zstd => {
+            Box::new(era_codec::ZstdCompressor::new(compression.level))
+        }
+        era_common::CompressionAlgorithm::LZ4 => {
+            Box::new(era_codec::LZ4Compressor::new(compression.level))
+        }
+    };
+    let mut iter = SessionBlockIterator::new(
+        vol0,
+        reader.session(),
+        reader.volume_key(),
+        reader.nonce_context(),
+        reader.archive_id_bytes(),
+        reader.epoch_id(),
+        compressor,
+        Some(vec![committed_end]),
+    );
+    let vol_id = vol0.header().volume_id();
+    let mut entries = Vec::new();
+    while let Some(block_res) = iter.next_block().await {
+        let decoded = block_res?;
+        let location = loc_by_slot
+            .get(&decoded.block_index)
+            .cloned()
+            .unwrap_or_else(|| {
+                let (offset, len) = block_spans
+                    .get(decoded.block_index as usize)
+                    .copied()
+                    .unwrap_or((0, 1));
+                BlockLocation::single(vol_id, decoded.block_index, offset, len)
+            });
+        for (hash, _) in decoded.chunks {
+            entries.push((hash, location.clone()));
+        }
+    }
+    Ok(entries)
 }
 
 struct FinalizeBudgetSummary {

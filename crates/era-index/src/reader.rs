@@ -1122,6 +1122,13 @@ impl IndexReader {
         self.embedded_pages.values().map(|p| p.len()).sum()
     }
 
+    /// Iterate over all entries stored in recovered embedded pages.
+    pub fn iter_entries(&self) -> impl Iterator<Item = &IndexEntry> {
+        self.embedded_pages
+            .values()
+            .flat_map(|page| page.entries().iter())
+    }
+
     /// Load an L2 page from embedded pages
     fn load_page(&self, block_id: BlockId) -> Result<Arc<IndexPage>> {
         // Check embedded pages first (recovery mode)

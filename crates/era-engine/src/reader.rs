@@ -933,6 +933,10 @@ impl ArchiveReader {
         &self.volume_key
     }
 
+    pub(crate) fn volume_readers(&self) -> &[VolumeReader<era_storage::LocalStorageReader>] {
+        &self.volume_readers
+    }
+
     pub fn compression_algorithm(&self) -> era_common::CompressionAlgorithm {
         self.compression_algorithm
     }

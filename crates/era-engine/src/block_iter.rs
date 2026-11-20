@@ -813,9 +813,9 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionBlockIterator<'
 
             let block_size = header.length;
 
-            // Skip non-data blocks (e.g., IndexPage, IndexManifest) — they are
-            // encrypted with different keys and are not part of the data stream.
-            if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
+            // Skip non-data blocks (e.g., Catalog, IndexPage, IndexManifest) — they are
+            // encrypted with different block-type AADs/keys and are not part of the data stream.
+            if header.block_type != BlockType::Data {
                 check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     self.volume_reader,
@@ -1012,7 +1012,7 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for MultiVolumeSessionBloc
 
             let block_size = header.length;
 
-            if header.block_type != BlockType::Data && header.block_type != BlockType::Catalog {
+            if header.block_type != BlockType::Data {
                 check_commit_or_end!(
                     self.committed_ends.as_deref(),
                     reader,

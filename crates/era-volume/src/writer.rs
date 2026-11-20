@@ -134,6 +134,27 @@ impl<W: StorageWriter> VolumeWriter<W> {
         header: SuperHeader,
         footer: &Footer,
     ) -> Result<Self> {
+        Self::open_append_at(
+            backend,
+            path,
+            header,
+            footer,
+            footer.data_end_offset(),
+            footer.block_count(),
+        )
+        .await
+    }
+
+    /// Open an existing volume for appending, truncating directly to `append_offset`
+    /// and continuing canonical block numbering from `initial_block_count`.
+    pub async fn open_append_at<B: StorageBackend<Writer = W>>(
+        backend: &B,
+        path: &Path,
+        header: SuperHeader,
+        footer: &Footer,
+        append_offset: u64,
+        initial_block_count: u32,
+    ) -> Result<Self> {
         let mut writer = backend.open_append(path).await?;
 
         // SECURITY: Validate footer.data_end_offset against actual file size
@@ -146,27 +167,71 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 actual_size
             )));
         }
+        if append_offset < DATA_REGION_START || append_offset > footer.data_end_offset() {
+            return Err(era_common::EraError::CorruptedFooter(format!(
+                "append_offset {} out of bounds [{}..={}]",
+                append_offset,
+                DATA_REGION_START,
+                footer.data_end_offset()
+            )));
+        }
 
-        writer.truncate(footer.data_end_offset()).await?;
+        writer.truncate(append_offset).await?;
+
+        let (last_checkpoint_offset, last_checkpoint_block_id) =
+            if footer.last_checkpoint_offset() < append_offset {
+                (
+                    footer.last_checkpoint_offset(),
+                    footer.last_checkpoint_block_id(),
+                )
+            } else {
+                (0, 0)
+            };
+        let (last_catalog_offset, last_catalog_size, last_catalog_block_id) =
+            if footer.catalog_offset() < append_offset {
+                (
+                    footer.catalog_offset(),
+                    footer.catalog_size(),
+                    footer.catalog_block_id(),
+                )
+            } else {
+                (0, 0, 0)
+            };
+        let (last_index_offset, last_index_size, last_index_block_id) =
+            if footer.index_offset() < append_offset {
+                (
+                    footer.index_offset(),
+                    footer.index_size(),
+                    footer.index_block_id(),
+                )
+            } else {
+                (0, 0, 0)
+            };
+        let (last_manifest_offset, last_manifest_block_id) =
+            if footer.manifest_offset() < append_offset {
+                (footer.manifest_offset(), footer.manifest_block_id())
+            } else {
+                (0, 0)
+            };
 
         Ok(Self {
             writer,
             header,
-            position: footer.data_end_offset(),
-            block_count: footer.block_count(),
+            position: append_offset,
+            block_count: initial_block_count,
             raw_bytes_written: 0,
             sequence: footer.sequence_number(),
             max_size: None,
-            last_checkpoint_offset: footer.last_checkpoint_offset(),
-            last_checkpoint_block_id: footer.last_checkpoint_block_id(),
-            last_catalog_offset: footer.catalog_offset(),
-            last_catalog_size: footer.catalog_size(),
-            last_catalog_block_id: footer.catalog_block_id(),
-            last_index_offset: footer.index_offset(),
-            last_index_size: footer.index_size(),
-            last_index_block_id: footer.index_block_id(),
-            last_manifest_offset: footer.manifest_offset(),
-            last_manifest_block_id: footer.manifest_block_id(),
+            last_checkpoint_offset,
+            last_checkpoint_block_id,
+            last_catalog_offset,
+            last_catalog_size,
+            last_catalog_block_id,
+            last_index_offset,
+            last_index_size,
+            last_index_block_id,
+            last_manifest_offset,
+            last_manifest_block_id,
         })
     }
 

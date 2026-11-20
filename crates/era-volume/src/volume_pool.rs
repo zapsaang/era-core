@@ -306,9 +306,32 @@ impl<B: StorageBackend> VolumePool<B> {
     /// Returns I/O errors from opening the volume on the storage backend.
     pub async fn open_append_single(
         backend: B,
+        config: VolumePoolConfig,
+        header: SuperHeader,
+        footer: &crate::Footer,
+        initial_committed_ends: Vec<u64>,
+    ) -> Result<Self> {
+        Self::open_append_single_at(
+            backend,
+            config,
+            header,
+            footer,
+            footer.data_end_offset(),
+            footer.block_count(),
+            initial_committed_ends,
+        )
+        .await
+    }
+
+    /// Open a single-volume archive for appending, truncating to `append_offset` and
+    /// continuing canonical block numbering from `initial_block_count`.
+    pub async fn open_append_single_at(
+        backend: B,
         mut config: VolumePoolConfig,
         header: SuperHeader,
         footer: &crate::Footer,
+        append_offset: u64,
+        initial_block_count: u32,
         initial_committed_ends: Vec<u64>,
     ) -> Result<Self> {
         if header.volume_sequence() != 0
@@ -324,11 +347,16 @@ impl<B: StorageBackend> VolumePool<B> {
         let volume_path = config.volume_path(0);
         let volume_filename = extract_filename(&volume_path)?;
 
-        let append_start_position = footer.data_end_offset();
-        check_retained_volume_size(append_start_position, config.max_volume_size)?;
-        let writer =
-            VolumeWriter::open_append(&backend, Path::new(volume_filename), header.clone(), footer)
-                .await?;
+        check_retained_volume_size(append_offset, config.max_volume_size)?;
+        let writer = VolumeWriter::open_append_at(
+            &backend,
+            Path::new(volume_filename),
+            header.clone(),
+            footer,
+            append_offset,
+            initial_block_count,
+        )
+        .await?;
         let block_sequence = writer.block_count() as u64;
 
         let stats = VolumePoolStats {
@@ -349,7 +377,7 @@ impl<B: StorageBackend> VolumePool<B> {
             initial_committed_ends,
             append_start_positions: {
                 let mut map = HashMap::new();
-                map.insert(0, append_start_position);
+                map.insert(0, append_offset);
                 map
             },
         })
