@@ -2,6 +2,7 @@ use era_common::{
     ArchiveConfig, CompressionAlgorithm, CompressionConfig, EraError, ErasureCodeConfig,
 };
 use era_engine::ArchiveWriterBuilder;
+use era_ingest::ChunkerConfig;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -29,16 +30,58 @@ fn count_volume_files(base_path: &Path, max_scan: usize) -> usize {
 }
 
 #[tokio::test]
-async fn test_build_rejects_volume_capacity_below_fastcdc_minimum_without_creating_output() {
+async fn test_build_rejects_max_volume_size_below_one_mib_without_creating_output() {
     let temp_dir = TempDir::new().unwrap();
-    let base_path = temp_dir.path().join("colocated.era");
+    let base_path = temp_dir.path().join("too_small.era");
+
+    let result = ArchiveWriterBuilder::new(&base_path)
+        .password("test_password")
+        .max_volume_size(1024 * 1024 - 1)
+        .build()
+        .await;
+
+    let entries = std::fs::read_dir(temp_dir.path()).unwrap().count();
+    let error = result.err();
+    assert!(
+        matches!(error, Some(EraError::InvalidConfig(_))) && entries == 0,
+        "expected InvalidConfig and an empty output directory, got {error:?} and {entries} entries"
+    );
+}
+
+#[tokio::test]
+async fn test_build_rejects_config_volume_max_size_below_one_mib_without_creating_output() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_path = temp_dir.path().join("too_small_cfg.era");
+    let mut cfg = ArchiveConfig::default();
+    cfg.volume.max_size = 512 * 1024;
+
+    let result = ArchiveWriterBuilder::new(&base_path)
+        .password("test_password")
+        .config(cfg)
+        .build()
+        .await;
+
+    let entries = std::fs::read_dir(temp_dir.path()).unwrap().count();
+    let error = result.err();
+    assert!(
+        matches!(error, Some(EraError::InvalidConfig(_))) && entries == 0,
+        "expected InvalidConfig and an empty output directory, got {error:?} and {entries} entries"
+    );
+}
+
+#[tokio::test]
+async fn test_build_rejects_invalid_chunker_config_without_creating_output() {
+    let temp_dir = TempDir::new().unwrap();
+    let base_path = temp_dir.path().join("invalid_chunker.era");
+
+    let mut invalid_chunker = ChunkerConfig::default();
+    invalid_chunker.min_size = 32;
 
     let result = ArchiveWriterBuilder::new(&base_path)
         .password("test_password")
         .enable_cdc(true)
-        .erasure_config(ErasureCodeConfig::new(16, 4))
-        .volume_count(1)
-        .max_volume_size(era_volume::MIN_VOLUME_SIZE)
+        .chunker_config(invalid_chunker)
+        .max_volume_size(era_engine::MIN_ARCHIVE_VOLUME_SIZE)
         .build()
         .await;
 

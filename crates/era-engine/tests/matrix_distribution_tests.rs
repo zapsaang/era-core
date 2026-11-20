@@ -437,7 +437,7 @@ async fn test_shard_size_validation() {
         ..Default::default()
     };
 
-    let max_volume_size = 30 * 1024;
+    let max_volume_size = 1024 * 1024;
     let mut writer = ArchiveWriterBuilder::new(&base_path)
         .config(config)
         .enable_erasure(true)
@@ -448,7 +448,14 @@ async fn test_shard_size_validation() {
         .await
         .unwrap();
 
-    let data = vec![0u8; 200 * 1024];
+    let data: Vec<u8> = (0u64..3 * 1024 * 1024)
+        .map(|i| {
+            let mut x = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            x ^= x >> 30;
+            x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            (x >> 56) as u8
+        })
+        .collect();
     writer.add_bytes("test.bin", &data).await.unwrap();
     writer.finalize().await.unwrap();
 
@@ -604,7 +611,7 @@ async fn test_matrix_distribution_large_archive() {
         .enable_erasure(true)
         .erasure_config(erasure_config)
         .volume_count(6)
-        .max_volume_size(500 * 1024) // 500KB per volume
+        .max_volume_size(1024 * 1024) // 1MB per volume
         .build()
         .await
         .unwrap();

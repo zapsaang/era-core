@@ -105,7 +105,7 @@ async fn test_repair_erasure_coded_single_volume_loss() {
             parity_shards: 2,
         })
         .volume_count(6)
-        .max_volume_size(256 * 1024)
+        .max_volume_size(1024 * 1024)
         .enable_small_file_packing(false)
         .build()
         .await

@@ -4,6 +4,22 @@ use std::mem::size_of;
 const CATALOG_PREFIX_SIZE: usize = 12;
 const LZ4_FRAME_OVERHEAD: usize = 20;
 
+/// Minimum supported archive volume size limit (1 MiB).
+pub const MIN_ARCHIVE_VOLUME_SIZE: u64 = 1024 * 1024;
+
+/// Validate that a configured or overridden `max_volume_size` meets [`MIN_ARCHIVE_VOLUME_SIZE`].
+///
+/// # Errors
+/// Returns [`EraError::InvalidConfig`] when `size` is below [`MIN_ARCHIVE_VOLUME_SIZE`].
+pub fn validate_max_volume_size(size: u64) -> Result<u64> {
+    if size < MIN_ARCHIVE_VOLUME_SIZE {
+        return Err(EraError::InvalidConfig(format!(
+            "max_volume_size ({size} bytes) is below minimum supported archive volume size ({MIN_ARCHIVE_VOLUME_SIZE} bytes / 1 MiB)"
+        )));
+    }
+    Ok(size)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VolumeCapacity {
     compression: CompressionAlgorithm,

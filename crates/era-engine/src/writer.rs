@@ -360,7 +360,7 @@ impl ArchiveWriterBuilder {
     /// Set maximum volume size for fixed-size splitting.
     ///
     /// Overrides the archive configuration's volume limit (1 GiB by default).
-    /// Limits below [`era_volume::MIN_VOLUME_SIZE`] are raised to that minimum.
+    /// Values below [`crate::MIN_ARCHIVE_VOLUME_SIZE`] (1 MiB) are rejected during build.
     pub fn max_volume_size(mut self, size: u64) -> Self {
         self.max_volume_size = Some(size);
         self
@@ -422,6 +422,13 @@ impl ArchiveWriterBuilder {
     /// Build the archive writer
     pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
+        if !self.append_existing {
+            crate::volume_capacity::validate_max_volume_size(
+                self.max_volume_size.unwrap_or(self.config.volume.max_size),
+            )?;
+        } else if let Some(size) = self.max_volume_size {
+            crate::volume_capacity::validate_max_volume_size(size)?;
+        }
         let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;
         // Create storage backend
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
@@ -2901,7 +2908,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_p3_7_builder_resolves_configured_capacity_and_override() {
-        for (configured_size, override_size) in [(64 * 1024, None), (128 * 1024, Some(64 * 1024))] {
+        for (configured_size, override_size) in
+            [(1024 * 1024, None), (2 * 1024 * 1024, Some(1024 * 1024))]
+        {
             let temp_dir = TempDir::new().unwrap();
             let archive_path = temp_dir.path().join("resolved_capacity.era");
             let mut config = ArchiveConfig::default();
@@ -2913,12 +2922,13 @@ mod tests {
                 .password("test_password")
                 .config(config)
                 .enable_erasure(false)
+                .target_block_size(512 * 1024)
                 .enable_cdc(false);
             if let Some(size) = override_size {
                 builder = builder.max_volume_size(size);
             }
             let mut writer = builder.build().await.unwrap();
-            let data: Vec<u8> = (0..192 * 1024).map(|i| (i % 251) as u8).collect();
+            let data: Vec<u8> = (0..3 * 512 * 1024).map(|i| (i % 251) as u8).collect();
             writer.add_bytes("payload.bin", &data).await.unwrap();
             writer.finalize().await.unwrap();
 
@@ -2937,8 +2947,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_p3_7_small_cap_catalog_chunking_and_manifest_preflight() {
-        const MAX_VOLUME_SIZE: u64 = 32 * 1024;
-        const FILE_COUNT: usize = 128;
+        const MAX_VOLUME_SIZE: u64 = 1024 * 1024;
+        const FILE_COUNT: usize = 500;
 
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("metadata_capacity.era");
@@ -2956,9 +2966,14 @@ mod tests {
             .await
             .unwrap();
 
+        let dir_segment = "m".repeat(220);
+        let deep_prefix = (0..10)
+            .map(|_| dir_segment.as_str())
+            .collect::<Vec<_>>()
+            .join("/");
         for i in 0..FILE_COUNT {
-            let name = format!("{i:03}_{}.bin", "metadata".repeat(24));
-            let data = vec![u8::try_from(i).unwrap(); 96];
+            let name = format!("{deep_prefix}/{i:03}_{}.bin", "x".repeat(180));
+            let data = vec![u8::try_from(i % 256).unwrap(); 96];
             writer.add_bytes(&name, &data).await.unwrap();
         }
         writer.finalize().await.unwrap();
@@ -2998,10 +3013,10 @@ mod tests {
             .await
             .unwrap();
         for i in 0..FILE_COUNT {
-            let name = format!("{i:03}_{}.bin", "metadata".repeat(24));
+            let name = format!("{deep_prefix}/{i:03}_{}.bin", "x".repeat(180));
             assert_eq!(
                 std::fs::read(output_dir.join(name)).unwrap(),
-                vec![u8::try_from(i).unwrap(); 96]
+                vec![u8::try_from(i % 256).unwrap(); 96]
             );
         }
     }

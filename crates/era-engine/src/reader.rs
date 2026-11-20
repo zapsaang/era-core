@@ -3108,19 +3108,19 @@ mod tests {
         let mut writer = ArchiveWriter::builder(&archive_path)
             .password(password)
             .config(test_config_no_ec())
-            .max_volume_size(200 * 1024)
-            .target_block_size(64 * 1024)
+            .max_volume_size(1024 * 1024)
+            .target_block_size(512 * 1024)
             .build()
             .await
             .unwrap();
 
         // Random data to defeat compression
         let mut rng = rand::rngs::OsRng;
-        let mut data_a = vec![0u8; 64 * 1024];
+        let mut data_a = vec![0u8; 512 * 1024];
         rng.fill_bytes(&mut data_a);
-        let mut data_b = vec![0u8; 64 * 1024];
+        let mut data_b = vec![0u8; 512 * 1024];
         rng.fill_bytes(&mut data_b);
-        let mut data_c = vec![0u8; 64 * 1024];
+        let mut data_c = vec![0u8; 512 * 1024];
         rng.fill_bytes(&mut data_c);
 
         writer.add_bytes("a.bin", &data_a).await.unwrap();

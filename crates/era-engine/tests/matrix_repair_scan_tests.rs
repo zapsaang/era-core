@@ -30,12 +30,12 @@ const STRIPES_PER_GENERATION: usize = 2;
 
 #[tokio::test]
 async fn writer_generations_full_width_roundtrip_and_repair() {
-    assert_writer_generations(6, 110_000).await;
+    assert_writer_generations(6, 1024 * 1024).await;
 }
 
 #[tokio::test]
 async fn writer_generations_colocated_shards_roundtrip_and_repair() {
-    assert_writer_generations(3, 160_000).await;
+    assert_writer_generations(3, 1536 * 1024).await;
 }
 
 async fn assert_writer_generations(width: usize, cap: u64) {
@@ -47,14 +47,14 @@ async fn assert_writer_generations(width: usize, cap: u64) {
     };
     config.compression.algorithm = CompressionAlgorithm::None;
     let files: Vec<_> = (1..=15u8)
-        .map(|i| (format!("{i}.bin"), vec![i; 64 * 1024 - usize::from(i % 2)]))
+        .map(|i| (format!("{i}.bin"), vec![i; 640 * 1024 - usize::from(i % 2)]))
         .collect();
     let mut writer = ArchiveWriterBuilder::new(&base)
         .password(PASSWORD)
         .config(config)
         .volume_count(width)
         .max_volume_size(cap)
-        .target_block_size(64 * 1024)
+        .target_block_size(640 * 1024)
         .enable_cdc(false)
         .build()
         .await

@@ -206,15 +206,15 @@ async fn test_rotated_manifest_authenticates_final_header_and_keeps_dense_data_e
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_password")
         .config(config)
-        .max_volume_size(110_000)
-        .target_block_size(64 * 1024)
+        .max_volume_size(1024 * 1024)
+        .target_block_size(512 * 1024)
         .enable_cdc(false)
         .build()
         .await
         .unwrap();
-    for i in 1..=3u8 {
+    for i in 1..=5u8 {
         writer
-            .add_bytes(&format!("{i}.bin"), &vec![i; 64 * 1024])
+            .add_bytes(&format!("{i}.bin"), &vec![i; 512 * 1024])
             .await
             .unwrap();
     }
@@ -294,14 +294,14 @@ async fn test_non_ec_generations_roundtrip_from_first_and_last_volume() {
         ..Default::default()
     };
     config.compression.algorithm = CompressionAlgorithm::None;
-    let files: Vec<(String, Vec<u8>)> = (1..=3u8)
-        .map(|value| (format!("{value}.bin"), vec![value; 64 * 1024]))
+    let files: Vec<(String, Vec<u8>)> = (1..=5u8)
+        .map(|value| (format!("{value}.bin"), vec![value; 512 * 1024]))
         .collect();
     let mut writer = ArchiveWriter::builder(&archive_path)
         .password("test_password")
         .config(config)
-        .max_volume_size(110_000)
-        .target_block_size(64 * 1024)
+        .max_volume_size(1024 * 1024)
+        .target_block_size(512 * 1024)
         .enable_cdc(false)
         .build()
         .await
