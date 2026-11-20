@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, BufReader};
 // use tracing::{debug, warn};
 
 /// Threshold for using CDC chunking (files larger than this use chunking)
-const CDC_THRESHOLD: u64 = 256 * 1024; // 256KB
+const CDC_THRESHOLD: usize = 256 * 1024; // 256KB
 
 /// Configuration for directory scanning
 #[derive(Debug, Clone)]
@@ -277,32 +277,24 @@ impl FileReader {
 
     /// Read a file with automatic chunking for large files (Async Stream)
     ///
-    /// Files smaller than `CDC_THRESHOLD` are returned as a single chunk.
-    /// Larger files are split using FastCDC content-defined chunking.
+    /// With CDC enabled, files exceeding the smaller of `CDC_THRESHOLD` and
+    /// the configured maximum chunk size are split using streaming FastCDC.
     pub async fn read_file_chunked_stream(
         &self,
         path: &Path,
     ) -> Result<std::pin::Pin<Box<dyn Stream<Item = Result<UniqueChunk>> + Send>>> {
         let file = File::open(path).await.map_err(EraError::Io)?;
         let metadata = file.metadata().await.map_err(EraError::Io)?;
-        let size = metadata.len();
-
-        if !self.use_cdc || size <= CDC_THRESHOLD {
+        let single_chunk_limit = CDC_THRESHOLD.min(self.chunker_config.max_size);
+        if !self.use_cdc
+            || usize::try_from(metadata.len()).is_ok_and(|size| size <= single_chunk_limit)
+        {
             // Small file: read as single chunk
             let chunk = self.read_file(path).await?;
             return Ok(Box::pin(futures::stream::once(async move {
                 Ok::<UniqueChunk, EraError>(chunk)
             })));
         }
-
-        // Large file: use streaming CDC
-        // We open file again? read_file opened it.
-        // read_file consumed it? No, read_file opens its own file.
-        // Here we opened 'file' for metadata check.
-        // We can reuse 'file'.
-
-        // We need to seek to start if we used it? No, we only did metadata().
-        // metadata() on File doesn't advance cursor? std::fs::File::metadata() doesn't. tokio::fs::File::metadata() doesn't.
 
         let reader = BufReader::with_capacity(self.buffer_size, file);
         let streaming = StreamingChunker::new(reader, self.chunker_config.clone());
