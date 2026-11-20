@@ -528,10 +528,6 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         },
     )?;
 
-    // Volume & Distribution
-    if let Some(val) = max_volume_size {
-        config.volume.max_size = val;
-    }
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
 
     // Load certificates
@@ -575,6 +571,9 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     }
 
     let mut builder = ArchiveWriter::builder(output).config(config.clone());
+    if let Some(size) = max_volume_size {
+        builder = builder.max_volume_size(size);
+    }
 
     if let Some(t) = threshold {
         builder = builder.access_policy(era_engine::AccessPolicy::Threshold(t as u32));

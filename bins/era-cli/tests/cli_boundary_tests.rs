@@ -329,6 +329,157 @@ mod volume_size_boundary_tests {
             "Extracted bytes differ"
         );
     }
+
+    fn assert_256kib_rotation_roundtrip(
+        file_stem: &str,
+        erasure: &str,
+        unrotated_volume_count: usize,
+    ) {
+        const MAX_VOLUME_SIZE: u64 = 256 * 1024;
+        const INPUT_SIZE: usize = 2 * 1024 * 1024;
+
+        let temp = TempDir::new().unwrap();
+        let input_name = format!("{file_stem}.bin");
+        let input = create_large_test_file_streaming(temp.path(), &input_name, INPUT_SIZE);
+        let expected = fs::read(&input).unwrap();
+        let archive = temp.path().join(format!("{file_stem}.era"));
+        let max_volume_size = MAX_VOLUME_SIZE.to_string();
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--no-compression",
+                "--erasure",
+                erasure,
+                "--max-volume-size",
+                max_volume_size.as_str(),
+            ])
+            .assert()
+            .success();
+
+        let volumes = get_volume_paths(&archive);
+        for volume in &volumes {
+            let size = get_volume_size(volume);
+            assert!(
+                size <= MAX_VOLUME_SIZE,
+                "{} has {size} bytes, exceeding the {MAX_VOLUME_SIZE}-byte cap",
+                volume.display()
+            );
+        }
+        assert!(
+            volumes.len() > unrotated_volume_count,
+            "expected size-driven rotation with --erasure {erasure}, got {} volume(s): {volumes:?}",
+            volumes.len()
+        );
+
+        let first_volume = volumes.first().unwrap();
+        let last_volume = volumes.last().unwrap();
+        for (entry_point, volume) in [("first", first_volume), ("last", last_volume)] {
+            era_cmd()
+                .args(["verify", volume.to_str().unwrap(), "--password", "pwd"])
+                .assert()
+                .success();
+
+            let out_dir = temp.path().join(format!("out_{entry_point}"));
+            era_cmd()
+                .args([
+                    "extract",
+                    "--input",
+                    volume.to_str().unwrap(),
+                    "--output",
+                    out_dir.to_str().unwrap(),
+                    "--password",
+                    "pwd",
+                ])
+                .assert()
+                .success();
+
+            assert_file_content_eq(&out_dir.join(&input_name), &expected);
+        }
+    }
+
+    #[test]
+    fn test_volume_rotation_256kib_ec_4_plus_2() {
+        assert_256kib_rotation_roundtrip("rot_256kib_ec", "4:2", 6);
+    }
+
+    #[test]
+    fn test_volume_rotation_256kib_non_ec() {
+        assert_256kib_rotation_roundtrip("rot_256kib_non_ec", "none", 1);
+    }
+
+    #[test]
+    fn test_p3_7_minimum_cap_compressed_ec_with_colocated_shards() {
+        const MIN_VOLUME_SIZE: u64 = 20_608;
+        const INPUT_SIZE: usize = 64 * 1024;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = 0x4D59_5DF4_D0F3_3173u64;
+        let data: Vec<u8> = (0..INPUT_SIZE)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 32) as u8
+            })
+            .collect();
+        let input = create_test_file(temp.path(), "minimum_ec.bin", &data);
+        let archive = temp.path().join("minimum_ec.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--erasure",
+                "4:2",
+                "--volumes",
+                "3",
+                "--max-volume-size",
+                &MIN_VOLUME_SIZE.to_string(),
+            ])
+            .assert()
+            .success();
+
+        let volumes = get_volume_paths(&archive);
+        assert!(volumes.len() > 3, "expected rotation, got {volumes:?}");
+        for volume in &volumes {
+            assert!(
+                get_volume_size(volume) <= MIN_VOLUME_SIZE,
+                "{} exceeds the minimum-sized configured cap",
+                volume.display()
+            );
+        }
+
+        for volume in [volumes.first().unwrap(), volumes.last().unwrap()] {
+            era_cmd()
+                .args(["verify", volume.to_str().unwrap(), "--password", "pwd"])
+                .assert()
+                .success();
+        }
+        let out_dir = temp.path().join("out");
+        era_cmd()
+            .args([
+                "extract",
+                "--input",
+                volumes.last().unwrap().to_str().unwrap(),
+                "--output",
+                out_dir.to_str().unwrap(),
+                "--password",
+                "pwd",
+            ])
+            .assert()
+            .success();
+        assert_file_content_eq(&out_dir.join("minimum_ec.bin"), &data);
+    }
 }
 
 // ===========================================================================
