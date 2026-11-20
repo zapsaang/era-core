@@ -1343,37 +1343,15 @@ impl ArchiveWriter {
         block_id: u64,
         aead_ctx: &XChaCha20Poly1305Context,
     ) -> Result<EncryptedMacroBlock> {
-        let nonce_context = self.pipeline.encryption().nonce_context();
-        let nonce =
-            derive_nonce_with_volume_index(&nonce_context, BlockId::new(block_id), volume_index);
-
-        let archive_id = self.pipeline.encryption().archive_id();
-        let epoch_id = self.pipeline.encryption().epoch_id();
-
-        let aad = build_aad(
-            &archive_id,
-            epoch_id,
-            era_common::BlockType::Manifest,
+        encrypt_manifest_block_with_ctx(
+            &self.pipeline.encryption().archive_id(),
+            self.pipeline.encryption().epoch_id(),
+            &self.pipeline.encryption().nonce_context(),
+            manifest_bytes,
             volume_index,
-            BlockId::new(block_id),
-        );
-
-        let ciphertext = aead_ctx.encrypt(&nonce, &aad, manifest_bytes)?;
-
-        let original_size = u32::try_from(manifest_bytes.len())
-            .map_err(|_| EraError::Other("Manifest size exceeds u32::MAX".into()))?;
-
-        let mut data = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
-        data.extend_from_slice(&nonce);
-        data.extend_from_slice(&ciphertext);
-
-        Ok(EncryptedMacroBlock {
-            block_id: BlockId::new(block_id),
-            data: Bytes::from(data),
-            original_size,
-            compressed_size: original_size,
-            chunk_count: 1,
-        })
+            block_id,
+            aead_ctx,
+        )
     }
 
     fn block_disk_size(block: &EncryptedMacroBlock) -> Result<u64> {
@@ -2159,46 +2137,8 @@ impl ArchiveWriter {
             .capacity
             .max_catalog_chunk_size()
             .min(MAX_CATALOG_CHUNK_SIZE);
-        let catalog_chunk_count = catalog_bytes.len().div_ceil(max_catalog_chunk).max(1);
-        let catalog_chunk_count_u32 = u32::try_from(catalog_chunk_count)
-            .map_err(|_| EraError::Other("Catalog chunk count exceeds u32::MAX".into()))?;
-
-        // Prepend header: [u32 chunk_count][u64 total_len] = 12 bytes
-        let total_len = u64::try_from(catalog_bytes.len())
-            .map_err(|_| EraError::InvalidConfig("Catalog plaintext length exceeds u64".into()))?;
-        if catalog_chunk_count_u32 > MAX_CATALOG_CHUNKS || total_len > MAX_CATALOG_PLAINTEXT_SIZE {
-            return Err(EraError::InvalidConfig(
-                "Catalog framing exceeds its chunk or plaintext bound".into(),
-            ));
-        }
-        let mut first_chunk_prefix = Vec::with_capacity(12);
-        first_chunk_prefix.extend_from_slice(&catalog_chunk_count_u32.to_le_bytes());
-        first_chunk_prefix.extend_from_slice(&total_len.to_le_bytes());
-
-        // Pre-chunk catalog data to avoid double iteration in erasure mode
-        let chunks: Vec<(Bytes, ChunkHash)> = if catalog_bytes.is_empty() {
-            let chunk_data = Bytes::from(first_chunk_prefix.clone());
-            let hash = era_crypto::hash(&chunk_data);
-            vec![(chunk_data, hash)]
-        } else {
-            catalog_bytes
-                .chunks(max_catalog_chunk)
-                .enumerate()
-                .map(|(i, raw_chunk)| {
-                    let chunk_data = if i == 0 {
-                        let mut buf =
-                            Vec::with_capacity(first_chunk_prefix.len() + raw_chunk.len());
-                        buf.extend_from_slice(&first_chunk_prefix);
-                        buf.extend_from_slice(raw_chunk);
-                        Bytes::from(buf)
-                    } else {
-                        Bytes::copy_from_slice(raw_chunk)
-                    };
-                    let hash = era_crypto::hash(&chunk_data);
-                    (chunk_data, hash)
-                })
-                .collect()
-        };
+        let chunks = frame_and_chunk_catalog(&catalog_bytes, max_catalog_chunk)?;
+        let catalog_chunk_count = chunks.len();
 
         let catalog_block_ids: Vec<u64> = (0..chunks.len())
             .map(|_| self.pipeline.reserve_block_id())
@@ -2589,6 +2529,86 @@ impl ArchiveWriter {
 
 fn is_internal_path(path: &Path) -> bool {
     path.to_string_lossy().starts_with(INTERNAL_META_PREFIX)
+}
+
+/// Frame serialized catalog plaintext with its 12-byte header and split into bounded chunks.
+fn frame_and_chunk_catalog(
+    catalog_bytes: &[u8],
+    max_catalog_chunk: usize,
+) -> Result<Vec<(Bytes, ChunkHash)>> {
+    let catalog_chunk_count = catalog_bytes.len().div_ceil(max_catalog_chunk).max(1);
+    let catalog_chunk_count_u32 = u32::try_from(catalog_chunk_count)
+        .map_err(|_| EraError::Other("Catalog chunk count exceeds u32::MAX".into()))?;
+
+    let total_len = u64::try_from(catalog_bytes.len())
+        .map_err(|_| EraError::InvalidConfig("Catalog plaintext length exceeds u64".into()))?;
+    if catalog_chunk_count_u32 > MAX_CATALOG_CHUNKS || total_len > MAX_CATALOG_PLAINTEXT_SIZE {
+        return Err(EraError::InvalidConfig(
+            "Catalog framing exceeds its chunk or plaintext bound".into(),
+        ));
+    }
+
+    let mut first_chunk_prefix = Vec::with_capacity(12);
+    first_chunk_prefix.extend_from_slice(&catalog_chunk_count_u32.to_le_bytes());
+    first_chunk_prefix.extend_from_slice(&total_len.to_le_bytes());
+
+    if catalog_bytes.is_empty() {
+        let chunk_data = Bytes::from(first_chunk_prefix);
+        let hash = era_crypto::hash(&chunk_data);
+        return Ok(vec![(chunk_data, hash)]);
+    }
+
+    Ok(catalog_bytes
+        .chunks(max_catalog_chunk)
+        .enumerate()
+        .map(|(i, raw_chunk)| {
+            let chunk_data = if i == 0 {
+                let mut buf = Vec::with_capacity(first_chunk_prefix.len() + raw_chunk.len());
+                buf.extend_from_slice(&first_chunk_prefix);
+                buf.extend_from_slice(raw_chunk);
+                Bytes::from(buf)
+            } else {
+                Bytes::copy_from_slice(raw_chunk)
+            };
+            let hash = era_crypto::hash(&chunk_data);
+            (chunk_data, hash)
+        })
+        .collect())
+}
+
+/// Encrypt a serialized v8.2 manifest payload into a `BlockType::Manifest` macro block.
+fn encrypt_manifest_block_with_ctx(
+    archive_id: &[u8; 16],
+    epoch_id: u32,
+    nonce_context: &[u8; 16],
+    manifest_bytes: &[u8],
+    volume_index: u32,
+    block_id: u64,
+    aead_ctx: &XChaCha20Poly1305Context,
+) -> Result<EncryptedMacroBlock> {
+    let nonce = derive_nonce_with_volume_index(nonce_context, BlockId::new(block_id), volume_index);
+    let aad = build_aad(
+        archive_id,
+        epoch_id,
+        era_common::BlockType::Manifest,
+        volume_index,
+        BlockId::new(block_id),
+    );
+    let ciphertext = aead_ctx.encrypt(&nonce, &aad, manifest_bytes)?;
+    let original_size = u32::try_from(manifest_bytes.len())
+        .map_err(|_| EraError::Other("Manifest size exceeds u32::MAX".into()))?;
+
+    let mut data = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+    data.extend_from_slice(&nonce);
+    data.extend_from_slice(&ciphertext);
+
+    Ok(EncryptedMacroBlock {
+        block_id: BlockId::new(block_id),
+        data: Bytes::from(data),
+        original_size,
+        compressed_size: original_size,
+        chunk_count: 1,
+    })
 }
 
 fn build_append_auth_providers(
@@ -3823,6 +3843,14 @@ pub mod generic {
                 ));
             }
 
+            // GenericArchiveWriter writes single-volume canonical blocks without RS shards.
+            let mut config = self.config;
+            if config.erasure.take().is_some() {
+                debug!(
+                    "GenericArchiveWriter writes canonical non-erasure blocks; clearing erasure config"
+                );
+            }
+
             let archive_id = ArchiveId::new();
             let archive_salt = era_crypto::Salt::generate();
 
@@ -3838,8 +3866,8 @@ pub mod generic {
             })?;
             let pwd_salt = era_crypto::Salt::generate();
             let kdf_params = KdfParams {
-                memory_cost: self.config.encryption.kdf_memory_cost,
-                time_cost: self.config.encryption.kdf_time_cost,
+                memory_cost: config.encryption.kdf_memory_cost,
+                time_cost: config.encryption.kdf_time_cost,
                 parallelism: 4,
             };
 
@@ -3887,15 +3915,16 @@ pub mod generic {
             );
 
             // Create volume writer
-            let header = SuperHeader::new(
+            let mut header = SuperHeader::new(
                 archive_id,
                 recipients,
-                self.config.clone(),
+                config.clone(),
                 *archive_salt.as_bytes(),
                 encrypted_volume_key,
                 self.access_policy
                     .unwrap_or(era_volume::AccessPolicy::AnyOfN),
             )?;
+            header.set_total_volumes(1);
             let epoch_id = header.epoch_id();
 
             let volume_writer =
@@ -3905,7 +3934,7 @@ pub mod generic {
             let nonce_context = *archive_salt.as_bytes();
 
             // Store compression config for creating compressors on demand
-            let compression_config = self.config.compression.clone();
+            let compression_config = config.compression.clone();
 
             let chunk_index = create_chunk_index_with_context(*archive_id.0.as_bytes(), epoch_id)?;
 
@@ -3927,9 +3956,9 @@ pub mod generic {
                 catalog: Catalog::new(),
                 chunk_index,
                 packing: PackingStage::new(
-                    self.config.packing.k_factor,
+                    config.packing.k_factor,
                     4 * 1024 * 1024,
-                    self.config.packing.flush_threshold,
+                    config.packing.flush_threshold,
                 )?,
                 written_blocks: Vec::new(),
                 pending_hashes: HashSet::new(),
@@ -4060,36 +4089,80 @@ pub mod generic {
             self.flush_pending().await?;
 
             self.catalog.block_locations = std::mem::take(&mut self.written_blocks);
+            let committed_end = self.volume_writer.current_size();
+            let volume_index = u32::from(self.volume_writer.volume_sequence());
+            self.encryption.set_volume_index(volume_index);
 
-            // Serialize and write catalog
+            // Serialize, frame, and write catalog with BlockType::Catalog AAD
             let catalog_bytes = self.catalog.to_bytes()?;
-            let catalog_hash = era_crypto::hash(&catalog_bytes);
-            let catalog_chunk = UniqueChunk::new(Bytes::from(catalog_bytes), catalog_hash);
+            let catalog_chunks = frame_and_chunk_catalog(&catalog_bytes, MAX_CATALOG_CHUNK_SIZE)?;
 
-            // Create session-based builder for catalog encryption
-            self.encryption
-                .set_volume_index(self.volume_writer.volume_sequence() as u32);
-            let compressor = self.create_compressor();
-            let catalog_builder = self.encryption.create_block_builder(compressor)?;
+            let mut first_catalog_location: Option<(u64, u32, u32)> = None;
+            for (chunk_data, chunk_hash) in catalog_chunks {
+                let catalog_chunk = UniqueChunk::new(chunk_data, chunk_hash);
+                let compressor = self.create_compressor();
+                let catalog_builder = self.encryption.create_block_builder(compressor)?;
 
-            let catalog_block = catalog_builder.pack_single(catalog_chunk)?;
-            let catalog_block_id = catalog_block.block_id.sequence() as u32;
-            let catalog_location = self
+                let catalog_block = catalog_builder
+                    .pack_single_with_type(catalog_chunk, era_common::BlockType::Catalog)?;
+                let catalog_block_id = u32::try_from(catalog_block.block_id.sequence())
+                    .map_err(|_| EraError::Other("Catalog block ID exceeds u32::MAX".into()))?;
+                let catalog_location = self
+                    .volume_writer
+                    .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)
+                    .await?;
+                first_catalog_location.get_or_insert((
+                    catalog_location.physical_offset,
+                    catalog_location.encrypted_size,
+                    catalog_block_id,
+                ));
+            }
+            let (catalog_offset, catalog_size, catalog_block_id) = first_catalog_location
+                .ok_or_else(|| EraError::Other("No catalog blocks written".into()))?;
+
+            // Build, encrypt, and write v8.2 ArchiveManifest
+            let manifest = ArchiveManifest::new(
+                self.encryption.epoch_id(),
+                crate::sequence::INITIAL_FINALIZE_SEQUENCE,
+                committed_end,
+                compute_catalog_commitment(&catalog_bytes),
+                compute_index_commitment(&[]),
+                vec![committed_end],
+            );
+            let header_digest = self.volume_writer.finalized_header_digest()?;
+            let manifest_bytes = manifest.to_bytes_with_header_digest(header_digest);
+
+            let manifest_block_id = self.encryption.next_block_id()?;
+            let manifest_block_id_u32 = u32::try_from(manifest_block_id)
+                .map_err(|_| EraError::Other("Manifest block ID exceeds u32::MAX".into()))?;
+            let nonce_context = self.encryption.nonce_context();
+            let block_key = self.encryption.session().derive_block_key(
+                self.encryption.volume_key(),
+                manifest_block_id,
+                &nonce_context,
+            )?;
+            let derived_key = block_key.to_derived_key()?;
+            let aead_ctx = XChaCha20Poly1305Context::from_derived_key(&derived_key)?;
+            let manifest_block = encrypt_manifest_block_with_ctx(
+                &self.encryption.archive_id(),
+                self.encryption.epoch_id(),
+                &nonce_context,
+                &manifest_bytes,
+                volume_index,
+                manifest_block_id,
+                &aead_ctx,
+            )?;
+            let manifest_location = self
                 .volume_writer
-                .write_canonical_block(&catalog_block, era_common::BlockType::Catalog)
+                .write_canonical_block(&manifest_block, era_common::BlockType::Manifest)
                 .await?;
+            self.volume_writer
+                .set_manifest_info(manifest_location.physical_offset, manifest_block_id_u32)?;
 
             // Finalize volume
             let _header = self
                 .volume_writer
-                .finalize_with_catalog(
-                    catalog_location.physical_offset,
-                    catalog_location.encrypted_size,
-                    catalog_block_id,
-                    0,
-                    0,
-                    0,
-                )
+                .finalize_with_catalog(catalog_offset, catalog_size, catalog_block_id, 0, 0, 0)
                 .await?;
 
             let blocks_written = self.encryption.blocks_written();
@@ -4180,10 +4253,10 @@ pub mod generic {
 
             let stats = writer.finalize().await.unwrap();
             assert_eq!(stats.total_files, 10);
-            // All 10 small files should fit in ~2 blocks (1 data + 1 catalog)
+            // All 10 small files should fit in ~3 blocks (1 data + 1 catalog + 1 manifest)
             assert!(
-                stats.blocks_written <= 2,
-                "Expected <=2 blocks, got {}",
+                stats.blocks_written <= 3,
+                "Expected <=3 blocks, got {}",
                 stats.blocks_written
             );
         }
