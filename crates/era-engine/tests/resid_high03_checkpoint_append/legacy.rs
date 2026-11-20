@@ -2,7 +2,7 @@ use super::fixtures::{block_header, checkpoint_end, PASSWORD};
 use era_common::{
     compute_shard_crc, ArchiveManifest, BlockHeader, BlockId, BlockLocation, BlockType,
 };
-use era_crypto::{build_aad, AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
+use era_crypto::{build_aad, AeadContext, Nonce, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_engine::ArchiveReader;
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
@@ -52,19 +52,29 @@ pub async fn rewrite_as_legacy(archive_path: &Path) -> (u64, u64) {
     let plaintext = aead
         .decrypt(nonce, &aad, &block.data[NONCE_SIZE..])
         .unwrap();
-    let (mut manifest, digest) =
-        ArchiveManifest::from_bytes_with_header_digest(&plaintext).unwrap();
+    let (mut manifest, digests) =
+        ArchiveManifest::from_bytes_with_header_digests(&plaintext).unwrap();
     manifest.committed_horizon = legacy_end;
     manifest.volume_committed_ends = vec![legacy_end];
-    let legacy = manifest.to_bytes_with_header_digest(digest.unwrap());
+    let legacy = if digests.by_sequence.is_empty() {
+        manifest.to_bytes_with_header_digest(digests.local.unwrap())
+    } else {
+        manifest
+            .to_bytes_with_header_digests(header.volume_sequence(), &digests.by_sequence)
+            .unwrap()
+    };
     assert_eq!(
         legacy.len(),
         plaintext.len(),
         "legacy rewrite must not move trailing metadata"
     );
 
-    let mut encrypted = nonce.to_vec();
-    encrypted.extend(aead.encrypt(nonce, &aad, &legacy).unwrap());
+    let replacement_nonce = Nonce::generate();
+    let mut encrypted = replacement_nonce.as_bytes().to_vec();
+    encrypted.extend(
+        aead.encrypt(replacement_nonce.as_bytes(), &aad, &legacy)
+            .unwrap(),
+    );
     assert_eq!(encrypted.len(), block.data.len());
     let block_header = BlockHeader::new(
         BlockType::Manifest,
