@@ -1977,35 +1977,16 @@ impl ArchiveWriter {
             data: Bytes::from(packed_data),
         };
 
-        // Collect individual file hashes to ensure they get indexed
-        // (This allows finding the packed chunk by looking up any small file hash)
-        let mut small_file_hashes: Vec<ChunkHash> = grouped.keys().copied().collect();
-        small_file_hashes.sort_by_key(|hash| hash.0);
-
-        // Pre-validation: reuse existing packed chunk when possible
-        if self.contains_or_pending(&chunk_hash)? {
-            if let Some(existing_location) = self.pipeline.get_location(&chunk_hash)? {
-                for hash in &small_file_hashes {
-                    if !self.contains_or_pending(hash)? {
-                        self.pipeline
-                            .record_location(*hash, existing_location.clone())?;
-                    }
-                }
-            } else {
-                self.pipeline
-                    .process_chunks(vec![packed_chunk], small_file_hashes)
-                    .await?;
-            }
+        let should_write = if self.contains_or_pending(&chunk_hash)? {
+            self.pipeline.get_location(&chunk_hash)?.is_none()
         } else {
-            // Process the packed chunk (write or buffer)
-            // Pass small_file_hashes so they are associated with the block location
+            true
+        };
+        if should_write {
             self.pipeline
-                .process_chunks(vec![packed_chunk], small_file_hashes)
+                .process_chunks(vec![packed_chunk], Vec::new())
                 .await?;
         }
-
-        // Note: pipeline.process_chunks handles index update for both packed_hash
-        // and all small_file_hashes.
 
         // Update catalog for each file
         let packed_file_count = unique_entries.len();
@@ -2707,8 +2688,17 @@ async fn recover_append_index_entries(
     }
 
     if let Some(index_reader) = reader.index_reader() {
+        let physical_chunk_hashes: HashSet<ChunkHash> = catalog
+            .entries
+            .iter()
+            .flat_map(|entry| entry.chunks.iter())
+            .map(|chunk| chunk.hash)
+            .collect();
         let mut entries = Vec::with_capacity(index_reader.total_entry_count());
         for entry in index_reader.iter_entries() {
+            if !physical_chunk_hashes.contains(entry.hash()) {
+                continue;
+            }
             let slot_index = u32::try_from(entry.block_id().sequence())
                 .map_err(|_| EraError::IntegrityError("Index block_id exceeds u32".into()))?;
             let location = loc_by_slot.get(&slot_index).cloned().unwrap_or_else(|| {
@@ -3500,6 +3490,98 @@ mod tests {
             .unwrap();
 
         assert_eq!(manifest.volume_committed_ends, volume_committed_ends);
+    }
+
+    #[tokio::test]
+    async fn test_append_recovery_filters_legacy_packed_raw_alias() {
+        let temp_dir = TempDir::new().unwrap();
+        let input_dir = temp_dir.path().join("input");
+        std::fs::create_dir(&input_dir).unwrap();
+        let archive_path = temp_dir.path().join("legacy_packed_alias.era");
+        let packed_path = input_dir.join("packed.txt");
+        let raw_path = input_dir.join("raw.txt");
+        let payload = b"small file bytes later written as a raw chunk";
+        std::fs::write(&packed_path, payload).unwrap();
+        std::fs::write(&raw_path, payload).unwrap();
+        let config = ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        };
+
+        let mut packed_writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config.clone())
+            .enable_small_file_packing(true)
+            .build()
+            .await
+            .unwrap();
+        packed_writer.add_file(&packed_path).await.unwrap();
+        packed_writer.flush_packed_files().await.unwrap();
+        let packed_hash = packed_writer.catalog.entries[0].chunks[0].hash;
+        let packed_location = packed_writer
+            .pipeline
+            .get_location(&packed_hash)
+            .unwrap()
+            .unwrap();
+        let raw_hash = era_crypto::hash(payload);
+        // Reproduce the historical on-disk index shape without retaining the old writer bug.
+        packed_writer
+            .pipeline
+            .index_mut()
+            .record_location(raw_hash, packed_location)
+            .unwrap();
+        packed_writer.finalize().await.unwrap();
+
+        let mut legacy_reader = ArchiveReader::open(&archive_path, "test_password")
+            .await
+            .unwrap();
+        legacy_reader.preflight_metadata_recovery().await.unwrap();
+        let legacy_index = legacy_reader.index_reader().unwrap();
+        assert!(
+            legacy_index
+                .iter_entries()
+                .any(|entry| entry.hash() == &raw_hash),
+            "the fixture must contain the legacy nonphysical raw alias"
+        );
+        assert!(legacy_index
+            .iter_entries()
+            .any(|entry| entry.hash() == &packed_hash));
+        drop(legacy_reader);
+
+        let mut raw_writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config)
+            .enable_small_file_packing(false)
+            .append_existing(true)
+            .build()
+            .await
+            .unwrap();
+        raw_writer.add_file(&raw_path).await.unwrap();
+        raw_writer.finalize().await.unwrap();
+
+        let mut reader = ArchiveReader::open(&archive_path, "test_password")
+            .await
+            .unwrap();
+        let verify_stats = reader.verify().await.unwrap();
+        assert_eq!(
+            verify_stats.archive_health,
+            crate::ArchiveHealthStatus::Healthy,
+            "legacy aliases must not suppress physical raw chunks: {:?}",
+            verify_stats.errors
+        );
+        let extract_dir = TempDir::new().unwrap();
+        reader
+            .extract_all(&crate::ExtractOptions::new(extract_dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(extract_dir.path().join("packed.txt")).unwrap(),
+            payload
+        );
+        assert_eq!(
+            std::fs::read(extract_dir.path().join("raw.txt")).unwrap(),
+            payload
+        );
     }
 
     #[tokio::test]

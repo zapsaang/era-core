@@ -328,11 +328,6 @@ impl<B: StorageBackend> WritePipeline<B> {
         self.index.get(hash)
     }
 
-    /// Record a chunk location directly (for special cases).
-    pub fn record_location(&mut self, hash: ChunkHash, location: BlockLocation) -> Result<()> {
-        self.index.record_location(hash, location)
-    }
-
     /// Create a fresh compressor based on configuration.
     ///
     /// This is called for each pack operation since compressors may have internal state.

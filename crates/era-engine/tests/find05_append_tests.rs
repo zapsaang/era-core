@@ -111,6 +111,10 @@ fn assert_data_region_only_data_blocks(archive_path: &Path, committed_end: u64) 
 async fn case_a_distinct_small_files_packing_enabled() {
     let temp_dir = TempDir::new().unwrap();
     let archive_path = temp_dir.path().join("case_a_packed.era");
+    let first_path = temp_dir.path().join("first.txt");
+    let second_path = temp_dir.path().join("second.txt");
+    fs::write(&first_path, b"first small payload").unwrap();
+    fs::write(&second_path, b"second small payload").unwrap();
 
     let mut w1 = ArchiveWriter::builder(&archive_path)
         .password(PASSWORD)
@@ -119,9 +123,7 @@ async fn case_a_distinct_small_files_packing_enabled() {
         .build()
         .await
         .unwrap();
-    w1.add_bytes("first.txt", b"first small payload")
-        .await
-        .unwrap();
+    w1.add_file(&first_path).await.unwrap();
     w1.finalize().await.unwrap();
 
     let mut w2 = ArchiveWriter::builder(&archive_path)
@@ -132,9 +134,7 @@ async fn case_a_distinct_small_files_packing_enabled() {
         .build()
         .await
         .unwrap();
-    w2.add_bytes("second.txt", b"second small payload")
-        .await
-        .unwrap();
+    w2.add_file(&second_path).await.unwrap();
     w2.finalize().await.unwrap();
 
     assert_healthy_and_extract(
