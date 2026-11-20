@@ -1955,7 +1955,25 @@ impl ArchiveReader {
         let mut context = ExtractionContext::new();
         context.set_canonical_output_dir(canonical_output_dir.clone());
         context.set_overwrite(options.overwrite);
-        let mut planned_targets: HashSet<PathBuf> = HashSet::new();
+
+        let normalize_target = |path: &Path| -> PathBuf {
+            path.components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect()
+        };
+        let mut target_winners: HashMap<PathBuf, usize> = HashMap::new();
+        let mut metadata_candidates: Vec<FileEntry> = Vec::new();
+        for (file_idx, entry) in catalog.entries.iter().enumerate() {
+            if is_internal_entry(entry) {
+                continue;
+            }
+            let target_key = normalize_target(&options.output_dir.join(&entry.path));
+            if options.overwrite {
+                target_winners.insert(target_key, file_idx);
+            } else {
+                target_winners.entry(target_key).or_insert(file_idx);
+            }
+        }
 
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
             if is_internal_entry(entry) {
@@ -1993,19 +2011,20 @@ impl ArchiveReader {
                 }
             }
 
-            let target_key: PathBuf = output_path
-                .components()
-                .filter(|c| !matches!(c, std::path::Component::CurDir))
-                .collect();
+            let target_key = normalize_target(&output_path);
+            if target_winners.get(&target_key) != Some(&file_idx) {
+                debug!("Skipping superseded file: {}", output_path.display());
+                stats.skipped += 1;
+                continue;
+            }
+
             let already_exists = tokio::fs::try_exists(&output_path).await.unwrap_or(false)
-                || tokio::fs::symlink_metadata(&output_path).await.is_ok()
-                || planned_targets.contains(&target_key);
+                || tokio::fs::symlink_metadata(&output_path).await.is_ok();
             if already_exists && !options.overwrite {
                 debug!("Skipping existing file: {}", output_path.display());
                 stats.skipped += 1;
                 continue;
             }
-            planned_targets.insert(target_key);
 
             if entry.size > MAX_DECLARED_FILE_SIZE {
                 return Self::fail_extraction_with_cleanup(
@@ -2106,6 +2125,9 @@ impl ArchiveReader {
                             .push((file_idx, chunk_idx, chunk_ref.offset));
                     }
                 }
+            }
+            if entry.file_type == era_ingest::FileType::File {
+                metadata_candidates.push(entry.clone());
             }
         }
 
@@ -2235,22 +2257,21 @@ impl ArchiveReader {
             stats.extracted, stats.bytes_written
         );
 
-        Self::apply_extracted_metadata(catalog, &options.output_dir, &stats.extracted_paths).await;
+        Self::apply_extracted_metadata(
+            metadata_candidates,
+            &options.output_dir,
+            &stats.extracted_paths,
+        )
+        .await;
 
         Ok(stats)
     }
 
     async fn apply_extracted_metadata(
-        catalog: &Catalog,
+        entries: Vec<FileEntry>,
         output_dir: &Path,
         extracted_paths: &[PathBuf],
     ) {
-        let entries: Vec<FileEntry> = catalog
-            .entries
-            .iter()
-            .filter(|e| e.file_type == era_ingest::FileType::File)
-            .cloned()
-            .collect();
         let output_dir = output_dir.to_path_buf();
         let extracted_set: std::collections::HashSet<PathBuf> =
             extracted_paths.iter().cloned().collect();
