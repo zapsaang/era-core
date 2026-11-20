@@ -14,16 +14,19 @@
 //! - **Password mode**: Traditional Argon2id key derivation (~50-300ms overhead)
 //! - **Certificate mode**: X25519 key exchange (~0.05ms overhead, ~1000x faster)
 
+mod checkpoint_append;
+
 use crate::auth::{
     AuthProvider, CertificateProvider, HybridCertificateProvider, PasswordProvider,
     PasswordSlotParams,
 };
 use crate::block_iter::{BlockIterator, SessionBlockIterator};
 use bytes::Bytes;
+use checkpoint_append::{extend_data_ends_for_rotation, scan_retained_data_region, RetainedVolume};
 use era_common::{
-    ArchiveConfig, ArchiveId, ArchiveManifest, BlockHeader, BlockId, BlockLocation, BlockType,
-    ChunkHash, EncryptedMacroBlock, EraError, ErasureCodeConfig, MatrixDistributionStrategy,
-    Result, UniqueChunk,
+    ArchiveConfig, ArchiveId, ArchiveManifest, BlockId, BlockLocation, ChunkHash,
+    EncryptedMacroBlock, EraError, ErasureCodeConfig, MatrixDistributionStrategy, Result,
+    UniqueChunk,
 };
 use era_crypto::certificate::{EraCertificate, EraKeyPair, KeyEncapsulation};
 use era_crypto::hybrid_certificate::{HybridCertificate, HybridKeyPair};
@@ -529,6 +532,7 @@ impl ArchiveWriterBuilder {
         let mut recovered_session: Option<(KeySession, VolumeKey)> = None;
         let mut append_retained_end = era_volume::DATA_REGION_START;
         let mut append_data_block_count = 0u32;
+        let mut append_checkpoint_exists = false;
         let mut recovered_index_entries: Vec<(ChunkHash, BlockLocation)> = Vec::new();
 
         let append_to_existing =
@@ -610,7 +614,7 @@ impl ArchiveWriterBuilder {
                     )
                 })?;
 
-            let manifest_opt = reader.manifest().cloned();
+            let mut manifest_opt = reader.manifest().cloned();
             if let Some(ref manifest) = manifest_opt {
                 let seq = footer.sequence_number();
                 if let Some(&committed_end) = manifest.volume_committed_ends.get(seq as usize) {
@@ -630,18 +634,59 @@ impl ArchiveWriterBuilder {
             let manifest_committed_end = manifest_opt
                 .as_ref()
                 .and_then(|m| m.volume_committed_ends.first().copied());
-            let (committed_end, data_block_count, block_spans) =
-                scan_retained_data_region(vol0, footer.data_end_offset(), manifest_committed_end)
-                    .await?;
+            append_checkpoint_exists = footer.last_checkpoint_offset() > 0;
+            if self.enable_checkpoint
+                && self.recovery_options_explicit
+                && self.recovery_options.strategy == RecoveryStrategy::Abort
+                && append_checkpoint_exists
+            {
+                return Err(era_common::EraError::CheckpointError(
+                    "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
+                        .into(),
+                ));
+            }
+            let retained = scan_retained_data_region(RetainedVolume {
+                reader: vol0,
+                footer: &footer,
+                manifest_committed_end,
+            })
+            .await?;
+            let committed_end = retained.end;
             append_retained_end = committed_end;
-            append_data_block_count = data_block_count;
+            append_data_block_count = retained.block_count;
+
+            let append_resume_requested = self.enable_checkpoint
+                && append_checkpoint_exists
+                && (!self.recovery_options_explicit
+                    || self.recovery_options.strategy == RecoveryStrategy::Resume);
+            // Authenticate the old checkpoint before truncation, but never import its
+            // locations or progress into a new append session.
+            if retained.legacy_terminal_checkpoint || append_resume_requested {
+                CheckpointManager::load_from_durable_checkpoint(
+                    &self.output_path,
+                    reader.session(),
+                    reader.volume_key(),
+                    *reader.header().salt(),
+                    reader.archive_id_bytes(),
+                    reader.epoch_id(),
+                )
+                .await?;
+            }
+            if retained.legacy_terminal_checkpoint {
+                if let Some(manifest) = manifest_opt.as_mut() {
+                    manifest.committed_horizon = committed_end;
+                    if let Some(old_end) = manifest.volume_committed_ends.first_mut() {
+                        *old_end = committed_end;
+                    }
+                }
+            }
 
             let catalog = reader.catalog().cloned().unwrap_or_default();
             recovered_index_entries = recover_append_index_entries(
                 &reader,
                 &catalog,
                 committed_end,
-                &block_spans,
+                &retained.block_spans,
                 &config.compression,
             )
             .await?;
@@ -1009,6 +1054,75 @@ impl ArchiveWriterBuilder {
             header.clone()
         };
 
+        let mut restore_checkpoint_state = false;
+        let checkpoint_manager = if self.enable_checkpoint {
+            let checkpoint_exists = if append_to_existing {
+                append_checkpoint_exists
+            } else {
+                CheckpointManager::exists(&self.output_path).await?
+            };
+            let effective_strategy = if self.recovery_options_explicit {
+                self.recovery_options.strategy
+            } else if checkpoint_exists {
+                RecoveryStrategy::Resume
+            } else {
+                RecoveryStrategy::StartFresh
+            };
+            restore_checkpoint_state =
+                effective_strategy == RecoveryStrategy::Resume && checkpoint_exists;
+
+            let manager = match effective_strategy {
+                RecoveryStrategy::StartFresh => {
+                    if checkpoint_exists {
+                        warn!("Starting fresh, deleting existing checkpoint");
+                        let old = CheckpointManager::load_or_create(&self.output_path)?;
+                        old.delete()?;
+                    }
+                    CheckpointManager::new(&self.output_path)
+                }
+                RecoveryStrategy::Resume => {
+                    if !checkpoint_exists {
+                        if !output_preexisted {
+                            CheckpointManager::new(&self.output_path)
+                        } else {
+                            return Err(era_common::EraError::CheckpointError(
+                                "Resume requested but no prior checkpoint exists. Use StartFresh to begin a new archive."
+                                    .into(),
+                            ));
+                        }
+                    } else if append_to_existing {
+                        let mut manager = CheckpointManager::new(&self.output_path);
+                        for (hash, location) in &recovered_index_entries {
+                            manager.record_chunk(*hash, location.clone())?;
+                        }
+                        manager
+                    } else {
+                        CheckpointManager::load_from_durable_checkpoint(
+                            &self.output_path,
+                            &session,
+                            &volume_key,
+                            *header.salt(),
+                            *header.archive_id().0.as_bytes(),
+                            header.epoch_id(),
+                        )
+                        .await?
+                    }
+                }
+                RecoveryStrategy::Abort => {
+                    if checkpoint_exists {
+                        return Err(era_common::EraError::CheckpointError(
+                             "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
+                                 .into(),
+                         ));
+                    }
+                    CheckpointManager::new(&self.output_path)
+                }
+            };
+            Some(manager)
+        } else {
+            None
+        };
+
         let volume_pool = if append_to_existing {
             if enable_erasure {
                 return Err(era_common::EraError::InvalidFormat(
@@ -1037,63 +1151,6 @@ impl ArchiveWriterBuilder {
             volume_pool.volume_count()
         );
 
-        // Set up checkpoint manager if enabled
-        let checkpoint_manager = if self.enable_checkpoint {
-            let checkpoint_exists = CheckpointManager::exists(&self.output_path).await?;
-            let effective_strategy = if self.recovery_options_explicit {
-                self.recovery_options.strategy
-            } else if checkpoint_exists {
-                RecoveryStrategy::Resume
-            } else {
-                RecoveryStrategy::StartFresh
-            };
-
-            let manager = match effective_strategy {
-                RecoveryStrategy::StartFresh => {
-                    if checkpoint_exists {
-                        warn!("Starting fresh, deleting existing checkpoint");
-                        let old = CheckpointManager::load_or_create(&self.output_path)?;
-                        old.delete()?;
-                    }
-                    CheckpointManager::new(&self.output_path)
-                }
-                RecoveryStrategy::Resume => {
-                    if !checkpoint_exists {
-                        if !output_preexisted {
-                            CheckpointManager::new(&self.output_path)
-                        } else {
-                            return Err(era_common::EraError::CheckpointError(
-                                "Resume requested but no prior checkpoint exists. Use StartFresh to begin a new archive."
-                                    .into(),
-                            ));
-                        }
-                    } else {
-                        CheckpointManager::load_from_durable_checkpoint(
-                            &self.output_path,
-                            &session,
-                            &volume_key,
-                            *header.salt(),
-                            *header.archive_id().0.as_bytes(),
-                            header.epoch_id(),
-                        )
-                        .await?
-                    }
-                }
-                RecoveryStrategy::Abort => {
-                    if checkpoint_exists {
-                        return Err(era_common::EraError::CheckpointError(
-                             "Checkpoint exists. Use Resume strategy to continue or StartFresh to discard."
-                                 .into(),
-                         ));
-                    }
-                    CheckpointManager::new(&self.output_path)
-                }
-            };
-            Some(manager)
-        } else {
-            None
-        };
-
         // Create chunk index (internal memory-based index)
         let chunk_index: Arc<dyn ChunkIndex> = create_chunk_index_with_context(
             *active_header.archive_id().0.as_bytes(),
@@ -1109,14 +1166,8 @@ impl ArchiveWriterBuilder {
         }
 
         // Load existing chunk locations from checkpoint if resuming
-        if let Some(ref mgr) = checkpoint_manager {
-            let should_restore_checkpoint_state = if self.recovery_options_explicit {
-                self.recovery_options.strategy == RecoveryStrategy::Resume
-            } else {
-                self.enable_checkpoint && CheckpointManager::exists(&self.output_path).await?
-            };
-
-            if should_restore_checkpoint_state {
+        if restore_checkpoint_state && !append_to_existing {
+            if let Some(ref mgr) = checkpoint_manager {
                 chunk_index.start_batch();
                 for (hash, location) in mgr.written_chunks() {
                     chunk_index.put(*hash, location.clone())?;
@@ -2094,6 +2145,14 @@ impl ArchiveWriter {
             .block_locations
             .extend(self.pipeline.take_written_block_locations());
 
+        let data_committed_ends: Vec<u64> = self
+            .pipeline
+            .volume()
+            .pool()
+            .committed_ends()
+            .into_iter()
+            .map(|(_, committed_end)| committed_end)
+            .collect();
         self.pipeline.commit_durable_checkpoint().await?;
         debug!("Durable checkpoint committed before catalog write");
 
@@ -2134,14 +2193,7 @@ impl ArchiveWriter {
             self.finalize_sequence = next_finalize_sequence(old_manifest.finalize_sequence)?;
         }
 
-        let provisional_committed_ends: Vec<u64> = self
-            .pipeline
-            .volume()
-            .pool()
-            .committed_ends()
-            .into_iter()
-            .map(|(_, committed_end)| committed_end)
-            .collect();
+        let provisional_committed_ends = data_committed_ends;
         let provisional_manifest = self.build_manifest(
             &catalog_bytes,
             &[],
@@ -2186,13 +2238,12 @@ impl ArchiveWriter {
             .pool()
             .check_typed_block_space(current_metadata_size)
             .is_empty();
+        let mut rotated_committed_ends = None;
         let manifest_total_size = if rotation_needed {
-            let mut rotated_ends = provisional_committed_ends;
-            let rotated_len = rotated_ends
-                .len()
-                .checked_add(self.pipeline.volume().volume_count())
-                .ok_or_else(|| EraError::Other("manifest volume count overflow".into()))?;
-            rotated_ends.resize(rotated_len, era_volume::DATA_REGION_START);
+            let rotated_ends = extend_data_ends_for_rotation(
+                &provisional_committed_ends,
+                self.pipeline.volume().volume_count(),
+            )?;
             let rotated_manifest = self.build_manifest(
                 &catalog_bytes,
                 &[],
@@ -2201,8 +2252,9 @@ impl ArchiveWriter {
                     .copied()
                     .max()
                     .unwrap_or(era_volume::DATA_REGION_START),
-                rotated_ends,
+                rotated_ends.clone(),
             )?;
+            rotated_committed_ends = Some(rotated_ends);
             Self::typed_plaintext_disk_size(
                 rotated_manifest.to_bytes_with_header_digest([0; 32]).len(),
             )?
@@ -2284,14 +2336,13 @@ impl ArchiveWriter {
             )?;
         }
 
-        let volume_committed_ends: Vec<u64> = self
-            .pipeline
-            .volume()
-            .pool()
-            .committed_ends()
-            .into_iter()
-            .map(|(_, committed_end)| committed_end)
-            .collect();
+        let volume_committed_ends = if rotated {
+            rotated_committed_ends.ok_or_else(|| {
+                EraError::IntegrityError("rotated manifest is missing data-only ends".into())
+            })?
+        } else {
+            provisional_committed_ends
+        };
         let committed_horizon = volume_committed_ends
             .iter()
             .copied()
@@ -2607,71 +2658,6 @@ fn build_append_auth_providers(
         ));
     }
     Ok(providers)
-}
-
-async fn scan_retained_data_region(
-    vol_reader: &VolumeReader<era_storage::LocalStorageReader>,
-    data_end_offset: u64,
-    manifest_committed_end: Option<u64>,
-) -> Result<(u64, u32, Vec<(u64, u32)>)> {
-    const MAX_SCAN_BLOCK_SIZE: u32 = 64 * 1024 * 1024;
-    let start = era_volume::DATA_REGION_START;
-    let bound = match manifest_committed_end {
-        Some(end) => {
-            if end < start || end > data_end_offset {
-                return Err(EraError::IntegrityError(format!(
-                    "Manifest committed end {} out of bounds [{}..={}]",
-                    end, start, data_end_offset
-                )));
-            }
-            end
-        }
-        None => data_end_offset,
-    };
-
-    let mut offset = start;
-    let mut block_count = 0u32;
-    let mut block_spans = Vec::new();
-    while offset < bound {
-        if offset + BlockHeader::SIZE as u64 > bound {
-            return Err(EraError::CorruptedHeader(format!(
-                "Truncated BlockHeader at offset {} before retained boundary {}",
-                offset, bound
-            )));
-        }
-        let header_bytes = vol_reader.read_raw(offset, BlockHeader::SIZE).await?;
-        let header = BlockHeader::from_bytes(&header_bytes).ok_or_else(|| {
-            EraError::CorruptedHeader(format!("Invalid BlockHeader at offset {}", offset))
-        })?;
-        if header.block_type != BlockType::Data {
-            if manifest_committed_end.is_none() {
-                break;
-            }
-            return Err(EraError::IntegrityError(format!(
-                "Unexpected non-Data block {:?} inside committed data region at offset {}",
-                header.block_type, offset
-            )));
-        }
-        if header.length == 0 || header.length > MAX_SCAN_BLOCK_SIZE {
-            return Err(EraError::CorruptedHeader(format!(
-                "Invalid BlockHeader length {} at offset {}",
-                header.length, offset
-            )));
-        }
-        let next_offset = offset + BlockHeader::SIZE as u64 + u64::from(header.length);
-        if next_offset > bound {
-            return Err(EraError::CorruptedHeader(format!(
-                "Block at offset {} extends past retained boundary {}",
-                offset, bound
-            )));
-        }
-        block_spans.push((offset, header.length));
-        block_count = block_count
-            .checked_add(1)
-            .ok_or_else(|| EraError::InvalidFormat("data block count overflow".into()))?;
-        offset = next_offset;
-    }
-    Ok((offset, block_count, block_spans))
 }
 
 async fn recover_append_index_entries(
