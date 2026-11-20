@@ -1845,7 +1845,10 @@ impl ArchiveReader {
             .await?;
         if let Some(header) = era_common::ShardHeader::from_bytes(&header_bytes) {
             if header.length as u64 > MAX_SHARD_SIZE {
-                return Err(EraError::InvalidFormat("Shard size exceeds maximum".into()));
+                return Err(EraError::ShardTooLarge {
+                    size: header.length as usize,
+                    max_size: MAX_SHARD_SIZE as usize,
+                });
             }
             let data = reader
                 .read_raw(
@@ -3360,5 +3363,53 @@ mod tests {
 
         let content = std::fs::read_to_string(extract_dir.join("test.txt")).unwrap();
         assert_eq!(content, "Hello, Erasure World!");
+    }
+
+    #[tokio::test]
+    async fn test_read_shard_returns_shard_too_large_on_oversized_shard() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("reader.era");
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test")
+            .enable_erasure(false)
+            .build()
+            .await
+            .unwrap();
+        writer.add_bytes("a.txt", b"hello").await.unwrap();
+        writer.finalize().await.unwrap();
+
+        let archive_reader = ArchiveReader::open(&archive_path, "test").await.unwrap();
+
+        let backend = era_storage::LocalStorageBackend::new(temp_dir.path());
+        let bad_vol = "bad_shard.era";
+        let mut vol_writer = VolumeWriter::create(
+            &backend,
+            Path::new(bad_vol),
+            archive_reader.header().clone(),
+        )
+        .await
+        .unwrap();
+        let oversized_len = (MAX_SHARD_SIZE as u32) + 1;
+        let shard_header = era_common::ShardHeader::new(oversized_len, 0);
+        vol_writer
+            .write_raw(&shard_header.to_bytes())
+            .await
+            .unwrap();
+        vol_writer.finalize().await.unwrap();
+
+        let vol_reader = VolumeReader::open(&backend, Path::new(bad_vol))
+            .await
+            .unwrap();
+        let err = archive_reader
+            .read_shard(&vol_reader, era_volume::DATA_REGION_START)
+            .await
+            .expect_err("oversized shard header must return ShardTooLarge");
+        match err {
+            EraError::ShardTooLarge { size, max_size } => {
+                assert_eq!(size, oversized_len as usize);
+                assert_eq!(max_size, MAX_SHARD_SIZE as usize);
+            }
+            other => panic!("expected ShardTooLarge, got: {other:?}"),
+        }
     }
 }

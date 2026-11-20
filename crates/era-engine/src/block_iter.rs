@@ -542,9 +542,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for ErasureBlockIterator<'
             };
             if bounded_len > MAX_SHARD_SIZE {
                 self.stats.blocks_failed += 1;
-                return Some(Err(EraError::InvalidFormat(
-                    "Shard size exceeds maximum".into(),
-                )));
+                return Some(Err(EraError::ShardTooLarge {
+                    size: bounded_len as usize,
+                    max_size: MAX_SHARD_SIZE as usize,
+                }));
             }
             let shard_len = bounded_len as usize;
 
@@ -1871,5 +1872,44 @@ mod tests {
             msg.contains("duplicate index 0"),
             "expected duplicate-index rejection, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_erasure_iterator_returns_shard_too_large_on_oversized_shard() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let file_name = "oversized_shard.era";
+        let mut writer = VolumeWriter::create(&backend, Path::new(file_name), test_header(0, 1))
+            .await
+            .unwrap();
+
+        writer.write_raw(&64u32.to_le_bytes()).await.unwrap();
+        let oversized_len = MAX_SHARD_SIZE + 1;
+        let shard_header = era_common::ShardHeader::new(oversized_len, 0);
+        writer.write_raw(&shard_header.to_bytes()).await.unwrap();
+        writer.finalize().await.unwrap();
+
+        let reader = VolumeReader::open(&backend, Path::new(file_name))
+            .await
+            .unwrap();
+        let volume_readers = vec![reader];
+        let unpacker = ErasureBlockUnpacker::new(
+            DerivedKey::from_bytes([0x44; 32]).unwrap(),
+            [0x11; 16],
+            [0x22; 16],
+            1,
+            0,
+            Box::new(NoCompressor),
+        );
+
+        let mut iter =
+            ErasureBlockIterator::new(&volume_readers, &[0], &unpacker, 1, 0, None).unwrap();
+        match iter.next_block().await {
+            Some(Err(EraError::ShardTooLarge { size, max_size })) => {
+                assert_eq!(size, oversized_len as usize);
+                assert_eq!(max_size, MAX_SHARD_SIZE as usize);
+            }
+            other => panic!("expected Err(ShardTooLarge), got: {other:?}"),
+        }
     }
 }
