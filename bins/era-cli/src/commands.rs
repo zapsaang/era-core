@@ -469,21 +469,132 @@ pub struct CreateArgs<'a> {
     pub compact: bool,
 }
 
-fn collect_archive_volume_paths(output: &Path) -> std::collections::HashSet<PathBuf> {
-    let mut paths = std::collections::HashSet::new();
-    if let Ok(canonical) = output.canonicalize() {
-        paths.insert(canonical.clone());
-        let stem = canonical.with_extension("");
-        for seq in 1..=u16::MAX {
-            let vol_path = stem.with_extension(format!("era.{:03}", seq));
-            if vol_path.exists() {
-                paths.insert(vol_path);
-            } else {
-                break;
+fn validate_and_register_create_entry(
+    disk_path: PathBuf,
+    stored_path: PathBuf,
+    seen_stored_paths: &mut std::collections::HashMap<PathBuf, PathBuf>,
+    files_to_process: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<()> {
+    if stored_path.is_absolute()
+        || stored_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "Invalid input path '{}': archive entry path '{}' must be relative and must not contain '..'",
+            disk_path.display(),
+            stored_path.display()
+        );
+    }
+
+    let normalized_key: PathBuf = stored_path
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    if normalized_key.as_os_str().is_empty() {
+        anyhow::bail!(
+            "Invalid input path '{}': resolved archive entry path is empty",
+            disk_path.display()
+        );
+    }
+
+    if let Some(existing) = seen_stored_paths.get(&normalized_key) {
+        anyhow::bail!(
+            "Duplicate archive entry path '{}' from '{}' conflicts with '{}'",
+            normalized_key.display(),
+            disk_path.display(),
+            existing.display()
+        );
+    }
+
+    seen_stored_paths.insert(normalized_key, disk_path.clone());
+    files_to_process.push((disk_path, stored_path));
+    Ok(())
+}
+
+fn collect_create_inputs(
+    inputs: &[PathBuf],
+    excluded_paths: &std::collections::HashSet<PathBuf>,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut files_to_process = Vec::new();
+    let mut seen_stored_paths = std::collections::HashMap::new();
+
+    for input in inputs {
+        let path = input.as_path();
+        let metadata = std::fs::metadata(path).with_context(|| {
+            format!(
+                "Input path is inaccessible or does not exist: {}",
+                path.display()
+            )
+        })?;
+
+        if metadata.is_dir() {
+            let base = path.parent().unwrap_or(path);
+            for entry in walkdir::WalkDir::new(path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.file_type().is_file() {
+                    let disk_path = entry.path().to_path_buf();
+                    if let Ok(canonical) = disk_path.canonicalize() {
+                        if excluded_paths.contains(&canonical) {
+                            info!("Skipping archive output file: {}", disk_path.display());
+                            continue;
+                        }
+                    }
+                    let stored_path = entry
+                        .path()
+                        .strip_prefix(base)
+                        .unwrap_or(entry.path())
+                        .to_path_buf();
+                    validate_and_register_create_entry(
+                        disk_path,
+                        stored_path,
+                        &mut seen_stored_paths,
+                        &mut files_to_process,
+                    )?;
+                }
+            }
+        } else {
+            if let Ok(canonical) = path.canonicalize() {
+                if excluded_paths.contains(&canonical) {
+                    info!("Skipping archive output file: {}", path.display());
+                    continue;
+                }
+            }
+            let stored_path = path.file_name().map(PathBuf::from).ok_or_else(|| {
+                anyhow::anyhow!("Input file path has no valid file name: {}", path.display())
+            })?;
+            validate_and_register_create_entry(
+                path.to_path_buf(),
+                stored_path,
+                &mut seen_stored_paths,
+                &mut files_to_process,
+            )?;
+        }
+    }
+
+    Ok(files_to_process)
+}
+
+fn cleanup_created_volume_files(
+    output: &Path,
+    expected_volumes: Option<usize>,
+    preexisting_volumes: &std::collections::HashSet<PathBuf>,
+) {
+    for vol_path in era_engine::collect_archive_volume_paths(output, expected_volumes) {
+        if !preexisting_volumes.contains(&vol_path) {
+            if let Err(err) = std::fs::remove_file(&vol_path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        "Failed to clean up newly created volume file {}: {}",
+                        vol_path.display(),
+                        err
+                    );
+                }
             }
         }
     }
-    paths
 }
 
 /// Create a new ERA archive
@@ -547,9 +658,6 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
             block_target_size,
         },
     )?;
-
-    config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
-    era_engine::validate_max_volume_size(max_volume_size.unwrap_or(config.volume.max_size))?;
 
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
     era_engine::validate_max_volume_size(max_volume_size.unwrap_or(config.volume.max_size))?;
@@ -652,7 +760,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     // Handle Volume Count Override for Matrix
     // The builder will use config.erasure and config.distribution
     // But we might need to set explicit volume count if provided
-    if let Some(ec) = &config.erasure {
+    let resolved_volume_count = if let Some(ec) = &config.erasure {
         info!(
             "Erasure coding:   {}:{} ({}% overhead, can recover {} lost shards/block)",
             ec.data_shards,
@@ -662,17 +770,24 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         );
 
         if config.distribution.strategy == MatrixDistributionStrategy::RotatingOffset {
-            let volumes = volume_count.unwrap_or_else(|| {
-                // Default to total_shards for optimal distribution
-                (ec.data_shards + ec.parity_shards) as usize
-            });
-            builder = builder.volume_count(volumes);
-        } else if let Some(v) = volume_count {
-            builder = builder.volume_count(v);
+            Some(volume_count.unwrap_or((ec.data_shards + ec.parity_shards) as usize))
+        } else {
+            volume_count
         }
-    } else if let Some(v) = volume_count {
+    } else {
+        volume_count
+    };
+    if let Some(v) = resolved_volume_count {
         builder = builder.volume_count(v);
     }
+
+    let excluded_paths = era_engine::collect_archive_volume_paths(output, resolved_volume_count);
+    let preexisting_volumes: std::collections::HashSet<PathBuf> = excluded_paths
+        .iter()
+        .filter(|p| p.exists())
+        .cloned()
+        .collect();
+    let files_to_process = collect_create_inputs(inputs, &excluded_paths)?;
 
     let mut writer = builder
         .build()
@@ -682,40 +797,6 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     info!("Creating archive: {}", output.display());
 
     let start_time = Instant::now();
-    let mut files_to_process: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-    let excluded_paths = collect_archive_volume_paths(output);
-
-    for input in inputs {
-        let path = input.as_path();
-        if path.is_dir() {
-            let base = path.parent().unwrap_or(path);
-            for entry in walkdir::WalkDir::new(path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                if entry.file_type().is_file() {
-                    let disk_path = entry.path().to_path_buf();
-                    if let Ok(canonical) = disk_path.canonicalize() {
-                        if excluded_paths.contains(&canonical) {
-                            info!("Skipping archive output file: {}", disk_path.display());
-                            continue;
-                        }
-                    }
-                    let stored_path = entry
-                        .path()
-                        .strip_prefix(base)
-                        .unwrap_or(entry.path())
-                        .to_path_buf();
-                    files_to_process.push((disk_path, stored_path));
-                }
-            }
-        } else {
-            let base = path.parent().unwrap_or(path);
-            let stored_path = path.strip_prefix(base).unwrap_or(path).to_path_buf();
-            files_to_process.push((path.to_path_buf(), stored_path));
-        }
-    }
 
     let pb = progress::progress_bar(files_to_process.len() as u64);
     pb.set_style(
@@ -726,24 +807,35 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
             .progress_chars("█▓▒░-"),
     );
 
-    for (disk_path, stored_path) in files_to_process {
-        pb.set_message(format!("{}", disk_path.display()));
+    let write_result: Result<_> = async {
+        for (disk_path, stored_path) in files_to_process {
+            pb.set_message(format!("{}", disk_path.display()));
+            writer
+                .add_file_with_path(&disk_path, &stored_path)
+                .await
+                .with_context(|| format!("Failed to add file: {}", disk_path.display()))?;
+            pb.inc(1);
+        }
+
+        pb.finish_with_message(format!(
+            "✓ Packing complete in {}",
+            HumanDuration(start_time.elapsed())
+        ));
+
         writer
-            .add_file_with_path(&disk_path, &stored_path)
+            .finalize()
             .await
-            .with_context(|| format!("Failed to add file: {}", disk_path.display()))?;
-        pb.inc(1);
+            .context("Failed to finalize archive")
     }
+    .await;
 
-    pb.finish_with_message(format!(
-        "✓ Packing complete in {}",
-        HumanDuration(start_time.elapsed())
-    ));
-
-    let stats = writer
-        .finalize()
-        .await
-        .context("Failed to finalize archive")?;
+    let stats = match write_result {
+        Ok(stats) => stats,
+        Err(err) => {
+            cleanup_created_volume_files(output, resolved_volume_count, &preexisting_volumes);
+            return Err(err);
+        }
+    };
 
     info!("");
     info!("Archive created successfully!");
