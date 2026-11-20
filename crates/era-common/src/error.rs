@@ -95,6 +95,9 @@ pub enum EraError {
     #[error("Block too large: {size} bytes (max: {max_size})")]
     BlockTooLarge { size: usize, max_size: usize },
 
+    #[error("Shard too large: {size} bytes (max: {max_size})")]
+    ShardTooLarge { size: usize, max_size: usize },
+
     // Chunk Errors
     #[error("Chunk not found: {hash}")]
     ChunkNotFound { hash: String },

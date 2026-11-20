@@ -353,12 +353,15 @@ async fn test_v5_advrs_01_non_session_shard_len_cap() {
         )
     });
 
-    let msg = format!("{:?}", extracted.err());
-    assert!(
-        msg.contains("Shard size exceeds maximum"),
-        "expected explicit shard-length cap error, got: {}",
-        msg
-    );
+    match extracted {
+        Err(era_common::EraError::ShardTooLarge { size, max_size }) => {
+            assert!(
+                size > max_size,
+                "ShardTooLarge must carry size ({size}) > max_size ({max_size})"
+            );
+        }
+        other => panic!("expected explicit shard-length cap error (ShardTooLarge), got: {other:?}"),
+    }
 }
 
 #[tokio::test]

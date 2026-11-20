@@ -1378,9 +1378,10 @@ impl<'a, R: era_storage::StorageReader> BlockIterator for SessionErasureBlockIte
 
                 if shard_len as u32 > MAX_SHARD_SIZE {
                     self.geometry.finish();
-                    return Some(Err(EraError::InvalidFormat(
-                        "Shard size exceeds maximum".into(),
-                    )));
+                    return Some(Err(EraError::ShardTooLarge {
+                        size: shard_len,
+                        max_size: MAX_SHARD_SIZE as usize,
+                    }));
                 }
                 if let Some(slot) = data_lengths.get_mut(shard_idx) {
                     *slot = authoritative_len.or(Some(shard_header.length));

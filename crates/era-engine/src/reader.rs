@@ -2115,6 +2115,9 @@ impl ArchiveReader {
                     }
                 }
                 Err(e) => {
+                    if matches!(&e, EraError::ShardTooLarge { .. }) {
+                        return Self::fail_extraction_with_cleanup(e, &tracked_output_files).await;
+                    }
                     consecutive_failures += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                         return Self::fail_extraction_with_cleanup(
@@ -2550,8 +2553,10 @@ fn is_internal_entry(entry: &FileEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_iter::{BlockIterStats, DecodedBlock};
     use crate::ArchiveWriter;
     use era_common::{ArchiveConfig, ArchiveId, VolumeId};
+    use era_ingest::ChunkRef;
     use era_volume::{
         AccessPolicy, EncryptedVolumeKey, KeyWrapAlgorithm, RecipientSlot, RecipientType,
         VolumeWriter,
@@ -3194,6 +3199,129 @@ mod tests {
         let mut reader = ArchiveReader::open(&archive_path, password).await.unwrap();
         let files = reader.list_files().await.unwrap();
         assert_eq!(files.len() as u64, file_count);
+    }
+
+    struct InjectedBlockIterator {
+        results: std::collections::VecDeque<Result<DecodedBlock>>,
+        stats: BlockIterStats,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl BlockIterator for InjectedBlockIterator {
+        async fn next_block(&mut self) -> Option<Result<DecodedBlock>> {
+            self.results.pop_front()
+        }
+
+        fn has_more(&self) -> bool {
+            !self.results.is_empty()
+        }
+
+        fn stats(&self) -> &BlockIterStats {
+            &self.stats
+        }
+    }
+
+    fn injected_iterator(results: Vec<Result<DecodedBlock>>) -> Box<dyn BlockIterator> {
+        Box::new(InjectedBlockIterator {
+            results: results.into_iter().collect(),
+            stats: BlockIterStats::default(),
+        })
+    }
+
+    fn decoded_block(block_index: u32, data: &Bytes) -> DecodedBlock {
+        let chunks: ChunkVec = std::iter::once((era_crypto::hash(data), data.clone())).collect();
+        DecodedBlock {
+            block_index,
+            chunks,
+            corrupted_shards: 0,
+        }
+    }
+
+    fn two_chunk_catalog(first: &Bytes, second: &Bytes) -> Catalog {
+        let total_size = u64::try_from(first.len() + second.len()).unwrap();
+        let entry = FileEntry::file(PathBuf::from("partial.txt"), total_size).with_chunks(vec![
+            ChunkRef::new(
+                era_crypto::hash(first),
+                0,
+                u32::try_from(first.len()).unwrap(),
+            ),
+            ChunkRef::new(
+                era_crypto::hash(second),
+                u64::try_from(first.len()).unwrap(),
+                u32::try_from(second.len()).unwrap(),
+            ),
+        ]);
+        let mut catalog = Catalog::new();
+        catalog.add(entry);
+        catalog
+    }
+
+    #[tokio::test]
+    async fn test_extract_with_iterator_propagates_shard_limit_and_cleans_up() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("extracted");
+        let output_path = output_dir.join("partial.txt");
+        let first = Bytes::from_static(b"partial ");
+        let second = Bytes::from_static(b"recovery");
+        let catalog = two_chunk_catalog(&first, &second);
+        let max_size = 256 * 1024 * 1024;
+        let size = max_size + 1;
+        let mut iter = injected_iterator(vec![
+            Ok(decoded_block(0, &first)),
+            Err(EraError::ShardTooLarge { size, max_size }),
+        ]);
+
+        let result = ArchiveReader::extract_with_iterator(
+            &catalog,
+            &mut iter,
+            &ExtractOptions::new(&output_dir),
+        )
+        .await;
+
+        match result {
+            Err(EraError::ShardTooLarge {
+                size: actual_size,
+                max_size: actual_max,
+            }) => {
+                assert_eq!(actual_size, size);
+                assert_eq!(actual_max, max_size);
+            }
+            other => panic!("expected concrete shard-limit error, got {other:?}"),
+        }
+        assert!(
+            !output_path.exists(),
+            "partial output must be removed after a shard-limit failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_with_iterator_recovers_after_ordinary_block_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("extracted");
+        let output_path = output_dir.join("partial.txt");
+        let first = Bytes::from_static(b"partial ");
+        let second = Bytes::from_static(b"recovery");
+        let catalog = two_chunk_catalog(&first, &second);
+        let mut iter = injected_iterator(vec![
+            Ok(decoded_block(0, &first)),
+            Err(EraError::ErasureError(
+                "injected recoverable block failure".into(),
+            )),
+            Ok(decoded_block(1, &second)),
+        ]);
+
+        let stats = ArchiveReader::extract_with_iterator(
+            &catalog,
+            &mut iter,
+            &ExtractOptions::new(&output_dir),
+        )
+        .await
+        .unwrap();
+
+        let expected = [first.as_ref(), second.as_ref()].concat();
+        assert_eq!(stats.extracted, 1);
+        assert_eq!(stats.bytes_written, u64::try_from(expected.len()).unwrap());
+        assert_eq!(fs::read(output_path).unwrap(), expected);
     }
 
     #[tokio::test]
