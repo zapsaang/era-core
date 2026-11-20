@@ -101,11 +101,21 @@ fn try_unlock_with_providers(
     }
 }
 
+#[derive(Clone, Copy)]
+enum CommittedDataEnds<'a> {
+    Unknown { expected_volumes: usize },
+    Authenticated(&'a [u64]),
+}
+
 fn minimum_volumes_for_repair(
     erasure_config: ErasureCodeConfig,
-    expected_volumes: usize,
     generation_width: usize,
+    committed_ends: CommittedDataEnds<'_>,
 ) -> usize {
+    let expected_volumes = match committed_ends {
+        CommittedDataEnds::Unknown { expected_volumes } => expected_volumes,
+        CommittedDataEnds::Authenticated(ends) => ends.len(),
+    };
     let data_shards = usize::from(erasure_config.data_shards);
     if expected_volumes == 0 || data_shards == 0 {
         return data_shards;
@@ -115,10 +125,19 @@ fn minimum_volumes_for_repair(
     let mut generation_start = 0;
     while generation_start < expected_volumes {
         let generation_volumes = generation_width.min(expected_volumes - generation_start);
-        let max_shards_per_vol = total_shards.div_ceil(generation_volumes).max(1);
-        minimum_volumes += data_shards
-            .div_ceil(max_shards_per_vol)
-            .min(generation_volumes);
+        let generation_end = generation_start + generation_volumes;
+        let data_empty = match committed_ends {
+            CommittedDataEnds::Unknown { .. } => false,
+            CommittedDataEnds::Authenticated(ends) => ends[generation_start..generation_end]
+                .iter()
+                .all(|&end| end == DATA_REGION_START),
+        };
+        if !data_empty {
+            let max_shards_per_vol = total_shards.div_ceil(generation_volumes).max(1);
+            minimum_volumes += data_shards
+                .div_ceil(max_shards_per_vol)
+                .min(generation_volumes);
+        }
         generation_start += generation_width;
     }
     minimum_volumes
@@ -1112,6 +1131,7 @@ async fn repair_archive_matrix_with_providers(
     // Verify credentials before proceeding with repair
     let mut header_repairs = Vec::new();
     let mut catalog_repairs = Vec::new();
+    let mut authenticated_committed_ends = None;
     let has_catalog = volume_readers.iter().any(|reader| {
         reader
             .footer()
@@ -1119,6 +1139,10 @@ async fn repair_archive_matrix_with_providers(
     });
     let session = if header_repair_needed || has_catalog {
         let mut archive = ArchiveReader::open_with_providers(path, _providers).await?;
+        authenticated_committed_ends = archive
+            .manifest()
+            .filter(|manifest| manifest.volume_committed_ends.len() == expected_volumes)
+            .map(|manifest| manifest.volume_committed_ends.clone());
         for (reader, volume_path) in volume_readers.iter().zip(&volume_paths) {
             if reader.header_recovered_from_backup() {
                 let header_bytes = recovered_header_bytes(reader, &archive).await?;
@@ -1219,11 +1243,12 @@ async fn repair_archive_matrix_with_providers(
         &volume_indices,
         header.config().distribution.strategy,
     )?;
-    let minimum_required_volumes = minimum_volumes_for_repair(
-        erasure_config,
-        expected_volumes,
-        geometry.generation_width(),
+    let committed_ends = authenticated_committed_ends.as_deref().map_or(
+        CommittedDataEnds::Unknown { expected_volumes },
+        CommittedDataEnds::Authenticated,
     );
+    let minimum_required_volumes =
+        minimum_volumes_for_repair(erasure_config, geometry.generation_width(), committed_ends);
     let mut stats = RepairStats {
         archive_health: classify_repair_archive_health(
             expected_volumes,
@@ -1735,23 +1760,53 @@ mod tests {
     #[test]
     fn test_minimum_volumes_for_repair() {
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 3, 3),
+            minimum_volumes_for_repair(
+                ErasureCodeConfig::new(4, 2),
+                3,
+                CommittedDataEnds::Unknown {
+                    expected_volumes: 3,
+                },
+            ),
             2
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(5, 1), 3, 3),
+            minimum_volumes_for_repair(
+                ErasureCodeConfig::new(5, 1),
+                3,
+                CommittedDataEnds::Unknown {
+                    expected_volumes: 3,
+                },
+            ),
             3
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 6, 6),
+            minimum_volumes_for_repair(
+                ErasureCodeConfig::new(4, 2),
+                6,
+                CommittedDataEnds::Unknown {
+                    expected_volumes: 6,
+                },
+            ),
             4
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 2, 2),
+            minimum_volumes_for_repair(
+                ErasureCodeConfig::new(4, 2),
+                2,
+                CommittedDataEnds::Unknown {
+                    expected_volumes: 2,
+                },
+            ),
             2
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 1, 1),
+            minimum_volumes_for_repair(
+                ErasureCodeConfig::new(4, 2),
+                1,
+                CommittedDataEnds::Unknown {
+                    expected_volumes: 1,
+                },
+            ),
             1
         );
     }
@@ -1759,12 +1814,24 @@ mod tests {
     #[test]
     fn test_minimum_volumes_for_repair_uses_generation_width() {
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 9, 3),
+            minimum_volumes_for_repair(
+                ErasureCodeConfig::new(4, 2),
+                3,
+                CommittedDataEnds::Unknown {
+                    expected_volumes: 9,
+                },
+            ),
             6,
             "three narrow generations need two surviving volumes each"
         );
         assert_eq!(
-            minimum_volumes_for_repair(ErasureCodeConfig::new(4, 2), 4, 3),
+            minimum_volumes_for_repair(
+                ErasureCodeConfig::new(4, 2),
+                3,
+                CommittedDataEnds::Unknown {
+                    expected_volumes: 4,
+                },
+            ),
             3,
             "a short final generation is capped by its actual width"
         );

@@ -1,4 +1,4 @@
-use era_common::{ArchiveConfig, ErasureCodeConfig};
+use era_common::{ArchiveConfig, CompressionAlgorithm, ErasureCodeConfig};
 use era_engine::{
     repair_archive, ArchiveHealthStatus, ArchiveReader, ArchiveWriterBuilder, ExtractOptions,
     RepairOptions,
@@ -16,6 +16,14 @@ fn test_config() -> ArchiveConfig {
     config.encryption.kdf_memory_cost = 1024;
     config.encryption.kdf_time_cost = 1;
     config
+}
+
+fn dry_run_options() -> RepairOptions {
+    RepairOptions {
+        create_backup: false,
+        dry_run: true,
+        continue_on_error: true,
+    }
 }
 
 async fn create_narrow_ec_archive(
@@ -126,17 +134,9 @@ async fn find10_repair_3_volumes_4_2_with_one_missing_volume_is_degraded_not_inc
     // Removing 1 of 3 volumes leaves 2 volumes holding 4 shards per stripe (== data_shards).
     fs::remove_file(temp_dir.path().join("narrow_missing.era.002")).unwrap();
 
-    let repair_stats = repair_archive(
-        &archive_path,
-        PASSWORD,
-        RepairOptions {
-            create_backup: false,
-            dry_run: true,
-            continue_on_error: true,
-        },
-    )
-    .await
-    .unwrap();
+    let repair_stats = repair_archive(&archive_path, PASSWORD, dry_run_options())
+        .await
+        .unwrap();
 
     assert_eq!(repair_stats.unrecoverable_blocks, 0);
     assert!(
@@ -171,17 +171,9 @@ async fn find10_repair_3_volumes_4_2_missing_plus_corrupted_is_incomplete() {
         128,
     );
 
-    let repair_stats = repair_archive(
-        &archive_path,
-        PASSWORD,
-        RepairOptions {
-            create_backup: false,
-            dry_run: true,
-            continue_on_error: true,
-        },
-    )
-    .await
-    .unwrap();
+    let repair_stats = repair_archive(&archive_path, PASSWORD, dry_run_options())
+        .await
+        .unwrap();
 
     assert!(repair_stats.unrecoverable_blocks > 0);
     assert!(
@@ -205,22 +197,71 @@ async fn find10_repair_3_volumes_5_1_with_one_missing_volume_is_incomplete() {
     // Removing 1 of 3 volumes leaves 2 volumes holding only 4 shards per stripe (< 5 data_shards).
     fs::remove_file(temp_dir.path().join("narrow_5_1.era.002")).unwrap();
 
-    let repair_stats = repair_archive(
-        &archive_path,
-        PASSWORD,
-        RepairOptions {
-            create_backup: false,
-            dry_run: true,
-            continue_on_error: true,
-        },
-    )
-    .await
-    .unwrap();
+    let repair_stats = repair_archive(&archive_path, PASSWORD, dry_run_options())
+        .await
+        .unwrap();
 
     assert!(repair_stats.unrecoverable_blocks > 0);
     assert!(
         repair_stats.is_incomplete(),
         "expected Incomplete status for 5:1 on 3 volumes with 1 missing volume, got {:?}",
+        repair_stats.archive_health
+    );
+}
+
+#[tokio::test]
+async fn find10_metadata_only_rotation_missing_metadata_volume_is_degraded() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("metadata_rotation.era");
+    let mut config = test_config();
+    config.compression.algorithm = CompressionAlgorithm::None;
+    let mut writer = ArchiveWriterBuilder::new(&archive_path)
+        .password(PASSWORD)
+        .config(config)
+        .enable_erasure(true)
+        .erasure_config(ErasureCodeConfig::new(4, 2))
+        .volume_count(2)
+        .max_volume_size(1024 * 1024)
+        .target_block_size(512 * 1024)
+        .enable_cdc(false)
+        .build()
+        .await
+        .unwrap();
+    for (name, byte) in [("first.bin", 1u8), ("second.bin", 2u8)] {
+        writer
+            .add_bytes(name, &vec![byte; 512 * 1024])
+            .await
+            .unwrap();
+    }
+    for i in 0..1000u32 {
+        let name = format!("tiny-{i:04}.bin");
+        let payload = [u8::try_from(i % 251).unwrap(); 64];
+        writer.add_bytes(&name, &payload).await.unwrap();
+    }
+    writer.finalize().await.unwrap();
+
+    let archive = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let ends = &archive.manifest().unwrap().volume_committed_ends;
+    assert_eq!((archive.header().total_volumes(), ends.len()), (4, 4));
+    assert!(ends[..2].iter().all(|&end| end > DATA_REGION_START));
+    assert_eq!(&ends[2..], &[DATA_REGION_START, DATA_REGION_START]);
+    drop(archive);
+
+    fs::remove_file(era_volume::volume_path(&archive_path, 3)).unwrap();
+    let repair_stats = repair_archive(&archive_path, PASSWORD, dry_run_options())
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            &repair_stats.archive_health,
+            ArchiveHealthStatus::Degraded {
+                expected_volumes: 4,
+                found_volumes: 3,
+                missing_indices,
+            } if missing_indices.as_slice() == [3]
+        ),
+        "metadata-only volume loss must not count against data recovery, got {:?}",
         repair_stats.archive_health
     );
 }
