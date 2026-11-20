@@ -1549,7 +1549,8 @@ impl ArchiveWriter {
                 self.add_file_with_path(&entry_path, relative_path).await?;
             }
         } else {
-            self.add_file_with_path(path, path).await?;
+            let stored_path = normalize_single_file_stored_path(path)?;
+            self.add_file_with_path(path, &stored_path).await?;
         }
         Ok(())
     }
@@ -2844,6 +2845,28 @@ pub struct ArchiveStats {
     pub total_size: u64,
     /// Number of blocks written
     pub blocks_written: u64,
+}
+
+fn normalize_single_file_stored_path(path: &Path) -> Result<PathBuf> {
+    let has_parent_dir = path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if path.is_absolute() || has_parent_dir {
+        return path
+            .file_name()
+            .map(PathBuf::from)
+            .ok_or_else(|| EraError::InvalidConfig("stored_path has no valid file name".into()));
+    }
+    let normalized: PathBuf = path
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    if normalized.as_os_str().is_empty() {
+        return Err(EraError::InvalidConfig(
+            "stored_path has no valid file name".into(),
+        ));
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]
