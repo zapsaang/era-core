@@ -17,6 +17,8 @@ pub struct StorageMetadata {
 }
 
 /// Writer for storage objects (async, non-blocking I/O)
+// async_trait emits #[must_use] on Pin<Box<dyn Future>> trait methods (clippy::double_must_use on Rust 1.99+).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait StorageWriter: Send {
     /// Append data to the end of the storage object
@@ -47,6 +49,8 @@ pub trait StorageWriter: Send {
 }
 
 /// Reader for storage objects (async, non-blocking I/O)
+// async_trait emits #[must_use] on Pin<Box<dyn Future>> trait methods (clippy::double_must_use on Rust 1.99+).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait StorageReader: Send {
     /// Read data at the specified offset
@@ -60,6 +64,8 @@ pub trait StorageReader: Send {
 }
 
 /// Storage backend abstraction (async, non-blocking I/O)
+// async_trait emits #[must_use] on Pin<Box<dyn Future>> trait methods (clippy::double_must_use on Rust 1.99+).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     /// The writer type for this backend

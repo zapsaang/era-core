@@ -51,6 +51,8 @@ pub struct BlockIterStats {
 }
 
 /// Common trait for block iterators
+// async_trait emits #[must_use] on Pin<Box<dyn Future>> trait methods (clippy::double_must_use on Rust 1.99+).
+#[allow(clippy::double_must_use)]
 #[async_trait(?Send)]
 pub trait BlockIterator {
     /// Get the next block's decoded chunks
