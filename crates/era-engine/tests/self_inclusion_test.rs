@@ -158,3 +158,49 @@ async fn test_add_path_preserves_unrelated_era_files() {
         paths
     );
 }
+
+#[tokio::test]
+async fn test_add_path_excludes_volume_files_without_era_extension() {
+    let temp_dir = TempDir::new().unwrap();
+    let source_dir = temp_dir.path().join("no_ext_src");
+    fs::create_dir_all(&source_dir).unwrap();
+
+    create_test_file(&source_dir, "payload.txt", b"actual payload");
+
+    // Output path without `.era` extension: VolumePool produces `my_archive.era` and `.era.001..`
+    let archive_base = source_dir.join("my_archive");
+
+    let mut writer = ArchiveWriterBuilder::new(&archive_base)
+        .password("test_password")
+        .enable_erasure(true)
+        .volume_count(6)
+        .build()
+        .await
+        .unwrap();
+
+    writer.add_path(&source_dir, true).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    let first_volume = source_dir.join("my_archive.era");
+    let mut reader = ArchiveReader::open(&first_volume, "test_password")
+        .await
+        .unwrap();
+    let files = reader.list_files().await.unwrap();
+    let paths: Vec<String> = files
+        .iter()
+        .map(|f| f.path.to_string_lossy().to_string())
+        .collect();
+
+    assert_eq!(
+        paths.len(),
+        1,
+        "expected only payload.txt, got: {:?}",
+        paths
+    );
+    assert!(paths[0].ends_with("payload.txt"), "got: {:?}", paths);
+    assert!(
+        !paths.iter().any(|p| p.contains("my_archive.era")),
+        "Archive must not self-include its own volumes: {:?}",
+        paths
+    );
+}

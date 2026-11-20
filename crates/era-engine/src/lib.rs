@@ -80,4 +80,4 @@ pub use volume_capacity::{validate_max_volume_size, MIN_ARCHIVE_VOLUME_SIZE};
     note = "Use ArchiveWriter instead. GenericArchiveWriter does not support multi-volume, manifest tracking, or V8.2 format features."
 )]
 pub use writer::generic::{GenericArchiveWriter, GenericArchiveWriterBuilder};
-pub use writer::{ArchiveWriter, ArchiveWriterBuilder, AuthMode};
+pub use writer::{collect_archive_volume_paths, ArchiveWriter, ArchiveWriterBuilder, AuthMode};

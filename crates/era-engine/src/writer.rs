@@ -1556,20 +1556,7 @@ impl ArchiveWriter {
     }
 
     fn collect_own_volume_paths(&self) -> HashSet<PathBuf> {
-        let mut paths = HashSet::new();
-        if let Ok(canonical) = self.output_path.canonicalize() {
-            paths.insert(canonical.clone());
-            let stem = canonical.with_extension("");
-            for seq in 1..=u16::MAX {
-                let vol_path = stem.with_extension(format!("era.{:03}", seq));
-                if vol_path.exists() {
-                    paths.insert(vol_path);
-                } else {
-                    break;
-                }
-            }
-        }
-        paths
+        collect_archive_volume_paths(&self.output_path, None)
     }
 
     /// Add a file with a specific stored path
@@ -2845,6 +2832,51 @@ pub struct ArchiveStats {
     pub total_size: u64,
     /// Number of blocks written
     pub blocks_written: u64,
+}
+
+/// Compute canonical paths of volume files associated with an archive output base path.
+///
+/// Canonicalizes the parent directory (so paths that do not exist yet or omit the `.era`
+/// extension still resolve consistently) and derives volume paths via `era_volume::volume_path`.
+pub fn collect_archive_volume_paths(
+    output: &Path,
+    expected_volumes: Option<usize>,
+) -> HashSet<PathBuf> {
+    let mut paths = HashSet::new();
+    let Some(file_name) = output.file_name() else {
+        return paths;
+    };
+    let parent = match output.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let Ok(canonical_parent) = parent.canonicalize() else {
+        return paths;
+    };
+    let canonical_base = canonical_parent.join(file_name);
+
+    let min_volumes = expected_volumes.unwrap_or(1).max(1);
+    for seq_idx in 0..min_volumes {
+        let Ok(seq) = u16::try_from(seq_idx) else {
+            break;
+        };
+        let vol_path = era_volume::volume_path(&canonical_base, seq);
+        let resolved = vol_path.canonicalize().unwrap_or(vol_path);
+        paths.insert(resolved);
+    }
+
+    let start_seq = u16::try_from(min_volumes).unwrap_or(u16::MAX);
+    for seq in start_seq..=u16::MAX {
+        let vol_path = era_volume::volume_path(&canonical_base, seq);
+        if vol_path.exists() {
+            let resolved = vol_path.canonicalize().unwrap_or(vol_path);
+            paths.insert(resolved);
+        } else {
+            break;
+        }
+    }
+
+    paths
 }
 
 fn normalize_single_file_stored_path(path: &Path) -> Result<PathBuf> {

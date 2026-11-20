@@ -1917,6 +1917,7 @@ impl ArchiveReader {
         // Build maps for extraction
         let mut context = ExtractionContext::new();
         context.set_canonical_output_dir(canonical_output_dir.clone());
+        let mut planned_targets: HashSet<PathBuf> = HashSet::new();
 
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
             if is_internal_entry(entry) {
@@ -1954,11 +1955,18 @@ impl ArchiveReader {
                 }
             }
 
-            if tokio::fs::try_exists(&output_path).await.unwrap_or(false) && !options.overwrite {
+            let target_key: PathBuf = output_path
+                .components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect();
+            let already_exists = tokio::fs::try_exists(&output_path).await.unwrap_or(false)
+                || planned_targets.contains(&target_key);
+            if already_exists && !options.overwrite {
                 debug!("Skipping existing file: {}", output_path.display());
                 stats.skipped += 1;
                 continue;
             }
+            planned_targets.insert(target_key);
 
             tracked_output_files.push(output_path.clone());
 
