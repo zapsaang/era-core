@@ -47,8 +47,9 @@ const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
 const MAX_EXTRACTION_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
 
 const MAX_SHARD_SIZE: u64 = 256 * 1024 * 1024;
-const MAX_CATALOG_PLAINTEXT_SIZE: u64 = 1024 * 1024 * 1024;
-const MAX_CATALOG_CHUNKS: u32 = 128;
+pub(crate) const MAX_CATALOG_PLAINTEXT_SIZE: u64 = 1024 * 1024 * 1024;
+pub(crate) const MAX_CATALOG_CHUNKS: u32 = 128;
+pub(crate) const MAX_CATALOG_CHUNK_SIZE: usize = era_volume::MAX_SHARD_SIZE / 2;
 const MAX_CATALOG_SCAN_CANDIDATES: usize = 256;
 const CATALOG_SCAN_WINDOW: u64 = 64 * 1024;
 
@@ -1492,10 +1493,20 @@ impl ArchiveReader {
             ));
         }
 
-        let max_chunk_size = u64::try_from(era_volume::MAX_SHARD_SIZE / 2)
-            .map_err(|_| EraError::InvalidFormat("Catalog chunk bound exceeds u64".into()))?;
-        let expected_chunks = total_len.div_ceil(max_chunk_size).max(1);
-        if u64::from(chunk_count) != expected_chunks {
+        // The authenticated first payload gives the width used by the writer.
+        // Legacy writers used the maximum width; capped writers can use less.
+        let first_payload = &first_chunk_data[12..];
+        if first_payload.is_empty() || first_payload.len() > MAX_CATALOG_CHUNK_SIZE {
+            return Err(EraError::InvalidFormat(
+                "Catalog first chunk has an invalid payload length".into(),
+            ));
+        }
+        let capacity = usize::try_from(total_len)
+            .map_err(|_| EraError::InvalidFormat("Catalog total length exceeds usize".into()))?;
+        let expected_chunks = capacity.div_ceil(first_payload.len());
+        let expected_chunks = u32::try_from(expected_chunks)
+            .map_err(|_| EraError::InvalidFormat("Catalog chunk count exceeds u32".into()))?;
+        if chunk_count != expected_chunks {
             return Err(EraError::InvalidFormat(format!(
                 "Catalog chunk count {} does not match total length {}",
                 chunk_count, total_len
@@ -1519,15 +1530,7 @@ impl ArchiveReader {
             "Multi-block catalog: {} blocks, {} total bytes",
             chunk_count, total_len
         );
-        let capacity = usize::try_from(total_len)
-            .map_err(|_| EraError::InvalidFormat("Catalog total length exceeds usize".into()))?;
         let mut catalog_buf = Vec::with_capacity(capacity);
-        let first_payload = &first_chunk_data[12..];
-        if u64::try_from(first_payload.len()).unwrap_or(u64::MAX) > total_len {
-            return Err(EraError::IntegrityError(
-                "Catalog first chunk exceeds advertised total".into(),
-            ));
-        }
         catalog_buf.extend_from_slice(first_payload);
 
         let first_size = locator.expected_size.ok_or_else(|| {
@@ -1614,24 +1617,14 @@ impl ArchiveReader {
                     block_chunks.data.len()
                 )));
             }
-            let assembled_len = catalog_buf.len().checked_add(length).ok_or_else(|| {
-                EraError::InvalidFormat("Catalog assembled length overflow".into())
-            })?;
-            if u64::try_from(assembled_len).unwrap_or(u64::MAX) > total_len {
+            let expected_len = first_payload.len().min(capacity - catalog_buf.len());
+            if length != expected_len {
                 return Err(EraError::IntegrityError(
-                    "Catalog continuation exceeds advertised total".into(),
+                    "Catalog continuation length does not match framing".into(),
                 ));
             }
             catalog_buf.extend_from_slice(&block_chunks.data[start..end]);
             next_offset = block_end;
-        }
-
-        if u64::try_from(catalog_buf.len()).unwrap_or(u64::MAX) != total_len {
-            return Err(EraError::IntegrityError(format!(
-                "Catalog reassembled length {} does not match advertised total {}",
-                catalog_buf.len(),
-                total_len
-            )));
         }
 
         Ok(catalog_buf)
