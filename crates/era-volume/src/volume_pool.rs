@@ -5,9 +5,9 @@
 //! when volumes reach their size limit.
 
 use era_common::{
-    compute_shard_crc, BlockHeader, BlockLocation, BlockType, EncryptedMacroBlock, EraError,
-    ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig, MatrixShardEntry, Result,
-    ShardHeader, VolumeId,
+    compute_shard_crc, ArchiveManifest, BlockHeader, BlockLocation, BlockType, EncryptedMacroBlock,
+    EraError, ErasureCodeConfig, MatrixBlockLocation, MatrixDistributionConfig, MatrixShardEntry,
+    Result, ShardHeader, VolumeId,
 };
 use era_storage::StorageBackend;
 use std::collections::HashMap;
@@ -17,14 +17,13 @@ use std::path::{Path, PathBuf};
 use crate::distribution::{
     validate_erasure_volume_count, DistributionCalculator, DistributionConfigExt,
 };
-use crate::writer::RetiredVolumeState;
+use crate::writer::{superheader_digest, RetiredVolumeState};
 use crate::{
     extract_filename, SuperHeader, VolumeReader, VolumeWriter, DEFAULT_MAX_VOLUME_SIZE,
     MIN_VOLUME_SIZE,
 };
 
-// ArchiveManifest's v8.2 decoder accepts at most this many committed ends.
-const MAX_MANIFEST_VOLUMES: usize = 1024;
+const MAX_MANIFEST_VOLUMES: usize = ArchiveManifest::MAX_VOLUMES;
 
 fn checked_manifest_volume_count(count: usize) -> Result<u16> {
     if !(1..=MAX_MANIFEST_VOLUMES).contains(&count) {
@@ -1017,6 +1016,38 @@ impl<B: StorageBackend> VolumePool<B> {
             .collect()
     }
 
+    /// Install the final count and digest all finalized headers in volume-sequence order.
+    /// Call after the last possible rotation and before encrypting manifest replicas.
+    /// Retired headers come from the same snapshots used by finalization; no files are opened.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid volume count, noncontiguous sequences, or an
+    /// unencodable header.
+    pub fn finalized_volume_header_digests(&mut self) -> Result<Vec<[u8; 32]>> {
+        self.install_final_volume_count()?;
+        self.retired_volumes
+            .iter()
+            .map(|(_, state)| {
+                (
+                    state.header.volume_sequence(),
+                    superheader_digest(&state.header),
+                )
+            })
+            .chain(self.writers.iter().map(|writer| {
+                (writer.volume_sequence(), writer.finalized_header_digest())
+            }))
+            .enumerate()
+            .map(|(expected, (sequence, digest))| {
+                if expected != usize::from(sequence) {
+                    return Err(EraError::InvalidConfig(format!(
+                        "expected volume sequence {expected} while building header digest table, found {sequence}"
+                    )));
+                }
+                digest
+            })
+            .collect()
+    }
+
     /// Finalize all volumes.
     ///
     /// # Errors
@@ -1450,6 +1481,45 @@ mod tests {
         assert_eq!(ends.len(), 2);
         assert_eq!(ends[0].0, 0);
         assert_eq!(ends[1].0, 1);
+    }
+
+    #[tokio::test]
+    async fn finalized_digest_table_binds_retired_and_active_header_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let mut config = VolumePoolConfig::new(temp_dir.path().join("header-digests"), 1);
+        config.max_volume_size = 16_000;
+        let mut pool = VolumePool::create(backend.clone(), config.clone(), create_test_header())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            pool.write_to_current(&[0; 4096]).await.unwrap();
+        }
+
+        let table = pool.finalized_volume_header_digests().unwrap();
+        pool.finalize_with_catalogs(&[(0, 0, 0)], None)
+            .await
+            .unwrap();
+
+        assert_eq!(table.len(), 2);
+        for seq in 0..2 {
+            let path = config.volume_path(seq);
+            let reader = VolumeReader::open(&backend, Path::new(path.file_name().unwrap()))
+                .await
+                .unwrap();
+            assert_eq!(reader.header().total_volumes(), 2);
+            assert_eq!(reader.header().volume_sequence(), seq);
+            let primary = reader.read_raw(0, crate::HEADER_SIZE).await.unwrap();
+            let backup = reader
+                .read_raw(
+                    reader.footer().unwrap().backup_header_offset(),
+                    crate::HEADER_SIZE,
+                )
+                .await
+                .unwrap();
+            assert_eq!(primary, backup);
+            assert_eq!(table[usize::from(seq)], *blake3::hash(&primary).as_bytes());
+        }
     }
 
     #[tokio::test]

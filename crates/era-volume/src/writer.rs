@@ -21,6 +21,10 @@ use rand::RngCore;
 /// Space reserved at the end of a fixed-size volume for the backup header + primary footer.
 const BACKUP_HEADER_FOOTER_RESERVED: u64 = (HEADER_SIZE + FOOTER_SIZE) as u64;
 
+pub(crate) fn superheader_digest(header: &SuperHeader) -> Result<[u8; 32]> {
+    Ok(*blake3::hash(&header.to_bytes()?).as_bytes())
+}
+
 /// Metadata snapshot of a retired volume whose write handle was closed to bound file descriptors.
 pub(crate) struct RetiredVolumeState {
     pub(crate) header: SuperHeader,
@@ -778,7 +782,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Digest the bytes that finalization writes to both header locations.
     pub fn finalized_header_digest(&self) -> Result<[u8; 32]> {
-        Ok(*blake3::hash(&self.header.to_bytes()?).as_bytes())
+        superheader_digest(&self.header)
     }
 
     /// Close the underlying writer handle while preserving state for deferred finalization.
