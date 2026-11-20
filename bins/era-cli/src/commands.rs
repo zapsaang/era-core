@@ -421,8 +421,28 @@ fn apply_config_overrides(
             max_size
         );
     }
+    if config.block.target_size == 0 {
+        anyhow::bail!("Block target size must be > 0");
+    }
 
     Ok(())
+}
+
+fn apply_writer_overrides(
+    mut builder: era_engine::ArchiveWriterBuilder,
+    config: &ArchiveConfig,
+    max_volume_size: Option<u64>,
+    block_target_size: Option<usize>,
+) -> era_engine::ArchiveWriterBuilder {
+    if let Some(size) = max_volume_size {
+        builder = builder.max_volume_size(size);
+    }
+    if block_target_size.is_some()
+        || config.block.target_size != ArchiveConfig::default().block.target_size
+    {
+        builder = builder.target_block_size(config.block.target_size);
+    }
+    builder
 }
 
 /// Parameters for creating a new ERA archive
@@ -531,6 +551,9 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
     era_engine::validate_max_volume_size(max_volume_size.unwrap_or(config.volume.max_size))?;
 
+    config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
+    era_engine::validate_max_volume_size(max_volume_size.unwrap_or(config.volume.max_size))?;
+
     // Load certificates
     let certificate = if let Some(path) = certificate_path {
         info!("Loading certificate: {}", path.display());
@@ -571,10 +594,8 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         anyhow::bail!("Multiple --hybrid-certificate values require --threshold and --shares");
     }
 
-    let mut builder = ArchiveWriter::builder(output).config(config.clone());
-    if let Some(size) = max_volume_size {
-        builder = builder.max_volume_size(size);
-    }
+    let builder = ArchiveWriter::builder(output).config(config.clone());
+    let mut builder = apply_writer_overrides(builder, &config, max_volume_size, block_target_size);
 
     if let Some(t) = threshold {
         builder = builder.access_policy(era_engine::AccessPolicy::Threshold(t as u32));
@@ -1280,6 +1301,7 @@ pub struct RepackArgs<'a> {
     pub compression_level: Option<i32>,
     pub no_compression: bool,
     pub erasure: Option<&'a str>,
+    pub max_volume_size: Option<u64>,
     pub cdc_min: Option<usize>,
     pub cdc_avg: Option<usize>,
     pub cdc_max: Option<usize>,
@@ -1305,6 +1327,7 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
         compression_level,
         no_compression,
         erasure,
+        max_volume_size,
         cdc_min,
         cdc_avg,
         cdc_max,
@@ -1344,6 +1367,9 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
             block_target_size,
         },
     )?;
+
+    config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
+    era_engine::validate_max_volume_size(max_volume_size.unwrap_or(config.volume.max_size))?;
 
     info!(
         "Repacking archive: {} -> {}",
@@ -1388,7 +1414,9 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
         || threshold.is_some()
         || !dest_password.is_empty();
 
-    let mut writer_builder = ArchiveWriter::builder(output).config(config.clone());
+    let writer_builder = ArchiveWriter::builder(output).config(config.clone());
+    let mut writer_builder =
+        apply_writer_overrides(writer_builder, &config, max_volume_size, block_target_size);
 
     if !has_explicit_dest_auth {
         let keypairs = if !key_paths.is_empty() {
@@ -2218,5 +2246,176 @@ mod tests {
             err.to_string().contains("missing expected volume files"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_wires_block_target_size_into_writer() {
+        let temp_dir = TempDir::new().unwrap();
+        let input = temp_dir.path().join("payload.bin");
+        let mut data = vec![0u8; 512 * 1024];
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        for byte in &mut data {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *byte = (state >> 24) as u8;
+        }
+        fs::write(&input, &data).unwrap();
+        let output = temp_dir.path().join("target_size.era");
+        let inputs = vec![input];
+
+        create(CreateArgs {
+            inputs: &inputs,
+            output: &output,
+            config_path: None,
+            certificate_path: None,
+            hybrid_certificate_paths: &[],
+            passwords: &["test_password".to_string()],
+            threshold: None,
+            shares: None,
+            compression_level: None,
+            no_compression: true,
+            erasure: Some("none"),
+            volume_count: None,
+            max_volume_size: None,
+            cdc_min: Some(8 * 1024),
+            cdc_avg: Some(16 * 1024),
+            cdc_max: Some(32 * 1024),
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: Some(64 * 1024),
+            compact: false,
+        })
+        .await
+        .unwrap();
+
+        let mut reader = ArchiveReader::open(&output, "test_password").await.unwrap();
+        let verify_stats = reader.verify().await.unwrap();
+        assert!(
+            verify_stats.blocks_verified >= 6,
+            "512 KiB with --block-target-size 65536 must split across multiple blocks, got {}",
+            verify_stats.blocks_verified
+        );
+    }
+
+    #[tokio::test]
+    async fn repack_applies_max_volume_size_and_rejects_below_one_mib() {
+        let temp_dir = TempDir::new().unwrap();
+        let input = temp_dir.path().join("payload.bin");
+        let mut data = vec![0u8; 1500 * 1024];
+        let mut state = 0xFEDC_BA98_7654_3210u64;
+        for byte in &mut data {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *byte = (state >> 24) as u8;
+        }
+        fs::write(&input, &data).unwrap();
+        let source = temp_dir.path().join("source.era");
+        let inputs = vec![input];
+
+        create(CreateArgs {
+            inputs: &inputs,
+            output: &source,
+            config_path: None,
+            certificate_path: None,
+            hybrid_certificate_paths: &[],
+            passwords: &["test_password".to_string()],
+            threshold: None,
+            shares: None,
+            compression_level: None,
+            no_compression: true,
+            erasure: Some("none"),
+            volume_count: None,
+            max_volume_size: None,
+            cdc_min: None,
+            cdc_avg: None,
+            cdc_max: None,
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: None,
+            compact: false,
+        })
+        .await
+        .unwrap();
+
+        let too_small = temp_dir.path().join("repack_too_small.era");
+        let err = repack(RepackArgs {
+            input: &source,
+            output: &too_small,
+            passwords: &["test_password".to_string()],
+            key_paths: &[],
+            key_passphrase: None,
+            dest_password: &[],
+            certificate_path: None,
+            hybrid_certificate_paths: &[],
+            threshold: None,
+            shares: None,
+            compact: false,
+            compression_level: None,
+            no_compression: true,
+            erasure: Some("none"),
+            max_volume_size: Some(era_engine::MIN_ARCHIVE_VOLUME_SIZE - 1),
+            cdc_min: None,
+            cdc_avg: None,
+            cdc_max: None,
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: None,
+        })
+        .await
+        .expect_err("repack max_volume_size below 1 MiB should fail");
+        assert!(
+            err.to_string().contains("minimum"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(count_volume_files(&too_small, 16), 0);
+
+        let repacked = temp_dir.path().join("repacked.era");
+        repack(RepackArgs {
+            input: &source,
+            output: &repacked,
+            passwords: &["test_password".to_string()],
+            key_paths: &[],
+            key_passphrase: None,
+            dest_password: &[],
+            certificate_path: None,
+            hybrid_certificate_paths: &[],
+            threshold: None,
+            shares: None,
+            compact: false,
+            compression_level: None,
+            no_compression: true,
+            erasure: Some("none"),
+            max_volume_size: Some(era_engine::MIN_ARCHIVE_VOLUME_SIZE),
+            cdc_min: Some(8 * 1024),
+            cdc_avg: Some(16 * 1024),
+            cdc_max: Some(32 * 1024),
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: Some(64 * 1024),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            count_volume_files(&repacked, 16) >= 2,
+            "1.5 MiB repacked with 1 MiB cap must rotate into >= 2 volumes"
+        );
+        let mut reader = ArchiveReader::open(&repacked, "test_password")
+            .await
+            .unwrap();
+        let verify_stats = reader.verify().await.unwrap();
+        assert_eq!(
+            verify_stats.archive_health,
+            era_engine::ArchiveHealthStatus::Healthy
+        );
+        assert!(verify_stats.blocks_verified >= 10);
+        let extract_dir = temp_dir.path().join("extracted");
+        reader
+            .extract_all(&era_engine::ExtractOptions::new(&extract_dir))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(extract_dir.join("payload.bin")).unwrap(), data);
     }
 }

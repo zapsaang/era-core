@@ -424,6 +424,11 @@ enum Commands {
         #[arg(short = 'e', long)]
         erasure: Option<String>,
 
+        /// Maximum size per volume in bytes (e.g., 4294967296 for 4GB)
+        /// When exceeded, new volumes are created automatically
+        #[arg(long)]
+        max_volume_size: Option<u64>,
+
         /// [Geek] CDC minimum chunk size (bytes)
         #[arg(long, help_heading = "Geek Parameters")]
         cdc_min: Option<usize>,
@@ -637,6 +642,7 @@ async fn main() -> anyhow::Result<()> {
             level,
             no_compression,
             erasure,
+            max_volume_size,
             cdc_min,
             cdc_avg,
             cdc_max,
@@ -659,6 +665,7 @@ async fn main() -> anyhow::Result<()> {
                 compression_level: level,
                 no_compression,
                 erasure: erasure.as_deref(),
+                max_volume_size,
                 cdc_min,
                 cdc_avg,
                 cdc_max,

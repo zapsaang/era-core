@@ -2353,6 +2353,13 @@ impl ArchiveWriter {
         } else {
             current_manifest_total_size
         };
+        let budget = FinalizeBudgetSummary {
+            catalog_chunks: catalog_chunk_count,
+            primary_catalog: primary_catalog_size,
+            backup_catalog: backup_catalog_size,
+            index: index_total_size,
+            manifest: manifest_total_size,
+        };
         let rotated = if rotation_needed {
             let required_without_index =
                 Self::metadata_disk_size(catalog_total_size, 0, manifest_total_size)?;
@@ -2401,25 +2408,11 @@ impl ArchiveWriter {
                                 0,
                                 manifest_total_size,
                             )
-                            .await?
+                            .await
+                            .map_err(|err| budget.enrich_error(err, true))?
                     }
                 }
-                Err(EraError::VolumeSpaceExhausted {
-                    volume,
-                    required,
-                    available,
-                    message,
-                }) => {
-                    return Err(EraError::VolumeSpaceExhausted {
-                        volume,
-                        required,
-                        available,
-                        message: format!(
-                            "{message} (catalog={primary_catalog_size} bytes, backup catalog={backup_catalog_size} bytes, index={index_total_size} bytes, manifest={manifest_total_size} bytes)"
-                        ),
-                    });
-                }
-                Err(error) => return Err(error),
+                Err(error) => return Err(budget.enrich_error(error, false)),
             }
         } else {
             false
@@ -2649,6 +2642,56 @@ impl ArchiveWriter {
 
 fn is_internal_path(path: &Path) -> bool {
     path.to_string_lossy().starts_with(INTERNAL_META_PREFIX)
+}
+
+struct FinalizeBudgetSummary {
+    catalog_chunks: usize,
+    primary_catalog: u64,
+    backup_catalog: u64,
+    index: u64,
+    manifest: u64,
+}
+
+impl FinalizeBudgetSummary {
+    fn enrich_error(&self, error: EraError, index_omitted: bool) -> EraError {
+        match error {
+            EraError::VolumeSpaceExhausted {
+                volume,
+                required,
+                available,
+                message,
+            } => {
+                let index_bytes = if index_omitted { 0 } else { self.index };
+                let catalog_budget = self
+                    .primary_catalog
+                    .saturating_add(self.backup_catalog)
+                    .saturating_add(self.manifest);
+                let detail = if self.catalog_chunks > 1 || catalog_budget > available {
+                    format!(
+                        "multi-block catalog metadata exceeds single-volume budget ({available} bytes); increase --max-volume-size \
+                         (catalog={} bytes in {} chunks, backup catalog={} bytes, index={} bytes, manifest={} bytes)",
+                        self.primary_catalog,
+                        self.catalog_chunks,
+                        self.backup_catalog,
+                        index_bytes,
+                        self.manifest
+                    )
+                } else {
+                    format!(
+                        "{message}; increase --max-volume-size (catalog={} bytes, backup catalog={} bytes, index={} bytes, manifest={} bytes)",
+                        self.primary_catalog, self.backup_catalog, index_bytes, self.manifest
+                    )
+                };
+                EraError::VolumeSpaceExhausted {
+                    volume,
+                    required,
+                    available,
+                    message: detail,
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 /// Statistics about the created archive
@@ -3551,6 +3594,56 @@ mod tests {
         );
         assert_eq!(footer.manifest_offset(), 0);
         assert_eq!(footer.manifest_block_id(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_finalize_multi_block_catalog_space_exhausted_mentions_max_volume_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("huge_catalog.era");
+        let mut config = ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        };
+        config.compression.algorithm = era_common::CompressionAlgorithm::None;
+
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .config(config)
+            .enable_erasure(false)
+            .enable_cdc(false)
+            .enable_small_file_packing(false)
+            .max_volume_size(crate::MIN_ARCHIVE_VOLUME_SIZE)
+            .build()
+            .await
+            .unwrap();
+
+        for i in 0..12_000usize {
+            let name = format!(
+                "dir_{:03}/sub_{:03}/long_entry_name_{:05}.bin",
+                i / 100,
+                i % 100,
+                i
+            );
+            writer.add_bytes(&name, b"x").await.unwrap();
+        }
+
+        let err = writer
+            .finalize()
+            .await
+            .expect_err("multi-block catalog exceeding 1 MiB single volume must fail");
+        match err {
+            EraError::VolumeSpaceExhausted { message, .. } => {
+                assert!(
+                    message.contains("--max-volume-size"),
+                    "error message should suggest increasing --max-volume-size, got: {message}"
+                );
+                assert!(
+                    message.contains("catalog"),
+                    "error message should identify catalog budget failure, got: {message}"
+                );
+            }
+            other => panic!("expected VolumeSpaceExhausted, got: {other:?}"),
+        }
     }
 }
 
