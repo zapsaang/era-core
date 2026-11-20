@@ -1373,12 +1373,26 @@ impl ArchiveWriter {
         })
     }
 
-    fn block_disk_size(block: &EncryptedMacroBlock) -> u64 {
-        block.data.len() as u64 + era_common::BlockHeader::SIZE as u64
+    fn block_disk_size(block: &EncryptedMacroBlock) -> Result<u64> {
+        u64::try_from(block.data.len())
+            .map_err(|_| EraError::Other("encrypted block length exceeds u64::MAX".into()))?
+            .checked_add(era_common::BlockHeader::SIZE as u64)
+            .ok_or_else(|| EraError::Other("typed block disk size overflow".into()))
     }
 
-    fn block_set_disk_size(blocks: &[EncryptedMacroBlock]) -> u64 {
-        blocks.iter().map(Self::block_disk_size).sum()
+    fn block_set_disk_size(blocks: &[EncryptedMacroBlock]) -> Result<u64> {
+        blocks.iter().try_fold(0u64, |total, block| {
+            total
+                .checked_add(Self::block_disk_size(block)?)
+                .ok_or_else(|| EraError::Other("typed block set disk size overflow".into()))
+        })
+    }
+
+    fn metadata_disk_size(catalog: u64, index: u64, manifest: u64) -> Result<u64> {
+        catalog
+            .checked_add(index)
+            .and_then(|size| size.checked_add(manifest))
+            .ok_or_else(|| EraError::InvalidConfig("metadata disk size overflow".into()))
     }
 
     fn typed_plaintext_disk_size(plaintext_len: usize) -> Result<u64> {
@@ -2159,6 +2173,9 @@ impl ArchiveWriter {
         } else {
             0
         };
+        if let Some(old_manifest) = &self.existing_manifest {
+            self.finalize_sequence = next_finalize_sequence(old_manifest.finalize_sequence)?;
+        }
 
         let provisional_committed_ends: Vec<u64> = self
             .pipeline
@@ -2176,9 +2193,9 @@ impl ArchiveWriter {
                 .copied()
                 .max()
                 .unwrap_or(era_volume::DATA_REGION_START),
-            provisional_committed_ends,
+            provisional_committed_ends.clone(),
         )?;
-        let manifest_total_size = Self::typed_plaintext_disk_size(
+        let current_manifest_total_size = Self::typed_plaintext_disk_size(
             provisional_manifest
                 .to_bytes_with_header_digest([0; 32])
                 .len(),
@@ -2193,20 +2210,119 @@ impl ArchiveWriter {
                 &volume_indices,
             )?;
 
-        let catalog_total_size = Self::block_set_disk_size(&catalog_blocks_by_volume[0])
-            + backup_blocks_by_volume
-                .as_ref()
-                .map(|sets| Self::block_set_disk_size(&sets[0]))
-                .unwrap_or(0);
-        let rotated = self
+        let backup_catalog_size = match &backup_blocks_by_volume {
+            Some(sets) => Self::block_set_disk_size(&sets[0])?,
+            None => 0,
+        };
+        let primary_catalog_size = Self::block_set_disk_size(&catalog_blocks_by_volume[0])?;
+        let catalog_total_size = primary_catalog_size
+            .checked_add(backup_catalog_size)
+            .ok_or_else(|| EraError::Other("catalog fanout disk size overflow".into()))?;
+        let current_metadata_size = Self::metadata_disk_size(
+            catalog_total_size,
+            index_total_size,
+            current_manifest_total_size,
+        )?;
+        let rotation_needed = !self
             .pipeline
-            .volume_mut()
-            .precheck_and_rotate_if_needed(
-                catalog_total_size,
-                index_total_size,
-                manifest_total_size,
-            )
-            .await?;
+            .volume()
+            .pool()
+            .check_typed_block_space(current_metadata_size)
+            .is_empty();
+        let manifest_total_size = if rotation_needed {
+            let mut rotated_ends = provisional_committed_ends;
+            let rotated_len = rotated_ends
+                .len()
+                .checked_add(self.pipeline.volume().volume_count())
+                .ok_or_else(|| EraError::Other("manifest volume count overflow".into()))?;
+            rotated_ends.resize(rotated_len, era_volume::DATA_REGION_START);
+            let rotated_manifest = self.build_manifest(
+                &catalog_bytes,
+                &[],
+                rotated_ends
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(era_volume::DATA_REGION_START),
+                rotated_ends,
+            )?;
+            Self::typed_plaintext_disk_size(
+                rotated_manifest.to_bytes_with_header_digest([0; 32]).len(),
+            )?
+        } else {
+            current_manifest_total_size
+        };
+        let rotated = if rotation_needed {
+            let required_without_index =
+                Self::metadata_disk_size(catalog_total_size, 0, manifest_total_size)?;
+            match self
+                .pipeline
+                .volume_mut()
+                .precheck_and_rotate_if_needed(
+                    catalog_total_size,
+                    index_total_size,
+                    manifest_total_size,
+                )
+                .await
+            {
+                Ok(rotated) => rotated,
+                Err(EraError::VolumeSpaceExhausted { available, .. })
+                    if backup_blocks_by_volume.is_some()
+                        && index_builder.is_some()
+                        && required_without_index <= available =>
+                {
+                    warn!(
+                        catalog_bytes = catalog_total_size,
+                        index_bytes = index_total_size,
+                        manifest_bytes = manifest_total_size,
+                        available_bytes = available,
+                        "Omitting the embedded index to preserve both EC catalog copies within the volume cap"
+                    );
+                    index_builder = None;
+                    let current_without_index = Self::metadata_disk_size(
+                        catalog_total_size,
+                        0,
+                        current_manifest_total_size,
+                    )?;
+                    if self
+                        .pipeline
+                        .volume()
+                        .pool()
+                        .check_typed_block_space(current_without_index)
+                        .is_empty()
+                    {
+                        false
+                    } else {
+                        self.pipeline
+                            .volume_mut()
+                            .precheck_and_rotate_if_needed(
+                                catalog_total_size,
+                                0,
+                                manifest_total_size,
+                            )
+                            .await?
+                    }
+                }
+                Err(EraError::VolumeSpaceExhausted {
+                    volume,
+                    required,
+                    available,
+                    message,
+                }) => {
+                    return Err(EraError::VolumeSpaceExhausted {
+                        volume,
+                        required,
+                        available,
+                        message: format!(
+                            "{message} (catalog={primary_catalog_size} bytes, backup catalog={backup_catalog_size} bytes, index={index_total_size} bytes, manifest={manifest_total_size} bytes)"
+                        ),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            false
+        };
 
         if rotated {
             volume_indices = self.current_volume_indices()?;
