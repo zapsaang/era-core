@@ -529,6 +529,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     )?;
 
     config.distribution.strategy = MatrixDistributionStrategy::RotatingOffset;
+    era_engine::validate_max_volume_size(max_volume_size.unwrap_or(config.volume.max_size))?;
 
     // Load certificates
     let certificate = if let Some(path) = certificate_path {
@@ -2135,6 +2136,46 @@ mod tests {
             err.to_string().contains("divide") || err.to_string().contains("total shards"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_max_volume_size_below_one_mib() {
+        let temp_dir = TempDir::new().unwrap();
+        let input = temp_dir.path().join("payload.bin");
+        fs::write(&input, vec![0xCD; 1024]).unwrap();
+        let output = temp_dir.path().join("too_small.era");
+        let inputs = vec![input];
+
+        let err = create(CreateArgs {
+            inputs: &inputs,
+            output: &output,
+            config_path: None,
+            certificate_path: None,
+            hybrid_certificate_paths: &[],
+            passwords: &["test_password".to_string()],
+            threshold: None,
+            shares: None,
+            compression_level: None,
+            no_compression: false,
+            erasure: None,
+            volume_count: None,
+            max_volume_size: Some(era_engine::MIN_ARCHIVE_VOLUME_SIZE - 1),
+            cdc_min: None,
+            cdc_avg: None,
+            cdc_max: None,
+            packing_k: None,
+            flush_threshold: None,
+            block_target_size: None,
+            compact: false,
+        })
+        .await
+        .expect_err("max_volume_size below 1 MiB should fail");
+
+        assert!(
+            err.to_string().contains("minimum"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(count_volume_files(&output, 16), 0);
     }
 
     #[tokio::test]

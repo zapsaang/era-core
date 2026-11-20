@@ -341,7 +341,7 @@ mod multivolume_extreme {
     #[test]
     fn test_multivolume_near_min_volume_boundary_roundtrip() {
         let temp = TempDir::new().unwrap();
-        let data = generate_deterministic_data(64 * 1024);
+        let data = generate_deterministic_data(5 * 1024 * 1024);
         let input = create_test_file(temp.path(), "near_min.bin", &data);
         let archive = temp.path().join("near_min.era");
         let out_dir = temp.path().join("out");
@@ -358,7 +358,7 @@ mod multivolume_extreme {
                 "4:2",
                 "--no-compression",
                 "--max-volume-size",
-                "24576",
+                "1048576",
             ])
             .assert()
             .success();

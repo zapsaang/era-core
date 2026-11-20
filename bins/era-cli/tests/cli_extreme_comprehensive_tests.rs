@@ -208,7 +208,7 @@ mod multivolume_extreme_scenarios {
     #[test]
     fn test_multivolume_tiny_16kb_with_large_file_fails_capacity() {
         let temp = TempDir::new().unwrap();
-        let size = 2 * 1024 * 1024; // 2MB file
+        let size = 64 * 1024;
         let input = create_large_test_file(temp.path(), "tiny_vol.bin", size);
         let archive = temp.path().join("tiny_vol.era");
 
@@ -221,7 +221,7 @@ mod multivolume_extreme_scenarios {
                 "--password",
                 "pwd",
                 "--max-volume-size",
-                "16384", // 16KB per volume
+                "16384", // 16KB per volume (below 1 MiB minimum)
                 "--erasure",
                 "4:2",
                 "--no-compression",
@@ -229,14 +229,16 @@ mod multivolume_extreme_scenarios {
             .assert()
             .failure()
             .stderr(predicates::str::contains(
-                "available=12136: write does not fit in a fresh volume",
+                "below minimum supported archive volume size",
             ));
+
+        assert_eq!(count_volume_files(&archive), 0);
     }
 
     #[test]
     fn test_multivolume_64kb_with_large_file_roundtrip() {
         let temp = TempDir::new().unwrap();
-        let size = 2 * 1024 * 1024; // 2MB file
+        let size = 5 * 1024 * 1024; // 5MB file
         let input = create_large_test_file(temp.path(), "tiny_vol.bin", size);
         let archive = temp.path().join("tiny_vol.era");
         let out_dir = temp.path().join("out");
@@ -250,7 +252,7 @@ mod multivolume_extreme_scenarios {
                 "--password",
                 "pwd",
                 "--max-volume-size",
-                "65536",
+                "1048576",
                 "--erasure",
                 "4:2",
                 "--no-compression",
@@ -261,14 +263,14 @@ mod multivolume_extreme_scenarios {
         let volume_paths = get_volume_paths(&archive);
         assert!(
             volume_paths.len() > 6,
-            "2MB with 64KB max should rotate beyond the initial six volumes, got {}",
+            "5MB with 1MB max should rotate beyond the initial six volumes, got {}",
             volume_paths.len()
         );
         for path in &volume_paths {
             let len = get_volume_size(path);
             assert!(
-                len <= 65536,
-                "volume {} is {} bytes, exceeding the 65536-byte cap",
+                len <= 1_048_576,
+                "volume {} is {} bytes, exceeding the 1048576-byte cap",
                 path.display(),
                 len
             );

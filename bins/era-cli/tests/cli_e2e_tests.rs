@@ -524,7 +524,7 @@ mod multivolume_stress_tests {
     #[test]
     fn test_multivolume_many_volumes_stress() {
         let temp = TempDir::new().unwrap();
-        let data = generate_deterministic_data(2 * 1024 * 1024);
+        let data = generate_deterministic_data(5 * 1024 * 1024);
         let input = create_test_file(temp.path(), "manyvols.bin", &data);
         let archive = temp.path().join("manyvols.era");
         let out_dir = temp.path().join("out");
@@ -538,7 +538,7 @@ mod multivolume_stress_tests {
                 "--password",
                 "pwd",
                 "--max-volume-size",
-                "32768",
+                "1048576",
                 "--no-compression",
                 "--erasure",
                 "4:2",
@@ -548,8 +548,8 @@ mod multivolume_stress_tests {
 
         let count = count_volume_files(&archive);
         assert!(
-            count >= 6,
-            "2MB with 32KB max-volume-size should produce many volumes, got {}",
+            count > 6,
+            "5MB with 1MB max-volume-size and 4:2 EC should rotate beyond 6 volumes, got {}",
             count
         );
 
@@ -572,7 +572,7 @@ mod multivolume_stress_tests {
     #[test]
     fn test_multivolume_min_volume_size_boundary() {
         let temp = TempDir::new().unwrap();
-        let data = vec![0xCD; 256 * 1024];
+        let data = generate_deterministic_data(2 * 1024 * 1024);
         let input = create_test_file(temp.path(), "minvol.bin", &data);
         let archive = temp.path().join("minvol.era");
         let out_dir = temp.path().join("out");
@@ -586,7 +586,7 @@ mod multivolume_stress_tests {
                 "--password",
                 "pwd",
                 "--max-volume-size",
-                "20480",
+                "1048576",
                 "--no-compression",
             ])
             .assert()
@@ -595,7 +595,7 @@ mod multivolume_stress_tests {
         let count = count_volume_files(&archive);
         assert!(
             count >= 2,
-            "256KB with 20KB volumes should produce multiple volumes, got {}",
+            "2MB with 1MB minimum volumes should produce multiple volumes, got {}",
             count
         );
 
@@ -2559,7 +2559,7 @@ mod large_file_stress_tests {
                 "--password",
                 "pwd",
                 "--max-volume-size",
-                "65536",
+                "1048576",
                 "--no-compression",
             ])
             .assert()
@@ -2568,7 +2568,7 @@ mod large_file_stress_tests {
         let count = count_volume_files(&archive);
         assert!(
             count >= 5,
-            "10MB with 64KB max-volume-size should produce multiple volumes, got {}",
+            "10MB with 1MB max-volume-size should produce multiple volumes, got {}",
             count
         );
 

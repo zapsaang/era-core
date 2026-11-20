@@ -479,9 +479,8 @@ mod multivolume_extreme_tests {
     #[test]
     fn test_multivolume_tiny_volume_size_8kb() {
         let temp = TempDir::new().unwrap();
-        let input = create_test_file(temp.path(), "mv8k.bin", &vec![0xAA; 256 * 1024]);
+        let input = create_test_file(temp.path(), "mv8k.bin", &vec![0xAA; 16 * 1024]);
         let archive = temp.path().join("mv8k.era");
-        let out_dir = temp.path().join("out");
 
         era_cmd()
             .args([
@@ -496,38 +495,17 @@ mod multivolume_extreme_tests {
                 "--no-compression",
             ])
             .assert()
-            .success();
+            .failure()
+            .stderr(predicates::str::contains("minimum"));
 
-        let count = count_volume_files(&archive);
-        assert!(
-            count >= 2,
-            "8KB volumes for 256KB data should produce multiple volumes, got {}",
-            count
-        );
-
-        era_cmd()
-            .args([
-                "extract",
-                "--input",
-                archive.to_str().unwrap(),
-                "--output",
-                out_dir.to_str().unwrap(),
-                "--password",
-                "pwd",
-            ])
-            .assert()
-            .success();
-
-        let restored = fs::read(out_dir.join("mv8k.bin")).unwrap();
-        assert_eq!(restored, vec![0xAA; 256 * 1024]);
+        assert_eq!(count_volume_files(&archive), 0);
     }
 
     #[test]
     fn test_multivolume_tiny_volume_size_16kb() {
         let temp = TempDir::new().unwrap();
-        let input = create_test_file(temp.path(), "mv16k.bin", &vec![0xBB; 256 * 1024]);
+        let input = create_test_file(temp.path(), "mv16k.bin", &vec![0xBB; 16 * 1024]);
         let archive = temp.path().join("mv16k.era");
-        let out_dir = temp.path().join("out");
 
         era_cmd()
             .args([
@@ -542,36 +520,16 @@ mod multivolume_extreme_tests {
                 "--no-compression",
             ])
             .assert()
-            .success();
+            .failure()
+            .stderr(predicates::str::contains("minimum"));
 
-        let count = count_volume_files(&archive);
-        assert!(
-            count >= 5,
-            "16KB volumes for 256KB data should produce multiple volumes, got {}",
-            count
-        );
-
-        era_cmd()
-            .args([
-                "extract",
-                "--input",
-                archive.to_str().unwrap(),
-                "--output",
-                out_dir.to_str().unwrap(),
-                "--password",
-                "pwd",
-            ])
-            .assert()
-            .success();
-
-        let restored = fs::read(out_dir.join("mv16k.bin")).unwrap();
-        assert_eq!(restored, vec![0xBB; 256 * 1024]);
+        assert_eq!(count_volume_files(&archive), 0);
     }
 
     #[test]
     fn test_multivolume_volume_expansion_triggered() {
         let temp = TempDir::new().unwrap();
-        let input = create_large_test_file(temp.path(), "mv_expand.bin", 2 * 1024 * 1024);
+        let input = create_large_test_file(temp.path(), "mv_expand.bin", 5 * 1024 * 1024);
         let archive = temp.path().join("mv_expand.era");
         let out_dir = temp.path().join("out");
 
@@ -584,7 +542,7 @@ mod multivolume_extreme_tests {
                 "--password",
                 "pwd",
                 "--max-volume-size",
-                "32768",
+                "1048576",
                 "--no-compression",
             ])
             .assert()
@@ -593,7 +551,7 @@ mod multivolume_extreme_tests {
         let count = count_volume_files(&archive);
         assert!(
             count >= 6,
-            "small max-volume-size with 2MB data should produce many volumes, got {}",
+            "1MB max-volume-size with 5MB data should produce many volumes, got {}",
             count
         );
 
@@ -611,7 +569,7 @@ mod multivolume_extreme_tests {
             .success();
 
         let restored = fs::read(out_dir.join("mv_expand.bin")).unwrap();
-        assert_eq!(restored.len(), 2 * 1024 * 1024);
+        assert_eq!(restored.len(), 5 * 1024 * 1024);
     }
 
     #[test]

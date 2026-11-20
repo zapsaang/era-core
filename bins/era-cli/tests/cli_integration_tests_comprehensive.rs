@@ -2401,7 +2401,7 @@ mod multivolume_tests {
     #[test]
     fn test_multivolume_max_volume_size_4kb() {
         let temp = TempDir::new().unwrap();
-        let input = create_test_file(temp.path(), "mv4k.bin", &vec![0xBB; 64 * 1024]);
+        let input = create_test_file(temp.path(), "mv4k.bin", &vec![0xBB; 16 * 1024]);
         let archive = temp.path().join("mv4k.era");
 
         era_cmd()
@@ -2417,20 +2417,16 @@ mod multivolume_tests {
                 "--no-compression",
             ])
             .assert()
-            .success();
+            .failure()
+            .stderr(predicates::str::contains("minimum"));
 
-        let count = count_volume_files(&archive);
-        assert!(
-            count >= 2,
-            "should split into multiple volumes with 4KB limit, got {}",
-            count
-        );
+        assert_eq!(count_volume_files(&archive), 0);
     }
 
     #[test]
     fn test_multivolume_max_volume_size_10kb() {
         let temp = TempDir::new().unwrap();
-        let input = create_test_file(temp.path(), "mv10k.bin", &vec![0xCC; 64 * 1024]);
+        let input = create_test_file(temp.path(), "mv10k.bin", &vec![0xCC; 16 * 1024]);
         let archive = temp.path().join("mv10k.era");
 
         era_cmd()
@@ -2446,14 +2442,10 @@ mod multivolume_tests {
                 "--no-compression",
             ])
             .assert()
-            .success();
+            .failure()
+            .stderr(predicates::str::contains("minimum"));
 
-        let count = count_volume_files(&archive);
-        assert!(
-            count >= 2,
-            "should split into multiple volumes with 10KB limit, got {}",
-            count
-        );
+        assert_eq!(count_volume_files(&archive), 0);
     }
 
     #[test]

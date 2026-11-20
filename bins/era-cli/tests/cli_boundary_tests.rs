@@ -232,42 +232,36 @@ mod volume_size_boundary_tests {
         assert!(count >= 1, "Should have at least 1 volume");
     }
 
-    /// Test with --max-volume-size below minimum threshold.
-    ///
-    /// The MIN_VOLUME_SIZE is approximately 20KB.
-    /// Setting max-volume-size below this should either error or be adjusted.
+    /// Test with --max-volume-size below minimum threshold (1 MiB).
     #[test]
     fn test_max_volume_size_below_minimum() {
         let temp = TempDir::new().unwrap();
         let input = create_test_file(temp.path(), "test.txt", b"min vol size test");
         let archive = temp.path().join("minvol.era");
 
-        // Try to set max-volume-size to 1KB (below minimum ~20KB)
-        let binding = era_cmd()
-            .args([
-                "create",
-                input.to_str().unwrap(),
-                "--output",
-                archive.to_str().unwrap(),
-                "--password",
-                "pwd",
-                "--max-volume-size",
-                "1024", // 1KB - way below minimum
-            ])
-            .assert();
-        let output = binding.get_output();
-
-        // Should either succeed with adjusted minimum or fail gracefully
-        if output.status.success() {
-            eprintln!("Note: --max-volume-size 1024 was accepted");
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        for invalid_cap in ["1024", "1048575"] {
+            let binding = era_cmd()
+                .args([
+                    "create",
+                    input.to_str().unwrap(),
+                    "--output",
+                    archive.to_str().unwrap(),
+                    "--password",
+                    "pwd",
+                    "--max-volume-size",
+                    invalid_cap,
+                ])
+                .assert()
+                .failure();
+            let stderr = String::from_utf8_lossy(&binding.get_output().stderr);
             assert!(
-                stderr.contains("minimum")
-                    || stderr.contains("Minimum")
-                    || stderr.contains("too small"),
-                "Error message should mention minimum size requirement: {}",
-                stderr
+                stderr.contains("minimum"),
+                "Error message for {invalid_cap} should mention minimum size requirement: {stderr}"
+            );
+            assert_eq!(
+                count_volume_files(&archive),
+                0,
+                "Rejected --max-volume-size {invalid_cap} must not leave volume files behind"
             );
         }
     }
@@ -330,13 +324,13 @@ mod volume_size_boundary_tests {
         );
     }
 
-    fn assert_256kib_rotation_roundtrip(
+    fn assert_1mib_rotation_roundtrip(
         file_stem: &str,
         erasure: &str,
         unrotated_volume_count: usize,
     ) {
-        const MAX_VOLUME_SIZE: u64 = 256 * 1024;
-        const INPUT_SIZE: usize = 2 * 1024 * 1024;
+        const MAX_VOLUME_SIZE: u64 = 1024 * 1024;
+        const INPUT_SIZE: usize = 5 * 1024 * 1024;
 
         let temp = TempDir::new().unwrap();
         let input_name = format!("{file_stem}.bin");
@@ -404,19 +398,19 @@ mod volume_size_boundary_tests {
     }
 
     #[test]
-    fn test_volume_rotation_256kib_ec_4_plus_2() {
-        assert_256kib_rotation_roundtrip("rot_256kib_ec", "4:2", 6);
+    fn test_volume_rotation_1mib_ec_4_plus_2() {
+        assert_1mib_rotation_roundtrip("rot_1mib_ec", "4:2", 6);
     }
 
     #[test]
-    fn test_volume_rotation_256kib_non_ec() {
-        assert_256kib_rotation_roundtrip("rot_256kib_non_ec", "none", 1);
+    fn test_volume_rotation_1mib_non_ec() {
+        assert_1mib_rotation_roundtrip("rot_1mib_non_ec", "none", 1);
     }
 
     #[test]
     fn test_p3_7_minimum_cap_compressed_ec_with_colocated_shards() {
-        const MIN_VOLUME_SIZE: u64 = 20_608;
-        const INPUT_SIZE: usize = 64 * 1024;
+        const MIN_VOLUME_SIZE: u64 = 1024 * 1024;
+        const INPUT_SIZE: usize = 3 * 1024 * 1024;
 
         let temp = TempDir::new().unwrap();
         let mut state = 0x4D59_5DF4_D0F3_3173u64;

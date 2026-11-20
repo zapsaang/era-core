@@ -1275,7 +1275,10 @@ fn test_multivolume_extract_roundtrip() {
 #[test]
 fn test_multivolume_max_volume_size_splits() {
     let temp = TempDir::new().unwrap();
-    let input = create_test_file(temp.path(), "split.bin", &vec![0xBB; 64 * 1024]);
+    let data: Vec<u8> = (0u64..2 * 1024 * 1024)
+        .map(|i| ((i.wrapping_mul(0x9E37_79B9_7F4A_7C15)) >> 56) as u8)
+        .collect();
+    let input = create_test_file(temp.path(), "split.bin", &data);
     let archive = temp.path().join("split.era");
 
     era_cmd()
@@ -1286,8 +1289,10 @@ fn test_multivolume_max_volume_size_splits() {
             archive.to_str().unwrap(),
             "--password",
             "pwd",
+            "--erasure",
+            "none",
             "--max-volume-size",
-            "8192",
+            "1048576",
             "--no-compression",
         ])
         .assert()
