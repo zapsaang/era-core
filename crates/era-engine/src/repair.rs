@@ -315,27 +315,60 @@ async fn recovered_header_bytes(
         ));
     }
 
-    // ArchiveReader may have authenticated a manifest from a different volume.
-    // Require a context-bound manifest from the volume whose header will be written.
     let header = reader.header();
     let manifest_offset = footer.manifest_offset();
-    if !footer.has_manifest()
-        || !(DATA_REGION_START..backup_offset).contains(&manifest_offset)
-        || header.archive_id() != archive.header().archive_id()
+    if header.archive_id() != archive.header().archive_id()
         || header.epoch_id() != archive.epoch_id()
         || header.total_volumes() != archive.header().total_volumes()
+        || header.volume_sequence() >= header.total_volumes()
     {
         return Err(EraError::IntegrityError(
             "Recovered header has no matching on-volume manifest".into(),
         ));
     }
+    let backup_bytes = reader.read_raw(backup_offset, HEADER_SIZE).await?;
+    let header_digest = if footer.has_manifest() {
+        if !(DATA_REGION_START..backup_offset).contains(&manifest_offset) {
+            return Err(EraError::IntegrityError(
+                "Recovered header manifest is outside the finalized data region".into(),
+            ));
+        }
+        local_header_digest(reader, archive).await?
+    } else {
+        *archive
+            .manifest_header_digest(header.volume_sequence())
+            .ok_or_else(|| {
+                EraError::IntegrityError(
+                    "Recovered header has no authenticated volume digest".into(),
+                )
+            })?
+    };
+    if blake3::hash(&backup_bytes).as_bytes() != &header_digest {
+        return Err(EraError::IntegrityError(
+            "Backup header bytes do not match the authenticated manifest digest".into(),
+        ));
+    }
+    Ok(backup_bytes)
+}
+
+async fn local_header_digest(
+    reader: &VolumeReader<era_storage::LocalStorageReader>,
+    archive: &ArchiveReader,
+) -> Result<[u8; 32]> {
+    let footer = reader.footer().ok_or_else(|| {
+        EraError::IntegrityError("Recovered header has no footer provenance".into())
+    })?;
+    let header = reader.header();
+    let manifest_offset = footer.manifest_offset();
     let block_id = footer.manifest_block_id();
     let location = BlockLocation::single(header.volume_id(), block_id, manifest_offset, 0);
     let (block_type, block) = reader.read_typed_block(&location).await?;
     let manifest_end = manifest_offset
         .checked_add(u64::from(block.compressed_size))
         .and_then(|end| end.checked_add(era_common::BlockHeader::SIZE as u64));
-    if block_type != BlockType::Manifest || !manifest_end.is_some_and(|end| end <= backup_offset) {
+    if block_type != BlockType::Manifest
+        || !manifest_end.is_some_and(|end| end <= footer.backup_header_offset())
+    {
         return Err(EraError::IntegrityError(
             "Recovered header manifest is outside the finalized data region or has the wrong type"
                 .into(),
@@ -369,22 +402,9 @@ async fn recovered_header_bytes(
         ));
     }
 
-    let header_digest = header_digest.ok_or_else(|| {
+    header_digest.ok_or_else(|| {
         EraError::IntegrityError("Manifest has no authenticated backup header digest".into())
-    })?;
-    let backup_bytes = reader.read_raw(backup_offset, HEADER_SIZE).await?;
-    if backup_bytes.len() != HEADER_SIZE {
-        return Err(EraError::CorruptedHeader(
-            "Backup header is truncated before primary-header repair".into(),
-        ));
-    }
-    if blake3::hash(&backup_bytes).as_bytes() != &header_digest {
-        return Err(EraError::IntegrityError(
-            "Backup header bytes do not match the authenticated manifest digest".into(),
-        ));
-    }
-
-    Ok(backup_bytes)
+    })
 }
 
 /// Repair an ERA archive using RS erasure coding
@@ -452,11 +472,8 @@ pub async fn repair_archive_with_providers(
 
     let volume_reader = VolumeReader::open(&backend, Path::new(volume_path)).await?;
 
-    // Verify erasure coding is enabled
     let header = volume_reader.header();
-    let erasure_config = header.config().erasure.ok_or_else(|| {
-        EraError::ErasureError("Archive does not use erasure coding - repair not available".into())
-    })?;
+    let erasure_config = header.config().erasure;
 
     // If the archive is multi-volume, use matrix-aware repair
     if header.total_volumes() > 1 {
@@ -466,15 +483,29 @@ pub async fn repair_archive_with_providers(
         .await;
     }
 
-    info!(
-        "Erasure config: {}/{} data/parity shards",
-        erasure_config.data_shards, erasure_config.parity_shards
-    );
+    if erasure_config.is_none() && !volume_reader.header_recovered_from_backup() {
+        return Err(EraError::ErasureError(
+            "Archive does not use erasure coding - repair not available".into(),
+        ));
+    }
+
+    if let Some(config) = erasure_config {
+        info!(
+            "Erasure config: {}/{} data/parity shards",
+            config.data_shards, config.parity_shards
+        );
+    }
 
     // Verify credentials before proceeding with repair
     let header_repair = if volume_reader.header_recovered_from_backup() {
-        let archive = ArchiveReader::open_with_providers(path, providers).await?;
-        Some(recovered_header_bytes(&volume_reader, &archive).await?)
+        let mut archive = ArchiveReader::open_with_providers(path, providers).await?;
+        let bytes = recovered_header_bytes(&volume_reader, &archive).await?;
+        if erasure_config.is_none() && !archive.verify().await?.is_ok() {
+            return Err(EraError::IntegrityError(
+                "Non-erasure archive has damage beyond its recoverable primary header".into(),
+            ));
+        }
+        Some(bytes)
     } else {
         let _mk_array = try_unlock_with_providers(header, &providers)?;
         None
@@ -511,6 +542,10 @@ pub async fn repair_archive_with_providers(
             apply_primary_header_repair(path, header_bytes).await?;
         }
     }
+
+    let Some(erasure_config) = erasure_config else {
+        return Ok(RepairStats::default());
+    };
 
     // Scan for corrupted blocks and repair
     let mut stats = RepairStats::default();
@@ -1015,32 +1050,31 @@ async fn repair_archive_matrix_with_providers(
         ));
     }
 
-    // Verify erasure coding is enabled
     let header = volume_readers[0].header();
-    let erasure_config = header
-        .config()
-        .erasure
-        .ok_or_else(|| EraError::ErasureError("Archive does not use erasure coding".into()))?;
-
-    let total_shards = erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
-
-    info!(
-        "Matrix repair: {}/{} erasure, {} volumes found, {} total shards",
-        erasure_config.data_shards, erasure_config.parity_shards, volume_count, total_shards
-    );
+    let erasure_config = header.config().erasure;
+    let header_repair_needed = volume_readers
+        .iter()
+        .any(VolumeReader::header_recovered_from_backup);
+    if erasure_config.is_none() && !header_repair_needed {
+        return Err(EraError::ErasureError(
+            "Archive does not use erasure coding".into(),
+        ));
+    }
 
     // Verify credentials before proceeding with repair
     let mut header_repairs = Vec::new();
-    let session = if volume_readers
-        .iter()
-        .any(VolumeReader::header_recovered_from_backup)
-    {
-        let archive = ArchiveReader::open_with_providers(path, _providers).await?;
+    let session = if header_repair_needed {
+        let mut archive = ArchiveReader::open_with_providers(path, _providers).await?;
         for (reader, volume_path) in volume_readers.iter().zip(&volume_paths) {
             if reader.header_recovered_from_backup() {
                 let header_bytes = recovered_header_bytes(reader, &archive).await?;
                 header_repairs.push((volume_path.clone(), header_bytes));
             }
+        }
+        if erasure_config.is_none() && !archive.verify().await?.is_ok() {
+            return Err(EraError::IntegrityError(
+                "Non-erasure archive has damage beyond its recoverable primary headers".into(),
+            ));
         }
         archive.session().try_clone()?
     } else {
@@ -1091,6 +1125,25 @@ async fn repair_archive_matrix_with_providers(
             apply_primary_header_repair(&volume_path, header_bytes).await?;
         }
     }
+
+    let Some(erasure_config) = erasure_config else {
+        return Ok(RepairStats {
+            archive_health: classify_repair_archive_health(
+                expected_volumes,
+                volume_count,
+                missing_volume_indices,
+                0,
+                expected_volumes,
+            ),
+            ..Default::default()
+        });
+    };
+    let total_shards = erasure_config.data_shards as usize + erasure_config.parity_shards as usize;
+
+    info!(
+        "Matrix repair: {}/{} erasure, {} volumes found, {} total shards",
+        erasure_config.data_shards, erasure_config.parity_shards, volume_count, total_shards
+    );
 
     let minimum_required_volumes = minimum_volumes_for_repair(erasure_config, expected_volumes);
     let mut stats = RepairStats {

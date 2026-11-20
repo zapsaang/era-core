@@ -2206,7 +2206,7 @@ impl ArchiveWriter {
         )?;
         let current_manifest_total_size = Self::typed_plaintext_disk_size(
             provisional_manifest
-                .to_bytes_with_header_digest([0; 32])
+                .to_bytes_with_header_digests(0, &vec![[0; 32]; provisional_committed_ends.len()])?
                 .len(),
         )?;
 
@@ -2256,7 +2256,12 @@ impl ArchiveWriter {
             )?;
             rotated_committed_ends = Some(rotated_ends);
             Self::typed_plaintext_disk_size(
-                rotated_manifest.to_bytes_with_header_digest([0; 32]).len(),
+                rotated_manifest
+                    .to_bytes_with_header_digests(
+                        0,
+                        &vec![[0; 32]; rotated_manifest.volume_committed_ends.len()],
+                    )?
+                    .len(),
             )?
         } else {
             current_manifest_total_size
@@ -2450,7 +2455,7 @@ impl ArchiveWriter {
             .pipeline
             .volume_mut()
             .pool_mut()
-            .finalized_header_digests()?;
+            .finalized_volume_header_digests()?;
 
         let manifest_block_id = self.pipeline.reserve_block_id()?;
 
@@ -2463,10 +2468,11 @@ impl ArchiveWriter {
 
         let manifest_blocks: Vec<EncryptedMacroBlock> = volume_indices
             .into_iter()
-            .zip(header_digests)
-            .map(|(volume_index, header_digest)| {
+            .map(|volume_index| {
+                let sequence = u16::try_from(volume_index)
+                    .map_err(|_| EraError::InvalidConfig("Volume sequence exceeds u16".into()))?;
                 self.encrypt_manifest_for_volume(
-                    &manifest.to_bytes_with_header_digest(header_digest),
+                    &manifest.to_bytes_with_header_digests(sequence, &header_digests)?,
                     volume_index,
                     manifest_block_id,
                     &aead_ctx,

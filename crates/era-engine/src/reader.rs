@@ -121,6 +121,7 @@ pub struct ArchiveReader {
     volume_committed_ends: Option<Vec<u64>>,
     /// The full manifest loaded from volumes (v8.2 only).
     manifest: Option<ArchiveManifest>,
+    manifest_header_digests: Vec<[u8; 32]>,
     /// V2.1 index reader recovered from volume
     index_reader: Option<IndexReader>,
     embedded_index_recovery_failed: bool,
@@ -157,6 +158,7 @@ impl ArchiveReader {
             catalog_recovered_from_backup: false,
             volume_committed_ends: None,
             manifest: None,
+            manifest_header_digests: Vec::new(),
             index_reader: None,
             embedded_index_recovery_failed: false,
         }
@@ -938,6 +940,10 @@ impl ArchiveReader {
         &self.volume_readers
     }
 
+    pub(crate) fn manifest_header_digest(&self, sequence: u16) -> Option<&[u8; 32]> {
+        self.manifest_header_digests.get(usize::from(sequence))
+    }
+
     pub fn compression_algorithm(&self) -> era_common::CompressionAlgorithm {
         self.compression_algorithm
     }
@@ -1327,6 +1333,7 @@ impl ArchiveReader {
 
     async fn load_manifest(&mut self) -> Result<()> {
         let mut best_manifest: Option<ArchiveManifest> = None;
+        let mut best_header_digests = Vec::new();
         let mut any_volume_has_manifest = false;
 
         for i in 0..self.volume_readers.len() {
@@ -1421,19 +1428,32 @@ impl ArchiveReader {
                 }
             };
 
-            let manifest = match ArchiveManifest::from_bytes(&decrypted) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!("Failed to deserialize manifest from volume {}: {}", i, e);
-                    continue;
-                }
-            };
+            let (manifest, digests) =
+                match ArchiveManifest::from_bytes_with_header_digests(&decrypted) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!("Failed to deserialize manifest from volume {}: {}", i, e);
+                        continue;
+                    }
+                };
+
+            if !digests.by_sequence.is_empty()
+                && (manifest.epoch_id != self.epoch_id
+                    || digests.by_sequence.len() != self.expected_volume_count
+                    || digests.by_sequence.get(usize::from(volume_sequence))
+                        != digests.local.as_ref())
+            {
+                return Err(EraError::IntegrityError(
+                    "Manifest header digest table does not match its volume context".into(),
+                ));
+            }
 
             let dominated = best_manifest
                 .as_ref()
                 .is_some_and(|best| best.finalize_sequence >= manifest.finalize_sequence);
             if !dominated {
                 best_manifest = Some(manifest);
+                best_header_digests = digests.by_sequence;
             }
         }
 
@@ -1450,6 +1470,7 @@ impl ArchiveReader {
             let volume_committed_ends = manifest.volume_committed_ends.clone();
             self.volume_committed_ends = Some(volume_committed_ends.clone());
             self.manifest = Some(manifest);
+            self.manifest_header_digests = best_header_digests;
             debug!(
                 "Loaded manifest: finalize_sequence={}, volume_committed_ends={:?}",
                 finalize_sequence, volume_committed_ends

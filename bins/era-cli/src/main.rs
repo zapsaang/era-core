@@ -174,8 +174,16 @@ enum Commands {
         era extract -i backup.era -o ./restored --force")]
     Extract {
         /// Input archive path
-        #[arg(short, long)]
-        input: PathBuf,
+        #[arg(
+            short,
+            long,
+            required_unless_present = "archive",
+            conflicts_with = "archive"
+        )]
+        input: Option<PathBuf>,
+
+        #[arg(required_unless_present = "input", conflicts_with = "input")]
+        archive: Option<PathBuf>,
 
         /// Output directory (default: current directory)
         #[arg(short, long, default_value = ".")]
@@ -559,12 +567,16 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Extract {
             input,
+            archive,
             output,
             password,
             key,
             key_passphrase,
             force,
         } => {
+            let input = input
+                .or(archive)
+                .ok_or_else(|| anyhow::anyhow!("Input archive path is required"))?;
             commands::extract(
                 &input,
                 &output,

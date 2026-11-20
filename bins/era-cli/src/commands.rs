@@ -4,7 +4,7 @@ use crate::progress;
 use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password};
 use era_common::{
-    ArchiveConfig, CompressionAlgorithm, ErasureCodeConfig, MatrixDistributionConfig,
+    ArchiveConfig, CompressionAlgorithm, EraError, ErasureCodeConfig, MatrixDistributionConfig,
     MatrixDistributionStrategy,
 };
 use era_engine::{
@@ -1260,85 +1260,89 @@ pub async fn repair(
         }
 
         let header = reader.header();
-        if header.config().erasure.is_some() {
+        let uses_erasure = header.config().erasure.is_some();
+        if uses_erasure {
             info!("Attempting repair using Reed-Solomon erasure coding...");
-            info!("");
+        } else {
+            info!("Attempting authenticated primary-header repair...");
+        }
+        info!("");
 
-            let repair_options = RepairOptions {
-                create_backup: true,
-                dry_run: !force,
-                continue_on_error: true,
-            };
+        let repair_options = RepairOptions {
+            create_backup: true,
+            dry_run: !force,
+            continue_on_error: true,
+        };
 
-            let providers = build_auth_providers(passwords, key_paths, key_passphrase)?;
-            let repair_result =
-                era_engine::repair_archive_with_providers(archive, providers, repair_options).await;
+        let providers = build_auth_providers(passwords, key_paths, key_passphrase)?;
+        let repair_result =
+            era_engine::repair_archive_with_providers(archive, providers, repair_options).await;
 
-            match repair_result {
-                Ok(repair_stats) => {
-                    info!("");
-                    info!("Repair Results:");
-                    info!("===============");
-                    info!("Blocks scanned:       {}", repair_stats.blocks_scanned);
+        match repair_result {
+            Ok(repair_stats) => {
+                info!("");
+                info!("Repair Results:");
+                info!("===============");
+                info!("Blocks scanned:       {}", repair_stats.blocks_scanned);
+                info!(
+                    "Blocks with damage:   {}",
+                    repair_stats.blocks_with_corruption
+                );
+                info!(
+                    "Corrupted shards:     {}",
+                    repair_stats.corrupted_shards_found
+                );
+                info!("Shards repaired:      {}", repair_stats.shards_repaired);
+                info!(
+                    "Unrecoverable blocks: {}",
+                    repair_stats.unrecoverable_blocks
+                );
+                info!("");
+
+                if repair_stats.fully_repaired() {
+                    if force {
+                        info!("✅ Archive successfully repaired!");
+                    } else {
+                        info!("✅ Repair is possible. Run with --force to apply repairs.");
+                    }
+                    return Ok(());
+                } else {
                     info!(
-                        "Blocks with damage:   {}",
-                        repair_stats.blocks_with_corruption
-                    );
-                    info!(
-                        "Corrupted shards:     {}",
-                        repair_stats.corrupted_shards_found
-                    );
-                    info!("Shards repaired:      {}", repair_stats.shards_repaired);
-                    info!(
-                        "Unrecoverable blocks: {}",
+                        "⚠️  Partial repair: {} blocks could not be recovered.",
                         repair_stats.unrecoverable_blocks
                     );
-                    info!("");
-
-                    if repair_stats.fully_repaired() {
-                        if force {
-                            info!("✅ Archive successfully repaired!");
-                        } else {
-                            info!("✅ Repair is possible. Run with --force to apply repairs.");
-                        }
-                        return Ok(());
-                    } else {
-                        info!(
-                            "⚠️  Partial repair: {} blocks could not be recovered.",
-                            repair_stats.unrecoverable_blocks
-                        );
-                        if !repair_stats.errors.is_empty() && verbose {
-                            info!("");
-                            info!("Unrecoverable errors:");
-                            for (i, err) in repair_stats.errors.iter().enumerate() {
-                                info!("  {}. {}", i + 1, err);
-                            }
+                    if !repair_stats.errors.is_empty() && verbose {
+                        info!("");
+                        info!("Unrecoverable errors:");
+                        for (i, err) in repair_stats.errors.iter().enumerate() {
+                            info!("  {}. {}", i + 1, err);
                         }
                     }
                 }
-                Err(e) => {
-                    info!("❌ Repair failed: {}", e);
+            }
+            Err(e) => {
+                if !uses_erasure && matches!(&e, EraError::ErasureError(_)) {
+                    info!("Note: This archive was created without erasure coding.");
+                    info!("Consider recreating with erasure coding for better protection:");
+                    info!("  era create --erasure 4:2 <inputs> -o <output>.era");
                     info!("");
                     info!(
-                        "Corrupted blocks cannot be repaired beyond available erasure parity \
-                         (--force only authorizes applying valid EC repairs)."
+                        "Damaged blocks in archives without erasure coding cannot be repaired (even with --force); \
+                         'era extract --force' only overwrites existing output files and does not bypass corruption."
+                    );
+                    anyhow::bail!(
+                        "Archive has errors and was created without erasure coding; damaged blocks cannot be repaired."
                     );
                 }
+                info!("❌ Repair failed: {}", e);
+                info!("");
+                info!(
+                    "Corrupted blocks cannot be repaired beyond available erasure parity \
+                         (--force only authorizes applying valid EC repairs)."
+                );
             }
-            anyhow::bail!("Archive has unrecoverable errors that could not be repaired.");
-        } else {
-            info!("Note: This archive was created without erasure coding.");
-            info!("Consider recreating with erasure coding for better protection:");
-            info!("  era create --erasure 4:2 <inputs> -o <output>.era");
-            info!("");
-            info!(
-                "Damaged blocks in archives without erasure coding cannot be repaired (even with --force); \
-                 'era extract --force' only overwrites existing output files and does not bypass corruption."
-            );
-            anyhow::bail!(
-                "Archive has errors and was created without erasure coding; damaged blocks cannot be repaired."
-            );
         }
+        anyhow::bail!("Archive has unrecoverable errors that could not be repaired.");
     }
 
     info!("Recovery checkpoint found from interrupted archive creation.");
