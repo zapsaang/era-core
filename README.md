@@ -503,10 +503,10 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 | Metric | Value |
 |--------|-------|
 | Language | Rust 100% |
-| Lines of Code | ~56,900 (including tests) |
-| Source Files | 234 `.rs` files |
-| Tests | September 2026 workspace verification: 2737 passed, 0 failed, 18 ignored |
-| Security Audit Tests | 279+ across multiple suites |
+| Lines of Code | ~141,700 (53,200 `src` + 85,650 `tests` + benches/examples) |
+| Source Files | 265 `.rs` files |
+| Tests | Workspace verification (`ulimit -n 1024`): 2916 passed, 0 failed, 17 ignored (164 suites/doc-tests) |
+| Security Audit Tests | 350+ across multiple suites |
 | Fuzz Targets | Planned (fuzz workspace not yet in repo) |
 | Crates | 9 library + 1 binary |
 | CLI Commands | 8 (create, extract, list, info, verify, repair, repack, keygen) |

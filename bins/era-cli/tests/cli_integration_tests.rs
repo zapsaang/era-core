@@ -866,17 +866,12 @@ fn test_repair_non_erasure_archive_no_op() {
             "pwd",
             "--erasure",
             "none",
+            "--no-compression",
         ])
         .assert()
         .success();
 
-    let file_len = fs::metadata(&archive).unwrap().len();
-    assert!(
-        file_len > 10200,
-        "archive should have sufficient data for corruption test"
-    );
-
-    corrupt_archive_shard(&archive, 10000);
+    corrupt_volume_data(&archive);
 
     let assert = era_cmd()
         .args([

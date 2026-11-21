@@ -3456,17 +3456,12 @@ mod repair_tests {
                 "pwd",
                 "--erasure",
                 "none",
+                "--no-compression",
             ])
             .assert()
             .success();
 
-        let file_len = fs::metadata(&archive).unwrap().len();
-        assert!(
-            file_len > 10200,
-            "archive too small for corruption test (need > 10200, got {})",
-            file_len
-        );
-        corrupt_archive_shard(&archive, 10000);
+        corrupt_volume_data(&archive);
 
         let assert_result = era_cmd()
             .args([

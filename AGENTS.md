@@ -4,7 +4,7 @@
 **Commit:** 5bf28de
 **Branch:** feat_fly
 
-Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing. ~126k LOC, 234 .rs files, 10 workspace members.
+Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing. ~141.7k LOC (~53.2k src), 265 .rs files, 10 workspace members.
 
 ## STRUCTURE
 
@@ -12,7 +12,7 @@ Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encrypt
 era-core/
 ├── bins/era-cli/        CLI (create/extract/list/info/verify/repair/repack/keygen) + tests/common harness
 ├── crates/
-│   ├── era-engine/      L4: archive orchestration, async pipeline (writer.rs 3649 LOC is the god object)
+│   ├── era-engine/      L4: archive orchestration, async pipeline (writer.rs 4586 LOC is the god object)
 │   ├── era-packing/     L3: k-Bounded Best-Fit MacroBlock packing
 │   ├── era-ingest/      L3: FastCDC chunking (16KB-64KB-256KB), DirectoryScanner
 │   ├── era-index/       L3: V2.1 embedded dedup (Bloom + L1/L2, redb ACID)
@@ -134,7 +134,7 @@ cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 - `crates/era-packing/src/{integration_performance_tests.rs,test_helpers.rs}` are test code living in src/ (cfg(test)-gated); `test_helpers.rs` is the cross-crate fixture source.
 - `crates/era-engine/src/checkpoint.rs`: `commit()`/`sync()` DEPRECATED (v2.2+) → use `commit_to_volume()`.
 - Only `unsafe` in workspace src: `crates/era-crypto/src/secure_memory.rs` (mlock/prctl).
-- No `[workspace.lints]`, no clippy.toml/rustfmt.toml/deny.toml — enforcement is CI's `-D warnings` only. `rust-toolchain.toml` pins 1.98.1 but CI uses `stable` (drift risk).
+- No `[workspace.lints]`, no clippy.toml/rustfmt.toml/deny.toml — enforcement is CI's `-D warnings` only. `rust-toolchain.toml` tracks `stable` matching `.github/workflows/ci.yml`.
 - `doc_gen/` is archival (content frozen 2026-04-28).
 
 ## Project Review Rules

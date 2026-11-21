@@ -4,16 +4,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Barrier;
 
-/// This test is fundamentally flawed: it opens files with `open_append()` which sets O_APPEND,
-/// then attempts to use `write_at()` for positional writes. On POSIX systems, O_APPEND forces
-/// ALL writes (including pwrite) to occur at EOF, making positional writes impossible.
-///
-/// The test assumption that `write_at` can work on append-mode handles is incorrect.
-/// Proper concurrent positional writes require opening without O_APPEND (e.g., O_RDWR).
-///
-/// Ignored until a non-append `open_readwrite()` API is added to StorageBackend trait.
+/// Verifies concurrent positional `write_at()` across non-overlapping regions on `open_append()` handles.
 #[tokio::test]
-#[ignore = "Invalid test: pwrite with O_APPEND is undefined behavior. Requires non-append open mode."]
 async fn test_storage_pwrite_concurrency() {
     let temp_dir = TempDir::new().unwrap();
     let backend = LocalStorageBackend::new(temp_dir.path());

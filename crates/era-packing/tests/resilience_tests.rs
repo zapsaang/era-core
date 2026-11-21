@@ -40,10 +40,115 @@ mod aead_resilience {
 
     #[test]
     fn test_resilient_unpacker_exists() {
-        // Validates that resilient unpacker module compiles and is importable
-        use era_packing::ResilientBlockUnpacker;
-        // If this compiles, the module is properly exposed
-        let _ = std::any::type_name::<ResilientBlockUnpacker>();
+        use era_common::VerifiedShard;
+        use era_packing::{ResilientBlockUnpacker, SessionBlockUnpacker};
+
+        let (session, volume_key, nonce_context) = test_setup();
+        let builder = SessionErasureBlockBuilder::new(
+            &session,
+            &volume_key,
+            nonce_context,
+            era_packing::BlockContext {
+                archive_id: TEST_ARCHIVE_ID,
+                epoch_id: TEST_EPOCH_ID,
+                volume_index: TEST_VOLUME_INDEX,
+            },
+            Box::new(ZstdCompressor::default()),
+            ErasureCodeConfig::new(4, 2),
+        )
+        .unwrap();
+
+        let mut x = 0x1234_5678u32;
+        let payload: Vec<u8> = (0..1024)
+            .map(|_| {
+                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                (x >> 16) as u8
+            })
+            .collect();
+        let chunk = UniqueChunk {
+            hash: ChunkHash::from_bytes([7; 32]),
+            data: Bytes::from(payload),
+        };
+        let expected_hash = chunk.hash;
+        let expected_data = chunk.data.clone();
+        let sharded = builder.pack_chunks(vec![chunk]).unwrap();
+
+        let session_unpacker = SessionBlockUnpacker::new(
+            &session,
+            &volume_key,
+            nonce_context,
+            TEST_ARCHIVE_ID,
+            TEST_EPOCH_ID,
+            Box::new(ZstdCompressor::default()),
+        );
+        let resilient = ResilientBlockUnpacker::new(&session_unpacker);
+
+        let erasure_info = era_common::ErasureBlockInfo {
+            data_shards: 4,
+            parity_shards: 2,
+            original_len: sharded.original_len,
+            shard_size: 0,
+        };
+
+        // Corrupt shard 0 with an erased zero pattern and exercise unpack_resilient heuristic recovery.
+        let mut erased_shards: Vec<(usize, Bytes)> = sharded
+            .shards
+            .iter()
+            .enumerate()
+            .map(|(idx, data)| (idx, data.clone()))
+            .collect();
+        erased_shards[0].1 = Bytes::from(vec![0u8; erased_shards[0].1.len()]);
+        let (recovered, corrupted) = resilient
+            .unpack_resilient(
+                erased_shards,
+                &erasure_info,
+                sharded.block_id,
+                TEST_VOLUME_INDEX,
+            )
+            .unwrap();
+        assert_eq!(corrupted, vec![0]);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].0, expected_hash);
+        assert_eq!(recovered[0].1, expected_data);
+
+        // Also exercise unpack_resilient_verified with an explicit CRC-failed bitflip on shard 1.
+        let verified_shards: Vec<VerifiedShard> = sharded
+            .shards
+            .iter()
+            .enumerate()
+            .map(|(idx, data)| {
+                let expected_crc = era_common::compute_shard_crc(data);
+                if idx == 1 {
+                    let mut bad = data.to_vec();
+                    bad[0] ^= 0xFF;
+                    VerifiedShard {
+                        index: idx,
+                        expected_crc,
+                        crc_valid: false,
+                        data: Bytes::from(bad),
+                    }
+                } else {
+                    VerifiedShard {
+                        index: idx,
+                        expected_crc,
+                        crc_valid: true,
+                        data: data.clone(),
+                    }
+                }
+            })
+            .collect();
+        let (verified_recovered, verified_corrupted) = resilient
+            .unpack_resilient_verified(
+                verified_shards,
+                &erasure_info,
+                sharded.block_id,
+                TEST_VOLUME_INDEX,
+            )
+            .unwrap();
+        assert_eq!(verified_corrupted, vec![1]);
+        assert_eq!(verified_recovered.len(), 1);
+        assert_eq!(verified_recovered[0].0, expected_hash);
+        assert_eq!(verified_recovered[0].1, expected_data);
     }
 
     #[test]
