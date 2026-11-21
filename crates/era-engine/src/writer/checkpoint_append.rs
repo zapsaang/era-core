@@ -13,9 +13,9 @@ pub(crate) struct RetainedDataRegion {
     pub end: u64,
     pub block_count: u32,
     pub block_spans: Vec<(u64, u32)>,
-    /// The authenticated legacy horizon includes exactly this terminal checkpoint.
+    /// Offset of an authenticated legacy terminal checkpoint included in the manifest horizon.
     /// The caller must authenticate it before truncating to `end`.
-    pub legacy_terminal_checkpoint: bool,
+    pub legacy_terminal_checkpoint_offset: Option<u64>,
 }
 
 pub(crate) fn extend_data_ends_for_rotation(
@@ -53,7 +53,7 @@ pub(crate) async fn scan_retained_data_region(
     let mut offset = start;
     let mut block_count = 0u32;
     let mut block_spans = Vec::new();
-    let mut legacy_terminal_checkpoint = false;
+    let mut legacy_terminal_checkpoint_offset = None;
     while offset < bound {
         if offset + BlockHeader::SIZE as u64 > bound {
             return Err(EraError::CorruptedHeader(format!(
@@ -94,10 +94,11 @@ pub(crate) async fn scan_retained_data_region(
             | BlockType::Reserved) => {
                 let legacy_end = volume.manifest_committed_end.is_some()
                     && kind == BlockType::Checkpoint
-                    && offset == volume.footer.last_checkpoint_offset()
+                    && (offset == volume.footer.last_checkpoint_offset()
+                        || volume.footer.last_checkpoint_offset() == 0)
                     && next_offset == bound;
                 if legacy_end {
-                    legacy_terminal_checkpoint = true;
+                    legacy_terminal_checkpoint_offset = Some(offset);
                     break;
                 }
                 if volume.manifest_committed_end.is_none() {
@@ -114,6 +115,6 @@ pub(crate) async fn scan_retained_data_region(
         end: offset,
         block_count,
         block_spans,
-        legacy_terminal_checkpoint,
+        legacy_terminal_checkpoint_offset,
     })
 }

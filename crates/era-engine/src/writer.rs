@@ -350,11 +350,12 @@ impl ArchiveWriterBuilder {
         self
     }
 
-    /// Enable checkpoint for crash recovery
+    /// Enable checkpoint for durable progress metadata on finalization.
     ///
-    /// When enabled, the writer will periodically save progress to a checkpoint file.
-    /// If the process crashes, the next call to build() will automatically resume
-    /// from the last checkpoint.
+    /// When enabled, `finalize()` commits an encrypted `BlockType::Checkpoint`
+    /// block inside the volume and records its location in the volume footers.
+    /// Interrupted append sessions stage uncommitted writes until `finalize()`,
+    /// leaving the previously finalized archive intact if dropped or aborted.
     pub fn enable_checkpoint(mut self, enable: bool) -> Self {
         self.enable_checkpoint = enable;
         self
@@ -659,7 +660,40 @@ impl ArchiveWriterBuilder {
                     || self.recovery_options.strategy == RecoveryStrategy::Resume);
             // Authenticate the old checkpoint before truncation, but never import its
             // locations or progress into a new append session.
-            if retained.legacy_terminal_checkpoint || append_resume_requested {
+            if let Some(legacy_ckpt_offset) = retained.legacy_terminal_checkpoint_offset {
+                if append_checkpoint_exists {
+                    CheckpointManager::load_from_durable_checkpoint(
+                        &self.output_path,
+                        reader.session(),
+                        reader.volume_key(),
+                        *reader.header().salt(),
+                        reader.archive_id_bytes(),
+                        reader.epoch_id(),
+                    )
+                    .await?;
+                } else {
+                    // A prior StartFresh append session cleared the footer checkpoint pointer
+                    // before exiting without finalizing; authenticate the legacy checkpoint
+                    // block at the retained boundary before trimming it at finalization.
+                    crate::checkpoint::read_checkpoint(
+                        vol0,
+                        reader.session(),
+                        reader.volume_key(),
+                        *reader.header().salt(),
+                        reader.archive_id_bytes(),
+                        reader.epoch_id(),
+                        legacy_ckpt_offset,
+                        Some(retained.block_count),
+                    )
+                    .await?;
+                }
+                if let Some(manifest) = manifest_opt.as_mut() {
+                    manifest.committed_horizon = committed_end;
+                    if let Some(old_end) = manifest.volume_committed_ends.first_mut() {
+                        *old_end = committed_end;
+                    }
+                }
+            } else if append_resume_requested {
                 CheckpointManager::load_from_durable_checkpoint(
                     &self.output_path,
                     reader.session(),
@@ -669,14 +703,6 @@ impl ArchiveWriterBuilder {
                     reader.epoch_id(),
                 )
                 .await?;
-            }
-            if retained.legacy_terminal_checkpoint {
-                if let Some(manifest) = manifest_opt.as_mut() {
-                    manifest.committed_horizon = committed_end;
-                    if let Some(old_end) = manifest.volume_committed_ends.first_mut() {
-                        *old_end = committed_end;
-                    }
-                }
             }
 
             let catalog = reader.catalog().cloned().unwrap_or_default();

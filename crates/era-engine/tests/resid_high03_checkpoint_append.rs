@@ -488,3 +488,203 @@ async fn finalize_checkpoint_respects_max_volume_size_when_volume_near_full() {
     );
     assert_extraction(&archive_path, &[("near_full.bin".to_owned(), payload)]).await;
 }
+
+#[tokio::test]
+async fn interrupted_append_preserves_readable_archive_across_plain_resume_and_start_fresh() {
+    use era_engine::ArchiveReader;
+
+    let cases = [
+        ("plain", false, None),
+        ("resume", true, Some(RecoveryOptions::resume())),
+        ("start_fresh", true, Some(RecoveryOptions::start_fresh())),
+    ];
+
+    for (label, checkpoint_enabled, recovery_opt) in cases {
+        let temp = TempDir::new().unwrap();
+        let archive_path = temp.path().join(format!("interrupted_{label}.era"));
+
+        let mut config = non_ec_config();
+        config.compression.algorithm = era_common::CompressionAlgorithm::None;
+        config.block.target_size = 32 * 1024;
+
+        {
+            let mut writer = ArchiveWriter::builder(&archive_path)
+                .password(PASSWORD)
+                .config(config.clone())
+                .target_block_size(32 * 1024)
+                .enable_checkpoint(checkpoint_enabled)
+                .enable_erasure(false)
+                .build()
+                .await
+                .unwrap();
+            writer
+                .add_bytes(ORIGINAL_NAME, ORIGINAL_BYTES)
+                .await
+                .unwrap();
+            writer.finalize().await.unwrap();
+        }
+
+        // Open for append, flush at least one data block (> target_block_size),
+        // then drop without finalize() to simulate a crash mid-append.
+        {
+            let mut builder = ArchiveWriter::builder(&archive_path)
+                .password(PASSWORD)
+                .config(config.clone())
+                .target_block_size(32 * 1024)
+                .append_existing(true)
+                .enable_checkpoint(checkpoint_enabled)
+                .enable_erasure(false);
+            if let Some(opts) = recovery_opt {
+                builder = builder.recovery_options(opts);
+            }
+            let mut writer = builder.build().await.unwrap();
+            writer
+                .add_bytes("uncommitted.bin", &vec![0xCD; 96 * 1024])
+                .await
+                .unwrap();
+            drop(writer);
+        }
+
+        // Committed archive must still open, verify Healthy, and extract original contents.
+        let mut reader = ArchiveReader::open(&archive_path, PASSWORD)
+            .await
+            .unwrap_or_else(|e| panic!("[{label}] failed to open after interrupted append: {e}"));
+        let stats = reader.verify().await.unwrap();
+        assert!(
+            stats.is_healthy(),
+            "[{label}] expected Healthy archive after interrupted append, got {:?}, warnings={:?}, errors={:?}",
+            stats.archive_health,
+            stats.warnings,
+            stats.errors
+        );
+        assert_extraction(
+            &archive_path,
+            &[(ORIGINAL_NAME.to_owned(), ORIGINAL_BYTES.to_vec())],
+        )
+        .await;
+
+        // A subsequent append session must also succeed and finalize cleanly.
+        append_files(
+            &archive_path,
+            &[(APPENDED_NAME.to_owned(), APPENDED_BYTES.to_vec())],
+            AppendOptions {
+                checkpoint: checkpoint_enabled,
+                config,
+            },
+        )
+        .await;
+        assert_extraction(
+            &archive_path,
+            &[
+                (ORIGINAL_NAME.to_owned(), ORIGINAL_BYTES.to_vec()),
+                (APPENDED_NAME.to_owned(), APPENDED_BYTES.to_vec()),
+            ],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn interrupted_start_fresh_on_legacy_checkpoint_allows_subsequent_append() {
+    use era_engine::{ArchiveReader, CheckpointManager};
+
+    let temp = TempDir::new().unwrap();
+    let archive_path = temp.path().join("legacy_start_fresh_crash.era");
+    create_original(
+        &archive_path,
+        Some((ORIGINAL_NAME, ORIGINAL_BYTES)),
+        non_ec_config(),
+    )
+    .await;
+    legacy::rewrite_as_legacy(&archive_path).await;
+
+    {
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password(PASSWORD)
+            .config(non_ec_config())
+            .append_existing(true)
+            .enable_checkpoint(true)
+            .recovery_options(RecoveryOptions::start_fresh())
+            .enable_erasure(false)
+            .build()
+            .await
+            .unwrap();
+        assert!(!CheckpointManager::exists(&archive_path).await.unwrap());
+        writer
+            .add_bytes("uncommitted.bin", b"uncommitted")
+            .await
+            .unwrap();
+        drop(writer);
+    }
+
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let stats = reader.verify().await.unwrap();
+    assert!(stats.is_healthy(), "{:?}", stats.archive_health);
+
+    append_files(
+        &archive_path,
+        &[(APPENDED_NAME.to_owned(), APPENDED_BYTES.to_vec())],
+        AppendOptions {
+            checkpoint: true,
+            config: non_ec_config(),
+        },
+    )
+    .await;
+    assert_extraction(
+        &archive_path,
+        &[
+            (ORIGINAL_NAME.to_owned(), ORIGINAL_BYTES.to_vec()),
+            (APPENDED_NAME.to_owned(), APPENDED_BYTES.to_vec()),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn interrupted_append_after_volume_rotation_preserves_original_archive() {
+    use era_engine::ArchiveReader;
+
+    let temp = TempDir::new().unwrap();
+    let archive_path = temp.path().join("rotated_interrupted.era");
+    let mut config = non_ec_config();
+    config.compression.algorithm = era_common::CompressionAlgorithm::None;
+    config.volume.max_size = 1024 * 1024;
+    config.block.target_size = 256 * 1024;
+
+    let original_payload = vec![0x31u8; 512 * 1024];
+    create_original(
+        &archive_path,
+        Some(("orig.bin", &original_payload)),
+        config.clone(),
+    )
+    .await;
+
+    {
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password(PASSWORD)
+            .config(config.clone())
+            .max_volume_size(1024 * 1024)
+            .target_block_size(256 * 1024)
+            .append_existing(true)
+            .enable_checkpoint(true)
+            .enable_erasure(false)
+            .build()
+            .await
+            .unwrap();
+        // Exceed 1 MiB cap to force rotate_volumes() before dropping without finalize().
+        writer
+            .add_bytes("overflow.bin", &vec![0x42u8; 700 * 1024])
+            .await
+            .unwrap();
+        drop(writer);
+    }
+
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let stats = reader.verify().await.unwrap();
+    assert!(
+        stats.is_healthy(),
+        "original single-volume archive must remain Healthy after interrupted rotated append: {:?}",
+        stats.archive_health
+    );
+    assert_extraction(&archive_path, &[("orig.bin".to_owned(), original_payload)]).await;
+}

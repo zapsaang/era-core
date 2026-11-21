@@ -25,6 +25,13 @@ pub(crate) fn superheader_digest(header: &SuperHeader) -> Result<[u8; 32]> {
     Ok(*blake3::hash(&header.to_bytes()?).as_bytes())
 }
 
+#[derive(Clone)]
+struct StagedAppend {
+    base_offset: u64,
+    buf: Vec<u8>,
+    original_footer: Footer,
+}
+
 /// Metadata snapshot of a retired volume whose write handle was closed to bound file descriptors.
 pub(crate) struct RetiredVolumeState {
     pub(crate) header: SuperHeader,
@@ -43,6 +50,7 @@ pub(crate) struct RetiredVolumeState {
     last_index_block_id: u32,
     last_manifest_offset: u64,
     last_manifest_block_id: u32,
+    staged_append: Option<StagedAppend>,
 }
 
 /// Writer for a single volume
@@ -81,6 +89,8 @@ pub struct VolumeWriter<W: StorageWriter> {
     last_manifest_offset: u64,
     /// Last manifest block ID (preserved across checkpoints)
     last_manifest_block_id: u32,
+    /// Buffered append tail so an existing volume stays readable until finalization.
+    staged_append: Option<StagedAppend>,
 }
 
 impl<W: StorageWriter> VolumeWriter<W> {
@@ -128,6 +138,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             last_index_block_id: 0,
             last_manifest_offset: 0,
             last_manifest_block_id: 0,
+            staged_append: None,
         })
     }
 
@@ -149,8 +160,8 @@ impl<W: StorageWriter> VolumeWriter<W> {
         .await
     }
 
-    /// Open an existing volume for appending, truncating directly to `append_offset`
-    /// and continuing canonical block numbering from `initial_block_count`.
+    /// Open an existing volume for appending, staging new writes from `append_offset`
+    /// and continuing canonical block numbering from `initial_block_count` until finalization.
     pub async fn open_append_at<B: StorageBackend<Writer = W>>(
         backend: &B,
         path: &Path,
@@ -159,7 +170,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         append_offset: u64,
         initial_block_count: u32,
     ) -> Result<Self> {
-        let mut writer = backend.open_append(path).await?;
+        let writer = backend.open_append(path).await?;
 
         // SECURITY: Validate footer.data_end_offset against actual file size
         // to prevent seeking past end of file with a corrupted footer
@@ -179,8 +190,6 @@ impl<W: StorageWriter> VolumeWriter<W> {
                 footer.data_end_offset()
             )));
         }
-
-        writer.truncate(append_offset).await?;
 
         let (last_checkpoint_offset, last_checkpoint_block_id) =
             if footer.last_checkpoint_offset() < append_offset {
@@ -236,7 +245,23 @@ impl<W: StorageWriter> VolumeWriter<W> {
             last_index_block_id,
             last_manifest_offset,
             last_manifest_block_id,
+            staged_append: Some(StagedAppend {
+                base_offset: append_offset,
+                buf: Vec::new(),
+                original_footer: footer.clone(),
+            }),
         })
+    }
+
+    async fn flush_staged_append(&mut self) -> Result<()> {
+        let Some(staged) = self.staged_append.take() else {
+            return Ok(());
+        };
+        self.writer.truncate(staged.base_offset).await?;
+        if !staged.buf.is_empty() {
+            self.writer.append(&staged.buf).await?;
+        }
+        Ok(())
     }
 
     /// Set the maximum size for this volume.
@@ -247,6 +272,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// # Errors
     /// Returns I/O errors from the underlying storage backend during padding.
     pub async fn set_max_size(&mut self, max_size: u64) -> Result<()> {
+        self.flush_staged_append().await?;
         self.max_size = Some(max_size);
         self.pad_to_size(max_size).await
     }
@@ -285,7 +311,53 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
     /// Zero out stale backup footer bytes in the reserved gap after append truncation
     /// and clear in-memory checkpoint pointers so StartFresh discards prior checkpoint state.
+    ///
+    /// When the append tail is staged (not yet finalized), rewrite the primary and backup
+    /// footers with cleared checkpoint pointers instead of blanking the backup footer, so the
+    /// existing finalized archive remains readable if the append session aborts before `finalize()`.
     pub async fn clear_backup_footer_gap(&mut self) -> Result<()> {
+        if let Some(ref mut staged) = self.staged_append {
+            let cleared_footer = Footer::builder(
+                staged.original_footer.data_end_offset(),
+                staged.original_footer.block_count(),
+                staged.original_footer.sequence_number(),
+            )
+            .catalog(
+                staged.original_footer.catalog_offset(),
+                staged.original_footer.catalog_size(),
+                staged.original_footer.catalog_block_id(),
+            )
+            .checkpoint(0, 0)
+            .manifest(
+                staged.original_footer.manifest_offset(),
+                staged.original_footer.manifest_block_id(),
+            )
+            .index(
+                staged.original_footer.index_offset(),
+                staged.original_footer.index_size(),
+                staged.original_footer.index_block_id(),
+            )
+            .backup_header(staged.original_footer.backup_header_offset())
+            .build();
+            let footer_bytes = cleared_footer.to_bytes()?;
+            self.writer
+                .write_at(HEADER_SIZE as u64, &footer_bytes)
+                .await?;
+            let backup_hdr = staged.original_footer.backup_header_offset();
+            if backup_hdr >= DATA_REGION_START {
+                let primary_footer_offset = backup_hdr + HEADER_SIZE as u64;
+                if self.writer.current_size() >= primary_footer_offset + FOOTER_SIZE as u64 {
+                    self.writer
+                        .write_at(primary_footer_offset, &footer_bytes)
+                        .await?;
+                }
+            }
+            staged.original_footer = cleared_footer;
+            self.writer.sync_data().await?;
+            self.last_checkpoint_offset = 0;
+            self.last_checkpoint_block_id = 0;
+            return Ok(());
+        }
         let zeros = [0u8; BACKUP_FOOTER_GAP];
         self.writer.write_at(HEADER_SIZE as u64, &zeros).await?;
         self.writer.sync_data().await?;
@@ -431,6 +503,12 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// old footer still valid on disk, new footer lost.
     pub async fn commit_checkpoint(&mut self, checkpoint_offset: u64) -> Result<()> {
         self.set_last_checkpoint(checkpoint_offset)?;
+
+        if self.staged_append.is_some() {
+            // Keep the previously finalized on-disk footers intact until finalize_with_catalog
+            // flushes the staged append tail atomically.
+            return Ok(());
+        }
 
         if let Some(max_size) = self.max_size {
             let pad_target = max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED);
@@ -580,7 +658,10 @@ impl<W: StorageWriter> VolumeWriter<W> {
         let header = era_common::BlockHeader::new(block_type, block_len, crc);
         let header_bytes = header.to_bytes();
 
-        if self.max_size.is_some() {
+        if let Some(ref mut staged) = self.staged_append {
+            staged.buf.extend_from_slice(&header_bytes);
+            staged.buf.extend_from_slice(&block.data);
+        } else if self.max_size.is_some() {
             // Traffic Analysis Defense: Use write_at inside the padded volume
             self.writer.write_at(offset, &header_bytes).await?;
             self.writer
@@ -594,7 +675,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         let location =
             BlockLocation::single(self.header.volume_id(), self.block_count, offset, block_len);
 
-        if self.max_size.is_some() {
+        if self.staged_append.is_some() || self.max_size.is_some() {
             self.position += total_len;
         } else {
             self.position = self.writer.current_size();
@@ -637,7 +718,10 @@ impl<W: StorageWriter> VolumeWriter<W> {
 
         let offset = self.position;
 
-        if self.max_size.is_some() {
+        if let Some(ref mut staged) = self.staged_append {
+            staged.buf.extend_from_slice(data);
+            self.position += data.len() as u64;
+        } else if self.max_size.is_some() {
             self.writer.write_at(offset, data).await?;
             self.position += data.len() as u64;
         } else {
@@ -709,7 +793,43 @@ impl<W: StorageWriter> VolumeWriter<W> {
         self.validate_offset_in_bounds("catalog", catalog_offset)?;
         self.validate_offset_in_bounds("index", index_offset)?;
 
+        let backup_header_offset = if let Some(max_size) = self.max_size {
+            max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED)
+        } else {
+            self.position
+        };
+        // V30-04: Validate backup header offset is not below DATA_REGION_START
+        if backup_header_offset < DATA_REGION_START {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "backup_header_offset {} is below DATA_REGION_START {}",
+                backup_header_offset, DATA_REGION_START
+            )));
+        }
+
         self.sequence += 1;
+        let header_bytes = self.header.to_bytes()?;
+
+        // Calculate data_end_offset (where data region ends, before backup header)
+        let data_end_offset = backup_header_offset;
+
+        // V27-12: Store catalog/index info so future checkpoints preserve it
+        self.last_catalog_offset = catalog_offset;
+        self.last_catalog_size = catalog_size;
+        self.last_catalog_block_id = catalog_block_id;
+        self.last_index_offset = index_offset;
+        self.last_index_size = index_size;
+        self.last_index_block_id = index_block_id;
+
+        let footer = Footer::builder(data_end_offset, self.block_count, self.sequence)
+            .catalog(catalog_offset, catalog_size, catalog_block_id)
+            .checkpoint(self.last_checkpoint_offset, self.last_checkpoint_block_id)
+            .manifest(self.last_manifest_offset, self.last_manifest_block_id)
+            .index(index_offset, index_size, index_block_id)
+            .backup_header(backup_header_offset)
+            .build();
+        let footer_bytes = footer.to_bytes()?;
+
+        self.flush_staged_append().await?;
 
         // Random padding if max_size is set
         if let Some(max_size) = self.max_size {
@@ -725,19 +845,8 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.writer.sync_data().await?;
         }
 
-        // 1. Write backup header (copy of primary) at current position
-        let backup_header_offset = self.position;
-
-        // V30-04: Validate backup header offset is not below DATA_REGION_START
-        if backup_header_offset < DATA_REGION_START {
-            return Err(era_common::EraError::InvalidConfig(format!(
-                "backup_header_offset {} is below DATA_REGION_START {}",
-                backup_header_offset, DATA_REGION_START
-            )));
-        }
-        let header_bytes = self.header.to_bytes()?;
-
-        // Rewrite primary header at offset 0 so total_volumes is current
+        // 1. Rewrite primary header at offset 0 so total_volumes is current,
+        // and write backup header (copy of primary) at backup_header_offset.
         self.writer.write_at(0, &header_bytes).await?;
 
         if self.max_size.is_some() {
@@ -748,28 +857,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.writer.append(&header_bytes).await?;
         }
 
-        // 2. Calculate data_end_offset (where data region ends, before backup header)
-        let data_end_offset = backup_header_offset;
-
-        // V27-12: Store catalog/index info so future checkpoints preserve it
-        self.last_catalog_offset = catalog_offset;
-        self.last_catalog_size = catalog_size;
-        self.last_catalog_block_id = catalog_block_id;
-        self.last_index_offset = index_offset;
-        self.last_index_size = index_size;
-        self.last_index_block_id = index_block_id;
-
-        // 3. Create footer with backup_header_offset
-        let footer = Footer::builder(data_end_offset, self.block_count, self.sequence)
-            .catalog(catalog_offset, catalog_size, catalog_block_id)
-            .checkpoint(self.last_checkpoint_offset, self.last_checkpoint_block_id)
-            .manifest(self.last_manifest_offset, self.last_manifest_block_id)
-            .index(index_offset, index_size, index_block_id)
-            .backup_header(backup_header_offset)
-            .build();
-        let footer_bytes = footer.to_bytes()?;
-
-        // 4. Write primary footer after backup header
+        // 2. Write primary footer after backup header
         let primary_footer_offset = backup_header_offset + HEADER_SIZE as u64;
         if self.max_size.is_some() {
             self.writer
@@ -779,7 +867,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.writer.append(&footer_bytes).await?;
         }
 
-        // 5. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
+        // 3. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
         self.writer
             .write_at(HEADER_SIZE as u64, &footer_bytes)
             .await?;
@@ -815,6 +903,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             last_index_block_id: self.last_index_block_id,
             last_manifest_offset: self.last_manifest_offset,
             last_manifest_block_id: self.last_manifest_block_id,
+            staged_append: self.staged_append,
         };
         self.writer.close().await?;
         Ok(state)
@@ -828,13 +917,20 @@ impl<W: StorageWriter> VolumeWriter<W> {
     ) -> Result<Self> {
         let mut writer = backend.open_append(path).await?;
         let actual_size = writer.current_size();
-        if actual_size < state.position {
+        let min_expected_size = state
+            .staged_append
+            .as_ref()
+            .map_or(state.position, |staged| staged.base_offset);
+        if actual_size < min_expected_size {
             return Err(era_common::EraError::CorruptedHeader(format!(
                 "retired volume size {} is less than expected position {}",
-                actual_size, state.position
+                actual_size, min_expected_size
             )));
         }
-        if state.max_size.is_none() && actual_size != state.position {
+        if state.staged_append.is_none()
+            && state.max_size.is_none()
+            && actual_size != state.position
+        {
             writer.truncate(state.position).await?;
         }
         Ok(Self {
@@ -855,6 +951,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
             last_index_block_id: state.last_index_block_id,
             last_manifest_offset: state.last_manifest_offset,
             last_manifest_block_id: state.last_manifest_block_id,
+            staged_append: state.staged_append,
         })
     }
 
