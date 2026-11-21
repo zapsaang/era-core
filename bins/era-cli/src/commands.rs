@@ -1327,17 +1327,30 @@ pub async fn repair(
                 }
             }
             Err(e) => {
-                if !uses_erasure && matches!(&e, EraError::ErasureError(_)) {
-                    info!("Note: This archive was created without erasure coding.");
-                    info!("Consider recreating with erasure coding for better protection:");
-                    info!("  era create --erasure 4:2 <inputs> -o <output>.era");
+                if !uses_erasure {
+                    if matches!(&e, EraError::ErasureError(_)) {
+                        info!("Note: This archive was created without erasure coding.");
+                        info!("Consider recreating with erasure coding for better protection:");
+                        info!("  era create --erasure 4:2 <inputs> -o <output>.era");
+                        info!("");
+                        info!(
+                            "Damaged blocks in archives without erasure coding cannot be repaired (even with --force); \
+                             'era extract --force' only overwrites existing output files and does not bypass corruption."
+                        );
+                        anyhow::bail!(
+                            "Archive has errors and was created without erasure coding; damaged blocks cannot be repaired."
+                        );
+                    }
+                    info!("❌ Repair failed: {}", e);
                     info!("");
+                    info!("Note: This archive was created without erasure coding.");
                     info!(
-                        "Damaged blocks in archives without erasure coding cannot be repaired (even with --force); \
-                         'era extract --force' only overwrites existing output files and does not bypass corruption."
+                        "Only an authenticated primary header can be restored without erasure coding; \
+                         damaged data blocks cannot be repaired (even with --force)."
                     );
                     anyhow::bail!(
-                        "Archive has errors and was created without erasure coding; damaged blocks cannot be repaired."
+                        "Archive has unrecoverable errors and was created without erasure coding: {}",
+                        e
                     );
                 }
                 info!("❌ Repair failed: {}", e);

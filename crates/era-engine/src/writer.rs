@@ -464,8 +464,7 @@ impl ArchiveWriterBuilder {
     pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
         let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;
-        let append_to_existing =
-            self.append_existing && tokio::fs::try_exists(&self.output_path).await?;
+        let append_to_existing = self.append_existing && output_preexisted;
         if !append_to_existing {
             crate::volume_capacity::validate_max_volume_size(
                 self.max_volume_size.unwrap_or(self.config.volume.max_size),
@@ -1088,6 +1087,7 @@ impl ArchiveWriterBuilder {
         };
 
         let mut restore_checkpoint_state = false;
+        let mut clear_checkpoint_after_open = false;
         let checkpoint_manager = if self.enable_checkpoint {
             let checkpoint_exists = if append_to_existing {
                 append_checkpoint_exists
@@ -1107,9 +1107,8 @@ impl ArchiveWriterBuilder {
             let manager = match effective_strategy {
                 RecoveryStrategy::StartFresh => {
                     if checkpoint_exists {
-                        warn!("Starting fresh, deleting existing checkpoint");
-                        let old = CheckpointManager::load_or_create(&self.output_path)?;
-                        old.delete()?;
+                        warn!("Starting fresh, discarding existing checkpoint after volume initialization");
+                        clear_checkpoint_after_open = true;
                     }
                     CheckpointManager::new(&self.output_path)
                 }
@@ -1165,7 +1164,7 @@ impl ArchiveWriterBuilder {
             let footer = append_footer
                 .as_ref()
                 .ok_or_else(|| era_common::EraError::CorruptedHeader("Missing footer".into()))?;
-            VolumePool::open_append_single_at(
+            let mut pool = VolumePool::open_append_single_at(
                 backend.clone(),
                 pool_config,
                 active_header.clone(),
@@ -1174,7 +1173,11 @@ impl ArchiveWriterBuilder {
                 append_data_block_count,
                 vec![append_retained_end],
             )
-            .await?
+            .await?;
+            if clear_checkpoint_after_open {
+                pool.clear_backup_footer_gap(0).await?;
+            }
+            pool
         } else {
             VolumePool::create(backend.clone(), pool_config, active_header.clone()).await?
         };
@@ -1954,7 +1957,7 @@ impl ArchiveWriter {
 
         // Use the pipeline to process chunks (handles encryption, erasure, volume, index)
         for chunks in self.capacity.chunk_groups(packed.chunks)? {
-            self.pipeline.process_chunks(chunks, Vec::new()).await?;
+            self.pipeline.process_chunks(chunks).await?;
         }
 
         Ok(())
@@ -2037,9 +2040,7 @@ impl ArchiveWriter {
             true
         };
         if should_write {
-            self.pipeline
-                .process_chunks(vec![packed_chunk], Vec::new())
-                .await?;
+            self.pipeline.process_chunks(vec![packed_chunk]).await?;
         }
 
         // Update catalog for each file
@@ -2148,6 +2149,7 @@ impl ArchiveWriter {
             .block_locations
             .extend(self.pipeline.take_written_block_locations());
 
+        self.pipeline.precheck_durable_checkpoint_space().await?;
         let data_committed_ends: Vec<u64> = self
             .pipeline
             .volume()
@@ -4115,10 +4117,12 @@ pub mod generic {
                     "target_block_size must be > 0".into(),
                 ));
             }
-            let max_chunk = crate::volume_capacity::max_canonical_data_chunk_size(
-                config.compression.algorithm,
-            )?;
-            let target_block_size = config.block.target_size.min(max_chunk).max(1);
+            let capacity = VolumeCapacity::canonical_unbounded(config.compression.algorithm)?;
+            let target_block_size = config
+                .block
+                .target_size
+                .min(capacity.max_data_chunk_size())
+                .max(1);
             let packing = PackingStage::new(
                 config.packing.k_factor,
                 target_block_size,
@@ -4230,6 +4234,7 @@ pub mod generic {
                 catalog: Catalog::new(),
                 chunk_index,
                 packing,
+                capacity,
                 written_blocks: Vec::new(),
                 pending_hashes: HashSet::new(),
             })
@@ -4254,6 +4259,7 @@ pub mod generic {
         chunk_index: Arc<dyn ChunkIndex>,
         /// Packing stage for k-Bounded Best-Fit bin packing
         packing: PackingStage,
+        capacity: VolumeCapacity,
         written_blocks: Vec<era_common::BlockLocation>,
 
         pending_hashes: HashSet<ChunkHash>,
@@ -4332,25 +4338,27 @@ pub mod generic {
 
         /// Write a packed block to storage
         async fn write_packed_block(&mut self, packed: PackedBlock) -> Result<()> {
-            let hashes: Vec<_> = packed.chunks.iter().map(|c| c.hash).collect();
+            for chunks in self.capacity.chunk_groups(packed.chunks)? {
+                let hashes: Vec<_> = chunks.iter().map(|c| c.hash).collect();
 
-            // Create session-based builder for this block
-            self.encryption
-                .set_volume_index(self.volume_writer.volume_sequence() as u32);
-            let compressor = self.create_compressor();
-            let block_builder = self.encryption.create_block_builder(compressor)?;
+                // Create session-based builder for this block
+                self.encryption
+                    .set_volume_index(self.volume_writer.volume_sequence() as u32);
+                let compressor = self.create_compressor();
+                let block_builder = self.encryption.create_block_builder(compressor)?;
 
-            let encrypted_block = block_builder.pack_chunks(packed.chunks)?;
-            let location = self
-                .volume_writer
-                .write_canonical_block(&encrypted_block, era_common::BlockType::Data)
-                .await?;
+                let encrypted_block = block_builder.pack_chunks(chunks)?;
+                let location = self
+                    .volume_writer
+                    .write_canonical_block(&encrypted_block, era_common::BlockType::Data)
+                    .await?;
 
-            self.written_blocks.push(location.clone());
+                self.written_blocks.push(location.clone());
 
-            for hash in hashes {
-                self.pending_hashes.remove(&hash);
-                self.chunk_index.put(hash, location.clone())?;
+                for hash in hashes {
+                    self.pending_hashes.remove(&hash);
+                    self.chunk_index.put(hash, location.clone())?;
+                }
             }
 
             Ok(())
@@ -4380,7 +4388,11 @@ pub mod generic {
 
             // Serialize, frame, and write catalog with BlockType::Catalog AAD
             let catalog_bytes = self.catalog.to_bytes()?;
-            let catalog_chunks = frame_and_chunk_catalog(&catalog_bytes, MAX_CATALOG_CHUNK_SIZE)?;
+            let max_catalog_chunk = self
+                .capacity
+                .max_catalog_chunk_size()
+                .min(MAX_CATALOG_CHUNK_SIZE);
+            let catalog_chunks = frame_and_chunk_catalog(&catalog_bytes, max_catalog_chunk)?;
 
             let mut first_catalog_location: Option<(u64, u32, u32)> = None;
             for (chunk_data, chunk_hash) in catalog_chunks {
@@ -4415,7 +4427,7 @@ pub mod generic {
                 vec![committed_end],
             );
             let header_digest = self.volume_writer.finalized_header_digest()?;
-            let manifest_bytes = manifest.to_bytes_with_header_digest(header_digest);
+            let manifest_bytes = manifest.to_bytes_with_header_digests(0, &[header_digest])?;
 
             let manifest_block_id = self.encryption.next_block_id()?;
             let manifest_block_id_u32 = u32::try_from(manifest_block_id)

@@ -231,3 +231,60 @@ async fn resid_high02_retired_sequence_zero_header_repair_restores_health_and_da
     assert_healthy_after_repair(&archive_path).await;
     assert_extracted_payloads_intact(&archive_path, &temp_dir.path().join("output"), &files).await;
 }
+
+#[tokio::test]
+async fn resid_high02_active_volume_repairs_primary_header_when_local_manifest_is_also_corrupted() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("active-double-damage.era");
+    let files = fixture_files(2);
+    let total = create_archive(
+        &archive_path,
+        ArchiveLayout {
+            erasure: Some(ErasureCodeConfig {
+                data_shards: 2,
+                parity_shards: 1,
+            }),
+            volume_count: 3,
+        },
+        &files,
+    )
+    .await;
+    assert_eq!(total, 3);
+
+    let vol0 = open_volume(&archive_path, 0).await;
+    let footer0 = vol0.footer().unwrap().clone();
+    assert!(footer0.has_manifest());
+    drop(vol0);
+
+    // Corrupt BOTH volume 0's local manifest block AND its primary header.
+    {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive_path)
+            .unwrap();
+        let corrupt_offset = footer0.manifest_offset() + era_common::BlockHeader::SIZE as u64 + 24;
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        let mut byte = [0u8; 1];
+        std::io::Read::read_exact(&mut file, &mut byte).unwrap();
+        byte[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        file.write_all(&byte).unwrap();
+        file.sync_all().unwrap();
+    }
+    let original_header = corrupt_primary_header(&archive_path);
+    assert_degraded_before_repair(&archive_path).await;
+
+    let repair = repair_archive(&archive_path, PASSWORD, RepairOptions::default())
+        .await
+        .unwrap();
+
+    assert!(repair.fully_repaired());
+    assert_eq!(repair.shards_repaired, 0);
+    assert_primary_header_restored(&archive_path, &original_header);
+    assert!(!open_volume(&archive_path, 0)
+        .await
+        .header_recovered_from_backup());
+    assert_healthy_after_repair(&archive_path).await;
+    assert_extracted_payloads_intact(&archive_path, &temp_dir.path().join("output"), &files).await;
+}

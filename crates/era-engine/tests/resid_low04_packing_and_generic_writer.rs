@@ -312,3 +312,165 @@ async fn generic_writer_splits_large_input_by_target_block_size_and_roundtrips()
         assert_eq!(file_blake3(&extracted_path), expected_hash);
     }
 }
+
+fn xof_bytes(seed: &str, len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(seed.as_bytes());
+    hasher.finalize_xof().fill(&mut out);
+    out
+}
+
+#[tokio::test]
+async fn generic_writer_splits_multi_chunk_packed_block_within_max_shard_size() {
+    // Case A: 4 separate ~4 MiB chunks with CompressionAlgorithm::None packed into one bin,
+    // whose combined raw size (16_777_120) is under target_block_size, but with MacroBlock
+    // protobuf index + AEAD tag exceeds MAX_SHARD_SIZE (16 MiB).
+    {
+        let dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(dir.path());
+        let mut config = fast_config(None);
+        config.block.target_size = 16 * 1024 * 1024;
+        config.packing.k_factor = 1;
+        config.packing.flush_threshold = 100;
+
+        let mut writer = GenericArchiveWriterBuilder::new(backend, "multi_chunk_none.era")
+            .password(PASSWORD)
+            .config(config)
+            .build()
+            .await
+            .unwrap();
+
+        let mut expected = Vec::new();
+        for idx in 0..4usize {
+            let name = format!("chunk_{idx}.bin");
+            let data = vec![u8::try_from(idx + 1).unwrap(); 4_194_280];
+            writer.add_bytes(&name, &data).await.unwrap();
+            expected.push((name, blake3::hash(&data), data.len()));
+        }
+        writer.finalize().await.unwrap();
+
+        let archive_path = dir.path().join("multi_chunk_none.era");
+        let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+        assert!(reader.verify().await.unwrap().is_healthy());
+        let out_dir = dir.path().join("out");
+        reader
+            .extract_all(&ExtractOptions::new(&out_dir))
+            .await
+            .unwrap();
+        for (name, hash, len) in &expected {
+            let extracted = out_dir.join(name);
+            assert_eq!(fs::metadata(&extracted).unwrap().len(), *len as u64);
+            assert_eq!(file_blake3(&extracted), *hash);
+        }
+    }
+
+    // Case B: 500 distinct incompressible chunks with Zstd whose raw sum fits one bin
+    // but protobuf index + Zstd frame + AEAD tag pushes a single MacroBlock over 16 MiB.
+    {
+        let dir = TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(dir.path());
+        let mut config = fast_config(None);
+        config.compression.algorithm = CompressionAlgorithm::Zstd;
+        config.block.target_size = 16 * 1024 * 1024;
+        config.packing.k_factor = 1;
+        config.packing.flush_threshold = 100;
+
+        let mut writer = GenericArchiveWriterBuilder::new(backend, "multi_chunk_zstd.era")
+            .password(PASSWORD)
+            .config(config)
+            .build()
+            .await
+            .unwrap();
+
+        let mut expected = Vec::new();
+        for idx in 0..500usize {
+            let name = format!("incompressible_{idx:03}.bin");
+            let data = xof_bytes(&format!("generic-zstd-overflow-{idx}"), 33_540);
+            writer.add_bytes(&name, &data).await.unwrap();
+            expected.push((name, blake3::hash(&data), data.len()));
+        }
+        writer.finalize().await.unwrap();
+
+        let archive_path = dir.path().join("multi_chunk_zstd.era");
+        let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+        assert!(reader.verify().await.unwrap().is_healthy());
+        let out_dir = dir.path().join("out");
+        reader
+            .extract_all(&ExtractOptions::new(&out_dir))
+            .await
+            .unwrap();
+        for (name, hash, len) in &expected {
+            let extracted = out_dir.join(name);
+            assert_eq!(fs::metadata(&extracted).unwrap().len(), *len as u64);
+            assert_eq!(file_blake3(&extracted), *hash);
+        }
+    }
+}
+
+#[tokio::test]
+async fn generic_writer_finalize_encodes_full_volume_header_digests_table() {
+    use era_common::{ArchiveManifest, BlockId, BlockLocation, BlockType};
+    use era_crypto::{build_aad, AeadContext, XChaCha20Poly1305Context, NONCE_SIZE};
+    use era_volume::VolumeReader;
+
+    let dir = TempDir::new().unwrap();
+    let backend = LocalStorageBackend::new(dir.path());
+    let mut writer = GenericArchiveWriterBuilder::new(backend.clone(), "generic_digests.era")
+        .password(PASSWORD)
+        .config(fast_config(None))
+        .build()
+        .await
+        .unwrap();
+    writer
+        .add_bytes("payload.bin", b"manifest digest table test")
+        .await
+        .unwrap();
+    writer.finalize().await.unwrap();
+
+    let archive_path = dir.path().join("generic_digests.era");
+    let reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let volume = VolumeReader::open(&backend, Path::new("generic_digests.era"))
+        .await
+        .unwrap();
+    let header = volume.header();
+    let footer = volume.footer().unwrap();
+    assert!(footer.has_manifest());
+
+    let location = BlockLocation::single(
+        header.volume_id(),
+        footer.manifest_block_id(),
+        footer.manifest_offset(),
+        0,
+    );
+    let (block_type, block) = volume.read_typed_block(&location).await.unwrap();
+    assert_eq!(block_type, BlockType::Manifest);
+
+    let block_key = reader
+        .session()
+        .derive_block_key(
+            reader.volume_key(),
+            u64::from(footer.manifest_block_id()),
+            &reader.nonce_context(),
+        )
+        .unwrap()
+        .to_derived_key()
+        .unwrap();
+    let aead = XChaCha20Poly1305Context::from_derived_key(&block_key).unwrap();
+    let nonce = block.data.first_chunk::<NONCE_SIZE>().unwrap();
+    let aad = build_aad(
+        header.archive_id().0.as_bytes(),
+        header.epoch_id(),
+        BlockType::Manifest,
+        u32::from(header.volume_sequence()),
+        BlockId::new(u64::from(footer.manifest_block_id())),
+    );
+    let decrypted = aead
+        .decrypt(nonce, &aad, &block.data[NONCE_SIZE..])
+        .unwrap();
+    let (_manifest, digests) = ArchiveManifest::from_bytes_with_header_digests(&decrypted).unwrap();
+
+    let expected_digest = *blake3::hash(&header.to_bytes().unwrap()).as_bytes();
+    assert_eq!(digests.local, Some(expected_digest));
+    assert_eq!(digests.by_sequence, vec![expected_digest]);
+}

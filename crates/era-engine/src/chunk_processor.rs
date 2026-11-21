@@ -11,11 +11,23 @@
 use bytes::Bytes;
 use era_common::{ChunkHash, ChunkVec, EraError, Result};
 use era_packing::unpack_file;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tracing::debug;
+
+/// Maximum number of multi-chunk output files kept open simultaneously during extraction.
+const MAX_OPEN_EXTRACTION_FILES: usize = 64;
+
+struct LazyMultiChunkState {
+    output_path: PathBuf,
+    expected_size: u64,
+    chunks_written: Vec<bool>,
+    total_chunks: usize,
+    written_count: usize,
+    initialized: bool,
+}
 
 /// State for tracking multi-chunk file extraction
 /// Uses pre-created files to avoid OOM on large files
@@ -51,6 +63,14 @@ pub struct ExtractionContext {
     overwrite: bool,
     /// Output files opened or overwritten by `process_chunks`
     created_output_paths: Vec<PathBuf>,
+    /// Expected sizes for single-chunk non-packed files registered via `register_single_chunk_file`
+    single_chunk_expected_sizes: HashMap<usize, u64>,
+    /// Lazy multi-chunk file states whose handles are opened on demand within an LRU bound
+    lazy_multi_chunk_files: HashMap<usize, LazyMultiChunkState>,
+    /// Bounded cache of open multi-chunk file handles
+    open_multi_chunk_handles: HashMap<usize, File>,
+    /// LRU order of open handle keys (front = least recently used)
+    open_handle_lru: VecDeque<usize>,
 }
 
 impl ExtractionContext {
@@ -64,6 +84,10 @@ impl ExtractionContext {
             canonical_output_dir: None,
             overwrite: false,
             created_output_paths: Vec::new(),
+            single_chunk_expected_sizes: HashMap::new(),
+            lazy_multi_chunk_files: HashMap::new(),
+            open_multi_chunk_handles: HashMap::new(),
+            open_handle_lru: VecDeque::new(),
         }
     }
 
@@ -82,6 +106,130 @@ impl ExtractionContext {
         &self.created_output_paths
     }
 
+    /// Register a non-packed single-chunk file for one-shot creation and write.
+    pub(crate) fn register_single_chunk_file(
+        &mut self,
+        file_idx: usize,
+        hash: ChunkHash,
+        output_path: PathBuf,
+        expected_size: u64,
+    ) {
+        self.single_chunk_pending
+            .entry(hash)
+            .or_default()
+            .push((file_idx, output_path));
+        self.single_chunk_expected_sizes
+            .insert(file_idx, expected_size);
+    }
+
+    /// Register a multi-chunk file for bounded lazy file-descriptor extraction.
+    pub(crate) fn register_multi_chunk_file(
+        &mut self,
+        file_idx: usize,
+        output_path: PathBuf,
+        expected_size: u64,
+        total_chunks: usize,
+    ) {
+        self.lazy_multi_chunk_files.insert(
+            file_idx,
+            LazyMultiChunkState {
+                output_path,
+                expected_size,
+                chunks_written: vec![false; total_chunks],
+                total_chunks,
+                written_count: 0,
+                initialized: false,
+            },
+        );
+    }
+
+    /// Close all currently cached extraction file handles (e.g. before cleanup).
+    pub(crate) fn close_open_handles(&mut self) {
+        self.open_multi_chunk_handles.clear();
+        self.open_handle_lru.clear();
+    }
+
+    fn touch_open_handle_lru(&mut self, file_idx: usize) {
+        if let Some(pos) = self.open_handle_lru.iter().position(|&id| id == file_idx) {
+            self.open_handle_lru.remove(pos);
+        }
+        self.open_handle_lru.push_back(file_idx);
+    }
+
+    fn evict_open_handle(&mut self, file_idx: usize) {
+        self.open_multi_chunk_handles.remove(&file_idx);
+        if let Some(pos) = self.open_handle_lru.iter().position(|&id| id == file_idx) {
+            self.open_handle_lru.remove(pos);
+        }
+    }
+
+    fn open_or_get_lazy_handle(&mut self, file_idx: usize) -> Result<&mut File> {
+        if self.open_multi_chunk_handles.contains_key(&file_idx) {
+            self.touch_open_handle_lru(file_idx);
+            return self
+                .open_multi_chunk_handles
+                .get_mut(&file_idx)
+                .ok_or_else(|| {
+                    EraError::IntegrityError(
+                        "Open extraction file handle missing from cache".into(),
+                    )
+                });
+        }
+
+        while self.open_multi_chunk_handles.len() >= MAX_OPEN_EXTRACTION_FILES {
+            let Some(evicted) = self.open_handle_lru.pop_front() else {
+                break;
+            };
+            self.open_multi_chunk_handles.remove(&evicted);
+        }
+
+        let (output_path, expected_size, initialized) = {
+            let state = self.lazy_multi_chunk_files.get(&file_idx).ok_or_else(|| {
+                EraError::IntegrityError(format!(
+                    "Missing lazy multi-chunk state for file index {file_idx}"
+                ))
+            })?;
+            (
+                state.output_path.clone(),
+                state.expected_size,
+                state.initialized,
+            )
+        };
+
+        self.ensure_contained_output_target(&output_path)?;
+
+        let file = if !initialized {
+            let file = open_output_for_extract(&output_path, self.overwrite)?;
+            if let Err(err) = file.set_len(expected_size) {
+                drop(file);
+                let _ = fs::remove_file(&output_path);
+                return Err(EraError::Io(err));
+            }
+            self.created_output_paths.push(output_path);
+            if let Some(state) = self.lazy_multi_chunk_files.get_mut(&file_idx) {
+                state.initialized = true;
+            }
+            file
+        } else {
+            let meta = fs::symlink_metadata(&output_path)?;
+            if !meta.file_type().is_file() {
+                return Err(EraError::Security(format!(
+                    "Extraction target is no longer a regular file: {}",
+                    output_path.display()
+                )));
+            }
+            fs::OpenOptions::new().write(true).open(&output_path)?
+        };
+
+        self.open_multi_chunk_handles.insert(file_idx, file);
+        self.open_handle_lru.push_back(file_idx);
+        self.open_multi_chunk_handles
+            .get_mut(&file_idx)
+            .ok_or_else(|| {
+                EraError::IntegrityError("Newly opened extraction handle missing from cache".into())
+            })
+    }
+
     fn ensure_contained_output_target(&self, output_path: &Path) -> Result<()> {
         let canonical_output_dir = self.canonical_output_dir.as_ref().ok_or_else(|| {
             EraError::Security("Canonical output directory not initialized".into())
@@ -93,6 +241,7 @@ impl ExtractionContext {
     pub fn has_pending(&self) -> bool {
         !self.single_chunk_pending.is_empty()
             || !self.multi_chunk_files.is_empty()
+            || !self.lazy_multi_chunk_files.is_empty()
             || !self.packed_chunks.is_empty()
     }
 
@@ -100,7 +249,7 @@ impl ExtractionContext {
     ///
     /// This handles:
     /// - Single-chunk files: create and write file directly
-    /// - Multi-chunk files: write chunk at correct offset in pre-created file
+    /// - Multi-chunk files: write chunk at correct offset in bounded lazy or pre-created file
     ///
     /// Returns the number of files completed and bytes written
     pub fn process_chunks(&mut self, chunks: ChunkVec, stats: &mut ExtractStats) -> Result<()> {
@@ -127,7 +276,18 @@ impl ExtractionContext {
 
             // Handle single-chunk files
             if let Some(entries) = self.single_chunk_pending.remove(&hash) {
-                for (_file_idx, output_path) in entries {
+                for (file_idx, output_path) in entries {
+                    if let Some(expected_size) = self.single_chunk_expected_sizes.remove(&file_idx)
+                    {
+                        if data.len() as u64 != expected_size {
+                            return Err(EraError::InvalidFormat(format!(
+                                "Single-chunk file {} length mismatch: expected {}, got {}",
+                                output_path.display(),
+                                expected_size,
+                                data.len()
+                            )));
+                        }
+                    }
                     self.ensure_contained_output_target(&output_path)?;
 
                     // Write file directly
@@ -169,8 +329,10 @@ impl ExtractionContext {
                         state.file.seek(SeekFrom::Start(chunk_offset))?;
                         state.file.write_all(&data)?;
 
-                        state.chunks_written[chunk_idx] = true;
-                        state.written_count += 1;
+                        if !state.chunks_written[chunk_idx] {
+                            state.chunks_written[chunk_idx] = true;
+                            state.written_count += 1;
+                        }
 
                         // Check if all chunks are written
                         if state.written_count == state.total_chunks {
@@ -184,6 +346,69 @@ impl ExtractionContext {
                             // Remove completed file from tracking
                             self.multi_chunk_files.remove(&file_idx);
                         }
+                    } else if self.lazy_multi_chunk_files.contains_key(&file_idx) {
+                        let (chunk_count_len, expected_size, output_path_display) = {
+                            let state =
+                                self.lazy_multi_chunk_files.get(&file_idx).ok_or_else(|| {
+                                    EraError::IntegrityError(
+                                        "Missing lazy multi-chunk state".into(),
+                                    )
+                                })?;
+                            (
+                                state.chunks_written.len(),
+                                state.expected_size,
+                                state.output_path.display().to_string(),
+                            )
+                        };
+                        if chunk_idx >= chunk_count_len {
+                            return Err(EraError::InvalidFormat(format!(
+                                "Chunk index out of bounds for {}: index {} >= {}",
+                                output_path_display, chunk_idx, chunk_count_len
+                            )));
+                        }
+                        if chunk_offset
+                            .checked_add(data.len() as u64)
+                            .is_none_or(|end| end > expected_size)
+                        {
+                            return Err(era_common::EraError::InvalidFormat(format!(
+                                "Chunk write exceeds file bounds: offset {} + size {} > expected {}",
+                                chunk_offset,
+                                data.len(),
+                                expected_size
+                            )));
+                        }
+
+                        let file = self.open_or_get_lazy_handle(file_idx)?;
+                        file.seek(SeekFrom::Start(chunk_offset))?;
+                        file.write_all(&data)?;
+
+                        let completed = {
+                            let state = self.lazy_multi_chunk_files.get_mut(&file_idx).ok_or_else(
+                                || {
+                                    EraError::IntegrityError(
+                                        "Missing lazy multi-chunk state".into(),
+                                    )
+                                },
+                            )?;
+                            if !state.chunks_written[chunk_idx] {
+                                state.chunks_written[chunk_idx] = true;
+                                state.written_count += 1;
+                            }
+                            state.written_count == state.total_chunks
+                        };
+
+                        if completed {
+                            if let Some(file) = self.open_multi_chunk_handles.get(&file_idx) {
+                                file.sync_all()?;
+                            }
+                            self.evict_open_handle(file_idx);
+                            if let Some(state) = self.lazy_multi_chunk_files.remove(&file_idx) {
+                                debug!("Extracted (chunked): {}", state.output_path.display());
+                                stats.extracted += 1;
+                                stats.bytes_written += state.expected_size;
+                                stats.extracted_paths.push(state.output_path);
+                            }
+                        }
                     }
                 }
             }
@@ -195,6 +420,16 @@ impl ExtractionContext {
     /// Log warnings for any incomplete files
     pub fn log_incomplete_files(&self) {
         for state in self.multi_chunk_files.values() {
+            if state.written_count > 0 {
+                debug!(
+                    "Warning: Incomplete file: {} ({}/{})",
+                    state.output_path.display(),
+                    state.written_count,
+                    state.total_chunks
+                );
+            }
+        }
+        for state in self.lazy_multi_chunk_files.values() {
             if state.written_count > 0 {
                 debug!(
                     "Warning: Incomplete file: {} ({}/{})",

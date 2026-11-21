@@ -229,9 +229,38 @@ async fn assert_matrix_candidate_repair(damaged_sequence: u16) {
         &damaged_path,
         &layouts[usize::from(damaged_sequence)].primary,
     );
-    assert_healthy_and_extract(&archive_path, &temp_dir.path().join("before"), &names).await;
+
+    // Partial multi-volume primary Catalog damage must be reported as Degraded so repair runs.
+    {
+        let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+        let stats = reader.verify().await.unwrap();
+        assert!(stats.is_ok(), "sibling catalog copies remain readable");
+        assert!(
+            stats.is_degraded(),
+            "damaged primary Catalog on volume {damaged_sequence} must report Degraded, got {:?}",
+            stats.archive_health
+        );
+        assert_eq!(stats.warnings.len(), 1);
+        assert!(
+            stats.warnings[0].contains(&format!("Volume {damaged_sequence}")),
+            "expected warning for Volume {damaged_sequence}, got {:?}",
+            stats.warnings
+        );
+        assert!(stats.errors.is_empty());
+
+        let before_dir = temp_dir.path().join("before");
+        let extracted = reader
+            .extract_all(&ExtractOptions::new(&before_dir))
+            .await
+            .unwrap();
+        assert_eq!(extracted.extracted, u64::try_from(names.len()).unwrap());
+        for name in &names {
+            assert_eq!(fs::read(before_dir.join(name)).unwrap(), PAYLOAD);
+        }
+    }
 
     repair(&archive_path).await;
+    assert_healthy_and_extract(&archive_path, &temp_dir.path().join("repaired"), &names).await;
 
     for (sequence, layout) in (0..MATRIX_VOLUMES).zip(&layouts) {
         if sequence != damaged_sequence {
@@ -240,7 +269,27 @@ async fn assert_matrix_candidate_repair(damaged_sequence: u16) {
             damage_blocks(&sibling, &layout.backup);
         }
     }
-    assert_healthy_and_extract(&archive_path, &temp_dir.path().join("after"), &names).await;
+
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    assert_eq!(
+        reader.load_catalog().await.unwrap().entries.len(),
+        names.len(),
+        "repaired primary Catalog on volume {damaged_sequence} must work standalone"
+    );
+    let stats = reader.verify().await.unwrap();
+    assert!(stats.is_ok());
+    assert!(stats.is_degraded());
+    assert_eq!(stats.warnings.len(), usize::from(MATRIX_VOLUMES - 1));
+    assert!(stats.errors.is_empty());
+    let after_dir = temp_dir.path().join("after");
+    let extracted = reader
+        .extract_all(&ExtractOptions::new(&after_dir))
+        .await
+        .unwrap();
+    assert_eq!(extracted.extracted, u64::try_from(names.len()).unwrap());
+    for name in &names {
+        assert_eq!(fs::read(after_dir.join(name)).unwrap(), PAYLOAD);
+    }
 }
 
 #[tokio::test]

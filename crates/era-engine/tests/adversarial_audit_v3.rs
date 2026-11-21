@@ -280,8 +280,15 @@ mod low_severity {
             .matches("tokio::fs::try_exists(&self.output_path).await?")
             .count();
         assert!(
-            count >= 2,
-            "writer must use async tokio::fs::try_exists for preexisting and append checks"
+            count >= 1,
+            "writer must use async tokio::fs::try_exists for output existence checks"
+        );
+        assert!(
+            source.contains("let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;")
+                && source.contains(
+                    "let append_to_existing = self.append_existing && output_preexisted;"
+                ),
+            "writer must derive both output_preexisted and append_to_existing from a single async try_exists call"
         );
         assert!(
             !source.contains("self.output_path.exists()"),

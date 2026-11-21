@@ -39,7 +39,7 @@ use crate::volume_stage::VolumeStage;
 /// let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 ///
 /// // Process chunks (handles encryption, erasure buffering, writing, indexing)
-/// pipeline.process_chunks(chunks, extra_hashes).await?;
+/// pipeline.process_chunks(chunks).await?;
 ///
 /// // At finalization, flush any remaining erasure buffer
 /// pipeline.flush_stripe().await?;
@@ -98,15 +98,8 @@ impl<B: StorageBackend> WritePipeline<B> {
     ///
     /// # Arguments
     /// * `chunks` - The chunks to process
-    /// * `extra_hashes` - Additional hashes to associate with the block location
-    ///   (e.g., small file hashes that map to a packed chunk)
-    pub async fn process_chunks(
-        &mut self,
-        chunks: Vec<UniqueChunk>,
-        extra_hashes: Vec<ChunkHash>,
-    ) -> Result<()> {
-        let mut hashes: Vec<ChunkHash> = chunks.iter().map(|c| c.hash).collect();
-        hashes.extend(extra_hashes);
+    pub async fn process_chunks(&mut self, chunks: Vec<UniqueChunk>) -> Result<()> {
+        let hashes: Vec<ChunkHash> = chunks.iter().map(|c| c.hash).collect();
 
         let compressor = self.create_compressor();
         let builder = self.encryption.create_block_builder(compressor)?;
@@ -360,6 +353,16 @@ impl<B: StorageBackend> WritePipeline<B> {
         self.index.sync_checkpoint()
     }
 
+    /// Ensure volume slot 0 has enough capacity for the durable checkpoint block before
+    /// capturing data-only committed ends, rotating volumes if needed.
+    pub async fn precheck_durable_checkpoint_space(&mut self) -> Result<bool> {
+        let Some(mgr) = self.index.checkpoint_manager() else {
+            return Ok(false);
+        };
+        let required = mgr.serialized_disk_size()?;
+        self.volume.ensure_slot_typed_block_space(0, required).await
+    }
+
     pub async fn commit_durable_checkpoint(&mut self) -> Result<()> {
         let Some(mgr) = self.index.checkpoint_manager_mut() else {
             return Ok(());
@@ -542,7 +545,7 @@ mod tests {
 
         assert!(!pipeline.contains(&hash).unwrap());
 
-        pipeline.process_chunks(vec![chunk], vec![]).await.unwrap();
+        pipeline.process_chunks(vec![chunk]).await.unwrap();
 
         // Chunk should now be indexed
         assert!(pipeline.contains(&hash).unwrap());
@@ -550,7 +553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pipeline_with_extra_hashes() {
+    async fn test_pipeline_indexes_only_chunk_hashes() {
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalStorageBackend::new(temp_dir.path());
         let base_path = temp_dir.path().join("test_archive");
@@ -567,17 +570,14 @@ mod tests {
 
         let mut pipeline = WritePipeline::new(encryption, erasure, volume, index, compression);
 
-        // Process a chunk with extra hashes (simulating packed small files)
         let chunk = create_test_chunk(b"Packed data");
-        let extra_hash = ChunkHash::from_bytes([42u8; 32]);
+        let chunk_hash = chunk.hash;
+        let unrelated_hash = ChunkHash::from_bytes([42u8; 32]);
 
-        pipeline
-            .process_chunks(vec![chunk], vec![extra_hash])
-            .await
-            .unwrap();
+        pipeline.process_chunks(vec![chunk]).await.unwrap();
 
-        // Both the chunk hash and extra hash should be indexed
-        assert!(pipeline.contains(&extra_hash).unwrap());
+        assert!(pipeline.contains(&chunk_hash).unwrap());
+        assert!(!pipeline.contains(&unrelated_hash).unwrap());
     }
 
     #[tokio::test]
@@ -607,11 +607,11 @@ mod tests {
         let hash1 = chunk1.hash;
         let hash2 = chunk2.hash;
 
-        pipeline.process_chunks(vec![chunk1], vec![]).await.unwrap();
+        pipeline.process_chunks(vec![chunk1]).await.unwrap();
         // First chunk buffered, not yet indexed
         assert!(!pipeline.contains(&hash1).unwrap());
 
-        pipeline.process_chunks(vec![chunk2], vec![]).await.unwrap();
+        pipeline.process_chunks(vec![chunk2]).await.unwrap();
         // Stripe complete, both chunks should be indexed
         assert!(pipeline.contains(&hash1).unwrap());
         assert!(pipeline.contains(&hash2).unwrap());
@@ -638,13 +638,13 @@ mod tests {
         assert!(pipeline.written_block_locations().is_empty());
 
         pipeline
-            .process_chunks(vec![create_test_chunk(b"chunk-1")], vec![])
+            .process_chunks(vec![create_test_chunk(b"chunk-1")])
             .await?;
         pipeline
-            .process_chunks(vec![create_test_chunk(b"chunk-2")], vec![])
+            .process_chunks(vec![create_test_chunk(b"chunk-2")])
             .await?;
         pipeline
-            .process_chunks(vec![create_test_chunk(b"chunk-3")], vec![])
+            .process_chunks(vec![create_test_chunk(b"chunk-3")])
             .await?;
 
         let locations = pipeline.written_block_locations();
@@ -682,10 +682,10 @@ mod tests {
         assert!(pipeline.written_block_locations().is_empty());
 
         pipeline
-            .process_chunks(vec![create_test_chunk(b"Chunk 1 data")], vec![])
+            .process_chunks(vec![create_test_chunk(b"Chunk 1 data")])
             .await?;
         pipeline
-            .process_chunks(vec![create_test_chunk(b"Chunk 2 data")], vec![])
+            .process_chunks(vec![create_test_chunk(b"Chunk 2 data")])
             .await?;
 
         assert_eq!(pipeline.written_block_locations().len(), 2);

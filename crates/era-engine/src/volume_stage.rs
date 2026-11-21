@@ -71,6 +71,17 @@ impl<B: StorageBackend> VolumeStage<B> {
         self.pool.needs_expansion(required_size)
     }
 
+    /// Ensure a specific volume slot can fit a canonical typed block, rotating if needed.
+    pub async fn ensure_slot_typed_block_space(
+        &mut self,
+        slot: usize,
+        on_disk_size: u64,
+    ) -> Result<bool> {
+        self.pool
+            .ensure_slot_typed_block_space(slot, on_disk_size)
+            .await
+    }
+
     /// Precheck typed-block fanout space and rotate volumes if needed.
     pub async fn precheck_and_rotate_if_needed(
         &mut self,

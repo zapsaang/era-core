@@ -169,6 +169,7 @@ enum Commands {
     )]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
         era extract -i backup.era -o ./restored\n  \
+        era extract backup.era -o ./restored\n  \
         era extract -i backup.era -o ./restored -p secret\n  \
         era extract -i backup.era -o ./restored --key private.pem\n  \
         era extract -i backup.era -o ./restored --force")]
@@ -182,6 +183,7 @@ enum Commands {
         )]
         input: Option<PathBuf>,
 
+        /// Input archive path (positional alternative to --input)
         #[arg(required_unless_present = "input", conflicts_with = "input")]
         archive: Option<PathBuf>,
 

@@ -13,10 +13,7 @@ use crate::block_iter::{
     BlockIterator, MultiVolumeSessionBlockIterator, SessionErasureBlockIterator,
     SessionErasureBlockIteratorArgs,
 };
-use crate::chunk_processor::{
-    enforce_output_containment, open_output_for_extract, ExtractionContext, MultiChunkState,
-    VerificationContext,
-};
+use crate::chunk_processor::{enforce_output_containment, ExtractionContext, VerificationContext};
 pub use crate::chunk_processor::{ArchiveHealthStatus, ExtractStats, VerifyStats};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
@@ -34,7 +31,7 @@ use era_packing::{SessionBlockUnpacker, SessionErasureBlockUnpacker};
 use era_storage::LocalStorageBackend;
 use era_volume::{DistributionCalculator, Footer, SuperHeader, VolumeReader};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 use zeroize::Zeroize;
@@ -2076,7 +2073,7 @@ impl ArchiveReader {
         options: &ExtractOptions,
     ) -> Result<ExtractStats> {
         let mut stats = ExtractStats::default();
-        let mut tracked_output_files: Vec<PathBuf> = Vec::new();
+        let tracked_output_files: Vec<PathBuf> = Vec::new();
         let mut cumulative_bytes_extracted: u64 = 0;
 
         let output_dir = options.output_dir.clone();
@@ -2118,6 +2115,7 @@ impl ArchiveReader {
         };
         let mut target_winners: HashMap<PathBuf, usize> = HashMap::new();
         let mut metadata_candidates: Vec<FileEntry> = Vec::new();
+        let mut planned_targets: Vec<PathBuf> = Vec::new();
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
             if is_internal_entry(entry) {
                 continue;
@@ -2215,61 +2213,30 @@ impl ArchiveReader {
                         }
                     };
 
+                    planned_targets.push(output_path.clone());
                     context
                         .packed_chunks
                         .entry(chunk_ref.hash)
                         .or_default()
                         .push((file_idx, packed_info.file_index, output_path));
-                } else {
-                    // Normal multi-chunk file: pre-create file
-                    let output_path_for_create = output_path.clone();
-                    let expected_size = entry.size;
-                    let canonical_output_dir_for_create = canonical_output_dir.clone();
-                    let overwrite = options.overwrite;
-                    let file =
-                        match tokio::task::spawn_blocking(move || -> std::io::Result<File> {
-                            enforce_output_containment(
-                                &output_path_for_create,
-                                &canonical_output_dir_for_create,
-                            )
-                            .map_err(|e| std::io::Error::other(e.to_string()))?;
-                            let file = open_output_for_extract(&output_path_for_create, overwrite)?;
-                            if let Err(err) = file.set_len(expected_size) {
-                                drop(file);
-                                let _ = std::fs::remove_file(&output_path_for_create);
-                                return Err(err);
-                            }
-                            Ok(file)
-                        })
-                        .await
-                        .map_err(|e| {
-                            EraError::Other(format!("Failed to join file creation task: {}", e))
-                        })
-                        .and_then(|res| res.map_err(EraError::Io))
-                        {
-                            Ok(file) => {
-                                tracked_output_files.push(output_path.clone());
-                                file
-                            }
-                            Err(err) => {
-                                return Self::fail_extraction_with_cleanup(
-                                    err,
-                                    &tracked_output_files,
-                                )
-                                .await;
-                            }
-                        };
-
-                    context.multi_chunk_files.insert(
+                } else if chunk_count == 1
+                    && entry.chunks[0].offset == 0
+                    && u64::from(entry.chunks[0].length) == entry.size
+                {
+                    planned_targets.push(output_path.clone());
+                    context.register_single_chunk_file(
                         file_idx,
-                        MultiChunkState {
-                            file,
-                            output_path,
-                            expected_size: entry.size,
-                            chunks_written: vec![false; chunk_count],
-                            total_chunks: chunk_count,
-                            written_count: 0,
-                        },
+                        entry.chunks[0].hash,
+                        output_path,
+                        entry.size,
+                    );
+                } else {
+                    planned_targets.push(output_path.clone());
+                    context.register_multi_chunk_file(
+                        file_idx,
+                        output_path,
+                        entry.size,
+                        chunk_count,
                     );
 
                     for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
@@ -2289,6 +2256,36 @@ impl ArchiveReader {
         if !context.has_pending() {
             info!("No files to extract");
             return Ok(stats);
+        }
+
+        if !planned_targets.is_empty() {
+            let canonical_root = canonical_output_dir.clone();
+            let overwrite = options.overwrite;
+            if let Err(err) = tokio::task::spawn_blocking(move || -> Result<()> {
+                for target in &planned_targets {
+                    enforce_output_containment(target, &canonical_root)?;
+                    if overwrite {
+                        match fs::symlink_metadata(target) {
+                            Ok(meta) if meta.is_dir() => {
+                                return Err(EraError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::IsADirectory,
+                                    format!("Cannot overwrite directory '{}'", target.display()),
+                                )));
+                            }
+                            Ok(_) => {}
+                            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(err) => return Err(EraError::Io(err)),
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| EraError::Other(format!("Failed to join extraction preflight task: {e}")))
+            .and_then(|res| res)
+            {
+                return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await;
+            }
         }
 
         const MAX_CONSECUTIVE_FAILURES: u32 = 16;
@@ -2314,7 +2311,7 @@ impl ArchiveReader {
                                         .to_string(),
                                 ),
                                 &tracked_output_files,
-                                &context,
+                                &mut context,
                             )
                             .await;
                         }
@@ -2331,7 +2328,7 @@ impl ArchiveReader {
                                             .to_string(),
                                     ),
                                     &tracked_output_files,
-                                    &context,
+                                    &mut context,
                                 )
                                 .await;
                         }
@@ -2344,7 +2341,7 @@ impl ArchiveReader {
                                     .to_string(),
                             ),
                             &tracked_output_files,
-                            &context,
+                            &mut context,
                         )
                         .await;
                     }
@@ -2353,7 +2350,7 @@ impl ArchiveReader {
                         return Self::fail_extraction_with_context(
                             err,
                             &tracked_output_files,
-                            &context,
+                            &mut context,
                         )
                         .await;
                     }
@@ -2363,7 +2360,7 @@ impl ArchiveReader {
                         return Self::fail_extraction_with_context(
                             e,
                             &tracked_output_files,
-                            &context,
+                            &mut context,
                         )
                         .await;
                     }
@@ -2375,7 +2372,7 @@ impl ArchiveReader {
                                 consecutive_failures, e
                             )),
                             &tracked_output_files,
-                            &context,
+                            &mut context,
                         )
                         .await;
                     }
@@ -2402,7 +2399,7 @@ impl ArchiveReader {
                         .into(),
                 ),
                 &tracked_output_files,
-                &context,
+                &mut context,
             )
             .await;
         }
@@ -2547,8 +2544,9 @@ impl ArchiveReader {
     async fn fail_extraction_with_context(
         err: EraError,
         tracked_paths: &[PathBuf],
-        context: &ExtractionContext,
+        context: &mut ExtractionContext,
     ) -> Result<ExtractStats> {
+        context.close_open_handles();
         let mut paths = tracked_paths.to_vec();
         paths.extend_from_slice(context.created_output_paths());
         Self::fail_extraction_with_cleanup(err, &paths).await
@@ -2792,7 +2790,37 @@ impl ArchiveReader {
                 ));
             }
         }
-        if self.catalog_recovered_from_backup {
+        let mut damaged_primary_catalogs = Vec::new();
+        for (reader_idx, reader) in self.volume_readers.iter().enumerate() {
+            let Some(footer) = reader.footer() else {
+                continue;
+            };
+            if !footer.has_catalog_location() || reader.block_count() == 0 {
+                continue;
+            }
+            let primary = CatalogBlockLocator {
+                reader_idx,
+                offset: footer.catalog_offset(),
+                expected_size: Some(footer.catalog_size()),
+                block_id: footer.catalog_block_id(),
+                require_manifest: false,
+            };
+            if let Err(err) = self.read_catalog_copy(primary).await {
+                damaged_primary_catalogs.push((reader.header().volume_sequence(), err));
+            }
+        }
+        if !damaged_primary_catalogs.is_empty() {
+            let source_note = if self.catalog_recovered_from_backup {
+                "recovered from EC backup"
+            } else {
+                "loaded from another volume"
+            };
+            for (sequence, err) in damaged_primary_catalogs {
+                stats.warnings.push(format!(
+                    "Volume {sequence}: primary Catalog damaged ({source_note}); primary Catalog still requires repair: {err}"
+                ));
+            }
+        } else if self.catalog_recovered_from_backup {
             stats.warnings.push(
                 "Catalog recovered from EC backup; primary Catalog still requires repair".into(),
             );

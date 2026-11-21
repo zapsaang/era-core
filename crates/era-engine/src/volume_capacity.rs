@@ -108,6 +108,25 @@ impl VolumeCapacity {
         })
     }
 
+    pub(crate) fn canonical_unbounded(compression: CompressionAlgorithm) -> Result<Self> {
+        let data_sealed_budget = era_volume::MAX_SHARD_SIZE;
+        let data_chunk_limit = single_chunk_limit(compression, data_sealed_budget)?;
+        let catalog_chunk_limit = data_chunk_limit
+            .checked_sub(CATALOG_PREFIX_SIZE)
+            .filter(|&size| size > 0)
+            .ok_or_else(|| {
+                EraError::InvalidConfig(
+                    "canonical block capacity cannot fit catalog framing".into(),
+                )
+            })?;
+        Ok(Self {
+            compression,
+            data_sealed_budget,
+            data_chunk_limit,
+            catalog_chunk_limit,
+        })
+    }
+
     pub(crate) fn max_data_chunk_size(self) -> usize {
         self.data_chunk_limit
     }
@@ -218,10 +237,6 @@ impl BatchSize {
             .and_then(|size| size.checked_add(self.data))
             .ok_or_else(|| EraError::InvalidConfig("MacroBlock plaintext size overflow".into()))
     }
-}
-
-pub(crate) fn max_canonical_data_chunk_size(compression: CompressionAlgorithm) -> Result<usize> {
-    single_chunk_limit(compression, era_volume::MAX_SHARD_SIZE)
 }
 
 fn single_chunk_limit(compression: CompressionAlgorithm, sealed_budget: usize) -> Result<usize> {

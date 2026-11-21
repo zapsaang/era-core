@@ -357,22 +357,21 @@ async fn recovered_header_bytes(
         ));
     }
     let backup_bytes = reader.read_raw(backup_offset, HEADER_SIZE).await?;
-    let header_digest = if footer.has_manifest() {
-        if !(DATA_REGION_START..backup_offset).contains(&manifest_offset) {
+    let header_digest =
+        if let Some(&digest) = archive.manifest_header_digest(header.volume_sequence()) {
+            digest
+        } else if footer.has_manifest() {
+            if !(DATA_REGION_START..backup_offset).contains(&manifest_offset) {
+                return Err(EraError::IntegrityError(
+                    "Recovered header manifest is outside the finalized data region".into(),
+                ));
+            }
+            local_header_digest(reader, archive).await?
+        } else {
             return Err(EraError::IntegrityError(
-                "Recovered header manifest is outside the finalized data region".into(),
+                "Recovered header has no authenticated volume digest".into(),
             ));
-        }
-        local_header_digest(reader, archive).await?
-    } else {
-        *archive
-            .manifest_header_digest(header.volume_sequence())
-            .ok_or_else(|| {
-                EraError::IntegrityError(
-                    "Recovered header has no authenticated volume digest".into(),
-                )
-            })?
-    };
+        };
     if blake3::hash(&backup_bytes).as_bytes() != &header_digest {
         return Err(EraError::IntegrityError(
             "Backup header bytes do not match the authenticated manifest digest".into(),

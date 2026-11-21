@@ -251,3 +251,240 @@ async fn append_abort_policy_rejects_checkpoint_without_mutating_archive() {
     assert!(matches!(error, EraError::CheckpointError(_)), "{error:?}");
     assert_eq!(fs::read(&archive_path).unwrap(), before);
 }
+
+#[tokio::test]
+async fn checkpoint_delete_preserves_manifest_and_does_not_corrupt_truncated_archive() {
+    use era_engine::CheckpointManager;
+    use era_volume::{Footer, FOOTER_SIZE, HEADER_SIZE};
+
+    let temp = TempDir::new().unwrap();
+    let archive_path = temp.path().join("delete_preserve.era");
+    create_original(
+        &archive_path,
+        Some((ORIGINAL_NAME, ORIGINAL_BYTES)),
+        non_ec_config(),
+    )
+    .await;
+
+    let (_, footer_before) = read_metadata(&archive_path).await;
+    assert!(footer_before.last_checkpoint_offset() > 0);
+    assert!(footer_before.has_manifest());
+
+    // Case A: deleting checkpoint on a finalized archive must preserve manifest provenance.
+    let mgr = CheckpointManager::load_or_create(&archive_path).unwrap();
+    mgr.delete().unwrap();
+
+    let raw = fs::read(&archive_path).unwrap();
+    let primary_after = Footer::from_bytes(&raw[raw.len() - FOOTER_SIZE..]).unwrap();
+    let backup_after = Footer::from_bytes(&raw[HEADER_SIZE..HEADER_SIZE + FOOTER_SIZE]).unwrap();
+    assert_eq!(primary_after.last_checkpoint_offset(), 0);
+    assert_eq!(backup_after.last_checkpoint_offset(), 0);
+    assert!(primary_after.has_manifest());
+    assert_eq!(
+        primary_after.manifest_offset(),
+        footer_before.manifest_offset()
+    );
+    assert_eq!(
+        primary_after.manifest_block_id(),
+        footer_before.manifest_block_id()
+    );
+    assert_eq!(
+        backup_after.manifest_offset(),
+        footer_before.manifest_offset()
+    );
+    assert_eq!(
+        backup_after.manifest_block_id(),
+        footer_before.manifest_block_id()
+    );
+
+    let mut reader = era_engine::ArchiveReader::open(&archive_path, PASSWORD)
+        .await
+        .unwrap();
+    reader.preflight_metadata_recovery().await.unwrap();
+    assert!(reader.manifest().is_some());
+    assert!(reader.verify().await.unwrap().is_healthy());
+
+    // Case B: when primary footer is absent (truncated), delete() must only update backup footer
+    // and must NOT overwrite the final 128 bytes of payload/metadata.
+    let trunc_path = temp.path().join("truncated_primary_footer.era");
+    create_original(
+        &trunc_path,
+        Some((ORIGINAL_NAME, ORIGINAL_BYTES)),
+        non_ec_config(),
+    )
+    .await;
+    let orig_len = fs::metadata(&trunc_path).unwrap().len();
+    {
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .open(&trunc_path)
+            .unwrap();
+        f.set_len(orig_len - FOOTER_SIZE as u64).unwrap();
+        f.sync_all().unwrap();
+    }
+    let before_trunc = fs::read(&trunc_path).unwrap();
+    let tail_before = before_trunc[before_trunc.len() - FOOTER_SIZE..].to_vec();
+
+    CheckpointManager::load_or_create(&trunc_path)
+        .unwrap()
+        .delete()
+        .unwrap();
+
+    let after_trunc = fs::read(&trunc_path).unwrap();
+    assert_eq!(
+        &after_trunc[after_trunc.len() - FOOTER_SIZE..],
+        tail_before.as_slice(),
+        "delete() must not overwrite trailing bytes when falling back to backup footer"
+    );
+    let backup_only =
+        Footer::from_bytes(&after_trunc[HEADER_SIZE..HEADER_SIZE + FOOTER_SIZE]).unwrap();
+    assert_eq!(backup_only.last_checkpoint_offset(), 0);
+    assert!(backup_only.has_manifest());
+}
+
+#[tokio::test]
+async fn append_start_fresh_failure_before_truncation_preserves_existing_archive_and_checkpoint() {
+    use era_engine::CheckpointManager;
+
+    let temp = TempDir::new().unwrap();
+    let archive_path = temp.path().join("start_fresh_atomic.era");
+    let mut big_cfg = non_ec_config();
+    big_cfg.compression.algorithm = era_common::CompressionAlgorithm::None;
+    let large_payload = vec![0x3C; 1_050_000];
+    create_original(
+        &archive_path,
+        Some(("large.bin", &large_payload)),
+        big_cfg.clone(),
+    )
+    .await;
+    let before = fs::read(&archive_path).unwrap();
+
+    // Force open_append_single_at to fail after builder validation by capping max_volume_size
+    // to 1 MiB (< retained data size). Existing archive + checkpoint must remain untouched.
+    let err = match ArchiveWriter::builder(&archive_path)
+        .password(PASSWORD)
+        .config(big_cfg)
+        .append_existing(true)
+        .enable_checkpoint(true)
+        .recovery_options(RecoveryOptions::start_fresh())
+        .max_volume_size(1024 * 1024)
+        .enable_erasure(false)
+        .build()
+        .await
+    {
+        Ok(_) => panic!("expected append with oversized retained volume to fail"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, EraError::InvalidConfig(_)),
+        "expected InvalidConfig from retained size check, got {err:?}"
+    );
+    assert_eq!(
+        fs::read(&archive_path).unwrap(),
+        before,
+        "failed StartFresh append must not delete checkpoint or mutate archive before truncation"
+    );
+    assert!(
+        CheckpointManager::exists(&archive_path).await.unwrap(),
+        "existing durable checkpoint must still exist after failed StartFresh open"
+    );
+
+    // Positive path: successful StartFresh append clears stale backup footer after truncation
+    // and finalizes cleanly.
+    let small_path = temp.path().join("start_fresh_ok.era");
+    create_original(
+        &small_path,
+        Some((ORIGINAL_NAME, ORIGINAL_BYTES)),
+        non_ec_config(),
+    )
+    .await;
+    let mut writer = ArchiveWriter::builder(&small_path)
+        .password(PASSWORD)
+        .config(non_ec_config())
+        .append_existing(true)
+        .enable_checkpoint(true)
+        .recovery_options(RecoveryOptions::start_fresh())
+        .enable_erasure(false)
+        .build()
+        .await
+        .unwrap();
+    assert!(
+        !CheckpointManager::exists(&small_path).await.unwrap(),
+        "successful StartFresh append must clear stale backup footer after truncation"
+    );
+    writer
+        .add_bytes(APPENDED_NAME, APPENDED_BYTES)
+        .await
+        .unwrap();
+    writer.finalize().await.unwrap();
+
+    assert_extraction(
+        &small_path,
+        &[
+            (ORIGINAL_NAME.to_owned(), ORIGINAL_BYTES.to_vec()),
+            (APPENDED_NAME.to_owned(), APPENDED_BYTES.to_vec()),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn finalize_checkpoint_respects_max_volume_size_when_volume_near_full() {
+    let temp = TempDir::new().unwrap();
+    let archive_path = temp.path().join("ckpt_near_full.era");
+    let mut cfg = non_ec_config();
+    cfg.compression.algorithm = era_common::CompressionAlgorithm::None;
+    cfg.volume.max_size = 1024 * 1024;
+
+    let mut writer = ArchiveWriter::builder(&archive_path)
+        .password(PASSWORD)
+        .config(cfg)
+        .max_volume_size(1024 * 1024)
+        .enable_checkpoint(true)
+        .enable_erasure(false)
+        .enable_cdc(false)
+        .enable_small_file_packing(false)
+        .build()
+        .await
+        .unwrap();
+
+    // Available data budget in 1 MiB volume = 1_048_576 - 4224 - 4248 = 1_040_104.
+    // A 1_039_900-byte payload fits Volume 0 cleanly (~80B overhead), leaving < 150B before
+    // PER_VOLUME_OVERHEAD so the finalized Checkpoint block must rotate to Volume 1.
+    let payload = vec![0x7A; 1_039_900];
+    writer.add_bytes("near_full.bin", &payload).await.unwrap();
+    writer.finalize().await.unwrap();
+
+    let vol0 = era_volume::volume_path(&archive_path, 0);
+    let vol1 = era_volume::volume_path(&archive_path, 1);
+    assert!(vol0.exists());
+    assert!(
+        vol1.exists(),
+        "near-full volume must rotate before writing durable checkpoint"
+    );
+    assert!(
+        fs::metadata(&vol0).unwrap().len() <= 1024 * 1024,
+        "volume 0 size {} exceeded max_volume_size {}",
+        fs::metadata(&vol0).unwrap().len(),
+        1024 * 1024
+    );
+    assert!(
+        fs::metadata(&vol1).unwrap().len() <= 1024 * 1024,
+        "volume 1 size {} exceeded max_volume_size {}",
+        fs::metadata(&vol1).unwrap().len(),
+        1024 * 1024
+    );
+
+    let mut reader = era_engine::ArchiveReader::open(&archive_path, PASSWORD)
+        .await
+        .unwrap();
+    let stats = reader.verify().await.unwrap();
+    assert!(
+        stats.is_healthy(),
+        "expected Healthy archive, got {:?}, warnings={:?}, errors={:?}",
+        stats.archive_health,
+        stats.warnings,
+        stats.errors
+    );
+    assert_extraction(&archive_path, &[("near_full.bin".to_owned(), payload)]).await;
+}

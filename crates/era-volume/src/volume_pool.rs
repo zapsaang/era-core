@@ -594,6 +594,53 @@ impl<B: StorageBackend> VolumePool<B> {
         Ok(())
     }
 
+    /// Clear stale backup footer bytes and checkpoint state on a writable volume slot.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if `slot` is out of bounds or propagates backend I/O errors.
+    pub async fn clear_backup_footer_gap(&mut self, slot: usize) -> Result<()> {
+        let writer = self.writers.get_mut(slot).ok_or_else(|| {
+            era_common::EraError::InvalidConfig(format!(
+                "volume slot {slot} is out of bounds for backup footer gap cleanup"
+            ))
+        })?;
+        writer.clear_backup_footer_gap().await
+    }
+
+    /// Ensure a single volume slot can fit a canonical typed block of `on_disk_size` bytes,
+    /// rotating volumes if needed without violating `max_volume_size`.
+    ///
+    /// Returns `Ok(true)` if rotation occurred, `Ok(false)` if space was already sufficient.
+    ///
+    /// # Errors
+    /// Returns `InvalidConfig` if `slot` is out of bounds or `on_disk_size` exceeds the
+    /// maximum canonical block size, `VolumeSpaceExhausted` if it cannot fit a fresh volume,
+    /// or propagates rotation errors.
+    pub async fn ensure_slot_typed_block_space(
+        &mut self,
+        slot: usize,
+        on_disk_size: u64,
+    ) -> Result<bool> {
+        if slot >= self.writers.len() {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "volume slot {slot} is out of bounds for typed-block space check"
+            )));
+        }
+        let max_canonical_disk_size =
+            (era_common::BlockHeader::SIZE as u64).saturating_add(crate::MAX_SHARD_SIZE as u64);
+        if on_disk_size > max_canonical_disk_size {
+            return Err(era_common::EraError::InvalidConfig(format!(
+                "typed block size {on_disk_size} exceeds maximum canonical block disk size {max_canonical_disk_size}"
+            )));
+        }
+        if self.volume_can_fit(slot, on_disk_size) {
+            return Ok(false);
+        }
+        self.check_fresh_volume_space(slot, on_disk_size)?;
+        self.rotate_volumes().await?;
+        Ok(true)
+    }
+
     /// Precheck available space for catalog + index + manifest blocks and rotate if needed.
     ///
     /// Checks whether all volumes have sufficient space for the combined on-disk
@@ -1001,19 +1048,6 @@ impl<B: StorageBackend> VolumePool<B> {
             writer.update_total_volumes(count);
         }
         Ok(())
-    }
-
-    /// Install the final count and digest the finalized headers of the active volumes in slot order.
-    /// Call only after the last possible rotation, before encrypting manifest replicas.
-    ///
-    /// # Errors
-    /// Returns an error if the pool has no writers or a header cannot be encoded.
-    pub fn finalized_header_digests(&mut self) -> Result<Vec<[u8; 32]>> {
-        self.install_final_volume_count()?;
-        self.writers
-            .iter()
-            .map(VolumeWriter::finalized_header_digest)
-            .collect()
     }
 
     /// Install the final count and digest all finalized headers in volume-sequence order.

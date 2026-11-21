@@ -398,7 +398,26 @@ impl CheckpointManager {
         .await
     }
 
-    /// Delete checkpoint (no-op in new implementation)
+    /// Compute exact on-disk size (BlockHeader + sealed ciphertext) for committing this checkpoint.
+    pub fn serialized_disk_size(&self) -> Result<u64> {
+        let plaintext_len = self.checkpoint.serialized_size()?;
+        let sealed_len = plaintext_len
+            .checked_add(era_crypto::TAG_SIZE)
+            .ok_or_else(|| EraError::InvalidConfig("Checkpoint sealed size overflow".into()))?;
+        if sealed_len > era_volume::MAX_SHARD_SIZE {
+            return Err(EraError::InvalidConfig(format!(
+                "Checkpoint size {} exceeds MAX_SHARD_SIZE ({})",
+                sealed_len,
+                era_volume::MAX_SHARD_SIZE
+            )));
+        }
+        u64::try_from(sealed_len)
+            .ok()
+            .and_then(|size| size.checked_add(era_common::BlockHeader::SIZE as u64))
+            .ok_or_else(|| EraError::InvalidConfig("Checkpoint disk size overflow".into()))
+    }
+
+    /// Clear durable checkpoint pointers from the volume's primary/backup footers.
     pub fn delete(&self) -> Result<()> {
         if !self.archive_path.exists() {
             return Ok(());
@@ -421,8 +440,8 @@ impl CheckpointManager {
         let mut primary_buf = [0u8; era_volume::FOOTER_SIZE];
         file.read_exact(&mut primary_buf).map_err(EraError::Io)?;
 
-        let mut footer = match era_volume::Footer::from_bytes(&primary_buf) {
-            Ok(f) => f,
+        let (footer, has_primary_footer) = match era_volume::Footer::from_bytes(&primary_buf) {
+            Ok(f) => (f, true),
             Err(_) => {
                 if file_len < (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
                     return Ok(());
@@ -432,11 +451,11 @@ impl CheckpointManager {
                     .map_err(EraError::Io)?;
                 let mut backup_buf = [0u8; era_volume::FOOTER_SIZE];
                 file.read_exact(&mut backup_buf).map_err(EraError::Io)?;
-                era_volume::Footer::from_bytes(&backup_buf)?
+                (era_volume::Footer::from_bytes(&backup_buf)?, false)
             }
         };
 
-        footer = era_volume::Footer::builder(
+        let footer = era_volume::Footer::builder(
             footer.data_end_offset(),
             footer.block_count(),
             footer.sequence_number(),
@@ -447,6 +466,7 @@ impl CheckpointManager {
             footer.catalog_block_id(),
         )
         .checkpoint(0, 0)
+        .manifest(footer.manifest_offset(), footer.manifest_block_id())
         .index(
             footer.index_offset(),
             footer.index_size(),
@@ -457,12 +477,16 @@ impl CheckpointManager {
 
         let footer_bytes = footer.to_bytes()?;
 
-        file.seek(SeekFrom::Start(primary_offset))
-            .map_err(EraError::Io)?;
-        file.write_all(&footer_bytes).map_err(EraError::Io)?;
-        file.seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
-            .map_err(EraError::Io)?;
-        file.write_all(&footer_bytes).map_err(EraError::Io)?;
+        if has_primary_footer {
+            file.seek(SeekFrom::Start(primary_offset))
+                .map_err(EraError::Io)?;
+            file.write_all(&footer_bytes).map_err(EraError::Io)?;
+        }
+        if file_len >= (era_volume::HEADER_SIZE + era_volume::FOOTER_SIZE) as u64 {
+            file.seek(SeekFrom::Start(era_volume::HEADER_SIZE as u64))
+                .map_err(EraError::Io)?;
+            file.write_all(&footer_bytes).map_err(EraError::Io)?;
+        }
         file.sync_all().map_err(EraError::Io)?;
 
         Ok(())

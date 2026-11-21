@@ -900,3 +900,85 @@ mod info_command_tests {
         );
     }
 }
+
+// ===========================================================================
+// Category 7: Extract CLI Argument Compatibility Tests
+// ===========================================================================
+
+mod extract_command_tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_help_documents_positional_archive_and_examples() {
+        let help = era_cmd().args(["extract", "--help"]).assert().success();
+        let out = help.get_output();
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            combined.contains("[ARCHIVE]")
+                && combined.contains("positional alternative to --input"),
+            "extract --help must document positional archive argument, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("era extract backup.era -o ./restored"),
+            "extract --help examples must show positional usage, got:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn test_extract_positional_archive_and_conflict_validation() {
+        let temp = TempDir::new().unwrap();
+        let payload = b"positional extract test payload";
+        let input = create_test_file(temp.path(), "payload.txt", payload);
+        let archive = temp.path().join("pos_extract.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+            ])
+            .assert()
+            .success();
+
+        let out_pos = temp.path().join("out_pos");
+        era_cmd()
+            .args([
+                "extract",
+                archive.to_str().unwrap(),
+                "-o",
+                out_pos.to_str().unwrap(),
+                "-p",
+                "pwd",
+            ])
+            .assert()
+            .success();
+        assert_eq!(fs::read(out_pos.join("payload.txt")).unwrap(), payload);
+
+        let out_conflict = temp.path().join("out_conflict");
+        era_cmd()
+            .args([
+                "extract",
+                "-i",
+                archive.to_str().unwrap(),
+                archive.to_str().unwrap(),
+                "-o",
+                out_conflict.to_str().unwrap(),
+                "-p",
+                "pwd",
+            ])
+            .assert()
+            .failure();
+
+        era_cmd()
+            .args(["extract", "-o", out_conflict.to_str().unwrap(), "-p", "pwd"])
+            .assert()
+            .failure();
+    }
+}

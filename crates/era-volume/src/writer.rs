@@ -283,6 +283,17 @@ impl<W: StorageWriter> VolumeWriter<W> {
         Ok(())
     }
 
+    /// Zero out stale backup footer bytes in the reserved gap after append truncation
+    /// and clear in-memory checkpoint pointers so StartFresh discards prior checkpoint state.
+    pub async fn clear_backup_footer_gap(&mut self) -> Result<()> {
+        let zeros = [0u8; BACKUP_FOOTER_GAP];
+        self.writer.write_at(HEADER_SIZE as u64, &zeros).await?;
+        self.writer.sync_data().await?;
+        self.last_checkpoint_offset = 0;
+        self.last_checkpoint_block_id = 0;
+        Ok(())
+    }
+
     /// Update the last checkpoint offset and block ID (for direct decryption).
     ///
     /// # Errors
