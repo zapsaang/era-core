@@ -1347,6 +1347,7 @@ impl ArchiveReader {
     async fn load_manifest(&mut self) -> Result<()> {
         let mut best_manifest: Option<ArchiveManifest> = None;
         let mut best_header_digests = Vec::new();
+        let mut best_local_header_digests: HashMap<u16, [u8; 32]> = HashMap::new();
         let mut any_volume_has_manifest = false;
 
         for i in 0..self.volume_readers.len() {
@@ -1461,12 +1462,31 @@ impl ArchiveReader {
                 ));
             }
 
-            let dominated = best_manifest
+            if best_manifest
                 .as_ref()
-                .is_some_and(|best| best.finalize_sequence >= manifest.finalize_sequence);
-            if !dominated {
+                .is_none_or(|best| manifest.finalize_sequence > best.finalize_sequence)
+            {
                 best_manifest = Some(manifest);
                 best_header_digests = digests.by_sequence;
+                best_local_header_digests.clear();
+                if let Some(local) = digests.local {
+                    best_local_header_digests.insert(volume_sequence, local);
+                }
+            } else if best_manifest.as_ref() == Some(&manifest) {
+                if best_header_digests.is_empty() && !digests.by_sequence.is_empty() {
+                    best_header_digests = digests.by_sequence;
+                }
+                if let Some(local) = digests.local {
+                    if best_local_header_digests
+                        .get(&volume_sequence)
+                        .is_some_and(|existing| existing != &local)
+                    {
+                        return Err(EraError::IntegrityError(format!(
+                            "Conflicting manifest header digest for volume {volume_sequence}"
+                        )));
+                    }
+                    best_local_header_digests.insert(volume_sequence, local);
+                }
             }
         }
 
@@ -1479,6 +1499,8 @@ impl ArchiveReader {
                     self.expected_volume_count,
                 )));
             }
+            self.verify_recovered_backup_headers(&best_header_digests, &best_local_header_digests)
+                .await?;
             let finalize_sequence = manifest.finalize_sequence;
             let volume_committed_ends = manifest.volume_committed_ends.clone();
             self.volume_committed_ends = Some(volume_committed_ends.clone());
@@ -1496,6 +1518,62 @@ impl ArchiveReader {
             debug!("No manifest found in any volume (backward compat v8.1)");
         }
 
+        Ok(())
+    }
+
+    async fn verify_recovered_backup_headers(
+        &self,
+        header_digests: &[[u8; 32]],
+        local_header_digests: &HashMap<u16, [u8; 32]>,
+    ) -> Result<()> {
+        for reader in &self.volume_readers {
+            if !reader.header_recovered_from_backup() {
+                continue;
+            }
+            let seq = reader.header().volume_sequence();
+            let Some(expected_digest) = header_digests
+                .get(usize::from(seq))
+                .or_else(|| local_header_digests.get(&seq))
+            else {
+                if !header_digests.is_empty() {
+                    return Err(EraError::IntegrityError(format!(
+                        "Recovered backup header for volume {seq} is missing from authenticated manifest header digest table"
+                    )));
+                }
+                if !local_header_digests.is_empty()
+                    && reader.footer().is_some_and(Footer::has_manifest)
+                {
+                    return Err(EraError::IntegrityError(format!(
+                        "Recovered backup header for volume {seq} could not be authenticated against its manifest header digest"
+                    )));
+                }
+                continue;
+            };
+
+            let footer = reader.footer().ok_or_else(|| {
+                EraError::IntegrityError(format!(
+                    "Volume {seq} recovered backup header has no footer provenance"
+                ))
+            })?;
+            let backup_offset = footer.backup_header_offset();
+            if backup_offset < era_volume::DATA_REGION_START
+                || backup_offset != footer.data_end_offset()
+            {
+                return Err(EraError::IntegrityError(format!(
+                    "Volume {seq} recovered backup header is outside the finalized backup-header location"
+                )));
+            }
+            let backup_bytes = reader
+                .read_raw(backup_offset, era_volume::HEADER_SIZE)
+                .await?;
+            if backup_bytes.len() != era_volume::HEADER_SIZE
+                || blake3::hash(&backup_bytes).as_bytes() != expected_digest
+            {
+                return Err(EraError::IntegrityError(format!(
+                    "Volume {seq} backup header bytes do not match the authenticated manifest digest"
+                )));
+            }
+        }
         Ok(())
     }
 
