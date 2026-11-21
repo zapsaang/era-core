@@ -464,7 +464,8 @@ impl ArchiveWriterBuilder {
     pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
         let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;
-        let append_to_existing = self.append_existing && output_preexisted;
+        let append_to_existing =
+            self.append_existing && tokio::fs::try_exists(&self.output_path).await?;
         if !append_to_existing {
             crate::volume_capacity::validate_max_volume_size(
                 self.max_volume_size.unwrap_or(self.config.volume.max_size),
