@@ -1,7 +1,12 @@
-use era_common::{ArchiveConfig, BlockHeader};
+use era_common::{
+    compute_shard_crc, ArchiveConfig, ArchiveManifest, BlockHeader, BlockId, BlockLocation,
+    BlockType, EraError,
+};
+use era_crypto::{build_aad, AeadContext, Nonce, XChaCha20Poly1305Context, NONCE_SIZE};
 use era_engine::{ArchiveReader, ArchiveWriter};
 use era_volume::{Footer, VolumeReader, FOOTER_SIZE};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -253,4 +258,110 @@ async fn test_empty_volume_committed_ends_fail_closed() {
         result.is_err(),
         "Should fail when manifest cannot be loaded but is declared"
     );
+}
+
+#[tokio::test]
+async fn test_append_rejects_footer_data_end_below_manifest_committed_end() {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("append_mismatch.era");
+
+    create_test_archive(&archive_path, "test", test_config()).await;
+
+    let mut reader = ArchiveReader::open(&archive_path, "test").await.unwrap();
+    reader.preflight_metadata_recovery().await.unwrap();
+    let footer = reader.primary_footer().unwrap().clone();
+    let header = reader.header().clone();
+    assert_eq!(header.volume_sequence(), 0);
+    assert_eq!(footer.sequence_number(), 1);
+
+    let backend = era_storage::LocalStorageBackend::new(archive_path.parent().unwrap());
+    let volume = VolumeReader::open(&backend, Path::new(archive_path.file_name().unwrap()))
+        .await
+        .unwrap();
+    let block_id = BlockId::new(u64::from(footer.manifest_block_id()));
+    let location = BlockLocation::single(
+        header.volume_id(),
+        footer.manifest_block_id(),
+        footer.manifest_offset(),
+        0,
+    );
+    let (kind, block) = volume.read_typed_block(&location).await.unwrap();
+    assert_eq!(kind, BlockType::Manifest);
+
+    let key = reader
+        .session()
+        .derive_block_key(reader.volume_key(), block_id.sequence(), header.salt())
+        .unwrap();
+    let aead = XChaCha20Poly1305Context::from_derived_key(&key.to_derived_key().unwrap()).unwrap();
+    let aad = build_aad(
+        header.archive_id().0.as_bytes(),
+        header.epoch_id(),
+        BlockType::Manifest,
+        u32::from(header.volume_sequence()),
+        block_id,
+    );
+    let nonce = block.data.first_chunk::<NONCE_SIZE>().unwrap();
+    let plaintext = aead
+        .decrypt(nonce, &aad, &block.data[NONCE_SIZE..])
+        .unwrap();
+    let (mut manifest, digests) =
+        ArchiveManifest::from_bytes_with_header_digests(&plaintext).unwrap();
+
+    let bumped_committed_end = footer.data_end_offset() + 1;
+    manifest.committed_horizon = bumped_committed_end;
+    manifest.volume_committed_ends = vec![bumped_committed_end];
+    let encoded = if digests.by_sequence.is_empty() {
+        manifest.to_bytes_with_header_digest(digests.local.unwrap())
+    } else {
+        manifest
+            .to_bytes_with_header_digests(header.volume_sequence(), &digests.by_sequence)
+            .unwrap()
+    };
+    assert_eq!(
+        encoded.len(),
+        plaintext.len(),
+        "manifest rewrite must preserve encoded block length"
+    );
+
+    let replacement_nonce = Nonce::generate();
+    let mut encrypted = replacement_nonce.as_bytes().to_vec();
+    encrypted.extend(
+        aead.encrypt(replacement_nonce.as_bytes(), &aad, &encoded)
+            .unwrap(),
+    );
+    assert_eq!(encrypted.len(), block.data.len());
+    let block_header = BlockHeader::new(
+        BlockType::Manifest,
+        u32::try_from(encrypted.len()).unwrap(),
+        compute_shard_crc(&encrypted),
+    );
+    let mut file = OpenOptions::new().write(true).open(&archive_path).unwrap();
+    file.seek(SeekFrom::Start(footer.manifest_offset()))
+        .unwrap();
+    file.write_all(&block_header.to_bytes()).unwrap();
+    file.write_all(&encrypted).unwrap();
+    file.sync_all().unwrap();
+    drop(volume);
+    drop(reader);
+
+    let err = match ArchiveWriter::builder(&archive_path)
+        .password("test")
+        .append_existing(true)
+        .config(test_config())
+        .build()
+        .await
+    {
+        Ok(_) => panic!("Expected append to fail when footer data_end_offset < committed_end"),
+        Err(err) => err,
+    };
+    match err {
+        EraError::IntegrityError(msg) => {
+            assert!(
+                msg.contains("Volume 0 footer data_end_offset")
+                    && msg.contains("is less than manifest committed end"),
+                "Unexpected IntegrityError message: {msg}"
+            );
+        }
+        other => panic!("Expected IntegrityError, got {other:?}"),
+    }
 }

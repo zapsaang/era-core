@@ -616,8 +616,8 @@ impl ArchiveWriterBuilder {
 
             let mut manifest_opt = reader.manifest().cloned();
             if let Some(ref manifest) = manifest_opt {
-                let seq = footer.sequence_number();
-                if let Some(&committed_end) = manifest.volume_committed_ends.get(seq as usize) {
+                let seq = loaded_header.volume_sequence();
+                if let Some(&committed_end) = manifest.volume_committed_ends.get(usize::from(seq)) {
                     if footer.data_end_offset() < committed_end {
                         return Err(EraError::IntegrityError(format!(
                             "Volume {} footer data_end_offset {} is less than manifest committed end {}. \
