@@ -101,6 +101,11 @@ impl ArchiveReader {
         let origin_primary_id = origin.footer().map(|f| f.catalog_block_id());
         let same_generation = origin.footer().map(|f| f.manifest_block_id())
             == target.footer().map(|f| f.manifest_block_id());
+        let copy_multiplier: u64 = if target.header().config().erasure.is_some() {
+            2
+        } else {
+            1
+        };
         if !valid_range
             || !same_generation
             || origin_primary_id != Some(primary.block_id)
@@ -109,7 +114,7 @@ impl ArchiveReader {
             || primary.expected_size != source.lengths.first().copied()
             || !source
                 .span()
-                .checked_mul(2)
+                .checked_mul(copy_multiplier)
                 .and_then(|span| primary.offset.checked_add(span))
                 .is_some_and(|end| end <= catalog_end)
         {

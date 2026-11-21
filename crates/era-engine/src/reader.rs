@@ -115,6 +115,7 @@ pub struct ArchiveReader {
     compression_algorithm: era_common::CompressionAlgorithm,
     catalog: Option<Catalog>,
     catalog_recovered_from_backup: bool,
+    catalog_loaded_from_primary: Option<usize>,
     /// Per-volume committed end offsets loaded from the highest-sequence manifest.
     /// `None` = no manifest (v8.1 or not yet loaded).
     /// `Some(vec)` = manifest loaded successfully (v8.2).
@@ -122,6 +123,7 @@ pub struct ArchiveReader {
     /// The full manifest loaded from volumes (v8.2 only).
     manifest: Option<ArchiveManifest>,
     manifest_header_digests: Vec<[u8; 32]>,
+    manifest_local_header_digests: HashMap<u16, [u8; 32]>,
     /// V2.1 index reader recovered from volume
     index_reader: Option<IndexReader>,
     embedded_index_recovery_failed: bool,
@@ -156,9 +158,11 @@ impl ArchiveReader {
             compression_algorithm: header.config().compression.algorithm,
             catalog: None,
             catalog_recovered_from_backup: false,
+            catalog_loaded_from_primary: None,
             volume_committed_ends: None,
             manifest: None,
             manifest_header_digests: Vec::new(),
+            manifest_local_header_digests: HashMap::new(),
             index_reader: None,
             embedded_index_recovery_failed: false,
         }
@@ -944,6 +948,10 @@ impl ArchiveReader {
         self.manifest_header_digests.get(usize::from(sequence))
     }
 
+    pub(crate) fn manifest_local_header_digest(&self, sequence: u16) -> Option<&[u8; 32]> {
+        self.manifest_local_header_digests.get(&sequence)
+    }
+
     pub fn compression_algorithm(&self) -> era_common::CompressionAlgorithm {
         self.compression_algorithm
     }
@@ -1006,7 +1014,10 @@ impl ArchiveReader {
             );
 
             match self.try_load_catalog_from_offset(primary).await {
-                Ok(catalog) => return Ok(self.catalog.insert(catalog)),
+                Ok(catalog) => {
+                    self.catalog_loaded_from_primary = Some(reader_idx);
+                    return Ok(self.catalog.insert(catalog));
+                }
                 Err(primary_error) => {
                     warn!(
                         "Failed to load primary catalog from volume {}: {}",
@@ -1051,6 +1062,14 @@ impl ArchiveReader {
     }
 
     async fn read_catalog_copy(&self, locator: CatalogBlockLocator) -> Result<(Catalog, Vec<u32>)> {
+        let (catalog_data, lengths) = self.read_and_verify_catalog_bytes(locator).await?;
+        Ok((Catalog::from_bytes(&catalog_data)?, lengths))
+    }
+
+    async fn read_and_verify_catalog_bytes(
+        &self,
+        locator: CatalogBlockLocator,
+    ) -> Result<(Vec<u8>, Vec<u32>)> {
         let reader = self.volume_readers.get(locator.reader_idx).ok_or_else(|| {
             EraError::InvalidFormat("Catalog volume index is out of bounds".into())
         })?;
@@ -1121,7 +1140,7 @@ impl ArchiveReader {
             era_crypto::verify_catalog_commitment(&catalog_data, &manifest.catalog_commitment)?;
         }
 
-        Ok((Catalog::from_bytes(&catalog_data)?, lengths))
+        Ok((catalog_data, lengths))
     }
 
     fn catalog_metadata_end(&self, reader_idx: usize, start: u64) -> Result<u64> {
@@ -1503,6 +1522,7 @@ impl ArchiveReader {
             self.volume_committed_ends = Some(volume_committed_ends.clone());
             self.manifest = Some(manifest);
             self.manifest_header_digests = best_header_digests;
+            self.manifest_local_header_digests = best_local_header_digests;
             debug!(
                 "Loaded manifest: finalize_sequence={}, volume_committed_ends={:?}",
                 finalize_sequence, volume_committed_ends
@@ -2790,8 +2810,12 @@ impl ArchiveReader {
                 ));
             }
         }
+        self.verify_backup_headers(&mut stats).await;
         let mut damaged_primary_catalogs = Vec::new();
         for (reader_idx, reader) in self.volume_readers.iter().enumerate() {
+            if self.catalog_loaded_from_primary == Some(reader_idx) {
+                continue;
+            }
             let Some(footer) = reader.footer() else {
                 continue;
             };
@@ -2805,7 +2829,14 @@ impl ArchiveReader {
                 block_id: footer.catalog_block_id(),
                 require_manifest: false,
             };
-            if let Err(err) = self.read_catalog_copy(primary).await {
+            let check_result = if self.manifest.is_some() {
+                self.read_and_verify_catalog_bytes(primary)
+                    .await
+                    .map(|_| ())
+            } else {
+                self.read_catalog_copy(primary).await.map(|_| ())
+            };
+            if let Err(err) = check_result {
                 damaged_primary_catalogs.push((reader.header().volume_sequence(), err));
             }
         }
@@ -2828,6 +2859,72 @@ impl ArchiveReader {
         stats.archive_health = self.classify_archive_health(&stats);
         self.log_verify_result(&stats);
         Ok(stats)
+    }
+
+    async fn verify_backup_headers(&self, stats: &mut VerifyStats) {
+        for reader in &self.volume_readers {
+            if reader.header_recovered_from_backup() {
+                continue;
+            }
+            let seq = reader.header().volume_sequence();
+            let Some(footer) = reader.footer() else {
+                continue;
+            };
+            let backup_offset = footer.backup_header_offset();
+            if backup_offset == 0 {
+                continue;
+            }
+            if backup_offset < era_volume::DATA_REGION_START
+                || backup_offset != footer.data_end_offset()
+            {
+                stats.warnings.push(format!(
+                    "Volume {seq}: backup header offset is invalid; backup header requires repair"
+                ));
+                continue;
+            }
+            let Ok(primary_bytes) = reader.read_raw(0, era_volume::HEADER_SIZE).await else {
+                stats.warnings.push(format!(
+                    "Volume {seq}: could not read primary header during backup header verification"
+                ));
+                continue;
+            };
+            let Ok(backup_bytes) = reader
+                .read_raw(backup_offset, era_volume::HEADER_SIZE)
+                .await
+            else {
+                stats.warnings.push(format!(
+                    "Volume {seq}: backup header damaged or unreadable; backup header requires repair"
+                ));
+                continue;
+            };
+            if primary_bytes.len() != era_volume::HEADER_SIZE
+                || backup_bytes.len() != era_volume::HEADER_SIZE
+            {
+                stats.warnings.push(format!(
+                    "Volume {seq}: backup header is truncated; backup header requires repair"
+                ));
+                continue;
+            }
+            let expected_digest = self
+                .manifest_header_digest(seq)
+                .or_else(|| self.manifest_local_header_digest(seq));
+            let primary_digest_ok =
+                expected_digest.is_none_or(|d| blake3::hash(&primary_bytes).as_bytes() == d);
+            let backup_parses = era_volume::SuperHeader::from_bytes(&backup_bytes).is_ok();
+            let backup_digest_ok =
+                expected_digest.is_none_or(|d| blake3::hash(&backup_bytes).as_bytes() == d);
+            let matches_primary = backup_bytes.as_ref() == primary_bytes.as_ref();
+
+            if !primary_digest_ok && backup_parses && backup_digest_ok {
+                stats.warnings.push(format!(
+                    "Volume {seq}: primary header digest mismatch against manifest; primary header requires repair"
+                ));
+            } else if !backup_parses || !matches_primary || !backup_digest_ok {
+                stats.warnings.push(format!(
+                    "Volume {seq}: backup header damaged or mismatched; backup header requires repair"
+                ));
+            }
+        }
     }
 }
 

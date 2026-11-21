@@ -288,3 +288,168 @@ async fn resid_high02_active_volume_repairs_primary_header_when_local_manifest_i
     assert_healthy_after_repair(&archive_path).await;
     assert_extracted_payloads_intact(&archive_path, &temp_dir.path().join("output"), &files).await;
 }
+
+#[tokio::test]
+async fn resid_high02_corrupted_backup_header_is_detected_by_verify_and_restored_by_repair() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // 1. Single-volume non-EC archive
+    let single_path = temp_dir.path().join("non-ec-backup-dmg.era");
+    let single_files = fixture_files(1);
+    create_archive(
+        &single_path,
+        ArchiveLayout {
+            erasure: None,
+            volume_count: 1,
+        },
+        &single_files,
+    )
+    .await;
+    let original_single = fs::read(&single_path).unwrap();
+    let backup_offset = open_volume(&single_path, 0)
+        .await
+        .footer()
+        .unwrap()
+        .backup_header_offset();
+    {
+        let mut file = OpenOptions::new().write(true).open(&single_path).unwrap();
+        file.seek(SeekFrom::Start(backup_offset)).unwrap();
+        file.write_all(&vec![0u8; HEADER_SIZE]).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    {
+        let mut reader = ArchiveReader::open(&single_path, PASSWORD).await.unwrap();
+        let stats = reader.verify().await.unwrap();
+        assert!(stats.is_ok(), "data blocks remain intact");
+        assert!(
+            stats.is_degraded(),
+            "corrupted backup header must be reported as Degraded, got {:?}",
+            stats.archive_health
+        );
+        assert!(!stats.warnings.is_empty());
+    }
+
+    let repair = repair_archive(&single_path, PASSWORD, RepairOptions::default())
+        .await
+        .unwrap();
+    assert!(repair.fully_repaired());
+    assert_eq!(fs::read(&single_path).unwrap(), original_single);
+    assert_healthy_after_repair(&single_path).await;
+
+    // Now corrupt primary header to prove repaired backup header actually recovers the archive.
+    corrupt_primary_header(&single_path);
+    assert_degraded_before_repair(&single_path).await;
+    assert_extracted_payloads_intact(
+        &single_path,
+        &temp_dir.path().join("out-single"),
+        &single_files,
+    )
+    .await;
+
+    // 2. Multi-volume EC archive
+    let ec_path = temp_dir.path().join("ec-backup-dmg.era");
+    let ec_files = fixture_files(2);
+    create_archive(
+        &ec_path,
+        ArchiveLayout {
+            erasure: Some(ErasureCodeConfig {
+                data_shards: 2,
+                parity_shards: 1,
+            }),
+            volume_count: 3,
+        },
+        &ec_files,
+    )
+    .await;
+    let original_ec_vol0 = fs::read(&ec_path).unwrap();
+    let ec_backup_offset = open_volume(&ec_path, 0)
+        .await
+        .footer()
+        .unwrap()
+        .backup_header_offset();
+    {
+        let mut file = OpenOptions::new().write(true).open(&ec_path).unwrap();
+        file.seek(SeekFrom::Start(ec_backup_offset)).unwrap();
+        file.write_all(&vec![0u8; HEADER_SIZE]).unwrap();
+        file.sync_all().unwrap();
+    }
+    {
+        let mut reader = ArchiveReader::open(&ec_path, PASSWORD).await.unwrap();
+        let stats = reader.verify().await.unwrap();
+        assert!(stats.is_degraded());
+    }
+    let ec_repair = repair_archive(&ec_path, PASSWORD, RepairOptions::default())
+        .await
+        .unwrap();
+    assert!(ec_repair.fully_repaired());
+    assert_eq!(fs::read(&ec_path).unwrap(), original_ec_vol0);
+    assert_healthy_after_repair(&ec_path).await;
+}
+
+#[tokio::test]
+async fn resid_high02_non_ec_header_plus_data_damage_restores_primary_header_before_reporting_data_error(
+) {
+    let temp_dir = TempDir::new().unwrap();
+    let archive_path = temp_dir.path().join("non-ec-partial-repair.era");
+    let files = fixture_files(2);
+    create_archive(
+        &archive_path,
+        ArchiveLayout {
+            erasure: None,
+            volume_count: 1,
+        },
+        &files,
+    )
+    .await;
+
+    // Corrupt both the primary header AND the second data block (first data block remains intact).
+    let mut reader = ArchiveReader::open(&archive_path, PASSWORD).await.unwrap();
+    let catalog = reader.load_catalog().await.unwrap().clone();
+    assert!(catalog.block_locations.len() >= 2);
+    let second_block_offset = catalog.block_locations.last().unwrap().physical_offset;
+    drop(reader);
+
+    {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive_path)
+            .unwrap();
+        let data_corrupt_offset = second_block_offset + era_common::BlockHeader::SIZE as u64 + 28;
+        file.seek(SeekFrom::Start(data_corrupt_offset)).unwrap();
+        let mut b = [0u8; 1];
+        std::io::Read::read_exact(&mut file, &mut b).unwrap();
+        b[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(data_corrupt_offset)).unwrap();
+        file.write_all(&b).unwrap();
+        file.sync_all().unwrap();
+    }
+    let original_header = corrupt_primary_header(&archive_path);
+    let damaged_snapshot = fs::read(&archive_path).unwrap();
+
+    // Dry-run must fail without modifying the file.
+    let dry_err = repair_archive(
+        &archive_path,
+        PASSWORD,
+        RepairOptions {
+            create_backup: true,
+            dry_run: true,
+            continue_on_error: true,
+        },
+    )
+    .await
+    .expect_err("non-EC archive with data damage must still report error");
+    assert!(matches!(dry_err, era_common::EraError::IntegrityError(_)));
+    assert_eq!(fs::read(&archive_path).unwrap(), damaged_snapshot);
+
+    // Non-dry-run must restore the authenticated primary header before reporting the data error.
+    let err = repair_archive(&archive_path, PASSWORD, RepairOptions::default())
+        .await
+        .expect_err("non-EC archive with data damage must still report data error");
+    assert!(matches!(err, era_common::EraError::IntegrityError(_)));
+    assert_primary_header_restored(&archive_path, &original_header);
+    assert!(!open_volume(&archive_path, 0)
+        .await
+        .header_recovered_from_backup());
+}

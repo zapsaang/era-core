@@ -1270,7 +1270,7 @@ pub async fn repair(
         if uses_erasure {
             info!("Attempting repair using Reed-Solomon erasure coding...");
         } else {
-            info!("Attempting authenticated primary-header repair...");
+            info!("Attempting authenticated header/catalog repair...");
         }
         info!("");
 
@@ -1345,7 +1345,7 @@ pub async fn repair(
                     info!("");
                     info!("Note: This archive was created without erasure coding.");
                     info!(
-                        "Only an authenticated primary header can be restored without erasure coding; \
+                        "Only authenticated headers and sibling catalogs can be restored without erasure coding; \
                          damaged data blocks cannot be repaired (even with --force)."
                     );
                     anyhow::bail!(
