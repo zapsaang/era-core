@@ -1,9 +1,12 @@
+#[allow(dead_code)]
 #[path = "../src/chunk_processor.rs"]
 mod v5_chunk_processor;
 
+#[allow(dead_code)]
 #[path = "../src/chunk_index.rs"]
 mod v5_chunk_index;
 
+#[allow(dead_code)]
 #[path = "../src/volume_stage.rs"]
 mod v5_volume_stage;
 
@@ -28,7 +31,7 @@ use era_volume::{
 use tempfile::TempDir;
 use tokio::time::{timeout, Duration};
 use v5_chunk_index::ChunkIndex;
-use v5_chunk_processor::{ExtractStats, ExtractionContext, MultiChunkState};
+use v5_chunk_processor::{ExtractStats, ExtractionContext};
 
 #[tokio::test]
 async fn test_v5_state_01_finalize_writes_durable_checkpoint() {
@@ -456,25 +459,8 @@ async fn test_v5_depth_01_chunk_idx_bounds() {
     let canonical_root = fs::canonicalize(temp.path()).unwrap();
     ctx.set_canonical_output_dir(canonical_root);
     let file_path = temp.path().join("chunked.bin");
-    fs::write(&file_path, vec![0u8; 8]).unwrap();
-
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&file_path)
-        .unwrap();
-
-    ctx.multi_chunk_files.insert(
-        1,
-        MultiChunkState {
-            file,
-            output_path: file_path,
-            expected_size: 8,
-            chunks_written: vec![false],
-            total_chunks: 1,
-            written_count: 0,
-        },
-    );
+    ctx.set_overwrite(true);
+    ctx.register_multi_chunk_file(1, file_path, 8, 1);
 
     let hash = ChunkHash::from_bytes([0xAB; 32]);
     ctx.chunk_to_files.insert(hash, vec![(1, 7, 0)]);

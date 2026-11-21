@@ -1322,7 +1322,6 @@ impl ArchiveWriterBuilder {
 pub struct ArchiveWriter {
     archive_id: ArchiveId,
     /// Output path for the archive
-    #[allow(dead_code)] // Kept for future use in recovery/diagnostics
     output_path: PathBuf,
 
     // Certificate mode: key encapsulation data

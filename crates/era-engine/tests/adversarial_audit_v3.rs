@@ -272,28 +272,39 @@ mod low_severity {
         );
     }
 
-    #[test]
-    fn test_v3_perf_03_writer_uses_async_path_exists() {
+    #[tokio::test]
+    async fn test_v3_perf_03_writer_uses_async_path_exists() {
         let source = include_str!("../src/writer.rs");
+        let build_start = source
+            .find("pub async fn build(self) -> Result<ArchiveWriter>")
+            .expect("ArchiveWriterBuilder::build signature missing");
+        let build_body = &source[build_start..];
+        let build_end = build_body
+            .find("\n/// Writer for creating ERA archives")
+            .unwrap_or(build_body.len());
+        let build_slice = &build_body[..build_end];
 
-        let count = source
-            .matches("tokio::fs::try_exists(&self.output_path).await?")
-            .count();
         assert!(
-            count >= 1,
-            "writer must use async tokio::fs::try_exists for output existence checks"
+            build_slice.contains("tokio::fs::try_exists("),
+            "writer builder build() must use async tokio::fs::try_exists"
         );
         assert!(
-            source.contains("let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;")
-                && source.contains(
-                    "let append_to_existing = self.append_existing && output_preexisted;"
-                ),
-            "writer must derive both output_preexisted and append_to_existing from a single async try_exists call"
+            !build_slice.contains(".exists()"),
+            "writer builder build() must not use blocking Path::exists()"
         );
-        assert!(
-            !source.contains("self.output_path.exists()"),
-            "writer must not use blocking Path::exists() in async build flow"
-        );
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let existing_archive = temp.path().join("preexisting.era");
+        std::fs::write(&existing_archive, b"not-an-era-archive").unwrap();
+        let err = era_engine::ArchiveWriter::builder(&existing_archive)
+            .password("test-password")
+            .enable_erasure(false)
+            .append_existing(true)
+            .build()
+            .await
+            .err()
+            .expect("building with append against corrupt preexisting archive must fail cleanly");
+        assert!(!format!("{err}").is_empty());
     }
 
     #[test]

@@ -49,6 +49,7 @@ tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 xattr = "1"
+libc = "0.2"
 
 [dev-dependencies]
 criterion = { workspace = true }

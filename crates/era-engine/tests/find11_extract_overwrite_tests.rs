@@ -162,3 +162,126 @@ async fn overwrite_unlinks_symlink_instead_of_writing_target() {
         b"archived item"
     );
 }
+
+#[tokio::test]
+async fn overwrite_extraction_failure_restores_preexisting_overwritten_files() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let temp = TempDir::new().unwrap();
+    let archive = temp.path().join("overwrite_rollback.era");
+
+    let mut config = era_common::ArchiveConfig {
+        erasure: None,
+        ..Default::default()
+    };
+    config.encryption.kdf_memory_cost = 1024;
+    config.encryption.kdf_time_cost = 1;
+    config.compression.algorithm = era_common::CompressionAlgorithm::None;
+    config.block.target_size = 256;
+
+    let mut writer = ArchiveWriterBuilder::new(&archive)
+        .password("pwd")
+        .config(config)
+        .target_block_size(256)
+        .enable_erasure(false)
+        .enable_cdc(false)
+        .enable_small_file_packing(false)
+        .build()
+        .await
+        .unwrap();
+
+    writer.add_bytes("alpha.bin", &[b'A'; 320]).await.unwrap();
+    writer.add_bytes("beta_ro.bin", &[b'B'; 320]).await.unwrap();
+    writer
+        .add_bytes("gamma_new.bin", &[b'C'; 320])
+        .await
+        .unwrap();
+    writer
+        .add_bytes("delta_fail.bin", &[b'D'; 320])
+        .await
+        .unwrap();
+    writer.finalize().await.unwrap();
+
+    // Corrupt the last data block so alpha, beta_ro, and gamma_new succeed first and then fail.
+    let mut probe = ArchiveReader::open(&archive, "pwd").await.unwrap();
+    let catalog = probe.load_catalog().await.unwrap().clone();
+    assert!(
+        catalog.block_locations.len() >= 4,
+        "expected distinct data blocks before failure"
+    );
+    let last_loc = catalog.block_locations.last().unwrap().clone();
+    drop(probe);
+
+    {
+        let mut f = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive)
+            .unwrap();
+        let corrupt_offset = last_loc.physical_offset + era_common::BlockHeader::SIZE as u64 + 28;
+        f.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        let mut byte = [0u8; 1];
+        f.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0xFF;
+        f.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+        f.write_all(&byte).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let out_dir = temp.path().join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    let alpha_path = out_dir.join("alpha.bin");
+    let beta_path = out_dir.join("beta_ro.bin");
+    fs::write(&alpha_path, b"original alpha content").unwrap();
+    fs::write(&beta_path, b"original readonly content").unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&beta_path, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let mut reader = ArchiveReader::open(&archive, "pwd").await.unwrap();
+    let res = reader
+        .extract_all(&ExtractOptions::new(&out_dir).overwrite(true))
+        .await;
+    assert!(
+        res.is_err(),
+        "corrupted final block must fail overwrite extraction"
+    );
+
+    assert_eq!(
+        fs::read(&alpha_path).unwrap(),
+        b"original alpha content",
+        "pre-existing overwritten file must be restored on failure"
+    );
+    assert_eq!(
+        fs::read(&beta_path).unwrap(),
+        b"original readonly content",
+        "pre-existing read-only file must be restored on failure"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::symlink_metadata(&beta_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o444,
+        "pre-existing file permissions must be preserved on rollback"
+    );
+    assert!(
+        !out_dir.join("gamma_new.bin").exists() && !out_dir.join("delta_fail.bin").exists(),
+        "newly created partial files must be removed on failure"
+    );
+
+    let leftovers: Vec<_> = fs::read_dir(&out_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".era_overwrite_backup_")
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "rollback must clean up backup staging files: {leftovers:?}"
+    );
+}

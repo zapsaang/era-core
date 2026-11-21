@@ -13,7 +13,10 @@ use crate::block_iter::{
     BlockIterator, MultiVolumeSessionBlockIterator, SessionErasureBlockIterator,
     SessionErasureBlockIteratorArgs,
 };
-use crate::chunk_processor::{enforce_output_containment, ExtractionContext, VerificationContext};
+use crate::chunk_processor::{
+    enforce_output_containment, ExpectedPackedChunk, ExpectedPackedEntry, ExtractionContext,
+    VerificationContext,
+};
 pub use crate::chunk_processor::{ArchiveHealthStatus, ExtractStats, VerifyStats};
 use bytes::Bytes;
 use era_codec::ZstdCompressor;
@@ -2093,35 +2096,27 @@ impl ArchiveReader {
         options: &ExtractOptions,
     ) -> Result<ExtractStats> {
         let mut stats = ExtractStats::default();
-        let tracked_output_files: Vec<PathBuf> = Vec::new();
         let mut cumulative_bytes_extracted: u64 = 0;
 
         let output_dir = options.output_dir.clone();
-        if let Err(err) = tokio::task::spawn_blocking(move || fs::create_dir_all(output_dir))
+        tokio::task::spawn_blocking(move || fs::create_dir_all(output_dir))
             .await
-            .map_err(|e| EraError::Other(format!("Failed to join output dir creation task: {}", e)))
-            .and_then(|res| res.map_err(EraError::Io))
-        {
-            return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await;
-        }
+            .map_err(|e| {
+                EraError::Other(format!("Failed to join output dir creation task: {}", e))
+            })?
+            .map_err(EraError::Io)?;
 
         let output_dir = options.output_dir.clone();
         let canonical_output_dir =
-            match tokio::task::spawn_blocking(move || fs::canonicalize(output_dir))
+            tokio::task::spawn_blocking(move || fs::canonicalize(output_dir))
                 .await
                 .map_err(|e| {
                     EraError::Other(format!(
                         "Failed to join output canonicalization task: {}",
                         e
                     ))
-                })
-                .and_then(|res| res.map_err(EraError::Io))
-            {
-                Ok(path) => path,
-                Err(err) => {
-                    return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await
-                }
-            };
+                })?
+                .map_err(EraError::Io)?;
 
         // Build maps for extraction
         let mut context = ExtractionContext::new();
@@ -2160,24 +2155,16 @@ impl ArchiveReader {
                 for component in rel.components() {
                     match component {
                         std::path::Component::ParentDir => {
-                            return Self::fail_extraction_with_cleanup(
-                                EraError::Security(format!(
-                                    "Path traversal detected: {}",
-                                    rel.display()
-                                )),
-                                &tracked_output_files,
-                            )
-                            .await;
+                            return Err(EraError::Security(format!(
+                                "Path traversal detected: {}",
+                                rel.display()
+                            )));
                         }
                         std::path::Component::RootDir => {
-                            return Self::fail_extraction_with_cleanup(
-                                EraError::Security(format!(
-                                    "Absolute path in archive entry: {}",
-                                    rel.display()
-                                )),
-                                &tracked_output_files,
-                            )
-                            .await;
+                            return Err(EraError::Security(format!(
+                                "Absolute path in archive entry: {}",
+                                rel.display()
+                            )));
                         }
                         _ => {}
                     }
@@ -2200,16 +2187,14 @@ impl ArchiveReader {
             }
 
             if entry.size > MAX_DECLARED_FILE_SIZE {
-                return Self::fail_extraction_with_cleanup(
-                    EraError::CorruptedHeader(format!(
-                        "File '{}' declares unreasonable size: {} bytes",
-                        entry.path.display(),
-                        entry.size
-                    )),
-                    &tracked_output_files,
-                )
-                .await;
+                return Err(EraError::CorruptedHeader(format!(
+                    "File '{}' declares unreasonable size: {} bytes",
+                    entry.path.display(),
+                    entry.size
+                )));
             }
+
+            validate_regular_file_chunks(entry)?;
 
             if entry.is_chunked() {
                 let chunk_count = entry.chunks.len();
@@ -2220,25 +2205,18 @@ impl ArchiveReader {
                 if is_packed {
                     // Packed chunk: handle like single-chunk file
                     let chunk_ref = &entry.chunks[0];
-                    let packed_info = match chunk_ref.packed_info.as_ref() {
-                        Some(info) => info,
-                        None => {
-                            return Self::fail_extraction_with_cleanup(
-                                EraError::IntegrityError(
-                                    "packed_info missing for packed chunk".into(),
-                                ),
-                                &tracked_output_files,
-                            )
-                            .await;
-                        }
-                    };
+                    let packed_info = chunk_ref.packed_info.as_ref().ok_or_else(|| {
+                        EraError::IntegrityError("packed_info missing for packed chunk".into())
+                    })?;
 
                     planned_targets.push(output_path.clone());
-                    context
-                        .packed_chunks
-                        .entry(chunk_ref.hash)
-                        .or_default()
-                        .push((file_idx, packed_info.file_index, output_path));
+                    context.register_packed_file(
+                        file_idx,
+                        chunk_ref.hash,
+                        packed_info.file_index,
+                        output_path,
+                        entry.size,
+                    );
                 } else if chunk_count == 1
                     && entry.chunks[0].offset == 0
                     && u64::from(entry.chunks[0].length) == entry.size
@@ -2265,6 +2243,11 @@ impl ArchiveReader {
                             .entry(chunk_ref.hash)
                             .or_default()
                             .push((file_idx, chunk_idx, chunk_ref.offset));
+                        context.register_multi_chunk_chunk_len(
+                            file_idx,
+                            chunk_idx,
+                            chunk_ref.length,
+                        );
                     }
                 }
             }
@@ -2281,7 +2264,7 @@ impl ArchiveReader {
         if !planned_targets.is_empty() {
             let canonical_root = canonical_output_dir.clone();
             let overwrite = options.overwrite;
-            if let Err(err) = tokio::task::spawn_blocking(move || -> Result<()> {
+            tokio::task::spawn_blocking(move || -> Result<()> {
                 for target in &planned_targets {
                     enforce_output_containment(target, &canonical_root)?;
                     if overwrite {
@@ -2302,10 +2285,7 @@ impl ArchiveReader {
             })
             .await
             .map_err(|e| EraError::Other(format!("Failed to join extraction preflight task: {e}")))
-            .and_then(|res| res)
-            {
-                return Self::fail_extraction_with_cleanup(err, &tracked_output_files).await;
-            }
+            .and_then(|res| res)?;
         }
 
         const MAX_CONSECUTIVE_FAILURES: u32 = 16;
@@ -2330,7 +2310,6 @@ impl ArchiveReader {
                                     "Extraction memory budget exceeded: possible decompression bomb"
                                         .to_string(),
                                 ),
-                                &tracked_output_files,
                                 &mut context,
                             )
                             .await;
@@ -2347,7 +2326,6 @@ impl ArchiveReader {
                                         "Extraction memory budget exceeded: possible decompression bomb"
                                             .to_string(),
                                     ),
-                                    &tracked_output_files,
                                     &mut context,
                                 )
                                 .await;
@@ -2360,29 +2338,18 @@ impl ArchiveReader {
                                 "Extraction memory budget exceeded: possible decompression bomb"
                                     .to_string(),
                             ),
-                            &tracked_output_files,
                             &mut context,
                         )
                         .await;
                     }
 
                     if let Err(err) = context.process_chunks(decoded.chunks, &mut stats) {
-                        return Self::fail_extraction_with_context(
-                            err,
-                            &tracked_output_files,
-                            &mut context,
-                        )
-                        .await;
+                        return Self::fail_extraction_with_context(err, &mut context).await;
                     }
                 }
                 Err(e) => {
                     if matches!(&e, EraError::ShardTooLarge { .. }) {
-                        return Self::fail_extraction_with_context(
-                            e,
-                            &tracked_output_files,
-                            &mut context,
-                        )
-                        .await;
+                        return Self::fail_extraction_with_context(e, &mut context).await;
                     }
                     consecutive_failures += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
@@ -2391,7 +2358,6 @@ impl ArchiveReader {
                                 "Aborting: {} consecutive block failures: {}",
                                 consecutive_failures, e
                             )),
-                            &tracked_output_files,
                             &mut context,
                         )
                         .await;
@@ -2418,7 +2384,6 @@ impl ArchiveReader {
                      too many missing or corrupted volumes."
                         .into(),
                 ),
-                &tracked_output_files,
                 &mut context,
             )
             .await;
@@ -2435,6 +2400,7 @@ impl ArchiveReader {
             &stats.extracted_paths,
         )
         .await;
+        context.commit_overwritten_backups().await;
 
         Ok(stats)
     }
@@ -2546,30 +2512,22 @@ impl ArchiveReader {
         Ok(())
     }
 
-    async fn fail_extraction_with_cleanup(
+    async fn fail_extraction_with_context(
         err: EraError,
-        paths: &[PathBuf],
+        context: &mut ExtractionContext,
     ) -> Result<ExtractStats> {
+        context.close_open_handles();
+        let paths = context.take_created_output_paths();
         if !paths.is_empty() {
-            if let Err(cleanup_err) = Self::cleanup_partial_files(paths).await {
+            if let Err(cleanup_err) = Self::cleanup_partial_files(&paths).await {
                 tracing::warn!(
                     "Partial extraction cleanup encountered an error: {}",
                     cleanup_err
                 );
             }
         }
+        context.restore_overwritten_backups().await;
         Err(err)
-    }
-
-    async fn fail_extraction_with_context(
-        err: EraError,
-        tracked_paths: &[PathBuf],
-        context: &mut ExtractionContext,
-    ) -> Result<ExtractStats> {
-        context.close_open_handles();
-        let mut paths = tracked_paths.to_vec();
-        paths.extend_from_slice(context.created_output_paths());
-        Self::fail_extraction_with_cleanup(err, &paths).await
     }
 
     /// Verify using the provided block iterator
@@ -2581,12 +2539,14 @@ impl ArchiveReader {
 
         let mut context = VerificationContext::new(catalog.entries.len());
 
-        // Track packed chunks to avoid duplicate verification
-        // Key: packed_chunk_hash, Value: list of file indices sharing this packed chunk
-        let mut packed_chunk_files: HashMap<ChunkHash, Vec<usize>> = HashMap::new();
-
         for (file_idx, entry) in catalog.entries.iter().enumerate() {
             if is_internal_entry(entry) {
+                context.file_chunk_counts.push(0);
+                continue;
+            }
+            if let Err(err) = validate_regular_file_chunks(entry) {
+                stats.files_incomplete += 1;
+                stats.errors.push(err.to_string());
                 context.file_chunk_counts.push(0);
                 continue;
             }
@@ -2594,28 +2554,37 @@ impl ArchiveReader {
                 let chunk_count = entry.chunks.len();
 
                 // Check if this is a packed chunk (single chunk with packed_info)
-                let is_packed = chunk_count == 1 && entry.chunks[0].packed_info.is_some();
-
-                if is_packed {
-                    // Packed file: track by packed chunk hash
-                    // Multiple files may share the same packed chunk
+                if let Some(packed_info) = (chunk_count == 1)
+                    .then(|| entry.chunks[0].packed_info.as_ref())
+                    .flatten()
+                {
                     let chunk_ref = &entry.chunks[0];
-                    packed_chunk_files
+                    let slot = context
+                        .expected_packed_chunks
                         .entry(chunk_ref.hash)
-                        .or_default()
-                        .push(file_idx);
-
-                    // Only add to expected_chunks once per unique packed chunk
-                    if !context.expected_chunks.contains_key(&chunk_ref.hash) {
-                        context
-                            .expected_chunks
-                            .entry(chunk_ref.hash)
-                            .or_default()
-                            .push((file_idx, 0, chunk_ref.length as u64));
+                        .or_insert_with(|| ExpectedPackedChunk {
+                            expected_outer_len: u64::from(chunk_ref.length),
+                            entries: Vec::new(),
+                        });
+                    if slot.expected_outer_len != u64::from(chunk_ref.length) {
+                        stats.files_incomplete += 1;
+                        stats.errors.push(format!(
+                            "File '{}': conflicting packed chunk length {} vs {}",
+                            entry.path.display(),
+                            chunk_ref.length,
+                            slot.expected_outer_len
+                        ));
+                        context.file_chunk_counts.push(0);
+                        continue;
                     }
+                    slot.entries.push(ExpectedPackedEntry {
+                        file_idx,
+                        file_index_in_pack: packed_info.file_index,
+                        expected_file_size: entry.size,
+                    });
                     context.file_chunk_counts.push(1);
                 } else {
-                    // Normal multi-chunk file
+                    // Normal single- or multi-chunk file
                     context.file_chunk_counts.push(chunk_count);
                     for (chunk_idx, chunk_ref) in entry.chunks.iter().enumerate() {
                         context
@@ -2627,21 +2596,6 @@ impl ArchiveReader {
                 }
             } else {
                 context.file_chunk_counts.push(0);
-            }
-        }
-
-        // For packed chunks, update expected_chunks to include all files sharing the chunk
-        for (hash, file_indices) in &packed_chunk_files {
-            if let Some(refs) = context.expected_chunks.get_mut(hash) {
-                // The first entry was already added, add the rest
-                for &file_idx in file_indices.iter().skip(1) {
-                    // Get the chunk ref to get the correct length
-                    if let Some(entry) = catalog.entries.get(file_idx) {
-                        if !entry.chunks.is_empty() {
-                            refs.push((file_idx, 0, entry.chunks[0].length as u64));
-                        }
-                    }
-                }
             }
         }
 
@@ -2926,6 +2880,57 @@ impl ArchiveReader {
             }
         }
     }
+}
+
+fn validate_regular_file_chunks(entry: &FileEntry) -> Result<()> {
+    if entry.file_type != era_ingest::FileType::File {
+        return Ok(());
+    }
+    if entry.chunks.is_empty() {
+        return Err(EraError::InvalidFormat(format!(
+            "Regular file '{}' has no chunk references",
+            entry.path.display()
+        )));
+    }
+    if entry.chunks.len() == 1 && entry.chunks[0].packed_info.is_some() {
+        return Ok(());
+    }
+    let mut expected_offset = 0u64;
+    for (idx, chunk_ref) in entry.chunks.iter().enumerate() {
+        if chunk_ref.packed_info.is_some() {
+            return Err(EraError::InvalidFormat(format!(
+                "File '{}' mixes packed_info with multiple chunks at index {}",
+                entry.path.display(),
+                idx
+            )));
+        }
+        if chunk_ref.offset != expected_offset {
+            return Err(EraError::InvalidFormat(format!(
+                "File '{}' has non-contiguous chunk {} offset {} (expected {})",
+                entry.path.display(),
+                idx,
+                chunk_ref.offset,
+                expected_offset
+            )));
+        }
+        expected_offset = expected_offset
+            .checked_add(u64::from(chunk_ref.length))
+            .ok_or_else(|| {
+                EraError::InvalidFormat(format!(
+                    "File '{}' chunk length sum overflows u64",
+                    entry.path.display()
+                ))
+            })?;
+    }
+    if expected_offset != entry.size {
+        return Err(EraError::InvalidFormat(format!(
+            "File '{}' chunk lengths sum to {} but entry declares {} bytes",
+            entry.path.display(),
+            expected_offset,
+            entry.size
+        )));
+    }
+    Ok(())
 }
 
 fn is_internal_entry(entry: &FileEntry) -> bool {

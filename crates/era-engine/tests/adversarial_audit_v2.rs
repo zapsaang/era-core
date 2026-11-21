@@ -40,7 +40,12 @@ fn v2_sec_02_auth_mode_uses_zeroizing_and_not_derived_clone() {
 #[test]
 fn v2_sec_03_chunk_offset_plus_len_bounds_check() {
     let source = include_str!("../src/chunk_processor.rs");
-    assert!(source.contains("chunk_offset + data.len() as u64"));
+    assert!(
+        source
+            .contains("chunk_offset\n                            .checked_add(data.len() as u64)")
+            || source.contains("chunk_offset.checked_add(data.len() as u64)")
+            || source.contains("chunk_offset + data.len() as u64")
+    );
     assert!(source.contains("Chunk write exceeds file bounds"));
 }
 

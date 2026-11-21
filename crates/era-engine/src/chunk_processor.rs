@@ -1,12 +1,7 @@
 //! Chunk processing utilities for extraction and verification.
 //!
-//! This module provides shared logic for processing chunks during extraction,
-//! eliminating code duplication between standard and erasure-coded paths.
-//!
-//! Note: These types are currently prepared for future refactoring.
-//! The reader.rs module still uses its own implementations for now.
-
-#![allow(dead_code)]
+//! This module provides shared logic for processing chunks during extraction
+//! and verification across standard and erasure-coded paths.
 
 use bytes::Bytes;
 use era_common::{ChunkHash, ChunkVec, EraError, Result};
@@ -15,10 +10,13 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{debug, warn};
 
 /// Maximum number of multi-chunk output files kept open simultaneously during extraction.
 const MAX_OPEN_EXTRACTION_FILES: usize = 64;
+
+static OVERWRITE_BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct LazyMultiChunkState {
     output_path: PathBuf,
@@ -27,23 +25,8 @@ struct LazyMultiChunkState {
     total_chunks: usize,
     written_count: usize,
     initialized: bool,
-}
-
-/// State for tracking multi-chunk file extraction
-/// Uses pre-created files to avoid OOM on large files
-pub struct MultiChunkState {
-    /// Open file handle for writing chunks directly
-    pub file: File,
-    /// Output path for logging
-    pub output_path: PathBuf,
-    /// Expected file size (sum of all chunk lengths)
-    pub expected_size: u64,
-    /// Track which chunks have been written (for completion check)
-    pub chunks_written: Vec<bool>,
-    /// Total number of chunks expected
-    pub total_chunks: usize,
-    /// Number of chunks written so far
-    pub written_count: usize,
+    #[cfg(unix)]
+    initial_file_id: Option<(u64, u64)>,
 }
 
 /// Context for chunk-based extraction
@@ -51,20 +34,24 @@ pub struct MultiChunkState {
 pub struct ExtractionContext {
     /// Single-chunk pending: hash -> list of (file_idx, output_path)
     pub single_chunk_pending: HashMap<ChunkHash, Vec<(usize, PathBuf)>>,
-    /// Multi-chunk file states: file_idx -> state
-    pub multi_chunk_files: HashMap<usize, MultiChunkState>,
     /// Chunk to files mapping: hash -> list of (file_idx, chunk_idx, offset)
     pub chunk_to_files: HashMap<ChunkHash, Vec<(usize, usize, u64)>>,
     /// Packed chunk mapping: hash -> list of (file_idx, file_index_in_pack, output_path)
     pub packed_chunks: HashMap<ChunkHash, Vec<(usize, usize, PathBuf)>>,
+    /// Expected unpacked sizes for packed files
+    packed_expected_sizes: HashMap<usize, u64>,
     /// Canonical output directory for path containment checking
     pub canonical_output_dir: Option<PathBuf>,
-    /// Whether existing target files/symlinks should be unlinked before extraction
+    /// Whether existing target files/symlinks should be moved aside before extraction
     overwrite: bool,
-    /// Output files opened or overwritten by `process_chunks`
+    /// Output files created by `process_chunks`
     created_output_paths: Vec<PathBuf>,
+    /// Sibling backups of pre-existing targets moved aside during `overwrite = true`
+    overwritten_backups: Vec<(PathBuf, PathBuf)>,
     /// Expected sizes for single-chunk non-packed files registered via `register_single_chunk_file`
     single_chunk_expected_sizes: HashMap<usize, u64>,
+    /// Expected byte length for each `(file_idx, chunk_idx)` of multi-chunk files
+    multi_chunk_expected_lengths: HashMap<(usize, usize), u32>,
     /// Lazy multi-chunk file states whose handles are opened on demand within an LRU bound
     lazy_multi_chunk_files: HashMap<usize, LazyMultiChunkState>,
     /// Bounded cache of open multi-chunk file handles
@@ -78,13 +65,15 @@ impl ExtractionContext {
     pub fn new() -> Self {
         Self {
             single_chunk_pending: HashMap::new(),
-            multi_chunk_files: HashMap::new(),
             chunk_to_files: HashMap::new(),
             packed_chunks: HashMap::new(),
+            packed_expected_sizes: HashMap::new(),
             canonical_output_dir: None,
             overwrite: false,
             created_output_paths: Vec::new(),
+            overwritten_backups: Vec::new(),
             single_chunk_expected_sizes: HashMap::new(),
+            multi_chunk_expected_lengths: HashMap::new(),
             lazy_multi_chunk_files: HashMap::new(),
             open_multi_chunk_handles: HashMap::new(),
             open_handle_lru: VecDeque::new(),
@@ -102,8 +91,79 @@ impl ExtractionContext {
     }
 
     /// Return paths opened or overwritten during `process_chunks`
-    pub fn created_output_paths(&self) -> &[PathBuf] {
-        &self.created_output_paths
+    pub(crate) fn take_created_output_paths(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.created_output_paths)
+    }
+
+    /// Take recorded `(original_path, sibling_backup_path)` pairs for restoration on failure.
+    pub(crate) fn take_overwritten_backups(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        std::mem::take(&mut self.overwritten_backups)
+    }
+
+    /// Remove sibling backup files after extraction and metadata restoration succeed.
+    pub(crate) async fn commit_overwritten_backups(&mut self) {
+        let backups = self.take_overwritten_backups();
+        if backups.is_empty() {
+            return;
+        }
+        if let Err(err) = tokio::task::spawn_blocking(move || {
+            for (_orig, backup_path) in backups {
+                if let Err(e) = fs::remove_file(&backup_path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(
+                            "Failed to delete overwrite backup {}: {}",
+                            backup_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        })
+        .await
+        {
+            warn!("Overwrite backup cleanup task failed: {}", err);
+        }
+    }
+
+    /// Restore sibling backups back to their original paths after failed extraction cleanup.
+    pub(crate) async fn restore_overwritten_backups(&mut self) {
+        let backups = self.take_overwritten_backups();
+        if backups.is_empty() {
+            return;
+        }
+        if let Err(err) = tokio::task::spawn_blocking(move || {
+            for (original_path, backup_path) in backups.into_iter().rev() {
+                if let Err(e) = fs::rename(&backup_path, &original_path) {
+                    warn!(
+                        "Failed to restore overwritten target {} from {}: {}",
+                        original_path.display(),
+                        backup_path.display(),
+                        e
+                    );
+                }
+            }
+        })
+        .await
+        {
+            warn!("Overwrite backup restore task failed: {}", err);
+        }
+    }
+
+    /// Register a packed small file for extraction with expected unpacked length validation.
+    pub(crate) fn register_packed_file(
+        &mut self,
+        file_idx: usize,
+        hash: ChunkHash,
+        file_index_in_pack: usize,
+        output_path: PathBuf,
+        expected_size: u64,
+    ) {
+        self.packed_chunks.entry(hash).or_default().push((
+            file_idx,
+            file_index_in_pack,
+            output_path,
+        ));
+        self.packed_expected_sizes.insert(file_idx, expected_size);
     }
 
     /// Register a non-packed single-chunk file for one-shot creation and write.
@@ -139,8 +199,21 @@ impl ExtractionContext {
                 total_chunks,
                 written_count: 0,
                 initialized: false,
+                #[cfg(unix)]
+                initial_file_id: None,
             },
         );
+    }
+
+    /// Record expected byte length for one chunk of a multi-chunk file.
+    pub(crate) fn register_multi_chunk_chunk_len(
+        &mut self,
+        file_idx: usize,
+        chunk_idx: usize,
+        expected_len: u32,
+    ) {
+        self.multi_chunk_expected_lengths
+            .insert((file_idx, chunk_idx), expected_len);
     }
 
     /// Close all currently cached extraction file handles (e.g. before cleanup).
@@ -183,6 +256,21 @@ impl ExtractionContext {
             self.open_multi_chunk_handles.remove(&evicted);
         }
 
+        #[cfg(unix)]
+        let (output_path, expected_size, initialized, expected_file_id) = {
+            let state = self.lazy_multi_chunk_files.get(&file_idx).ok_or_else(|| {
+                EraError::IntegrityError(format!(
+                    "Missing lazy multi-chunk state for file index {file_idx}"
+                ))
+            })?;
+            (
+                state.output_path.clone(),
+                state.expected_size,
+                state.initialized,
+                state.initial_file_id,
+            )
+        };
+        #[cfg(not(unix))]
         let (output_path, expected_size, initialized) = {
             let state = self.lazy_multi_chunk_files.get(&file_idx).ok_or_else(|| {
                 EraError::IntegrityError(format!(
@@ -199,26 +287,69 @@ impl ExtractionContext {
         self.ensure_contained_output_target(&output_path)?;
 
         let file = if !initialized {
-            let file = open_output_for_extract(&output_path, self.overwrite)?;
+            let (file, backup) = open_output_for_extract(&output_path, self.overwrite)?;
             if let Err(err) = file.set_len(expected_size) {
                 drop(file);
                 let _ = fs::remove_file(&output_path);
+                if let Some((orig, bak)) = backup {
+                    let _ = fs::rename(&bak, &orig);
+                }
                 return Err(EraError::Io(err));
             }
+            #[cfg(unix)]
+            let initial_file_id = {
+                use std::os::unix::fs::MetadataExt;
+                let meta = file.metadata()?;
+                Some((meta.dev(), meta.ino()))
+            };
             self.created_output_paths.push(output_path);
+            if let Some(bak) = backup {
+                self.overwritten_backups.push(bak);
+            }
             if let Some(state) = self.lazy_multi_chunk_files.get_mut(&file_idx) {
                 state.initialized = true;
+                #[cfg(unix)]
+                {
+                    state.initial_file_id = initial_file_id;
+                }
             }
             file
         } else {
-            let meta = fs::symlink_metadata(&output_path)?;
+            let mut open_opts = fs::OpenOptions::new();
+            open_opts.write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                open_opts.custom_flags(libc::O_NOFOLLOW);
+            }
+            let file = open_opts.open(&output_path).map_err(|err| {
+                #[cfg(unix)]
+                if err.raw_os_error() == Some(libc::ELOOP) {
+                    return EraError::Security(format!(
+                        "Symlink detected when reopening extraction target: {}",
+                        output_path.display()
+                    ));
+                }
+                EraError::Io(err)
+            })?;
+            let meta = file.metadata()?;
             if !meta.file_type().is_file() {
                 return Err(EraError::Security(format!(
                     "Extraction target is no longer a regular file: {}",
                     output_path.display()
                 )));
             }
-            fs::OpenOptions::new().write(true).open(&output_path)?
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if expected_file_id != Some((meta.dev(), meta.ino())) {
+                    return Err(EraError::Security(format!(
+                        "Extraction target inode changed while handle was evicted: {}",
+                        output_path.display()
+                    )));
+                }
+            }
+            file
         };
 
         self.open_multi_chunk_handles.insert(file_idx, file);
@@ -240,7 +371,6 @@ impl ExtractionContext {
     /// Check if there are any pending extractions
     pub fn has_pending(&self) -> bool {
         !self.single_chunk_pending.is_empty()
-            || !self.multi_chunk_files.is_empty()
             || !self.lazy_multi_chunk_files.is_empty()
             || !self.packed_chunks.is_empty()
     }
@@ -249,23 +379,37 @@ impl ExtractionContext {
     ///
     /// This handles:
     /// - Single-chunk files: create and write file directly
-    /// - Multi-chunk files: write chunk at correct offset in bounded lazy or pre-created file
+    /// - Multi-chunk files: write chunk at correct offset in bounded lazy files
     ///
     /// Returns the number of files completed and bytes written
     pub fn process_chunks(&mut self, chunks: ChunkVec, stats: &mut ExtractStats) -> Result<()> {
         for (hash, data) in chunks {
             // Handle packed chunks first (small files packed together)
             if let Some(entries) = self.packed_chunks.remove(&hash) {
-                for (_file_idx, file_index_in_pack, output_path) in entries {
+                for (file_idx, file_index_in_pack, output_path) in entries {
                     // Unpack the specific file from the packed chunk
                     let file_data = unpack_file(&data, file_index_in_pack)?;
+                    if let Some(expected_size) = self.packed_expected_sizes.remove(&file_idx) {
+                        if file_data.len() as u64 != expected_size {
+                            return Err(EraError::InvalidFormat(format!(
+                                "Packed file {} length mismatch: expected {}, got {}",
+                                output_path.display(),
+                                expected_size,
+                                file_data.len()
+                            )));
+                        }
+                    }
 
                     self.ensure_contained_output_target(&output_path)?;
 
                     // Write file
-                    let mut file = open_output_for_extract(&output_path, self.overwrite)?;
+                    let (mut file, backup) = open_output_for_extract(&output_path, self.overwrite)?;
                     self.created_output_paths.push(output_path.clone());
+                    if let Some(bak) = backup {
+                        self.overwritten_backups.push(bak);
+                    }
                     file.write_all(&file_data)?;
+                    file.sync_all()?;
 
                     debug!("Extracted (packed): {}", output_path.display());
                     stats.extracted += 1;
@@ -291,9 +435,13 @@ impl ExtractionContext {
                     self.ensure_contained_output_target(&output_path)?;
 
                     // Write file directly
-                    let mut file = open_output_for_extract(&output_path, self.overwrite)?;
+                    let (mut file, backup) = open_output_for_extract(&output_path, self.overwrite)?;
                     self.created_output_paths.push(output_path.clone());
+                    if let Some(bak) = backup {
+                        self.overwritten_backups.push(bak);
+                    }
                     file.write_all(&data)?;
+                    file.sync_all()?;
 
                     debug!("Extracted: {}", output_path.display());
                     stats.extracted += 1;
@@ -305,48 +453,21 @@ impl ExtractionContext {
             // Handle multi-chunk files
             if let Some(file_refs) = self.chunk_to_files.remove(&hash) {
                 for (file_idx, chunk_idx, chunk_offset) in file_refs {
-                    if let Some(state) = self.multi_chunk_files.get_mut(&file_idx) {
-                        if chunk_idx >= state.chunks_written.len() {
+                    if let Some(expected_chunk_len) = self
+                        .multi_chunk_expected_lengths
+                        .remove(&(file_idx, chunk_idx))
+                    {
+                        if data.len() as u64 != u64::from(expected_chunk_len) {
                             return Err(EraError::InvalidFormat(format!(
-                                "Chunk index out of bounds for {}: index {} >= {}",
-                                state.output_path.display(),
+                                "Multi-chunk length mismatch for file {} chunk {}: expected {}, got {}",
+                                file_idx,
                                 chunk_idx,
-                                state.chunks_written.len()
+                                expected_chunk_len,
+                                data.len()
                             )));
                         }
-
-                        // Bounds validation: ensure chunk write stays within expected file size
-                        if chunk_offset + data.len() as u64 > state.expected_size {
-                            return Err(era_common::EraError::InvalidFormat(
-                                format!(
-                                    "Chunk write exceeds file bounds: offset {} + size {} > expected {}",
-                                    chunk_offset, data.len(), state.expected_size
-                                )
-                            ));
-                        }
-
-                        // Seek to correct position and write chunk
-                        state.file.seek(SeekFrom::Start(chunk_offset))?;
-                        state.file.write_all(&data)?;
-
-                        if !state.chunks_written[chunk_idx] {
-                            state.chunks_written[chunk_idx] = true;
-                            state.written_count += 1;
-                        }
-
-                        // Check if all chunks are written
-                        if state.written_count == state.total_chunks {
-                            state.file.sync_all()?;
-
-                            debug!("Extracted (chunked): {}", state.output_path.display());
-                            stats.extracted += 1;
-                            stats.bytes_written += state.expected_size;
-                            stats.extracted_paths.push(state.output_path.clone());
-
-                            // Remove completed file from tracking
-                            self.multi_chunk_files.remove(&file_idx);
-                        }
-                    } else if self.lazy_multi_chunk_files.contains_key(&file_idx) {
+                    }
+                    if self.lazy_multi_chunk_files.contains_key(&file_idx) {
                         let (chunk_count_len, expected_size, output_path_display) = {
                             let state =
                                 self.lazy_multi_chunk_files.get(&file_idx).ok_or_else(|| {
@@ -419,16 +540,6 @@ impl ExtractionContext {
 
     /// Log warnings for any incomplete files
     pub fn log_incomplete_files(&self) {
-        for state in self.multi_chunk_files.values() {
-            if state.written_count > 0 {
-                debug!(
-                    "Warning: Incomplete file: {} ({}/{})",
-                    state.output_path.display(),
-                    state.written_count,
-                    state.total_chunks
-                );
-            }
-        }
         for state in self.lazy_multi_chunk_files.values() {
             if state.written_count > 0 {
                 debug!(
@@ -444,13 +555,14 @@ impl ExtractionContext {
 
 /// Open a new output file for extraction after output containment has been verified.
 ///
-/// When `overwrite` is true, any existing regular file or symlink at `output_path` is removed
-/// first so read-only targets (e.g. `0444`) can be replaced cleanly and existing symlinks are
-/// unlinked rather than followed.
+/// When `overwrite` is true, any existing regular file or symlink at `output_path` is moved aside
+/// to a unique sibling backup path first so read-only targets (e.g. `0444`) can be replaced cleanly,
+/// symlinks are never followed, and pre-existing contents can be restored if extraction fails later.
 pub(crate) fn open_output_for_extract(
     output_path: &Path,
     overwrite: bool,
-) -> std::io::Result<File> {
+) -> std::io::Result<(File, Option<(PathBuf, PathBuf)>)> {
+    let mut backup = None;
     if overwrite {
         match fs::symlink_metadata(output_path) {
             Ok(meta) => {
@@ -460,16 +572,44 @@ pub(crate) fn open_output_for_extract(
                         format!("Cannot overwrite directory '{}'", output_path.display()),
                     ));
                 }
-                fs::remove_file(output_path)?;
+                let parent = output_path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                let backup_path = loop {
+                    let seq = OVERWRITE_BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
+                    let candidate = parent.join(format!(
+                        ".era_overwrite_backup_{}_{}",
+                        std::process::id(),
+                        seq
+                    ));
+                    if matches!(
+                        fs::symlink_metadata(&candidate),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                    ) {
+                        break candidate;
+                    }
+                };
+                fs::rename(output_path, &backup_path)?;
+                backup = Some((output_path.to_path_buf(), backup_path));
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
         }
     }
-    fs::OpenOptions::new()
+    match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(output_path)
+    {
+        Ok(file) => Ok((file, backup)),
+        Err(err) => {
+            if let Some((orig, bak)) = backup {
+                let _ = fs::rename(&bak, &orig);
+            }
+            Err(err)
+        }
+    }
 }
 
 pub(crate) fn enforce_output_containment(
@@ -548,11 +688,26 @@ pub struct ExtractStats {
     pub extracted_paths: Vec<PathBuf>,
 }
 
+/// Verification metadata for a single file inside a packed chunk.
+pub struct ExpectedPackedEntry {
+    pub file_idx: usize,
+    pub file_index_in_pack: usize,
+    pub expected_file_size: u64,
+}
+
+/// Verification metadata for a packed chunk shared by one or more small files.
+pub struct ExpectedPackedChunk {
+    pub expected_outer_len: u64,
+    pub entries: Vec<ExpectedPackedEntry>,
+}
+
 /// Context for verification
 /// Tracks expected chunks and which files have received them
 pub struct VerificationContext {
     /// Expected chunks: hash -> list of (file_idx, chunk_idx, expected_len)
     pub expected_chunks: HashMap<ChunkHash, Vec<(usize, usize, u64)>>,
+    /// Expected packed chunks indexed by outer packed chunk hash
+    pub expected_packed_chunks: HashMap<ChunkHash, ExpectedPackedChunk>,
     /// Number of chunks expected per file
     pub file_chunk_counts: Vec<usize>,
     /// Number of chunks found per file
@@ -564,6 +719,7 @@ impl VerificationContext {
     pub fn new(file_count: usize) -> Self {
         Self {
             expected_chunks: HashMap::new(),
+            expected_packed_chunks: HashMap::new(),
             file_chunk_counts: Vec::with_capacity(file_count),
             file_chunks_found: vec![0; file_count],
         }
@@ -603,6 +759,42 @@ impl VerificationContext {
                             expected_len,
                             data.len()
                         ));
+                    }
+                }
+            }
+
+            // Verify packed chunk outer length and each packed file's unpacked length
+            if let Some(packed) = self.expected_packed_chunks.get(hash) {
+                if data.len() as u64 != packed.expected_outer_len {
+                    stats.errors.push(format!(
+                        "Block {}: packed chunk length mismatch (expected {}, got {})",
+                        block_index,
+                        packed.expected_outer_len,
+                        data.len()
+                    ));
+                    continue;
+                }
+                for entry in &packed.entries {
+                    match unpack_file(data, entry.file_index_in_pack) {
+                        Ok(unpacked) => {
+                            if unpacked.len() as u64 == entry.expected_file_size {
+                                self.file_chunks_found[entry.file_idx] += 1;
+                            } else {
+                                stats.errors.push(format!(
+                                    "Block {}: packed file {} unpacked length mismatch (expected {}, got {})",
+                                    block_index,
+                                    entry.file_idx,
+                                    entry.expected_file_size,
+                                    unpacked.len()
+                                ));
+                            }
+                        }
+                        Err(err) => {
+                            stats.errors.push(format!(
+                                "Block {}: failed to unpack packed file {}: {}",
+                                block_index, entry.file_idx, err
+                            ));
+                        }
                     }
                 }
             }
@@ -735,7 +927,7 @@ mod tests {
     fn test_extraction_context_new() {
         let ctx = ExtractionContext::new();
         assert!(ctx.single_chunk_pending.is_empty());
-        assert!(ctx.multi_chunk_files.is_empty());
+        assert!(ctx.lazy_multi_chunk_files.is_empty());
         assert!(ctx.chunk_to_files.is_empty());
         assert!(!ctx.has_pending());
     }
