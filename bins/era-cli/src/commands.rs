@@ -424,6 +424,15 @@ fn apply_config_overrides(
     if config.block.target_size == 0 {
         anyhow::bail!("Block target size must be > 0");
     }
+    if config.packing.k_factor == 0 {
+        anyhow::bail!("Packing k-factor must be >= 1");
+    }
+    if config.packing.flush_threshold == 0 || config.packing.flush_threshold > 100 {
+        anyhow::bail!(
+            "Packing flush threshold must be between 1 and 100 (got {})",
+            config.packing.flush_threshold
+        );
+    }
 
     Ok(())
 }
@@ -2134,6 +2143,39 @@ mod tests {
             assert!(
                 err.to_string().contains("min <= avg <= max"),
                 "unexpected CDC ordering error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_config_overrides_rejects_invalid_packing_params() {
+        let mut k_zero = ArchiveConfig::default();
+        let err_k = apply_config_overrides(
+            &mut k_zero,
+            ConfigOverrides {
+                packing_k: Some(0),
+                ..overrides(None, false, None, None, None, None)
+            },
+        )
+        .expect_err("packing_k = 0 should fail");
+        assert!(
+            err_k.to_string().contains("k-factor"),
+            "unexpected packing_k error: {err_k}"
+        );
+
+        for bad_flush in [0, 101] {
+            let mut flush_cfg = ArchiveConfig::default();
+            let err_flush = apply_config_overrides(
+                &mut flush_cfg,
+                ConfigOverrides {
+                    flush_threshold: Some(bad_flush),
+                    ..overrides(None, false, None, None, None, None)
+                },
+            )
+            .expect_err("invalid flush_threshold should fail");
+            assert!(
+                err_flush.to_string().contains("flush threshold"),
+                "unexpected flush_threshold error for {bad_flush}: {err_flush}"
             );
         }
     }

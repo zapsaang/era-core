@@ -220,6 +220,10 @@ impl BatchSize {
     }
 }
 
+pub(crate) fn max_canonical_data_chunk_size(compression: CompressionAlgorithm) -> Result<usize> {
+    single_chunk_limit(compression, era_volume::MAX_SHARD_SIZE)
+}
+
 fn single_chunk_limit(compression: CompressionAlgorithm, sealed_budget: usize) -> Result<usize> {
     let compressed_budget = sealed_budget
         .checked_sub(era_crypto::TAG_SIZE)

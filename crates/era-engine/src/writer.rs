@@ -1037,6 +1037,22 @@ impl ArchiveWriterBuilder {
         let target_block_size = raw_target_block_size
             .min(capacity.max_data_chunk_size())
             .max(1);
+        let packing = PackingStage::new(
+            config.packing.k_factor,
+            target_block_size,
+            config.packing.flush_threshold,
+        )?;
+        let erasure = if enable_erasure {
+            ErasureStage::new(Some(erasure_config))?
+        } else {
+            ErasureStage::disabled()
+        };
+        let data_chunk_limit = u64::try_from(capacity.max_data_chunk_size())
+            .map_err(|_| EraError::InvalidConfig("data chunk limit exceeds u64".into()))?;
+        let packed_file_overhead = u64::try_from(
+            size_of::<era_packing::PackedHeader>() + size_of::<era_packing::PackedEntry>(),
+        )
+        .map_err(|_| EraError::InvalidConfig("packed file overhead exceeds u64".into()))?;
         let header = SuperHeader::new(
             archive_id,
             recipients,
@@ -1213,13 +1229,6 @@ impl ArchiveWriterBuilder {
             next_block_id,
         );
 
-        // Create erasure stage (enabled or disabled based on config)
-        let erasure = if enable_erasure {
-            ErasureStage::new(Some(erasure_config))?
-        } else {
-            ErasureStage::disabled()
-        };
-
         // Create volume stage wrapping the pool
         let volume = VolumeStage::new(volume_pool);
 
@@ -1235,13 +1244,6 @@ impl ArchiveWriterBuilder {
             config.compression.clone(),
         );
 
-        let data_chunk_limit = u64::try_from(capacity.max_data_chunk_size())
-            .map_err(|_| EraError::InvalidConfig("data chunk limit exceeds u64".into()))?;
-        let packed_file_overhead = u64::try_from(
-            size_of::<era_packing::PackedHeader>() + size_of::<era_packing::PackedEntry>(),
-        )
-        .map_err(|_| EraError::InvalidConfig("packed file overhead exceeds u64".into()))?;
-
         Ok(ArchiveWriter {
             archive_id,
             output_path: self.output_path,
@@ -1250,11 +1252,7 @@ impl ArchiveWriterBuilder {
             file_reader,
             enable_cdc,
             // Initialize packing stage with k-Bounded Best-Fit
-            packing: PackingStage::new(
-                config.packing.k_factor,
-                target_block_size,
-                config.packing.flush_threshold,
-            )?,
+            packing,
             // Small file packing
             small_file_packer: if self.enable_small_file_packing {
                 SmallFilePacker::new(
@@ -4111,6 +4109,20 @@ pub mod generic {
                     "GenericArchiveWriter writes canonical non-erasure blocks; clearing erasure config"
                 );
             }
+            if config.block.target_size == 0 {
+                return Err(era_common::EraError::InvalidConfig(
+                    "target_block_size must be > 0".into(),
+                ));
+            }
+            let max_chunk = crate::volume_capacity::max_canonical_data_chunk_size(
+                config.compression.algorithm,
+            )?;
+            let target_block_size = config.block.target_size.min(max_chunk).max(1);
+            let packing = PackingStage::new(
+                config.packing.k_factor,
+                target_block_size,
+                config.packing.flush_threshold,
+            )?;
 
             let archive_id = ArchiveId::new();
             let archive_salt = era_crypto::Salt::generate();
@@ -4216,11 +4228,7 @@ pub mod generic {
                 volume_writer,
                 catalog: Catalog::new(),
                 chunk_index,
-                packing: PackingStage::new(
-                    config.packing.k_factor,
-                    4 * 1024 * 1024,
-                    config.packing.flush_threshold,
-                )?,
+                packing,
                 written_blocks: Vec::new(),
                 pending_hashes: HashSet::new(),
             })
@@ -4273,22 +4281,36 @@ pub mod generic {
             }
         }
 
+        async fn ingest_chunk_slice(&mut self, slice: &[u8], offset: u64) -> Result<ChunkRef> {
+            let hash = era_crypto::hash(slice);
+            if !self.contains_or_pending(&hash)? {
+                let chunk = UniqueChunk::new(Bytes::copy_from_slice(slice), hash);
+                self.add_to_pending(chunk).await?;
+            }
+            let chunk_len = u32::try_from(slice.len())
+                .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
+            Ok(ChunkRef::new(hash, offset, chunk_len))
+        }
+
         /// Add a file from memory
         pub async fn add_bytes(&mut self, name: &str, data: &[u8]) -> Result<()> {
             debug!("Adding in-memory file: {} ({} bytes)", name, data.len());
 
-            let hash = era_crypto::hash(data);
+            let target_block_size = self.packing.target_block_size();
+            let chunk_refs = if data.len() > target_block_size {
+                let mut refs = Vec::with_capacity(data.len().div_ceil(target_block_size));
+                let mut offset = 0u64;
+                for slice in data.chunks(target_block_size) {
+                    refs.push(self.ingest_chunk_slice(slice, offset).await?);
+                    offset += slice.len() as u64;
+                }
+                refs
+            } else {
+                vec![self.ingest_chunk_slice(data, 0).await?]
+            };
 
-            if !self.contains_or_pending(&hash)? {
-                let chunk = UniqueChunk::new(Bytes::copy_from_slice(data), hash);
-                self.add_to_pending(chunk).await?;
-            }
-
-            let chunk_len = u32::try_from(data.len())
-                .map_err(|_| EraError::Other("Chunk length exceeds u32::MAX".into()))?;
-            let chunk_ref = era_ingest::ChunkRef::new(hash, 0, chunk_len);
-            let entry = FileEntry::file(PathBuf::from(name), data.len() as u64)
-                .with_chunks(vec![chunk_ref]);
+            let entry =
+                FileEntry::file(PathBuf::from(name), data.len() as u64).with_chunks(chunk_refs);
             self.catalog.add(entry);
 
             Ok(())
@@ -4326,6 +4348,7 @@ pub mod generic {
             self.written_blocks.push(location.clone());
 
             for hash in hashes {
+                self.pending_hashes.remove(&hash);
                 self.chunk_index.put(hash, location.clone())?;
             }
 
