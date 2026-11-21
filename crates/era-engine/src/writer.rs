@@ -463,14 +463,15 @@ impl ArchiveWriterBuilder {
     /// Build the archive writer
     pub async fn build(self) -> Result<ArchiveWriter> {
         use rand::RngCore as _;
-        if !self.append_existing {
+        let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;
+        let append_to_existing = self.append_existing && output_preexisted;
+        if !append_to_existing {
             crate::volume_capacity::validate_max_volume_size(
                 self.max_volume_size.unwrap_or(self.config.volume.max_size),
             )?;
         } else if let Some(size) = self.max_volume_size {
             crate::volume_capacity::validate_max_volume_size(size)?;
         }
-        let output_preexisted = tokio::fs::try_exists(&self.output_path).await?;
         // Create storage backend
         let output_dir = self.output_path.parent().unwrap_or(Path::new("."));
         let backend = LocalStorageBackend::new(output_dir);
@@ -534,9 +535,6 @@ impl ArchiveWriterBuilder {
         let mut append_data_block_count = 0u32;
         let mut append_checkpoint_exists = false;
         let mut recovered_index_entries: Vec<(ChunkHash, BlockLocation)> = Vec::new();
-
-        let append_to_existing =
-            self.append_existing && tokio::fs::try_exists(&self.output_path).await?;
 
         if append_to_existing {
             // 1. Validate volume 0 DNA before unlocking credentials
@@ -1021,6 +1019,24 @@ impl ArchiveWriterBuilder {
         } else {
             (FileReader::new(), None)
         };
+        let default_block_target_size = era_common::BlockConfig::default().target_size;
+        let raw_target_block_size = if let Some(target) = self.target_block_size {
+            target
+        } else if config.block.target_size != default_block_target_size {
+            config.block.target_size
+        } else if enable_cdc && enable_erasure {
+            chunker_max_size.unwrap_or(config.block.target_size)
+        } else {
+            config.block.target_size
+        };
+        if raw_target_block_size == 0 {
+            return Err(EraError::InvalidConfig(
+                "target_block_size must be > 0".into(),
+            ));
+        }
+        let target_block_size = raw_target_block_size
+            .min(capacity.max_data_chunk_size())
+            .max(1);
         let header = SuperHeader::new(
             archive_id,
             recipients,
@@ -1179,18 +1195,6 @@ impl ArchiveWriterBuilder {
                 );
             }
         }
-
-        let mut target_block_size = if let Some(target) = self.target_block_size {
-            target
-        } else if enable_cdc && enable_erasure {
-            chunker_max_size.unwrap_or(4 * 1024 * 1024)
-        } else {
-            // Default to 4MB MacroBlocks as per Whitepaper, regardless of CDC.
-            // PackingStage will aggregate small CDC chunks into these 4MB blocks.
-            4 * 1024 * 1024
-        };
-
-        target_block_size = target_block_size.min(capacity.max_data_chunk_size()).max(1);
 
         let next_block_id = if append_to_existing {
             u64::from(append_data_block_count)
@@ -3257,6 +3261,134 @@ mod tests {
             .unwrap();
 
         assert_eq!(writer.packing.bin_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_builder_uses_config_block_target_size() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut compact = ArchiveConfig::compact_preset();
+        compact.encryption.kdf_memory_cost = 1024;
+        compact.encryption.kdf_time_cost = 1;
+        let compact_writer = ArchiveWriter::builder(temp_dir.path().join("compact.era"))
+            .password("test_password")
+            .config(compact)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            compact_writer.packing.target_block_size(),
+            (16 * 1024 * 1024).min(compact_writer.capacity.max_data_chunk_size())
+        );
+        assert!(compact_writer.packing.target_block_size() > 4 * 1024 * 1024);
+
+        let mut non_ec = ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        };
+        non_ec.encryption.kdf_memory_cost = 1024;
+        non_ec.encryption.kdf_time_cost = 1;
+        non_ec.block.target_size = 8 * 1024 * 1024;
+        let non_ec_writer = ArchiveWriter::builder(temp_dir.path().join("non_ec.era"))
+            .password("test_password")
+            .config(non_ec)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(non_ec_writer.packing.target_block_size(), 8 * 1024 * 1024);
+
+        let mut overridden = ArchiveConfig::compact_preset();
+        overridden.encryption.kdf_memory_cost = 1024;
+        overridden.encryption.kdf_time_cost = 1;
+        let overridden_writer = ArchiveWriter::builder(temp_dir.path().join("override.era"))
+            .password("test_password")
+            .config(overridden)
+            .target_block_size(512 * 1024)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(overridden_writer.packing.target_block_size(), 512 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_zero_block_target_size() {
+        let dir_cfg = TempDir::new().unwrap();
+        let mut cfg = ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        };
+        cfg.encryption.kdf_memory_cost = 1024;
+        cfg.encryption.kdf_time_cost = 1;
+        cfg.block.target_size = 0;
+
+        let err_cfg = match ArchiveWriter::builder(dir_cfg.path().join("zero_cfg.era"))
+            .password("test_password")
+            .config(cfg)
+            .build()
+            .await
+        {
+            Ok(_) => panic!("expected zero config.block.target_size to fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err_cfg, EraError::InvalidConfig(_)),
+            "expected InvalidConfig, got {err_cfg:?}"
+        );
+        assert_eq!(std::fs::read_dir(dir_cfg.path()).unwrap().count(), 0);
+
+        let dir_explicit = TempDir::new().unwrap();
+        let mut cfg2 = ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        };
+        cfg2.encryption.kdf_memory_cost = 1024;
+        cfg2.encryption.kdf_time_cost = 1;
+        let err_explicit = match ArchiveWriter::builder(dir_explicit.path().join("zero_arg.era"))
+            .password("test_password")
+            .config(cfg2)
+            .target_block_size(0)
+            .build()
+            .await
+        {
+            Ok(_) => panic!("expected zero .target_block_size(0) to fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err_explicit, EraError::InvalidConfig(_)),
+            "expected InvalidConfig, got {err_explicit:?}"
+        );
+        assert_eq!(std::fs::read_dir(dir_explicit.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_builder_append_missing_target_validates_config_max_volume_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("missing.era");
+        let mut config = ArchiveConfig {
+            erasure: None,
+            ..Default::default()
+        };
+        config.encryption.kdf_memory_cost = 1024;
+        config.encryption.kdf_time_cost = 1;
+        config.volume.max_size = 256 * 1024;
+
+        let err = match ArchiveWriter::builder(&archive_path)
+            .password("test_password")
+            .append_existing(true)
+            .config(config)
+            .build()
+            .await
+        {
+            Ok(_) => {
+                panic!("expected invalid config.volume.max_size to be rejected on new archive")
+            }
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, EraError::InvalidConfig(_)),
+            "expected InvalidConfig, got {err:?}"
+        );
+        assert_eq!(std::fs::read_dir(temp_dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

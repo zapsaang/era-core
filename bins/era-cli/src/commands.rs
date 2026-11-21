@@ -430,17 +430,14 @@ fn apply_config_overrides(
 
 fn apply_writer_overrides(
     mut builder: era_engine::ArchiveWriterBuilder,
-    config: &ArchiveConfig,
     max_volume_size: Option<u64>,
     block_target_size: Option<usize>,
 ) -> era_engine::ArchiveWriterBuilder {
     if let Some(size) = max_volume_size {
         builder = builder.max_volume_size(size);
     }
-    if block_target_size.is_some()
-        || config.block.target_size != ArchiveConfig::default().block.target_size
-    {
-        builder = builder.target_block_size(config.block.target_size);
+    if let Some(size) = block_target_size {
+        builder = builder.target_block_size(size);
     }
     builder
 }
@@ -703,7 +700,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
     }
 
     let builder = ArchiveWriter::builder(output).config(config.clone());
-    let mut builder = apply_writer_overrides(builder, &config, max_volume_size, block_target_size);
+    let mut builder = apply_writer_overrides(builder, max_volume_size, block_target_size);
 
     if let Some(t) = threshold {
         builder = builder.access_policy(era_engine::AccessPolicy::Threshold(t as u32));
@@ -1520,7 +1517,7 @@ pub async fn repack(args: RepackArgs<'_>) -> Result<()> {
 
     let writer_builder = ArchiveWriter::builder(output).config(config.clone());
     let mut writer_builder =
-        apply_writer_overrides(writer_builder, &config, max_volume_size, block_target_size);
+        apply_writer_overrides(writer_builder, max_volume_size, block_target_size);
 
     if !has_explicit_dest_auth {
         let keypairs = if !key_paths.is_empty() {
