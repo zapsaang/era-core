@@ -17,6 +17,8 @@ use tracing::{debug, warn};
 const MAX_OPEN_EXTRACTION_FILES: usize = 64;
 
 static OVERWRITE_BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+static EXTRACTION_IDENTITY_SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct LazyMultiChunkState {
     output_path: PathBuf,
@@ -27,6 +29,11 @@ struct LazyMultiChunkState {
     initialized: bool,
     #[cfg(unix)]
     initial_file_id: Option<(u64, u64)>,
+    /// Hardlink to the originally created inode. Keeping this link alive prevents the
+    /// inode number from being reused if the output path is unlinked and recreated while
+    /// the writable handle is evicted, so `(dev, ino)` comparisons remain meaningful.
+    #[cfg(unix)]
+    identity_link: Option<PathBuf>,
 }
 
 /// Context for chunk-based extraction
@@ -201,6 +208,8 @@ impl ExtractionContext {
                 initialized: false,
                 #[cfg(unix)]
                 initial_file_id: None,
+                #[cfg(unix)]
+                identity_link: None,
             },
         );
     }
@@ -220,6 +229,43 @@ impl ExtractionContext {
     pub(crate) fn close_open_handles(&mut self) {
         self.open_multi_chunk_handles.clear();
         self.open_handle_lru.clear();
+    }
+
+    /// Take the hardlink identity anchors that still belong to incomplete output files.
+    pub(crate) fn take_identity_links(&mut self) -> Vec<PathBuf> {
+        let mut links = Vec::new();
+        #[cfg(unix)]
+        for state in self.lazy_multi_chunk_files.values_mut() {
+            if let Some(link) = state.identity_link.take() {
+                links.push(link);
+            }
+        }
+        links
+    }
+
+    /// Remove identity anchors left after a successful extraction pass.
+    pub(crate) async fn commit_identity_links(&mut self) {
+        let links = self.take_identity_links();
+        if links.is_empty() {
+            return;
+        }
+        if let Err(err) = tokio::task::spawn_blocking(move || {
+            for link in links {
+                if let Err(e) = fs::remove_file(&link) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(
+                            "Failed to remove extraction identity link {}: {}",
+                            link.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        })
+        .await
+        {
+            warn!("Extraction identity link cleanup task failed: {}", err);
+        }
     }
 
     fn touch_open_handle_lru(&mut self, file_idx: usize) {
@@ -257,7 +303,7 @@ impl ExtractionContext {
         }
 
         #[cfg(unix)]
-        let (output_path, expected_size, initialized, expected_file_id) = {
+        let (output_path, expected_size, initialized, expected_file_id, identity_link) = {
             let state = self.lazy_multi_chunk_files.get(&file_idx).ok_or_else(|| {
                 EraError::IntegrityError(format!(
                     "Missing lazy multi-chunk state for file index {file_idx}"
@@ -268,6 +314,7 @@ impl ExtractionContext {
                 state.expected_size,
                 state.initialized,
                 state.initial_file_id,
+                state.identity_link.clone(),
             )
         };
         #[cfg(not(unix))]
@@ -297,10 +344,21 @@ impl ExtractionContext {
                 return Err(EraError::Io(err));
             }
             #[cfg(unix)]
-            let initial_file_id = {
+            let (initial_file_id, identity_link) = {
                 use std::os::unix::fs::MetadataExt;
                 let meta = file.metadata()?;
-                Some((meta.dev(), meta.ino()))
+                let identity_link = match create_identity_link(&output_path) {
+                    Ok(link) => link,
+                    Err(err) => {
+                        drop(file);
+                        let _ = fs::remove_file(&output_path);
+                        if let Some((orig, bak)) = backup {
+                            let _ = fs::rename(&bak, &orig);
+                        }
+                        return Err(EraError::Io(err));
+                    }
+                };
+                (Some((meta.dev(), meta.ino())), identity_link)
             };
             self.created_output_paths.push(output_path);
             if let Some(bak) = backup {
@@ -311,6 +369,7 @@ impl ExtractionContext {
                 #[cfg(unix)]
                 {
                     state.initial_file_id = initial_file_id;
+                    state.identity_link = Some(identity_link);
                 }
             }
             file
@@ -342,9 +401,34 @@ impl ExtractionContext {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                if expected_file_id != Some((meta.dev(), meta.ino())) {
+                let current_file_id = (meta.dev(), meta.ino());
+                if expected_file_id != Some(current_file_id) {
                     return Err(EraError::Security(format!(
                         "Extraction target inode changed while handle was evicted: {}",
+                        output_path.display()
+                    )));
+                }
+                // The identity hardlink keeps the original inode allocated. Comparing the
+                // opened file against that link detects unlink/recreate replacement even
+                // when the filesystem reuses the freed inode number for the decoy file.
+                let identity_link = identity_link.ok_or_else(|| {
+                    EraError::Security(format!(
+                        "Extraction target identity link is missing while handle was evicted: {}",
+                        output_path.display()
+                    ))
+                })?;
+                let identity_meta = fs::symlink_metadata(&identity_link).map_err(|err| {
+                    EraError::Security(format!(
+                        "Extraction target identity link is unavailable for {}: {}",
+                        output_path.display(),
+                        err
+                    ))
+                })?;
+                if !identity_meta.file_type().is_file()
+                    || (identity_meta.dev(), identity_meta.ino()) != current_file_id
+                {
+                    return Err(EraError::Security(format!(
+                        "Extraction target was replaced by another file while its handle was evicted: {}",
                         output_path.display()
                     )));
                 }
@@ -524,6 +608,18 @@ impl ExtractionContext {
                             }
                             self.evict_open_handle(file_idx);
                             if let Some(state) = self.lazy_multi_chunk_files.remove(&file_idx) {
+                                #[cfg(unix)]
+                                if let Some(identity_link) = state.identity_link.as_ref() {
+                                    if let Err(err) = fs::remove_file(identity_link) {
+                                        if err.kind() != std::io::ErrorKind::NotFound {
+                                            warn!(
+                                                "Failed to remove extraction identity link {}: {}",
+                                                identity_link.display(),
+                                                err
+                                            );
+                                        }
+                                    }
+                                }
                                 debug!("Extracted (chunked): {}", state.output_path.display());
                                 stats.extracted += 1;
                                 stats.bytes_written += state.expected_size;
@@ -549,6 +645,31 @@ impl ExtractionContext {
                     state.total_chunks
                 );
             }
+        }
+    }
+}
+
+/// Create a hardlink that pins the inode allocated for an extracted output file.
+///
+/// The link is a sibling of the output file, so it never crosses filesystems. It is
+/// removed as soon as the multi-chunk file completes (or during failure cleanup).
+#[cfg(unix)]
+fn create_identity_link(output_path: &Path) -> std::io::Result<PathBuf> {
+    let parent = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    loop {
+        let seq = EXTRACTION_IDENTITY_SEQ.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".era_extract_identity_{}_{}",
+            std::process::id(),
+            seq
+        ));
+        match fs::hard_link(output_path, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
         }
     }
 }

@@ -26,6 +26,29 @@ fn payload_for(index: usize, len: usize) -> Vec<u8> {
     out
 }
 
+#[cfg(unix)]
+fn assert_no_identity_links(root: &std::path::Path) {
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                dirs.push(entry.path());
+            } else {
+                assert!(
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".era_extract_identity_"),
+                    "extraction identity link leaked: {}",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn extract_over_1100_single_chunk_files_within_default_fd_limit() {
     const FILE_COUNT: usize = 1150;
@@ -112,6 +135,8 @@ async fn extract_over_1100_multi_chunk_files_within_default_fd_limit() {
     for (name, bytes) in &expected {
         assert_eq!(fs::read(out_dir.join(name)).unwrap(), *bytes);
     }
+    #[cfg(unix)]
+    assert_no_identity_links(&out_dir);
 }
 
 #[tokio::test]
@@ -181,6 +206,8 @@ async fn extract_multi_chunk_failure_cleans_up_created_files() {
         !out_dir.join("first.bin").exists() && !out_dir.join("second.bin").exists(),
         "partially extracted multi-chunk files must be cleaned up on failure"
     );
+    #[cfg(unix)]
+    assert_no_identity_links(&out_dir);
 }
 
 #[cfg(unix)]

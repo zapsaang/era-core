@@ -2513,6 +2513,7 @@ impl ArchiveReader {
             stats.extracted, stats.bytes_written
         );
 
+        context.commit_identity_links().await;
         Self::apply_extracted_metadata(
             metadata_candidates,
             &options.output_dir,
@@ -2636,7 +2637,8 @@ impl ArchiveReader {
         context: &mut ExtractionContext,
     ) -> Result<ExtractStats> {
         context.close_open_handles();
-        let paths = context.take_created_output_paths();
+        let mut paths = context.take_created_output_paths();
+        paths.extend(context.take_identity_links());
         if !paths.is_empty() {
             if let Err(cleanup_err) = Self::cleanup_partial_files(&paths).await {
                 tracing::warn!(
