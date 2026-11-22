@@ -115,6 +115,10 @@ impl StorageBackend for MemoryStorageBackend {
             modified: None,
         })
     }
+
+    fn remove_sync_on_drop(&self, path: &Path) {
+        self.storage.write().remove(path);
+    }
 }
 
 /// In-memory storage writer

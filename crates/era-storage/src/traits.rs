@@ -90,4 +90,7 @@ pub trait StorageBackend: Send + Sync {
 
     /// Get metadata for a storage object
     async fn stat(&self, path: &Path) -> Result<StorageMetadata>;
+
+    /// Best-effort synchronous deletion used during `Drop` cleanup of uncommitted files.
+    fn remove_sync_on_drop(&self, _path: &Path) {}
 }

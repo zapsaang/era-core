@@ -150,6 +150,20 @@ pub struct VolumePool<B: StorageBackend> {
     initial_committed_ends: Vec<u64>,
     /// Position when each volume was opened for append, keyed by volume sequence (append mode only).
     append_start_positions: HashMap<u16, u64>,
+    /// Newly created rotated volume filenames during an uncommitted append session.
+    uncommitted_rotated_files: Vec<String>,
+}
+
+impl<B: StorageBackend> Drop for VolumePool<B> {
+    fn drop(&mut self) {
+        if self.uncommitted_rotated_files.is_empty() {
+            return;
+        }
+        self.writers.clear();
+        for filename in self.uncommitted_rotated_files.drain(..) {
+            self.backend.remove_sync_on_drop(Path::new(&filename));
+        }
+    }
 }
 
 impl<B: StorageBackend> VolumePool<B> {
@@ -205,6 +219,7 @@ impl<B: StorageBackend> VolumePool<B> {
             stats,
             initial_committed_ends: Vec::new(),
             append_start_positions: HashMap::new(),
+            uncommitted_rotated_files: Vec::new(),
         };
 
         Ok(pool)
@@ -293,6 +308,7 @@ impl<B: StorageBackend> VolumePool<B> {
             stats,
             initial_committed_ends: Vec::new(),
             append_start_positions: HashMap::new(),
+            uncommitted_rotated_files: Vec::new(),
         })
     }
 
@@ -379,6 +395,7 @@ impl<B: StorageBackend> VolumePool<B> {
                 map.insert(0, append_offset);
                 map
             },
+            uncommitted_rotated_files: Vec::new(),
         })
     }
 
@@ -418,6 +435,7 @@ impl<B: StorageBackend> VolumePool<B> {
         let mut new_writers = Vec::with_capacity(volume_count);
         let mut new_sequences = Vec::with_capacity(volume_count);
 
+        let is_append_session = !self.append_start_positions.is_empty();
         for next_sequence in first_new_sequence..new_total {
             let mut header = self.template_header.clone();
             header.set_volume_id(VolumeId::new());
@@ -429,6 +447,10 @@ impl<B: StorageBackend> VolumePool<B> {
 
             let writer =
                 VolumeWriter::create(&self.backend, Path::new(volume_filename), header).await?;
+            if is_append_session {
+                self.uncommitted_rotated_files
+                    .push(volume_filename.to_string());
+            }
 
             new_writers.push(writer);
             new_sequences.push(next_sequence);
@@ -1200,44 +1222,88 @@ impl<B: StorageBackend> VolumePool<B> {
         self.install_final_volume_count()?;
         let mut stats = std::mem::take(&mut self.stats);
 
+        let defer_retired_for_append = !self.append_start_positions.is_empty();
         let retired_volumes = std::mem::take(&mut self.retired_volumes);
         let old_sequences: Vec<u16> = std::mem::take(&mut self.sequences);
         let writers: Vec<_> = std::mem::take(&mut self.writers);
 
-        for (seq, state) in retired_volumes {
-            let volume_path = self.config.volume_path(seq);
-            let volume_filename = extract_filename(&volume_path)?;
-            let mut writer =
-                VolumeWriter::reopen_for_finalize(&self.backend, Path::new(volume_filename), state)
-                    .await?;
-            // A retired append volume can still point at a manifest for its old header.
-            writer.set_manifest_info(0, 0)?;
-            writer.finalize().await?;
-        }
-
-        for (i, mut writer) in writers.into_iter().enumerate() {
-            let size = writer.current_size();
-            let sequence = old_sequences[i];
-            stats.volume_sizes.push((sequence, size));
-            let (offset, size_u32, block_id) = catalog_locations[i];
-            let (idx_offset, idx_size, idx_block_id) =
-                index_locations.map_or((0, 0, 0), |idx| idx[i]);
-            if let Some(manifest) = manifest_locations {
-                let (manifest_offset, _manifest_size, manifest_block_id) = manifest[i];
-                writer.set_manifest_info(manifest_offset, manifest_block_id)?;
-            }
-            writer
-                .finalize_with_catalog(
-                    offset,
-                    size_u32,
-                    block_id,
-                    idx_offset,
-                    idx_size,
-                    idx_block_id,
+        if !defer_retired_for_append {
+            for (seq, state) in retired_volumes {
+                let volume_path = self.config.volume_path(seq);
+                let volume_filename = extract_filename(&volume_path)?;
+                let writer = VolumeWriter::reopen_for_finalize(
+                    &self.backend,
+                    Path::new(volume_filename),
+                    state,
                 )
                 .await?;
+                writer.finalize().await?;
+            }
+
+            for (i, mut writer) in writers.into_iter().enumerate() {
+                let size = writer.current_size();
+                let sequence = old_sequences[i];
+                stats.volume_sizes.push((sequence, size));
+                let (offset, size_u32, block_id) = catalog_locations[i];
+                let (idx_offset, idx_size, idx_block_id) =
+                    index_locations.map_or((0, 0, 0), |idx| idx[i]);
+                if let Some(manifest) = manifest_locations {
+                    let (manifest_offset, _manifest_size, manifest_block_id) = manifest[i];
+                    writer.set_manifest_info(manifest_offset, manifest_block_id)?;
+                }
+                writer
+                    .finalize_with_catalog(
+                        offset,
+                        size_u32,
+                        block_id,
+                        idx_offset,
+                        idx_size,
+                        idx_block_id,
+                    )
+                    .await?;
+            }
+        } else {
+            // In append sessions that rotated, finalize the newly created volumes first so
+            // any failure leaves the original retired volume(s) untouched on disk.
+            for (i, mut writer) in writers.into_iter().enumerate() {
+                let size = writer.current_size();
+                let sequence = old_sequences[i];
+                stats.volume_sizes.push((sequence, size));
+                let (offset, size_u32, block_id) = catalog_locations[i];
+                let (idx_offset, idx_size, idx_block_id) =
+                    index_locations.map_or((0, 0, 0), |idx| idx[i]);
+                if let Some(manifest) = manifest_locations {
+                    let (manifest_offset, _manifest_size, manifest_block_id) = manifest[i];
+                    writer.set_manifest_info(manifest_offset, manifest_block_id)?;
+                }
+                writer
+                    .finalize_with_catalog(
+                        offset,
+                        size_u32,
+                        block_id,
+                        idx_offset,
+                        idx_size,
+                        idx_block_id,
+                    )
+                    .await?;
+            }
+
+            for (seq, state) in retired_volumes {
+                let volume_path = self.config.volume_path(seq);
+                let volume_filename = extract_filename(&volume_path)?;
+                let mut writer = VolumeWriter::reopen_for_finalize(
+                    &self.backend,
+                    Path::new(volume_filename),
+                    state,
+                )
+                .await?;
+                // A retired append volume can still point at a manifest for its old header.
+                writer.set_manifest_info(0, 0)?;
+                writer.finalize().await?;
+            }
         }
 
+        self.uncommitted_rotated_files.clear();
         Ok(stats)
     }
 

@@ -8,9 +8,13 @@
 //! 2. **Zero Allocations**: Static buffer for padding
 //! 3. **Backpressure Compatible**: Works with async ChunkPipeline
 
-use era_common::{compute_shard_crc, BlockLocation, EncryptedMacroBlock, Result, VolumeId};
-use era_storage::{StorageBackend, StorageWriter};
+use era_common::{
+    compute_shard_crc, BlockLocation, EncryptedMacroBlock, EraError, Result, VolumeId,
+};
+use era_storage::{StorageBackend, StorageReader, StorageWriter};
+use std::io::SeekFrom;
 use std::path::Path;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::footer::{BACKUP_FOOTER_GAP, FOOTER_SIZE};
 use crate::header::{DATA_REGION_START, HEADER_SIZE};
@@ -20,16 +24,86 @@ use rand::RngCore;
 
 /// Space reserved at the end of a fixed-size volume for the backup header + primary footer.
 const BACKUP_HEADER_FOOTER_RESERVED: u64 = (HEADER_SIZE + FOOTER_SIZE) as u64;
+/// Streaming copy buffer size for disk-backed append spooling and rollback.
+const SPOOL_CHUNK_SIZE: usize = 64 * 1024;
 
 pub(crate) fn superheader_digest(header: &SuperHeader) -> Result<[u8; 32]> {
     Ok(*blake3::hash(&header.to_bytes()?).as_bytes())
 }
 
-#[derive(Clone)]
 struct StagedAppend {
     base_offset: u64,
-    buf: Vec<u8>,
+    initial_block_count: u32,
+    original_size: u64,
     original_footer: Footer,
+    spool: tokio::fs::File,
+    staged_data_offset: u64,
+    staged_len: u64,
+}
+
+impl StagedAppend {
+    async fn append_slices(&mut self, slices: &[&[u8]]) -> Result<()> {
+        let write_offset = self
+            .staged_data_offset
+            .checked_add(self.staged_len)
+            .ok_or_else(|| EraError::InvalidFormat("staged append spool offset overflow".into()))?;
+        self.spool
+            .seek(SeekFrom::Start(write_offset))
+            .await
+            .map_err(EraError::Io)?;
+        let mut added = 0u64;
+        for slice in slices {
+            if !slice.is_empty() {
+                self.spool.write_all(slice).await.map_err(EraError::Io)?;
+                added = added.checked_add(slice.len() as u64).ok_or_else(|| {
+                    EraError::InvalidFormat("staged append length overflow".into())
+                })?;
+            }
+        }
+        self.staged_len = self
+            .staged_len
+            .checked_add(added)
+            .ok_or_else(|| EraError::InvalidFormat("staged append length overflow".into()))?;
+        Ok(())
+    }
+
+    async fn overwrite_original_head_footer(&mut self, footer_bytes: &[u8]) -> Result<()> {
+        self.spool
+            .seek(SeekFrom::Start(HEADER_SIZE as u64))
+            .await
+            .map_err(EraError::Io)?;
+        self.spool
+            .write_all(footer_bytes)
+            .await
+            .map_err(EraError::Io)
+    }
+
+    async fn overwrite_original_tail_slice(
+        &mut self,
+        volume_offset: u64,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if volume_offset < self.base_offset {
+            return Ok(());
+        }
+        let Some(rel) = volume_offset.checked_sub(self.base_offset) else {
+            return Ok(());
+        };
+        let Some(end) = volume_offset.checked_add(bytes.len() as u64) else {
+            return Ok(());
+        };
+        if end > self.original_size {
+            return Ok(());
+        }
+        let spool_offset = DATA_REGION_START
+            .checked_add(rel)
+            .ok_or_else(|| EraError::InvalidFormat("staged spool tail offset overflow".into()))?;
+        self.spool
+            .seek(SeekFrom::Start(spool_offset))
+            .await
+            .map_err(EraError::Io)?;
+        self.spool.write_all(bytes).await.map_err(EraError::Io)
+    }
 }
 
 /// Metadata snapshot of a retired volume whose write handle was closed to bound file descriptors.
@@ -191,6 +265,42 @@ impl<W: StorageWriter> VolumeWriter<W> {
             )));
         }
 
+        let reader = backend.open_read(path).await?;
+        let std_spool = tempfile::tempfile().map_err(EraError::Io)?;
+        let mut spool = tokio::fs::File::from_std(std_spool);
+        let head = reader.read_at(0, DATA_REGION_START as usize).await?;
+        if head.len() != DATA_REGION_START as usize {
+            return Err(EraError::CorruptedHeader(format!(
+                "short volume head read during append staging: got {} bytes, expected {}",
+                head.len(),
+                DATA_REGION_START
+            )));
+        }
+        spool.write_all(&head).await.map_err(EraError::Io)?;
+
+        let mut tail_offset = append_offset;
+        while tail_offset < actual_size {
+            let chunk_len =
+                usize::try_from((actual_size - tail_offset).min(SPOOL_CHUNK_SIZE as u64))
+                    .unwrap_or(SPOOL_CHUNK_SIZE);
+            let chunk = reader.read_at(tail_offset, chunk_len).await?;
+            if chunk.is_empty() {
+                return Err(EraError::CorruptedFooter(format!(
+                    "unexpected EOF while staging append rollback tail at offset {tail_offset}"
+                )));
+            }
+            spool.write_all(&chunk).await.map_err(EraError::Io)?;
+            tail_offset = tail_offset
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| EraError::InvalidFormat("staged tail offset overflow".into()))?;
+        }
+        drop(reader);
+
+        let original_tail_len = actual_size - append_offset;
+        let staged_data_offset = DATA_REGION_START
+            .checked_add(original_tail_len)
+            .ok_or_else(|| EraError::InvalidFormat("staged spool offset overflow".into()))?;
+
         let (last_checkpoint_offset, last_checkpoint_block_id) =
             if footer.last_checkpoint_offset() < append_offset {
                 (
@@ -247,21 +357,128 @@ impl<W: StorageWriter> VolumeWriter<W> {
             last_manifest_block_id,
             staged_append: Some(StagedAppend {
                 base_offset: append_offset,
-                buf: Vec::new(),
+                initial_block_count,
+                original_size: actual_size,
                 original_footer: footer.clone(),
+                spool,
+                staged_data_offset,
+                staged_len: 0,
             }),
         })
     }
 
-    async fn flush_staged_append(&mut self) -> Result<()> {
-        let Some(staged) = self.staged_append.take() else {
-            return Ok(());
-        };
-        self.writer.truncate(staged.base_offset).await?;
-        if !staged.buf.is_empty() {
-            self.writer.append(&staged.buf).await?;
+    /// Bytes currently buffered in heap memory for a staged append (always 0 because
+    /// append writes spool to an anonymous temporary file).
+    #[must_use]
+    pub fn staged_in_memory_bytes(&self) -> usize {
+        0
+    }
+
+    /// Bytes currently spooled on disk for a pending staged append session.
+    #[must_use]
+    pub fn staged_disk_bytes(&self) -> u64 {
+        self.staged_append
+            .as_ref()
+            .map_or(0, |staged| staged.staged_len)
+    }
+
+    fn build_transitional_footer(staged: &StagedAppend) -> Footer {
+        let base = staged.base_offset;
+        let orig = &staged.original_footer;
+        let mut builder = Footer::builder(base, staged.initial_block_count, orig.sequence_number());
+        if orig.catalog_offset() >= DATA_REGION_START
+            && orig
+                .catalog_offset()
+                .checked_add(u64::from(orig.catalog_size()))
+                .is_some_and(|end| end <= base)
+        {
+            builder = builder.catalog(
+                orig.catalog_offset(),
+                orig.catalog_size(),
+                orig.catalog_block_id(),
+            );
+        }
+        if orig.last_checkpoint_offset() >= DATA_REGION_START
+            && orig.last_checkpoint_offset() < base
+        {
+            builder = builder.checkpoint(
+                orig.last_checkpoint_offset(),
+                orig.last_checkpoint_block_id(),
+            );
+        }
+        if orig.manifest_offset() >= DATA_REGION_START && orig.manifest_offset() < base {
+            builder = builder.manifest(orig.manifest_offset(), orig.manifest_block_id());
+        }
+        if orig.index_offset() >= DATA_REGION_START
+            && orig
+                .index_offset()
+                .checked_add(u64::from(orig.index_size()))
+                .is_some_and(|end| end <= base)
+        {
+            builder = builder.index(
+                orig.index_offset(),
+                orig.index_size(),
+                orig.index_block_id(),
+            );
+        }
+        builder.backup_header(0).build()
+    }
+
+    async fn stream_staged_tail(writer: &mut W, staged: &mut StagedAppend) -> Result<()> {
+        writer.truncate(staged.base_offset).await?;
+        staged
+            .spool
+            .seek(SeekFrom::Start(staged.staged_data_offset))
+            .await
+            .map_err(EraError::Io)?;
+        let mut remaining = staged.staged_len;
+        let mut buf = vec![0u8; SPOOL_CHUNK_SIZE];
+        while remaining > 0 {
+            let to_read =
+                usize::try_from(remaining.min(SPOOL_CHUNK_SIZE as u64)).unwrap_or(SPOOL_CHUNK_SIZE);
+            staged
+                .spool
+                .read_exact(&mut buf[..to_read])
+                .await
+                .map_err(EraError::Io)?;
+            writer.append(&buf[..to_read]).await?;
+            remaining -= to_read as u64;
         }
         Ok(())
+    }
+
+    async fn restore_staged_original(writer: &mut W, staged: &mut StagedAppend) -> Result<()> {
+        staged
+            .spool
+            .seek(SeekFrom::Start(0))
+            .await
+            .map_err(EraError::Io)?;
+        let mut head = vec![0u8; DATA_REGION_START as usize];
+        staged
+            .spool
+            .read_exact(&mut head)
+            .await
+            .map_err(EraError::Io)?;
+        writer.write_at(0, &head).await?;
+
+        let mut remaining = staged.staged_data_offset - DATA_REGION_START;
+        let mut target_offset = staged.base_offset;
+        let mut buf = vec![0u8; SPOOL_CHUNK_SIZE];
+        while remaining > 0 {
+            let to_read =
+                usize::try_from(remaining.min(SPOOL_CHUNK_SIZE as u64)).unwrap_or(SPOOL_CHUNK_SIZE);
+            staged
+                .spool
+                .read_exact(&mut buf[..to_read])
+                .await
+                .map_err(EraError::Io)?;
+            writer.write_at(target_offset, &buf[..to_read]).await?;
+            target_offset += to_read as u64;
+            remaining -= to_read as u64;
+        }
+
+        writer.truncate(staged.original_size).await?;
+        writer.sync().await
     }
 
     /// Set the maximum size for this volume.
@@ -270,9 +487,14 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// use positional `write_at` instead of `append`.
     ///
     /// # Errors
+    /// Returns `InvalidConfig` if called on a staged append writer.
     /// Returns I/O errors from the underlying storage backend during padding.
     pub async fn set_max_size(&mut self, max_size: u64) -> Result<()> {
-        self.flush_staged_append().await?;
+        if self.staged_append.is_some() {
+            return Err(EraError::InvalidConfig(
+                "cannot set max_size on a staged append volume writer".into(),
+            ));
+        }
         self.max_size = Some(max_size);
         self.pad_to_size(max_size).await
     }
@@ -343,12 +565,16 @@ impl<W: StorageWriter> VolumeWriter<W> {
             self.writer
                 .write_at(HEADER_SIZE as u64, &footer_bytes)
                 .await?;
+            staged.overwrite_original_head_footer(&footer_bytes).await?;
             let backup_hdr = staged.original_footer.backup_header_offset();
             if backup_hdr >= DATA_REGION_START {
                 let primary_footer_offset = backup_hdr + HEADER_SIZE as u64;
                 if self.writer.current_size() >= primary_footer_offset + FOOTER_SIZE as u64 {
                     self.writer
                         .write_at(primary_footer_offset, &footer_bytes)
+                        .await?;
+                    staged
+                        .overwrite_original_tail_slice(primary_footer_offset, &footer_bytes)
                         .await?;
                 }
             }
@@ -659,8 +885,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         let header_bytes = header.to_bytes();
 
         if let Some(ref mut staged) = self.staged_append {
-            staged.buf.extend_from_slice(&header_bytes);
-            staged.buf.extend_from_slice(&block.data);
+            staged.append_slices(&[&header_bytes, &block.data]).await?;
         } else if self.max_size.is_some() {
             // Traffic Analysis Defense: Use write_at inside the padded volume
             self.writer.write_at(offset, &header_bytes).await?;
@@ -696,6 +921,9 @@ impl<W: StorageWriter> VolumeWriter<W> {
     /// # Errors
     /// Returns I/O errors from the underlying storage backend.
     pub async fn sync_data(&mut self) -> Result<()> {
+        if let Some(ref staged) = self.staged_append {
+            staged.spool.sync_data().await.map_err(EraError::Io)?;
+        }
         self.writer.sync_data().await
     }
     /// Write raw bytes to the volume (for index embedding and low-level access).
@@ -719,7 +947,7 @@ impl<W: StorageWriter> VolumeWriter<W> {
         let offset = self.position;
 
         if let Some(ref mut staged) = self.staged_append {
-            staged.buf.extend_from_slice(data);
+            staged.append_slices(&[data]).await?;
             self.position += data.len() as u64;
         } else if self.max_size.is_some() {
             self.writer.write_at(offset, data).await?;
@@ -829,51 +1057,72 @@ impl<W: StorageWriter> VolumeWriter<W> {
             .build();
         let footer_bytes = footer.to_bytes()?;
 
-        self.flush_staged_append().await?;
+        let mut staged_opt = self.staged_append.take();
+        let commit_result: Result<()> = async {
+            if let Some(ref mut staged) = staged_opt {
+                // Persist a valid transitional footer at offset 4096 BEFORE truncating
+                // old metadata, so a hard crash right after truncate still leaves the
+                // retained data region openable.
+                let transitional_bytes = Self::build_transitional_footer(staged).to_bytes()?;
+                self.writer
+                    .write_at(HEADER_SIZE as u64, &transitional_bytes)
+                    .await?;
+                self.writer.sync_data().await?;
+                Self::stream_staged_tail(&mut self.writer, staged).await?;
+            }
 
-        // Random padding if max_size is set
-        if let Some(max_size) = self.max_size {
-            // Ensure full padding to max_size minus space for backup header + footer
-            let pad_target = max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED);
-            self.pad_to_size(pad_target).await?;
-            self.position = pad_target;
+            // Random padding if max_size is set
+            if let Some(max_size) = self.max_size {
+                // Ensure full padding to max_size minus space for backup header + footer
+                let pad_target = max_size.saturating_sub(BACKUP_HEADER_FOOTER_RESERVED);
+                self.pad_to_size(pad_target).await?;
+                self.position = pad_target;
+            }
 
-            // CRASH SAFETY: Sync padding data to disk BEFORE writing backup header
-            // and footers. This matches the protocol in commit_checkpoint() and
-            // prevents "garbage tail" — where footer references padding that
-            // never reached disk. Uses fdatasync (metadata sync not required).
+            // CRASH SAFETY (LL-03 / RF-06): Sync data/padding to disk BEFORE writing
+            // backup header and overwriting the recovery backup footer at offset 4096,
+            // for both fixed-size and growable volumes.
             self.writer.sync_data().await?;
-        }
 
-        // 1. Rewrite primary header at offset 0 so total_volumes is current,
-        // and write backup header (copy of primary) at backup_header_offset.
-        self.writer.write_at(0, &header_bytes).await?;
+            // 1. Rewrite primary header at offset 0 so total_volumes is current,
+            // and write backup header (copy of primary) at backup_header_offset.
+            self.writer.write_at(0, &header_bytes).await?;
 
-        if self.max_size.is_some() {
+            if self.max_size.is_some() {
+                self.writer
+                    .write_at(backup_header_offset, &header_bytes)
+                    .await?;
+            } else {
+                self.writer.append(&header_bytes).await?;
+            }
+
+            // 2. Write primary footer after backup header
+            let primary_footer_offset = backup_header_offset + HEADER_SIZE as u64;
+            if self.max_size.is_some() {
+                self.writer
+                    .write_at(primary_footer_offset, &footer_bytes)
+                    .await?;
+            } else {
+                self.writer.append(&footer_bytes).await?;
+            }
+
+            // 3. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
             self.writer
-                .write_at(backup_header_offset, &header_bytes)
+                .write_at(HEADER_SIZE as u64, &footer_bytes)
                 .await?;
-        } else {
-            self.writer.append(&header_bytes).await?;
+
+            // Sync to disk
+            self.writer.sync().await
+        }
+        .await;
+
+        if let Err(err) = commit_result {
+            if let Some(ref mut staged) = staged_opt {
+                let _ = Self::restore_staged_original(&mut self.writer, staged).await;
+            }
+            return Err(err);
         }
 
-        // 2. Write primary footer after backup header
-        let primary_footer_offset = backup_header_offset + HEADER_SIZE as u64;
-        if self.max_size.is_some() {
-            self.writer
-                .write_at(primary_footer_offset, &footer_bytes)
-                .await?;
-        } else {
-            self.writer.append(&footer_bytes).await?;
-        }
-
-        // 3. Write backup footer at reserved gap (offset HEADER_SIZE = 4096)
-        self.writer
-            .write_at(HEADER_SIZE as u64, &footer_bytes)
-            .await?;
-
-        // Sync to disk
-        self.writer.sync().await?;
         self.writer.close().await?;
 
         Ok(self.header)

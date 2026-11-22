@@ -644,6 +644,18 @@ async fn interrupted_start_fresh_on_legacy_checkpoint_allows_subsequent_append()
 async fn interrupted_append_after_volume_rotation_preserves_original_archive() {
     use era_engine::ArchiveReader;
 
+    let unique_payload = |seed: u64, len: usize| -> Vec<u8> {
+        let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            out.push((state >> 24) as u8);
+        }
+        out
+    };
+
     let temp = TempDir::new().unwrap();
     let archive_path = temp.path().join("rotated_interrupted.era");
     let mut config = non_ec_config();
@@ -651,7 +663,7 @@ async fn interrupted_append_after_volume_rotation_preserves_original_archive() {
     config.volume.max_size = 1024 * 1024;
     config.block.target_size = 256 * 1024;
 
-    let original_payload = vec![0x31u8; 512 * 1024];
+    let original_payload = unique_payload(1, 512 * 1024);
     create_original(
         &archive_path,
         Some(("orig.bin", &original_payload)),
@@ -671,9 +683,9 @@ async fn interrupted_append_after_volume_rotation_preserves_original_archive() {
             .build()
             .await
             .unwrap();
-        // Exceed 1 MiB cap to force rotate_volumes() before dropping without finalize().
+        // Exceed 1 MiB cap with incompressible non-dedup data to force rotate_volumes() before dropping.
         writer
-            .add_bytes("overflow.bin", &vec![0x42u8; 700 * 1024])
+            .add_bytes("overflow.bin", &unique_payload(2, 700 * 1024))
             .await
             .unwrap();
         drop(writer);
@@ -687,4 +699,11 @@ async fn interrupted_append_after_volume_rotation_preserves_original_archive() {
         stats.archive_health
     );
     assert_extraction(&archive_path, &[("orig.bin".to_owned(), original_payload)]).await;
+
+    let rotated_volume = era_volume::volume_path(&archive_path, 1);
+    assert!(
+        !rotated_volume.exists(),
+        "interrupted rotated append must clean up uncommitted orphan volume {}",
+        rotated_volume.display()
+    );
 }

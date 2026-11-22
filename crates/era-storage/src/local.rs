@@ -225,6 +225,11 @@ impl StorageBackend for LocalStorageBackend {
                 .map(|d| d.as_secs()),
         })
     }
+
+    fn remove_sync_on_drop(&self, path: &Path) {
+        let full_path = self.resolve_path(path);
+        let _ = std::fs::remove_file(full_path);
+    }
 }
 
 /// Writer for local filesystem storage
