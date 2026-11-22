@@ -718,8 +718,6 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
     checkpoint_offset: u64,
     checkpoint_block_id: Option<u32>,
 ) -> Result<Checkpoint> {
-    use era_common::BlockId;
-
     let (data_region_start, data_region_end) = volume_reader.data_region();
     if checkpoint_offset < data_region_start || checkpoint_offset >= data_region_end {
         return Err(EraError::InvalidFormat(format!(
@@ -747,36 +745,130 @@ pub async fn read_checkpoint<R: era_storage::StorageReader>(
 
     // If block_id is provided, try direct decryption first
     if let Some(id) = checkpoint_block_id {
-        let block_id = BlockId::new(id as u64);
-        let block_key =
-            session.derive_block_key(volume_key, block_id.sequence(), &nonce_context)?;
-        let derived_key = block_key.to_derived_key()?;
-
-        if let Ok(decrypted_data) = era_crypto::decrypt_with_context_for_type(
-            &derived_key,
+        if let Some(checkpoint) = try_decrypt_checkpoint_block(
+            volume_reader,
+            session,
+            volume_key,
             &nonce_context,
             &archive_id,
             epoch_id,
-            volume_reader.header().volume_sequence() as u32,
-            BlockType::Checkpoint,
-            block_id,
+            id as u64,
             &encrypted_block.data,
-        ) {
-            if let Ok(checkpoint) = Checkpoint::from_bytes(&decrypted_data) {
-                tracing::info!(
-                    "Checkpoint recovered with block_id {}: {} chunks, {} files",
-                    id,
-                    checkpoint.chunks_written,
-                    checkpoint.total_files_processed
-                );
-                return Ok(checkpoint);
-            }
+        )? {
+            tracing::info!(
+                "Checkpoint recovered with block_id {}: {} chunks, {} files",
+                id,
+                checkpoint.chunks_written,
+                checkpoint.total_files_processed
+            );
+            return Ok(checkpoint);
+        }
+
+        return Err(EraError::Decryption(
+            "Could not decrypt checkpoint with any candidate block ID".into(),
+        ));
+    }
+
+    // Legacy fallback when checkpoint_block_id is absent: scan canonical BlockHeaders
+    // from data_region_start up to checkpoint_offset to count preceding canonical blocks,
+    // then also check bounded footer block_count sequences in case non-canonical blocks exist.
+    let mut scan_offset = data_region_start;
+    let mut scanned_seq = 0u64;
+    while scan_offset < checkpoint_offset && scan_offset < data_region_end {
+        let scan_loc = BlockLocation::single(era_common::VolumeId::new(), 0, scan_offset, 0);
+        let Ok((_, scanned_block)) = volume_reader.read_typed_block(&scan_loc).await else {
+            break;
+        };
+        let Some(next_offset) = scan_offset
+            .checked_add(era_common::BlockHeader::SIZE as u64)
+            .and_then(|o| o.checked_add(u64::from(scanned_block.compressed_size)))
+        else {
+            break;
+        };
+        if next_offset <= scan_offset {
+            break;
+        }
+        scan_offset = next_offset;
+        scanned_seq = scanned_seq.saturating_add(1);
+    }
+
+    let max_possible_blocks = data_region_end
+        .saturating_sub(data_region_start)
+        .checked_div(era_common::BlockHeader::SIZE as u64)
+        .unwrap_or(0);
+    let max_footer_seq = u64::from(volume_reader.block_count()).min(max_possible_blocks);
+
+    let mut candidates = Vec::new();
+    if scan_offset == checkpoint_offset {
+        candidates.push(scanned_seq);
+    }
+    let mut seq = 0u64;
+    while seq <= max_footer_seq {
+        if !candidates.contains(&seq) {
+            candidates.push(seq);
+        }
+        seq = seq.saturating_add(1);
+    }
+
+    for seq_id in candidates {
+        if let Some(checkpoint) = try_decrypt_checkpoint_block(
+            volume_reader,
+            session,
+            volume_key,
+            &nonce_context,
+            &archive_id,
+            epoch_id,
+            seq_id,
+            &encrypted_block.data,
+        )? {
+            tracing::info!(
+                "Checkpoint recovered via header scan (block_id {}): {} chunks, {} files",
+                seq_id,
+                checkpoint.chunks_written,
+                checkpoint.total_files_processed
+            );
+            return Ok(checkpoint);
         }
     }
 
     Err(EraError::Decryption(
         "Could not decrypt checkpoint with any candidate block ID".into(),
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_decrypt_checkpoint_block<R: era_storage::StorageReader>(
+    volume_reader: &era_volume::VolumeReader<R>,
+    session: &KeySession,
+    volume_key: &VolumeKey,
+    nonce_context: &[u8; 16],
+    archive_id: &[u8; 16],
+    epoch_id: u32,
+    seq_id: u64,
+    ciphertext: &[u8],
+) -> Result<Option<Checkpoint>> {
+    use era_common::BlockId;
+
+    let block_id = BlockId::new(seq_id);
+    let block_key = session.derive_block_key(volume_key, block_id.sequence(), nonce_context)?;
+    let derived_key = block_key.to_derived_key()?;
+
+    if let Ok(decrypted_data) = era_crypto::decrypt_with_context_for_type(
+        &derived_key,
+        nonce_context,
+        archive_id,
+        epoch_id,
+        volume_reader.header().volume_sequence() as u32,
+        BlockType::Checkpoint,
+        block_id,
+        ciphertext,
+    ) {
+        if let Ok(checkpoint) = Checkpoint::from_bytes(&decrypted_data) {
+            return Ok(Some(checkpoint));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Recover all checkpoints from a volume by scanning
@@ -955,5 +1047,108 @@ mod tests {
         assert!(!CheckpointManager::exists("/tmp/test.era")
             .await
             .expect("missing file should not fail"));
+    }
+
+    #[tokio::test]
+    async fn read_checkpoint_and_recover_all_checkpoints_succeed_when_block_id_is_none() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let backend = era_storage::LocalStorageBackend::new(temp_dir.path());
+        let file_name = Path::new("legacy_ckpt.era");
+
+        let archive_id_obj = era_common::ArchiveId::new();
+        let archive_id = *archive_id_obj.0.as_bytes();
+        let nonce_context = [0x22u8; 16];
+        let epoch_id = 1u32;
+        let session = KeySession::from_master_key(&[0x33u8; 32]).unwrap();
+        let (volume_key, wrapped_vk) = session.generate_and_wrap_volume_key().unwrap();
+
+        let header = era_volume::SuperHeader::new(
+            archive_id_obj,
+            vec![era_volume::RecipientSlot::new(
+                era_volume::RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
+            era_common::ArchiveConfig::default(),
+            nonce_context,
+            era_volume::EncryptedVolumeKey::new(
+                era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+                wrapped_vk.nonce,
+                wrapped_vk.ciphertext,
+            ),
+            era_volume::AccessPolicy::AnyOfN,
+        )
+        .unwrap();
+
+        let mut writer = era_volume::VolumeWriter::create(&backend, file_name, header)
+            .await
+            .unwrap();
+
+        // Preceding canonical data block at sequence 0 so checkpoint lives at sequence 1.
+        let dummy_data = era_common::EncryptedMacroBlock {
+            block_id: era_common::BlockId::new(0),
+            data: bytes::Bytes::from_static(b"preceding-canonical-block"),
+            original_size: 25,
+            compressed_size: 25,
+            chunk_count: 1,
+        };
+        writer
+            .write_canonical_block(&dummy_data, BlockType::Data)
+            .await
+            .unwrap();
+
+        let checkpoint = Checkpoint::new(0, 8192, 4096, 3, 7, HashMap::new());
+        let ckpt_offset = write_checkpoint(
+            &mut writer,
+            &session,
+            &volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            1,
+            &checkpoint,
+        )
+        .await
+        .unwrap();
+
+        // Simulate legacy footer where last_checkpoint_block_id is absent (0).
+        writer
+            .set_last_checkpoint_with_block_id(ckpt_offset, 0)
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        let reader = era_volume::VolumeReader::open(&backend, file_name)
+            .await
+            .unwrap();
+
+        let direct = read_checkpoint(
+            &reader,
+            &session,
+            &volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+            ckpt_offset,
+            None,
+        )
+        .await
+        .expect("read_checkpoint with None block_id should scan canonical headers");
+        assert_eq!(direct.chunks_written, 7);
+        assert_eq!(direct.total_files_processed, 3);
+
+        let recovered = recover_all_checkpoints(
+            &reader,
+            &session,
+            &volume_key,
+            nonce_context,
+            archive_id,
+            epoch_id,
+        )
+        .await
+        .expect("recover_all_checkpoints should recover legacy checkpoint");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].chunks_written, 7);
+        assert_eq!(recovered[0].total_files_processed, 3);
     }
 }

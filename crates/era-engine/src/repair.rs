@@ -363,27 +363,6 @@ async fn read_valid_footer(
     Some(bytes)
 }
 
-/// Detect whether either on-disk footer copy is damaged or the copies disagree.
-async fn volume_needs_footer_repair(
-    reader: &VolumeReader<era_storage::LocalStorageReader>,
-) -> bool {
-    if reader.footer().is_none() {
-        return false;
-    }
-    if reader.footer_recovered_from_backup() {
-        return true;
-    }
-    let size = reader.size();
-    let primary_offset = size.saturating_sub(era_volume::FOOTER_SIZE as u64);
-    let Some(primary) = read_valid_footer(reader, primary_offset).await else {
-        return true;
-    };
-    match read_valid_footer(reader, era_volume::HEADER_SIZE as u64).await {
-        None => true,
-        Some(backup) => primary != backup,
-    }
-}
-
 /// Plan the writes needed to restore footer redundancy from the surviving copy.
 async fn plan_volume_footer_repairs(
     reader: &VolumeReader<era_storage::LocalStorageReader>,
@@ -915,7 +894,11 @@ pub async fn repair_archive_with_providers(
     }
 
     let needs_header = volume_needs_header_repair(&volume_reader).await;
-    let needs_footer = volume_needs_footer_repair(&volume_reader).await;
+    let footer_plan_res = plan_volume_footer_repairs(&volume_reader, path).await;
+    let needs_footer = match &footer_plan_res {
+        Ok(repairs) => !repairs.is_empty(),
+        Err(_) => true,
+    };
     if erasure_config.is_none() && !needs_header && !needs_footer {
         return Err(EraError::ErasureError(
             "Archive does not use erasure coding - repair not available".into(),
@@ -933,11 +916,7 @@ pub async fn repair_archive_with_providers(
     let has_catalog = volume_reader
         .footer()
         .is_some_and(|footer| footer.has_catalog_location());
-    let footer_repairs = if needs_footer {
-        plan_volume_footer_repairs(&volume_reader, path).await?
-    } else {
-        Vec::new()
-    };
+    let footer_repairs = footer_plan_res?;
     let (header_repairs, catalog_repairs, verify_stats) =
         if needs_header || needs_footer || has_catalog {
             let mut archive = ArchiveReader::open_with_providers(path, providers).await?;
@@ -1266,7 +1245,7 @@ pub async fn repair_archive_with_providers(
     // Apply repairs if not dry run
     if !options.dry_run && !repairs.is_empty() {
         info!("Applying {} shard repairs...", repairs.len());
-        apply_repairs(path, &repairs)?;
+        apply_repairs(path, repairs).await?;
     } else if options.dry_run && !repairs.is_empty() {
         info!("Dry run: would have repaired {} shards", repairs.len());
     }
@@ -1421,53 +1400,60 @@ async fn apply_metadata_repair(path: &Path, offset: u64, bytes: Bytes) -> Result
 }
 
 /// Apply shard repairs to the archive file
-fn apply_repairs(path: &Path, repairs: &[ShardRepair]) -> Result<()> {
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+async fn apply_repairs(path: &Path, repairs: Vec<ShardRepair>) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
 
-    for repair in repairs {
-        // Write new shard header with CRC
-        let crc = compute_shard_crc(&repair.data);
-        let header = ShardHeader::new(repair.data.len() as u32, crc);
+        for repair in &repairs {
+            // Write new shard header with CRC
+            let crc = compute_shard_crc(&repair.data);
+            let len = u32::try_from(repair.data.len())
+                .map_err(|_| EraError::InvalidFormat("Repaired shard exceeds u32::MAX".into()))?;
+            let header = ShardHeader::new(len, crc);
 
-        // Write shard data first, then flush, then write header
-        // This ensures a crash between writes leaves the header unwritten (detectable)
-        // rather than pointing to garbage data (V2-SEC-06 fix)
-        let header_bytes = header.to_bytes();
-        let data_offset = repair.offset + header_bytes.len() as u64;
+            // Write shard data first, then flush, then write header
+            // This ensures a crash between writes leaves the header unwritten (detectable)
+            // rather than pointing to garbage data (V2-SEC-06 fix)
+            let header_bytes = header.to_bytes();
+            let data_offset = repair.offset + header_bytes.len() as u64;
 
-        file.seek(SeekFrom::Start(data_offset))?;
-        file.write_all(&repair.data)?;
-        file.flush()?;
+            file.seek(SeekFrom::Start(data_offset))?;
+            file.write_all(&repair.data)?;
+            file.flush()?;
 
-        // Now write the header (which points to the data we just wrote)
-        file.seek(SeekFrom::Start(repair.offset))?;
-        file.write_all(&header_bytes)?;
+            // Now write the header (which points to the data we just wrote)
+            file.seek(SeekFrom::Start(repair.offset))?;
+            file.write_all(&header_bytes)?;
 
-        // V2-ROB-10: Post-write CRC validation - re-read and verify written data
-        file.flush()?;
-        file.seek(SeekFrom::Start(data_offset))?;
+            // V2-ROB-10: Post-write CRC validation - re-read and verify written data
+            file.flush()?;
+            file.seek(SeekFrom::Start(data_offset))?;
 
-        let mut read_buffer = vec![0u8; repair.data.len()];
-        file.read_exact(&mut read_buffer)?;
+            let mut read_buffer = vec![0u8; repair.data.len()];
+            file.read_exact(&mut read_buffer)?;
 
-        let read_crc = compute_shard_crc(&read_buffer);
-        if read_crc != crc {
-            return Err(EraError::IntegrityError(format!(
-                "Post-write CRC verification failed for repaired shard {} (expected {}, got {})",
-                repair.shard_idx, crc, read_crc
-            )));
+            let read_crc = compute_shard_crc(&read_buffer);
+            if read_crc != crc {
+                return Err(EraError::IntegrityError(format!(
+                    "Post-write CRC verification failed for repaired shard {} (expected {}, got {})",
+                    repair.shard_idx, crc, read_crc
+                )));
+            }
+
+            debug!(
+                "Repaired shard {} at offset {} ({} bytes)",
+                repair.shard_idx,
+                repair.offset,
+                repair.data.len()
+            );
         }
 
-        debug!(
-            "Repaired shard {} at offset {} ({} bytes)",
-            repair.shard_idx,
-            repair.offset,
-            repair.data.len()
-        );
-    }
-
-    file.sync_all()?;
-    Ok(())
+        file.sync_all()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| EraError::Other(format!("Shard repair task failed: {e}")))?
 }
 
 /// Repair a multi-volume ERA archive with matrix distribution
@@ -1528,13 +1514,13 @@ async fn repair_archive_matrix_with_providers(
             break;
         }
     }
-    let mut footer_repair_needed = false;
-    for reader in &volume_readers {
-        if volume_needs_footer_repair(reader).await {
-            footer_repair_needed = true;
-            break;
-        }
+    let mut planned_footer_repairs = Vec::with_capacity(volume_readers.len());
+    for (reader, volume_path) in volume_readers.iter().zip(&volume_paths) {
+        planned_footer_repairs.push(plan_volume_footer_repairs(reader, volume_path).await);
     }
+    let footer_repair_needed = planned_footer_repairs
+        .iter()
+        .any(|res| !matches!(res, Ok(repairs) if repairs.is_empty()));
     let has_catalog = volume_readers.iter().any(|reader| {
         reader
             .footer()
@@ -1560,7 +1546,9 @@ async fn repair_archive_matrix_with_providers(
             .map(|manifest| manifest.volume_committed_ends.clone());
         for (reader, volume_path) in volume_readers.iter().zip(&volume_paths) {
             header_repairs.extend(plan_volume_header_repairs(reader, volume_path, &archive).await?);
-            footer_repairs.extend(plan_volume_footer_repairs(reader, volume_path).await?);
+        }
+        for res in planned_footer_repairs {
+            footer_repairs.extend(res?);
         }
         for repair in archive.plan_catalog_repairs().await? {
             let index = volume_indices
@@ -2032,10 +2020,10 @@ async fn repair_archive_matrix_with_providers(
 
     // Apply repairs to each volume
     if !options.dry_run && !all_repairs.is_empty() {
-        for (vol_idx, repairs) in &all_repairs {
+        for (vol_idx, repairs) in all_repairs {
             if !repairs.is_empty() {
                 info!("Applying {} repairs to volume {}", repairs.len(), vol_idx);
-                apply_repairs(&volume_paths[*vol_idx], repairs)?;
+                apply_repairs(&volume_paths[vol_idx], repairs).await?;
             }
         }
     } else if options.dry_run {
@@ -2245,5 +2233,33 @@ mod tests {
             3,
             "a short final generation is capped by its actual width"
         );
+    }
+
+    #[tokio::test]
+    async fn test_apply_repairs_writes_verifies_on_blocking_pool() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let volume_path = temp_dir.path().join("shard_repair.era");
+        let payload = Bytes::from_static(b"reconstructed-erasure-shard-data");
+        let shard_offset = 64u64;
+        let total_len = shard_offset as usize + ShardHeader::SIZE + payload.len();
+        std::fs::write(&volume_path, vec![0u8; total_len]).unwrap();
+
+        apply_repairs(
+            &volume_path,
+            vec![ShardRepair {
+                offset: shard_offset,
+                shard_idx: 2,
+                data: payload.clone(),
+            }],
+        )
+        .await
+        .expect("async apply_repairs should succeed via spawn_blocking");
+
+        let disk = std::fs::read(&volume_path).unwrap();
+        let header = ShardHeader::from_bytes(&disk[shard_offset as usize..]).unwrap();
+        let written = &disk[shard_offset as usize + ShardHeader::SIZE..];
+        assert_eq!(header.length as usize, payload.len());
+        assert!(header.verify(written));
+        assert_eq!(written, payload.as_ref());
     }
 }
