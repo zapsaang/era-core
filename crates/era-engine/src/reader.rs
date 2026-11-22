@@ -2315,14 +2315,6 @@ impl ArchiveReader {
                 continue;
             }
 
-            if entry.size > MAX_DECLARED_FILE_SIZE {
-                return Err(EraError::CorruptedHeader(format!(
-                    "File '{}' declares unreasonable size: {} bytes",
-                    entry.path.display(),
-                    entry.size
-                )));
-            }
-
             validate_regular_file_chunks(entry)?;
 
             if entry.is_chunked() {
@@ -2521,8 +2513,81 @@ impl ArchiveReader {
         )
         .await;
         context.commit_overwritten_backups().await;
+        Self::sync_extracted_directories(&canonical_output_dir, &stats.extracted_paths).await;
 
         Ok(stats)
+    }
+
+    #[cfg(unix)]
+    async fn sync_extracted_directories(canonical_output_dir: &Path, extracted_paths: &[PathBuf]) {
+        let root = canonical_output_dir.to_path_buf();
+        let parents: Vec<PathBuf> = extracted_paths
+            .iter()
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .collect();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            let mut dirs_to_sync = HashSet::new();
+            dirs_to_sync.insert(root.clone());
+
+            let mut seen_parents = HashSet::new();
+            for parent in parents {
+                if !seen_parents.insert(parent.clone()) {
+                    continue;
+                }
+                let Ok(canonical_parent) = std::fs::canonicalize(&parent) else {
+                    continue;
+                };
+                if !canonical_parent.starts_with(&root) {
+                    continue;
+                }
+                let mut cur = canonical_parent.as_path();
+                while cur.starts_with(&root) {
+                    dirs_to_sync.insert(cur.to_path_buf());
+                    if cur == root {
+                        break;
+                    }
+                    let Some(next) = cur.parent() else {
+                        break;
+                    };
+                    cur = next;
+                }
+            }
+
+            for dir in dirs_to_sync {
+                match std::fs::File::open(&dir) {
+                    Ok(handle) => {
+                        if let Err(e) = handle.sync_all() {
+                            warn!(
+                                "Failed to fsync extracted output directory {}: {}",
+                                dir.display(),
+                                e
+                            );
+                        } else {
+                            #[cfg(test)]
+                            tests::record_synced_directory_for_test(&dir);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to open extracted output directory {} for fsync: {}",
+                            dir.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        })
+        .await
+        {
+            warn!("Extracted directory fsync task failed: {}", e);
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn sync_extracted_directories(
+        _canonical_output_dir: &Path,
+        _extracted_paths: &[PathBuf],
+    ) {
     }
 
     async fn apply_extracted_metadata(
@@ -2540,38 +2605,70 @@ impl ArchiveReader {
                 if !extracted_set.contains(&expected_path) {
                     continue;
                 }
+                let has_metadata = entry.mtime.is_some()
+                    || cfg!(unix) && (!entry.xattrs.is_empty() || (entry.permissions & 0o777) != 0);
+                if !has_metadata {
+                    continue;
+                }
                 let output_path = expected_path;
+
+                let mut open_opts = std::fs::OpenOptions::new();
+                open_opts.write(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    open_opts.custom_flags(libc::O_NOFOLLOW);
+                }
+                let file = match open_opts.open(&output_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!(
+                            "Failed to open extracted file for metadata restoration {}: {}",
+                            output_path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                };
+                match file.metadata() {
+                    Ok(meta) if meta.file_type().is_file() => {}
+                    Ok(_) => {
+                        warn!(
+                            "Refusing to restore metadata on non-regular file {}",
+                            output_path.display()
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to inspect extracted file metadata {}: {}",
+                            output_path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                }
 
                 // Restore mtime and xattrs BEFORE permissions, because a read-only
                 // mode (e.g. 0444) would prevent subsequent write operations.
                 if let Some(mtime_secs) = entry.mtime {
                     let target_time = std::time::SystemTime::UNIX_EPOCH
                         + std::time::Duration::from_secs(mtime_secs);
-                    match std::fs::File::options().write(true).open(&output_path) {
-                        Ok(file) => {
-                            let times = std::fs::FileTimes::new().set_modified(target_time);
-                            if let Err(e) = file.set_times(times) {
-                                warn!(
-                                    "Failed to restore mtime for {}: {}",
-                                    output_path.display(),
-                                    e
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to open file for mtime restoration {}: {}",
-                                output_path.display(),
-                                e
-                            );
-                        }
+                    let times = std::fs::FileTimes::new().set_modified(target_time);
+                    if let Err(e) = file.set_times(times) {
+                        warn!(
+                            "Failed to restore mtime for {}: {}",
+                            output_path.display(),
+                            e
+                        );
                     }
                 }
 
                 #[cfg(unix)]
                 {
+                    use xattr::FileExt;
                     for (key, value) in &entry.xattrs {
-                        if let Err(e) = xattr::set(&output_path, key, value) {
+                        if let Err(e) = file.set_xattr(key, value) {
                             warn!(
                                 "Failed to restore xattr {} for {}: {}",
                                 key,
@@ -2588,7 +2685,7 @@ impl ArchiveReader {
                     let mode = entry.permissions & 0o777;
                     if mode != 0 {
                         let perms = std::fs::Permissions::from_mode(mode);
-                        if let Err(e) = std::fs::set_permissions(&output_path, perms) {
+                        if let Err(e) = file.set_permissions(perms) {
                             warn!(
                                 "Failed to restore permissions for {}: {}",
                                 output_path.display(),
@@ -3154,6 +3251,13 @@ impl ArchiveReader {
 fn validate_regular_file_chunks(entry: &FileEntry) -> Result<()> {
     if entry.file_type != era_ingest::FileType::File {
         return Ok(());
+    }
+    if entry.size > MAX_DECLARED_FILE_SIZE {
+        return Err(EraError::CorruptedHeader(format!(
+            "File '{}' declares unreasonable size: {} bytes",
+            entry.path.display(),
+            entry.size
+        )));
     }
     if entry.chunks.is_empty() {
         return Err(EraError::InvalidFormat(format!(
@@ -4206,5 +4310,177 @@ mod tests {
             }
             other => panic!("expected ShardTooLarge, got: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    static EXTRACTED_DIR_SYNC_LOG: std::sync::OnceLock<std::sync::Mutex<Vec<PathBuf>>> =
+        std::sync::OnceLock::new();
+
+    #[cfg(unix)]
+    pub(super) fn record_synced_directory_for_test(path: &Path) {
+        let log = EXTRACTED_DIR_SYNC_LOG.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        log.lock().unwrap().push(path.to_path_buf());
+    }
+
+    #[tokio::test]
+    async fn verify_and_extract_symmetrically_reject_file_exceeding_max_declared_size() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("out");
+        let declared_size = super::MAX_DECLARED_FILE_SIZE + 1;
+
+        let mut chunks = Vec::new();
+        let mut offset = 0u64;
+        let chunk_len = 4_000_000_000u32;
+        while offset + u64::from(chunk_len) <= declared_size {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[..8].copy_from_slice(&offset.to_le_bytes());
+            chunks.push(ChunkRef::new(
+                era_common::ChunkHash::from_bytes(hash_bytes),
+                offset,
+                chunk_len,
+            ));
+            offset += u64::from(chunk_len);
+        }
+        let rem = u32::try_from(declared_size - offset).unwrap();
+        if rem > 0 {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[..8].copy_from_slice(&offset.to_le_bytes());
+            chunks.push(ChunkRef::new(
+                era_common::ChunkHash::from_bytes(hash_bytes),
+                offset,
+                rem,
+            ));
+        }
+
+        let mut catalog = Catalog::new();
+        catalog.add(
+            FileEntry::file(PathBuf::from("oversized.bin"), declared_size).with_chunks(chunks),
+        );
+
+        let mut extract_iter = injected_iterator(Vec::new());
+        let extract_err = ArchiveReader::extract_with_iterator(
+            &catalog,
+            &mut extract_iter,
+            &ExtractOptions::new(&output_dir),
+        )
+        .await
+        .expect_err("extract must reject file exceeding MAX_DECLARED_FILE_SIZE");
+        assert!(
+            matches!(extract_err, EraError::CorruptedHeader(ref msg) if msg.contains("declares unreasonable size")),
+            "expected CorruptedHeader with size reason, got {extract_err:?}"
+        );
+
+        let mut verify_iter = injected_iterator(Vec::new());
+        let verify_stats = ArchiveReader::verify_with_iterator(&catalog, &mut verify_iter)
+            .await
+            .unwrap();
+        assert!(
+            !verify_stats.is_ok(),
+            "verify must fail for file exceeding MAX_DECLARED_FILE_SIZE"
+        );
+        assert_eq!(verify_stats.files_incomplete, 1);
+        assert!(
+            verify_stats
+                .errors
+                .iter()
+                .any(|e| e.contains("declares unreasonable size")),
+            "verify must reject unreasonable declared size symmetrically with extract, got errors: {:?}",
+            verify_stats.errors
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_extracted_metadata_refuses_symlink_swap_and_protects_victim_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let out_dir = temp_dir.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let victim = temp_dir.path().join("victim.txt");
+        fs::write(&victim, b"do not touch").unwrap();
+        let original_mtime =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&victim)
+                .unwrap();
+            f.set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+                .unwrap();
+        }
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let swapped_target = out_dir.join("target.bin");
+        std::os::unix::fs::symlink(&victim, &swapped_target).unwrap();
+
+        let mut entry = FileEntry::file(PathBuf::from("target.bin"), 4);
+        entry.permissions = 0o777;
+        entry.mtime = Some(1_700_000_000);
+
+        ArchiveReader::apply_extracted_metadata(vec![entry], &out_dir, &[swapped_target]).await;
+
+        let victim_meta = fs::metadata(&victim).unwrap();
+        assert_eq!(
+            victim_meta.permissions().mode() & 0o777,
+            0o600,
+            "metadata restoration must not chmod symlink target"
+        );
+        assert_eq!(
+            victim_meta.modified().unwrap(),
+            original_mtime,
+            "metadata restoration must not overwrite symlink target mtime"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn extract_all_syncs_output_directories_on_completion() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("dir_sync.era");
+        let mut writer = ArchiveWriter::builder(&archive_path)
+            .password("test")
+            .enable_erasure(false)
+            .build()
+            .await
+            .unwrap();
+        writer.add_bytes("top.bin", b"top").await.unwrap();
+        writer
+            .add_bytes("nested/sub/item.bin", b"nested")
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        let out_dir = temp_dir.path().join("out");
+        let mut reader = ArchiveReader::open(&archive_path, "test").await.unwrap();
+        reader
+            .extract_all(&ExtractOptions::new(&out_dir))
+            .await
+            .unwrap();
+
+        let canonical_out = fs::canonicalize(&out_dir).unwrap();
+        let synced: Vec<PathBuf> = EXTRACTED_DIR_SYNC_LOG
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with(&canonical_out))
+            .cloned()
+            .collect();
+
+        assert!(
+            synced.contains(&canonical_out),
+            "extraction must fsync root output directory {}, got {synced:?}",
+            canonical_out.display()
+        );
+        assert!(
+            synced.contains(&canonical_out.join("nested")),
+            "extraction must fsync intermediate created directory, got {synced:?}"
+        );
+        assert!(
+            synced.contains(&canonical_out.join("nested/sub")),
+            "extraction must fsync leaf parent directory, got {synced:?}"
+        );
     }
 }
