@@ -65,12 +65,6 @@ impl PackingStage {
         })
     }
 
-    /// Create a packing stage with default flush threshold (95%).
-    #[allow(dead_code)]
-    pub fn with_defaults(k_factor: usize, target_block_size: usize) -> era_common::Result<Self> {
-        Self::new(k_factor, target_block_size, 95)
-    }
-
     /// Get the target block size.
     ///
     /// This is useful for chunking large in-memory data before adding to the stage.
@@ -97,21 +91,15 @@ impl PackingStage {
     }
 
     /// Check if the staging pool is empty (no buffered chunks).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.staging_pool.stats().total_chunks == 0
     }
 
     /// Get the number of bins in the staging pool.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn bin_count(&self) -> usize {
         self.staging_pool.bin_count()
-    }
-
-    /// Get statistics about the staging pool.
-    #[allow(dead_code)]
-    pub fn stats(&self) -> era_packing::StagingPoolStats {
-        self.staging_pool.stats()
     }
 }
 

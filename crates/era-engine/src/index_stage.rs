@@ -50,7 +50,7 @@ impl IndexStage {
     /// Create a new `IndexStage` without checkpoint support.
     ///
     /// Used in tests and scenarios where crash recovery is not needed.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn without_checkpoint(chunk_index: Arc<dyn ChunkIndex>) -> Self {
         Self {
             chunk_index,
@@ -82,22 +82,6 @@ impl IndexStage {
         Ok(())
     }
 
-    /// Sync checkpoint state to stable storage.
-    ///
-    /// No-op if no checkpoint manager is configured.
-    ///
-    /// For async-first checkpoint persistence with atomic volume writes, use
-    /// `commit_to_volume()` instead. Both methods are valid depending on the
-    /// orchestration context and whether synchronous or asynchronous flushing is needed.
-    #[allow(dead_code)]
-    pub fn sync_checkpoint(&mut self) -> Result<()> {
-        if let Some(ref mut mgr) = self.checkpoint_manager {
-            #[allow(deprecated)]
-            mgr.sync()?;
-        }
-        Ok(())
-    }
-
     /// Extract the `IndexBuilder` for V2.1 embedded index finalization.
     ///
     /// This downcasts the inner chunk index to `RedbChunkIndex` and takes
@@ -115,14 +99,7 @@ impl IndexStage {
         self.checkpoint_manager.as_ref()
     }
 
-    #[allow(dead_code)]
     pub fn checkpoint_manager_mut(&mut self) -> Option<&mut CheckpointManager> {
         self.checkpoint_manager.as_mut()
-    }
-
-    /// Get a reference to the underlying chunk index.
-    #[allow(dead_code)]
-    pub fn chunk_index(&self) -> &Arc<dyn ChunkIndex> {
-        &self.chunk_index
     }
 }

@@ -38,8 +38,6 @@ const O_NOFOLLOW: i32 = 0x0100;
 /// files (volume rotation and crash-retry rely on it) but never follows a symlink
 /// final component on platforms where O_NOFOLLOW is known.
 fn create_open_options() -> OpenOptions {
-    // custom_flags below is unix-only, so mut is unused on other targets.
-    #[allow(unused_mut)]
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(any(

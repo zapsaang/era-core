@@ -88,7 +88,7 @@ impl ErasureStage {
     }
 
     /// Get the erasure coding configuration, if enabled.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn config(&self) -> Option<&ErasureCodeConfig> {
         self.config.as_ref()
     }
@@ -131,7 +131,7 @@ impl ErasureStage {
     }
 
     /// Check if there are buffered blocks waiting to be flushed.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn has_pending(&self) -> bool {
         self.stripe_buffer
             .as_ref()

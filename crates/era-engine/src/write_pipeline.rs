@@ -348,11 +348,6 @@ impl<B: StorageBackend> WritePipeline<B> {
     /// For async-first checkpoint persistence with atomic volume writes, use
     /// `commit_to_volume()` instead. Both methods are valid depending on the
     /// orchestration context and whether synchronous or asynchronous flushing is needed.
-    #[allow(dead_code)]
-    pub fn sync_checkpoint(&mut self) -> Result<()> {
-        self.index.sync_checkpoint()
-    }
-
     /// Ensure volume slot 0 has enough capacity for the durable checkpoint block before
     /// capturing data-only committed ends, rotating volumes if needed.
     pub async fn precheck_durable_checkpoint_space(&mut self) -> Result<bool> {
@@ -409,13 +404,12 @@ impl<B: StorageBackend> WritePipeline<B> {
     }
 
     /// Get the block locations written by this pipeline.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn written_block_locations(&self) -> &[BlockLocation] {
         &self.written_blocks
     }
 
     /// Take the block locations written by this pipeline.
-    #[allow(dead_code)]
     pub fn take_written_block_locations(&mut self) -> Vec<BlockLocation> {
         std::mem::take(&mut self.written_blocks)
     }
@@ -423,24 +417,6 @@ impl<B: StorageBackend> WritePipeline<B> {
     /// Get a reference to the encryption context.
     pub fn encryption(&self) -> &EncryptionContext {
         &self.encryption
-    }
-
-    /// Get a mutable reference to the encryption context.
-    #[allow(dead_code)]
-    pub fn encryption_mut(&mut self) -> &mut EncryptionContext {
-        &mut self.encryption
-    }
-
-    /// Get a reference to the erasure stage.
-    #[allow(dead_code)]
-    pub fn erasure(&self) -> &ErasureStage {
-        &self.erasure
-    }
-
-    /// Get a mutable reference to the erasure stage.
-    #[allow(dead_code)]
-    pub fn erasure_mut(&mut self) -> &mut ErasureStage {
-        &mut self.erasure
     }
 
     /// Get a reference to the volume stage.
@@ -459,18 +435,9 @@ impl<B: StorageBackend> WritePipeline<B> {
     }
 
     /// Get a mutable reference to the index stage.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn index_mut(&mut self) -> &mut IndexStage {
         &mut self.index
-    }
-
-    /// Decompose the pipeline into its constituent parts.
-    ///
-    /// This is useful during finalization when you need direct access
-    /// to individual stages.
-    #[allow(dead_code)]
-    pub fn into_parts(self) -> (EncryptionContext, ErasureStage, VolumeStage<B>, IndexStage) {
-        (self.encryption, self.erasure, self.volume, self.index)
     }
 }
 

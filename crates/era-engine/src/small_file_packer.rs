@@ -115,13 +115,13 @@ impl SmallFilePacker {
     }
 
     /// Get the number of buffered files.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
 
     /// Get the total size of buffered data.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn total_size(&self) -> u64 {
         self.total_size
     }

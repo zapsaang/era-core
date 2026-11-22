@@ -64,7 +64,7 @@ pub use pem_support::{
     load_public_key_from_pem_string, EitherKeyPair, PemFormat,
 };
 pub use secure_memory::{
-    check_security_features, disable_core_dumps, SecureBuffer, SecureKey32, SecureKey64,
-    SecureMemoryConfig, SecurityReport,
+    check_security_features, disable_core_dumps, SecureBuffer, SecureBytes, SecureKey32,
+    SecureKey64, SecureMemoryConfig, SecurityReport,
 };
 pub use security_check::{print_security_report, verify_mlock_or_warn, verify_security_or_warn};

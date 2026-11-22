@@ -203,11 +203,15 @@ pub struct CheckpointManager {
     /// Current checkpoint state
     checkpoint: Checkpoint,
     /// Archive output path (for compatibility with old API)
-    #[allow(dead_code)] // Kept for future use in recovery path
     archive_path: PathBuf,
 }
 
 impl CheckpointManager {
+    /// Archive path associated with this checkpoint manager.
+    pub fn archive_path(&self) -> &Path {
+        &self.archive_path
+    }
+
     /// Create a new checkpoint manager (does NOT create sidecar file)
     pub fn with_hmac_key(archive_path: impl AsRef<Path>, _hmac_key: [u8; 32]) -> Self {
         // HMAC key is ignored in new implementation (checkpoints are encrypted blocks)
@@ -705,8 +709,7 @@ pub async fn write_checkpoint<W: StorageWriter>(
 /// * `volume_key` - Volume encryption key
 /// * `nonce_context` - Nonce context for encryption
 /// * `checkpoint_offset` - Physical offset of the checkpoint block
-/// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to brute-force search (legacy volumes).
-#[allow(dead_code)] // Will be used by cold recovery path
+/// * `block_id` - Optional block ID for direct decryption. If `None`, falls back to canonical header scan (legacy volumes).
 #[allow(clippy::too_many_arguments)]
 pub async fn read_checkpoint<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
@@ -880,7 +883,6 @@ fn try_decrypt_checkpoint_block<R: era_storage::StorageReader>(
 /// Currently only recovers the last checkpoint. A full implementation
 /// would traverse the checkpoint chain if previous checkpoint offsets
 /// were stored in each checkpoint.
-#[allow(dead_code)] // Will be used by cold recovery path
 pub async fn recover_all_checkpoints<R: era_storage::StorageReader>(
     volume_reader: &era_volume::VolumeReader<R>,
     session: &KeySession,

@@ -25,13 +25,11 @@ use era_volume::{VolumePool, VolumePoolStats, VolumeWriter};
 /// - Writing catalog blocks to all volumes for redundancy
 /// - Managing volume rotation when volumes fill up
 /// - Tracking block sequences for matrix distribution
-#[allow(dead_code)]
 pub struct VolumeStage<B: StorageBackend> {
     /// The underlying volume pool
     pool: VolumePool<B>,
 }
 
-#[allow(dead_code)]
 impl<B: StorageBackend> VolumeStage<B> {
     /// Create a new volume stage wrapping a volume pool.
     pub fn new(pool: VolumePool<B>) -> Self {

@@ -21,6 +21,7 @@ fn install_symlink(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
 }
 
+#[allow(dead_code)]
 #[path = "../src/volume_stage.rs"]
 mod public_path_volume_stage;
 

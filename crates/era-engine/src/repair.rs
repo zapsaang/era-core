@@ -238,7 +238,7 @@ pub struct RepairStats {
 
 /// Helper to read and verify a single shard at the given offset
 /// Returns (shard_data, shard_header, corrupted) or an error if I/O fails
-#[allow(dead_code)]
+#[cfg(test)]
 async fn read_and_verify_shard(
     reader: &VolumeReader<era_storage::LocalStorageReader>,
     offset: u64,
@@ -2261,5 +2261,79 @@ mod tests {
         assert_eq!(header.length as usize, payload.len());
         assert!(header.verify(written));
         assert_eq!(written, payload.as_ref());
+    }
+
+    #[tokio::test]
+    async fn test_read_and_verify_shard_checks_crc() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let backend = LocalStorageBackend::new(temp_dir.path());
+        let file_name = Path::new("shard_check.era");
+
+        let header = era_volume::SuperHeader::new(
+            era_common::ArchiveId::new(),
+            vec![era_volume::RecipientSlot::new(
+                era_volume::RecipientType::Argon2idPassword,
+                Some([0x12; 8]),
+                vec![0xAB; 16],
+                vec![0xCD; 48],
+            )],
+            era_common::ArchiveConfig::default(),
+            [0x22; 16],
+            era_volume::EncryptedVolumeKey::new(
+                era_volume::KeyWrapAlgorithm::XChaCha20Poly1305,
+                [0x33; 24],
+                vec![0x44; 48],
+            ),
+            era_volume::AccessPolicy::AnyOfN,
+        )
+        .unwrap();
+
+        let shard_payload = b"shard-payload";
+        let shard_crc = compute_shard_crc(shard_payload);
+        let shard_hdr = ShardHeader::new(shard_payload.len() as u32, shard_crc);
+        let mut block_payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        block_payload.extend_from_slice(&shard_hdr.to_bytes());
+        block_payload.extend_from_slice(shard_payload);
+
+        let block = era_common::EncryptedMacroBlock {
+            block_id: BlockId::new(0),
+            data: Bytes::from(block_payload.clone()),
+            original_size: block_payload.len() as u32,
+            compressed_size: block_payload.len() as u32,
+            chunk_count: 1,
+        };
+
+        let mut writer = era_volume::VolumeWriter::create(&backend, file_name, header)
+            .await
+            .unwrap();
+        let loc = writer
+            .write_canonical_block(&block, BlockType::Data)
+            .await
+            .unwrap();
+        writer.finalize().await.unwrap();
+
+        let shard_offset = loc.physical_offset + era_common::BlockHeader::SIZE as u64;
+        let reader = VolumeReader::open(&backend, file_name).await.unwrap();
+        let (data, parsed_hdr, corrupted) = read_and_verify_shard(&reader, shard_offset, 4)
+            .await
+            .unwrap()
+            .expect("shard header should parse");
+        assert!(!corrupted);
+        assert_eq!(parsed_hdr.length as usize, shard_payload.len());
+        assert_eq!(data.as_ref(), shard_payload);
+
+        // Corrupt a payload byte and re-verify.
+        let volume_path = temp_dir.path().join(file_name);
+        let corrupt_pos = shard_offset + 4 + ShardHeader::SIZE as u64;
+        let mut raw = std::fs::read(&volume_path).unwrap();
+        raw[corrupt_pos as usize] ^= 0xFF;
+        std::fs::write(&volume_path, raw).unwrap();
+
+        let reader2 = VolumeReader::open(&backend, file_name).await.unwrap();
+        let (_, _, corrupted2) = read_and_verify_shard(&reader2, shard_offset, 4)
+            .await
+            .unwrap()
+            .expect("corrupted shard still parses header");
+        assert!(corrupted2);
     }
 }

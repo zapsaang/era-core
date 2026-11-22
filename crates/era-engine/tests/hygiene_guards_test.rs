@@ -621,4 +621,69 @@ mod meta_gates {
             "README must document --locked commands"
         );
     }
+
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn production_sources_have_zero_dead_code_or_unused_allows() {
+        let root = super::repo_root();
+        let mut src_roots = Vec::new();
+        for group in ["crates", "bins"] {
+            if let Ok(entries) = std::fs::read_dir(root.join(group)) {
+                for entry in entries.flatten() {
+                    let src = entry.path().join("src");
+                    if src.is_dir() {
+                        src_roots.push(src);
+                    }
+                }
+            }
+        }
+
+        let forbidden = [
+            "allow(dead_code)",
+            "allow(unused_mut)",
+            "allow(unused_imports)",
+        ];
+        let mut rs_files = Vec::new();
+        for src_root in src_roots {
+            collect_rs_files(&src_root, &mut rs_files);
+        }
+        rs_files.sort();
+
+        let mut violations = Vec::new();
+        for path in rs_files {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            for (idx, line) in content.lines().enumerate() {
+                for pattern in forbidden {
+                    if line.contains(pattern) {
+                        violations.push(format!("{rel}:{}: contains {pattern}", idx + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "production src/ must not suppress warnings with allow(dead_code|unused_mut|unused_imports):\n{}",
+            violations.join("\n")
+        );
+    }
 }

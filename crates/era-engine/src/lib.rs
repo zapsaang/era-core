@@ -54,7 +54,12 @@ pub use block_iter::{
     MultiVolumeSessionBlockIterator, SessionBlockIterator, SessionErasureBlockIterator,
     StandardBlockIterator,
 };
-pub use checkpoint::{Checkpoint, CheckpointManager, InProgressFile, CHECKPOINT_VERSION};
+pub use checkpoint::{
+    read_checkpoint, recover_all_checkpoints, Checkpoint, CheckpointManager, InProgressFile,
+    CHECKPOINT_VERSION,
+};
+#[doc(hidden)]
+pub use chunk_index::{ChunkIndex, MemoryChunkIndex};
 // Re-export KeySession for convenient access
 pub use era_crypto::KeySession;
 // Re-export certificate types for convenient access
@@ -75,6 +80,8 @@ pub use repair::{
     repair_archive_with_private_keys, repair_archive_with_providers, RepairOptions, RepairStats,
 };
 pub use volume_capacity::{validate_max_volume_size, MIN_ARCHIVE_VOLUME_SIZE};
+#[doc(hidden)]
+pub use volume_stage::VolumeStage;
 #[deprecated(
     since = "0.2.0",
     note = "Use ArchiveWriter instead. GenericArchiveWriter does not support multi-volume, manifest tracking, or V8.2 format features."

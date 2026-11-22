@@ -171,13 +171,11 @@ impl<const N: usize> fmt::Debug for SecureBuffer<N> {
 ///
 /// Similar to `SecureBuffer` but allows allocating any size at runtime.
 /// Uses manual zeroization for secure memory management.
-#[allow(dead_code)]
 pub struct SecureBytes {
     data: Vec<u8>,
     is_locked: bool,
 }
 
-#[allow(dead_code)]
 impl SecureBytes {
     /// Create a new secure bytes buffer of `size`
     pub fn new(size: usize) -> Result<Self, SecureMemoryError> {
@@ -230,7 +228,6 @@ impl SecureBytes {
 
 impl SecureBytes {
     /// Clone the buffer, returning Result since secure memory allocation can fail.
-    #[allow(dead_code)]
     pub fn try_clone(&self) -> Result<Self, SecureMemoryError> {
         let mut new = Self::new(self.data.len())?;
         new.as_mut_slice().copy_from_slice(self.as_slice());

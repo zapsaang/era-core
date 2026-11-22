@@ -22,8 +22,7 @@ const MAX_MEMORY_INDEX_ENTRIES: usize = 1_000_000;
 ///
 /// Provides a unified interface for looking up and recording chunk locations,
 /// whether backed by an in-memory HashMap or a persistent LSM-Tree.
-#[allow(dead_code)]
-pub(crate) trait ChunkIndex: Send + Sync {
+pub trait ChunkIndex: Send + Sync {
     /// Check if a chunk hash exists in the index.
     fn contains(&self, hash: &ChunkHash) -> EraResult<bool>;
 
@@ -38,6 +37,11 @@ pub(crate) trait ChunkIndex: Send + Sync {
 
     /// Return the number of entries in the index.
     fn len(&self) -> usize;
+
+    /// Check whether the index has no entries.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Flush any pending writes to stable storage.
     fn flush(&self) -> EraResult<()>;
@@ -55,15 +59,13 @@ pub(crate) trait ChunkIndex: Send + Sync {
 /// Simple in-memory chunk index backed by a HashMap.
 ///
 /// Suitable for tests and small archives. Does not persist across restarts.
-#[allow(dead_code)]
-pub(crate) struct MemoryChunkIndex {
+pub struct MemoryChunkIndex {
     map: RwLock<HashMap<ChunkHash, BlockLocation>>,
     max_entries: usize,
 }
 
 impl MemoryChunkIndex {
     /// Create a new empty in-memory chunk index.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             map: RwLock::new(HashMap::new()),
@@ -81,13 +83,18 @@ impl MemoryChunkIndex {
     /// ```ignore
     /// let index = MemoryChunkIndex::with_capacity(500_000);
     /// ```
-    #[allow(dead_code)]
     pub fn with_capacity(max_entries: usize) -> Self {
         let capped = max_entries.min(MAX_MEMORY_INDEX_ENTRIES);
         Self {
             map: RwLock::new(HashMap::with_capacity(capped)),
             max_entries: capped,
         }
+    }
+}
+
+impl Default for MemoryChunkIndex {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -160,7 +167,7 @@ enum BuilderState {
 
 impl RedbChunkIndex {
     /// Create a new Redb-backed chunk index.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new() -> EraResult<Self> {
         Self::new_with_context([0u8; 16], 0)
     }
@@ -298,12 +305,6 @@ impl ChunkIndex for RedbChunkIndex {
     fn as_any(&self) -> &dyn Any {
         self
     }
-}
-
-/// Create a chunk index backed by Redb (default for production).
-#[allow(dead_code)]
-pub(crate) fn create_chunk_index() -> EraResult<Arc<dyn ChunkIndex>> {
-    create_chunk_index_with_context([0u8; 16], 0)
 }
 
 pub(crate) fn create_chunk_index_with_context(

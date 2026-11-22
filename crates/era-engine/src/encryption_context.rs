@@ -153,34 +153,28 @@ impl EncryptionContext {
     }
 
     /// Get a reference to the key session.
-    #[allow(dead_code)]
     pub fn session(&self) -> &KeySession {
         &self.session
     }
 
     /// Get a reference to the volume key.
-    #[allow(dead_code)]
     pub fn volume_key(&self) -> &VolumeKey {
         &self.volume_key
     }
 
     /// Get the nonce context.
-    #[allow(dead_code)]
     pub fn nonce_context(&self) -> [u8; 16] {
         self.nonce_context
     }
 
-    #[allow(dead_code)]
     pub fn archive_id(&self) -> [u8; 16] {
         self.archive_id
     }
 
-    #[allow(dead_code)]
     pub fn epoch_id(&self) -> u32 {
         self.epoch_id
     }
 
-    #[allow(dead_code)]
     pub fn set_volume_index(&mut self, volume_index: u32) {
         self.volume_index = volume_index;
     }

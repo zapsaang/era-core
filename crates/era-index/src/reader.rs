@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use bloomfilter::Bloom;
 
-#[allow(unused_imports)] // Used in tests
 use super::{IndexEntry, IndexPage, MetaIndex};
 use era_common::{BlockId, BlockLocation, BlockType, ChunkHash, EraError, Result, VolumeId};
 use era_crypto::{KeySession, VolumeKey};
