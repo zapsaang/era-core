@@ -194,19 +194,53 @@ impl From<ErasureBlockInfo> for proto::ErasureBlockInfo {
 impl TryFrom<proto::ErasureBlockInfo> for ErasureBlockInfo {
     type Error = crate::EraError;
     fn try_from(proto: proto::ErasureBlockInfo) -> Result<Self, Self::Error> {
+        const MAX_ERASURE_TOTAL_SHARDS: usize = 255;
+        const MAX_SHARD_SIZE_BYTES: u32 = 16 * 1024 * 1024;
+
+        let data_shards = u8::try_from(proto.data_shards).map_err(|_| {
+            crate::EraError::Deserialization(format!(
+                "ErasureBlockInfo data_shards {} exceeds u8 range",
+                proto.data_shards
+            ))
+        })?;
+        let parity_shards = u8::try_from(proto.parity_shards).map_err(|_| {
+            crate::EraError::Deserialization(format!(
+                "ErasureBlockInfo parity_shards {} exceeds u8 range",
+                proto.parity_shards
+            ))
+        })?;
+        if data_shards == 0 {
+            return Err(crate::EraError::Deserialization(
+                "ErasureBlockInfo data_shards must be at least 1".to_string(),
+            ));
+        }
+        if parity_shards == 0 {
+            return Err(crate::EraError::Deserialization(
+                "ErasureBlockInfo parity_shards must be at least 1".to_string(),
+            ));
+        }
+        let total_shards = usize::from(data_shards) + usize::from(parity_shards);
+        if total_shards > MAX_ERASURE_TOTAL_SHARDS {
+            return Err(crate::EraError::Deserialization(format!(
+                "ErasureBlockInfo total shards ({total_shards}) exceeds maximum {MAX_ERASURE_TOTAL_SHARDS}"
+            )));
+        }
+        if proto.shard_size == 0 || proto.shard_size > MAX_SHARD_SIZE_BYTES {
+            return Err(crate::EraError::Deserialization(format!(
+                "ErasureBlockInfo shard_size {} is out of bounds [1..={MAX_SHARD_SIZE_BYTES}]",
+                proto.shard_size
+            )));
+        }
+        let max_original_len = u64::from(proto.shard_size) * u64::from(data_shards);
+        if u64::from(proto.original_len) > max_original_len {
+            return Err(crate::EraError::Deserialization(format!(
+                "ErasureBlockInfo original_len {} exceeds shard_size * data_shards ({max_original_len})",
+                proto.original_len
+            )));
+        }
         Ok(Self {
-            data_shards: u8::try_from(proto.data_shards).map_err(|_| {
-                crate::EraError::Deserialization(format!(
-                    "ErasureBlockInfo data_shards {} exceeds u8 range",
-                    proto.data_shards
-                ))
-            })?,
-            parity_shards: u8::try_from(proto.parity_shards).map_err(|_| {
-                crate::EraError::Deserialization(format!(
-                    "ErasureBlockInfo parity_shards {} exceeds u8 range",
-                    proto.parity_shards
-                ))
-            })?,
+            data_shards,
+            parity_shards,
             shard_size: proto.shard_size,
             original_len: proto.original_len,
         })
@@ -342,16 +376,24 @@ impl From<BlockChunkIndex> for proto::BlockChunkIndex {
 impl TryFrom<proto::BlockChunkIndex> for BlockChunkIndex {
     type Error = crate::EraError;
     fn try_from(proto: proto::BlockChunkIndex) -> Result<Self, Self::Error> {
-        let entries: Result<Vec<_>, _> = proto.entries.into_iter().map(|e| e.try_into()).collect();
-        Ok(Self {
-            count: u16::try_from(proto.count).map_err(|_| {
-                crate::EraError::Deserialization(format!(
-                    "BlockChunkIndex count {} exceeds u16 range",
-                    proto.count
-                ))
-            })?,
-            entries: entries?,
-        })
+        let count = u16::try_from(proto.count).map_err(|_| {
+            crate::EraError::Deserialization(format!(
+                "BlockChunkIndex count {} exceeds u16 range",
+                proto.count
+            ))
+        })?;
+        let entries: Vec<_> = proto
+            .entries
+            .into_iter()
+            .map(|e| e.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
+        if usize::from(count) != entries.len() {
+            return Err(crate::EraError::Deserialization(format!(
+                "BlockChunkIndex count ({count}) does not match entries length ({})",
+                entries.len()
+            )));
+        }
+        Ok(Self { count, entries })
     }
 }
 
@@ -460,5 +502,105 @@ impl From<proto::PackingConfig> for PackingConfig {
             k_factor: proto.k_factor as usize,
             flush_threshold: proto.flush_threshold as usize,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_chunk_index_rejects_count_entry_length_mismatch() {
+        let entry = proto::ChunkIndexEntry {
+            hash: vec![0xAA; 32],
+            offset: 0,
+            length: 128,
+        };
+        let mismatched = proto::BlockChunkIndex {
+            count: 2,
+            entries: vec![entry.clone()],
+        };
+        let err = BlockChunkIndex::try_from(mismatched)
+            .expect_err("count != entries.len() must be rejected");
+        assert!(
+            matches!(err, crate::EraError::Deserialization(_)),
+            "{err:?}"
+        );
+
+        let matched = proto::BlockChunkIndex {
+            count: 1,
+            entries: vec![entry],
+        };
+        let parsed = BlockChunkIndex::try_from(matched).unwrap();
+        assert_eq!(parsed.count, 1);
+        assert_eq!(parsed.entries.len(), 1);
+    }
+
+    #[test]
+    fn erasure_block_info_rejects_zero_shards_excess_total_or_invalid_lengths() {
+        let invalid_cases = [
+            // zero data shards
+            proto::ErasureBlockInfo {
+                data_shards: 0,
+                parity_shards: 2,
+                shard_size: 1024,
+                original_len: 1024,
+            },
+            // zero parity shards
+            proto::ErasureBlockInfo {
+                data_shards: 4,
+                parity_shards: 0,
+                shard_size: 1024,
+                original_len: 1024,
+            },
+            // total shards > 255
+            proto::ErasureBlockInfo {
+                data_shards: 200,
+                parity_shards: 56,
+                shard_size: 1024,
+                original_len: 1024,
+            },
+            // zero shard size
+            proto::ErasureBlockInfo {
+                data_shards: 4,
+                parity_shards: 2,
+                shard_size: 0,
+                original_len: 0,
+            },
+            // shard size > 16 MiB
+            proto::ErasureBlockInfo {
+                data_shards: 4,
+                parity_shards: 2,
+                shard_size: 16 * 1024 * 1024 + 1,
+                original_len: 1024,
+            },
+            // original_len > shard_size * data_shards
+            proto::ErasureBlockInfo {
+                data_shards: 4,
+                parity_shards: 2,
+                shard_size: 1024,
+                original_len: 4097,
+            },
+        ];
+
+        for case in invalid_cases {
+            let err = ErasureBlockInfo::try_from(case).expect_err(&format!(
+                "invalid ErasureBlockInfo must be rejected: {case:?}"
+            ));
+            assert!(
+                matches!(err, crate::EraError::Deserialization(_)),
+                "{err:?}"
+            );
+        }
+
+        let valid = proto::ErasureBlockInfo {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size: 1024,
+            original_len: 4096,
+        };
+        let parsed = ErasureBlockInfo::try_from(valid).unwrap();
+        assert_eq!(parsed.data_shards, 4);
+        assert_eq!(parsed.parity_shards, 2);
     }
 }

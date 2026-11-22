@@ -387,10 +387,20 @@ pub fn check_security_features() -> SecurityReport {
     }
 }
 
+#[cfg(test)]
+static MLOCK_PROBE_UNLOCKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn check_mlock_available() -> bool {
-    // Quick test: try to mlock a small buffer
+    // Quick test: try to mlock a small buffer and release it immediately.
     let test_buf = [0u8; 16];
-    mlock(test_buf.as_ptr(), 16).is_ok()
+    if mlock(test_buf.as_ptr(), 16).is_ok() {
+        let _ = munlock(test_buf.as_ptr(), 16);
+        #[cfg(test)]
+        MLOCK_PROBE_UNLOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -460,5 +470,18 @@ mod tests {
         let report = check_security_features();
         assert_eq!(report.platform, std::env::consts::OS);
         assert!(!report.zeroize_alloc_enabled);
+    }
+
+    #[test]
+    fn check_mlock_available_unlocks_probe_buffer_when_supported() {
+        let before = MLOCK_PROBE_UNLOCKS.load(std::sync::atomic::Ordering::SeqCst);
+        let available = check_mlock_available();
+        let after = MLOCK_PROBE_UNLOCKS.load(std::sync::atomic::Ordering::SeqCst);
+        if available {
+            assert!(
+                after > before,
+                "check_mlock_available must munlock the probe buffer when mlock succeeds"
+            );
+        }
     }
 }
