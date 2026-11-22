@@ -9,9 +9,9 @@ Physical volume format v8.2 and multi-volume management. L2.
 | `lib.rs` | 92 | Crate facade. Public constants (`MAX_SHARD_SIZE`, `HEADER_SIZE`, `FOOTER_SIZE`), module declarations, and re-exports. |
 | `header.rs` | 1231 | SuperHeader (4096B, magic `ERA\x08\x02`), dynamic multi-recipient envelope (`recipients: Vec<RecipientSlot>`), `AccessPolicy`, `EncryptedVolumeKey`, `KeyWrapAlgorithm` |
 | `footer.rs` | 990 | Fixed 128B footer, `FOOTER_MAGIC`, Blake3 checksum, block count, index location |
-| `volume_pool.rs` | 1559 | `VolumePool` — rotation state machine, matrix shard distribution, per-volume space tracking |
-| `writer.rs` | 918 | `VolumeWriter` — async volume writes, padding |
-| `reader.rs` | 700 | `VolumeReader` — async reads, length validation against `MAX_SHARD_SIZE`, scan termination via `MAX_CONSECUTIVE_SCAN_MISSES` |
+| `volume_pool.rs` | 2433 | `VolumePool` — rotation state machine, matrix shard distribution, per-volume space tracking |
+| `writer.rs` | 1431 | `VolumeWriter` — async volume writes, disk-spooled append staging, sync barriers |
+| `reader.rs` | 773 | `VolumeReader` — async reads, length validation against `MAX_SHARD_SIZE`, scan termination via `MAX_CONSECUTIVE_SCAN_MISSES` |
 | `multi_volume.rs` | 671 | `MultiVolumeReader`, `MultiVolumeWriter` — multi-disk coordination |
 | `distribution.rs` | 325 | Matrix distribution calculation helpers (`canonical_erasure_volume_count`, strategy canonicalization) |
 

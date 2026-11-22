@@ -8,7 +8,7 @@ An encrypted archival storage engine written in Rust, featuring 3-layer envelope
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: 2026-11-22 (working tree on `b22a07e` + audit revisions) — `cargo test --release --workspace` under `ulimit -n 1024`: 2974 passed, 0 failed, 17 ignored (171 suites/doc-tests).
+**Last Verified**: 2026-11-22 (frozen code tree `feat_fly @ c12c976`) — `cargo test --release --locked --workspace` under `ulimit -n 1024`: 2989 passed, 0 failed, 17 ignored (172 suites/doc-tests).
 
 ## Features
 
@@ -356,23 +356,23 @@ Password recipient slots derive their wrapping key with Argon2id and AEAD-wrap t
 
 ### Security Audits
 
-ERA Core has undergone multiple rounds of adversarial security auditing (279+ test cases across historical and V5 suites) plus a V2.1 index persistence audit (30 tests).
+ERA Core has undergone multiple rounds of adversarial security auditing (316 test cases across historical and V5 suites in `era-engine` / `era-index`, plus workspace-wide audit waves).
 
-**Authoritative Audit Report:** [ADVERSARIAL_AUDIT_V5_REPORT.md](doc_gen/AUDIT_REPORT_era-engine/ADVERSARIAL_AUDIT_V5_REPORT.md)
+**Authoritative Audit Report:** [final-audit-and-remediation-2026-11-22.md](docs/final-audit-and-remediation-2026-11-22.md)
 
 | Audit | Tests | Focus Areas |
 |-------|-------|-------------|
 | `competitor_audit` | 44 | Core crypto, key management, nonce safety, AEAD correctness |
-| `second_audit` | 42 | Key wrapping, secret sharing, multi-party access control |
+| `second_audit` | 44 | Key wrapping, secret sharing, multi-party access control |
 | `third_audit` | 43 | Memory zeroization, source-level security patterns, TryFrom bounds |
 | `fourth_audit` | 46 | Context-bound AAD, path traversal, allocation limits, VK wrapping resilience |
-| `adversarial_audit_v5` | 22 | State machine integrity, resume provenance, path containment checks |
-| `adversarial_audit_v3` | 20 | V3 specific adversarial coverage (all fixed) |
+| `adversarial_audit_v5` | 26 | State machine integrity, resume provenance, path containment checks |
+| `adversarial_audit_v3` | 22 | V3 specific adversarial coverage (all fixed) |
 | `adversarial_audit_v9` | 9 | End-to-end adversarial scenarios: splicing, corruption |
 | `adversarial_audit_v2` | 53 | Skeptical baseline verification (all fixed) |
-| `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
+| `index_persistence_audit` | 29 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
 
-Workspace verification recorded 2974 passed, 0 failed, 17 ignored (2026-11-22, working tree on `b22a07e` + audit revisions). The independent two-round audit verdict, fixed findings, and residual accepted risks are recorded in `docs/final-audit-and-remediation-2026-11-22.md`. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
+Workspace verification recorded 2989 passed, 0 failed, 17 ignored (2026-11-22, frozen code tree `feat_fly @ c12c976` under `ulimit -n 1024`). The independent two-round audit verdict, fixed findings, and residual accepted risks are recorded in `docs/final-audit-and-remediation-2026-11-22.md`. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
 
 ## Development
 
@@ -387,26 +387,25 @@ cargo fmt --all -- --check
 # 2. Lint (warnings = errors; resolves from the tracked Cargo.lock)
 cargo clippy --locked --all-targets --all-features -- -D warnings
 
-# 3. Test suite (release; CI runs the CLI job and the workspace job)
-cargo test --release --locked -p era-cli && cargo test --release --locked --workspace
+# 3. Test suite (release; CI pins ulimit -n 1024 and runs the CLI job and the workspace job)
+bash -c 'ulimit -n 1024 && cargo test --release --locked -p era-cli && cargo test --release --locked --workspace'
 ```
 
-CI pins `ulimit -n 1024` on the Linux runners and gives every job a `timeout-minutes` bound, so a local run above matches CI's resource limits.
+CI pins `ulimit -n 1024` on the Linux runners and gives every job a `timeout-minutes` bound, so the `ulimit -n 1024` command above matches CI's resource limits.
 
 Run locally before committing:
 
 ```bash
 cargo fmt --all -- --check && \
 cargo clippy --locked --all-targets --all-features -- -D warnings && \
-cargo test --release --locked -p era-cli && \
-cargo test --release --locked --workspace
+bash -c 'ulimit -n 1024 && cargo test --release --locked -p era-cli && cargo test --release --locked --workspace'
 ```
 
 ### Testing
 
-2026-11-22 workspace verification recorded 2974 passed, 0 failed, 17 ignored across 10 crates, covering:
+2026-11-22 workspace verification recorded 2989 passed, 0 failed, 17 ignored across 10 crates, covering:
 
-- **279+ adversarial audit tests** across multiple security audit suites (historical and V5)
+- **316+ adversarial audit tests** across core security audit suites (historical and V5, plus workspace audit crates)
 - Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
 - Integration tests for archive create/extract roundtrips
 - V2.1 embedded index tests (Bloom filter, L1/L2 page construction, cold recovery)
@@ -536,9 +535,9 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 | Metric | Value |
 |--------|-------|
 | Language | Rust 100% |
-| Lines of Code | ~141,700 (53,200 `src` + 85,650 `tests` + benches/examples) |
-| Source Files | 272 `.rs` files (265 tracked at `b22a07e` + 7 audit regression files) |
-| Tests | `cargo test --release --workspace` under `ulimit -n 1024` (2026-11-22, working tree on `b22a07e` + audit revisions): 2974 passed, 0 failed, 17 ignored (171 suites/doc-tests) |
+| Lines of Code | 147,587 (55,425 `src` + 89,289 `tests` + 2,873 benches/examples) |
+| Source Files | 273 `.rs` files |
+| Tests | `cargo test --release --locked --workspace` under `ulimit -n 1024` (2026-11-22, `feat_fly @ c12c976`): 2989 passed, 0 failed, 17 ignored (172 suites/doc-tests) |
 | Security Audit Tests | 350+ across multiple suites |
 | Fuzz Targets | Planned (fuzz workspace not yet in repo) |
 | Crates | 9 library + 1 binary |

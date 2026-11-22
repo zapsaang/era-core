@@ -1,10 +1,10 @@
 # ERA-CORE KNOWLEDGE BASE
 
 **Generated:** 2026-11-22
-**Commit:** b22a07e (+ 2026-11-22 audit revisions in working tree)
+**Commit:** c12c976
 **Branch:** feat_fly
 
-Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing. ~145.9k LOC (~54.3k src), 272 .rs files, 10 workspace members.
+Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing. 147.6k LOC (55.4k src), 273 .rs files, 10 workspace members.
 
 ## STRUCTURE
 
@@ -38,21 +38,21 @@ L0: era-crypto, era-common
 
 ## CODE MAP
 
-Refs = production-source reference lines at the commit above: `git grep -w <symbol> b22a07e -- 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' 'bins/era-cli/src/*.rs' 'bins/era-cli/src/**/*.rs'` (separate tests/benches excluded).
+Refs = production-source reference lines at `c12c976`: `git grep -w <symbol> HEAD -- 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' 'bins/era-cli/src/*.rs' 'bins/era-cli/src/**/*.rs'` (separate tests/benches excluded).
 
 | Symbol | File | Refs | Role |
 |--------|------|-----:|------|
-| `EraError` | `crates/era-common/src/error.rs` | 1135 | workspace error enum (~49 variants), most cross-cut type |
-| `ChunkHash` | `crates/era-common/src/types/ids.rs` | 253 | BLAKE3 content address |
-| `KeySession` | `crates/era-crypto/src/key_session.rs` | 102 | MK/IK/VK envelope state |
-| `SuperHeader` | `crates/era-volume/src/header.rs` | 96 | on-disk header v8.2, dynamic `recipients: Vec<RecipientSlot>` |
-| `VolumeReader` | `crates/era-volume/src/reader.rs` | 82 | async volume read, MAX_SHARD_SIZE validation |
-| `Catalog` | `crates/era-ingest/src/entry.rs` | 143 | file inventory + chunk refs |
+| `EraError` | `crates/era-common/src/error.rs` | 1199 | workspace error enum (~49 variants), most cross-cut type |
+| `ChunkHash` | `crates/era-common/src/types/ids.rs` | 255 | BLAKE3 content address |
+| `KeySession` | `crates/era-crypto/src/key_session.rs` | 104 | MK/IK/VK envelope state |
+| `SuperHeader` | `crates/era-volume/src/header.rs` | 105 | on-disk header v8.2, dynamic `recipients: Vec<RecipientSlot>` |
+| `VolumeReader` | `crates/era-volume/src/reader.rs` | 91 | async volume read, MAX_SHARD_SIZE validation |
+| `Catalog` | `crates/era-ingest/src/entry.rs` | 147 | file inventory + chunk refs |
 | `ArchiveManifest` | `crates/era-common/src/types/manifest.rs` | 67 | v8.2 manifest: epochs, committed horizons |
-| `ArchiveWriter` | `crates/era-engine/src/writer.rs` | 67 | create pipeline orchestrator |
-| `VolumePool` | `crates/era-volume/src/volume_pool.rs` | 54 | volume rotation + matrix shard distribution |
-| `ArchiveReader` | `crates/era-engine/src/reader.rs` | 66 | extract pipeline orchestrator |
-| `StorageBackend` | `crates/era-storage/src/traits.rs` | 33 | async I/O abstraction (Local/Memory; S3 planned) |
+| `ArchiveWriter` | `crates/era-engine/src/writer.rs` | 68 | create pipeline orchestrator |
+| `VolumePool` | `crates/era-volume/src/volume_pool.rs` | 55 | volume rotation + matrix shard distribution |
+| `ArchiveReader` | `crates/era-engine/src/reader.rs` | 75 | extract pipeline orchestrator |
+| `StorageBackend` | `crates/era-storage/src/traits.rs` | 35 | async I/O abstraction (Local/Memory; S3 planned) |
 | `IndexReader` | `crates/era-index/src/reader.rs` | 26 | Bloom + L1/L2 lookup + cold recovery |
 
 ## ANTI-PATTERNS (enforced by audit suites + clippy `-D warnings`)
@@ -100,8 +100,8 @@ Refs = production-source reference lines at the commit above: `git grep -w <symb
 ## COMMANDS
 
 ```bash
-# Full CI check (matches ci.yml exactly — lint + BOTH test jobs)
-cargo fmt --all -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --release --locked -p era-cli && cargo test --release --locked --workspace
+# Full CI check (matches ci.yml exactly — lint + ulimit -n 1024 + BOTH test jobs)
+cargo fmt --all -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings && bash -c 'ulimit -n 1024 && cargo test --release --locked -p era-cli && cargo test --release --locked --workspace'
 
 # Per-crate / suite
 cargo test -p era-engine
