@@ -25,6 +25,15 @@ target/
 !CLAUDE.md
 !doc_gen/**/*.md
 !docs/*-2026-11-*.md
+# Audit evidence chain (audit H-02 partial mitigation): allow docs/audit/ to be
+# tracked. Limitation: this only works because repository .gitignore patterns
+# outrank the user-level global ignore of docs/; a global ignore that excludes a
+# parent directory cannot be re-included by a pattern for a child path, so in
+# some environments 'git add -f docs/audit/...' is still required.
+!docs/
+!docs/audit/
+!docs/audit/**
+!docs/**/*-2026-11-*.md
 *.bak
 
 fuzz/

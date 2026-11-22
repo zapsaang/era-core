@@ -44,9 +44,6 @@ const INTERNAL_META_PREFIX: &str = ".era/meta/";
 /// Maximum allowed file size declared in catalog (100 GB) - sanity check
 const MAX_DECLARED_FILE_SIZE: u64 = 100 * 1024 * 1024 * 1024;
 
-/// Maximum total decoded bytes accepted during one extraction pass (8 GB)
-const MAX_EXTRACTION_MEMORY: u64 = 8 * 1024 * 1024 * 1024;
-
 mod catalog_repair;
 pub(crate) use catalog_repair::CatalogRepair;
 
@@ -73,6 +70,20 @@ pub struct ExtractOptions {
     pub output_dir: PathBuf,
     /// Overwrite existing files
     pub overwrite: bool,
+    /// Optional cap on the total number of bytes written to disk by one extraction
+    /// pass.
+    ///
+    /// The budget is charged against the bytes actually written (the extraction stats
+    /// delta after each processed block), so deduplicated chunks that fan out to several
+    /// catalog entries are counted once per write and cannot amplify past the limit.
+    ///
+    /// `None` (the default) enforces no global cap: decompression-bomb protection is
+    /// applied per block (256 MiB decompressed payload limit in `era-codec`), per
+    /// shard/block (`MAX_SHARD_SIZE` in `era-volume`/`block_iter`) and per file
+    /// (`MAX_DECLARED_FILE_SIZE`). A global cap would make any archive whose deduplicated
+    /// plaintext exceeds the constant impossible to extract, so callers that process
+    /// untrusted input must opt in with an explicit budget.
+    pub max_total_output_bytes: Option<u64>,
 }
 
 impl ExtractOptions {
@@ -81,12 +92,23 @@ impl ExtractOptions {
         Self {
             output_dir: output_dir.into(),
             overwrite: false,
+            max_total_output_bytes: None,
         }
     }
 
     /// Set whether to overwrite existing files
     pub fn overwrite(mut self, overwrite: bool) -> Self {
         self.overwrite = overwrite;
+        self
+    }
+
+    /// Enforce a total output-write budget for this extraction pass.
+    ///
+    /// `None` disables the global budget (the default). When set, extraction fails with
+    /// [`EraError::Security`] as soon as the bytes actually written to disk exceed the
+    /// limit, and already-written files are removed.
+    pub fn max_total_output_bytes(mut self, max_total_output_bytes: Option<u64>) -> Self {
+        self.max_total_output_bytes = max_total_output_bytes;
         self
     }
 }
@@ -1370,12 +1392,9 @@ impl ArchiveReader {
         let mut any_volume_has_manifest = false;
 
         for i in 0..self.volume_readers.len() {
-            let reader = &self.volume_readers[i];
-            let footer = match reader.footer() {
-                Some(f) => f,
-                None => continue,
+            let Some(footer) = self.volume_readers[i].footer().cloned() else {
+                continue;
             };
-
             if !footer.has_manifest() {
                 continue;
             }
@@ -1383,8 +1402,8 @@ impl ArchiveReader {
 
             let manifest_offset = footer.manifest_offset();
             let manifest_block_id = footer.manifest_block_id();
-            let volume_id = reader.header().volume_id();
-            let volume_sequence = reader.header().volume_sequence();
+            let volume_id = self.volume_readers[i].header().volume_id();
+            let volume_sequence = self.volume_readers[i].header().volume_sequence();
 
             let manifest_location =
                 BlockLocation::single(volume_id, manifest_block_id, manifest_offset, 0);
@@ -1445,21 +1464,42 @@ impl ArchiveReader {
                     continue;
                 }
             };
-            let aad = build_aad(
-                &self.archive_id,
-                self.epoch_id,
-                BlockType::Manifest,
-                u32::from(volume_sequence),
-                BlockId::new(manifest_block_id as u64),
-            );
+            let decrypted = self
+                .decrypt_manifest_block(
+                    i,
+                    &aead_ctx,
+                    &nonce_bytes,
+                    ciphertext,
+                    manifest_block_id,
+                    (self.archive_id, self.epoch_id, volume_sequence),
+                )
+                .await;
+            let (decrypted, (aad_archive_id, aad_epoch_id, aad_volume_sequence), adopted_backup) =
+                match decrypted {
+                    Ok(value) => value,
+                    Err(e) => {
+                        warn!("Failed to decrypt manifest: {}", e);
+                        continue;
+                    }
+                };
 
-            let decrypted = match aead_ctx.decrypt(&nonce_bytes, &aad, ciphertext) {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!("Failed to decrypt manifest: {}", e);
-                    continue;
-                }
-            };
+            // R2-08: the AAD fields that opened the manifest ciphertext are
+            // authenticated, so they are authoritative for the archive identity even
+            // when the volume header itself was tampered.
+            if aad_archive_id != self.archive_id || aad_epoch_id != self.epoch_id {
+                warn!(
+                    "Volume {aad_volume_sequence}: manifest AEAD authenticated header AAD fields that differ from the active volume-0 header; using the authenticated values (volume header requires repair)"
+                );
+                self.archive_id = aad_archive_id;
+                self.epoch_id = aad_epoch_id;
+            }
+            if let Some(backup_header) = adopted_backup {
+                warn!(
+                    "Volume {aad_volume_sequence}: manifest authentication required the reserved backup header AAD fields; using the backup header (primary header requires repair)"
+                );
+                self.volume_readers[i].adopt_authenticated_backup_header(backup_header);
+            }
+            let volume_sequence = aad_volume_sequence;
 
             let (manifest, digests) =
                 match ArchiveManifest::from_bytes_with_header_digests(&decrypted) {
@@ -1520,6 +1560,13 @@ impl ArchiveReader {
             }
             self.verify_recovered_backup_headers(&best_header_digests, &best_local_header_digests)
                 .await?;
+            if !best_header_digests.is_empty() {
+                self.verify_active_primary_headers(
+                    &best_header_digests,
+                    &best_local_header_digests,
+                )
+                .await?;
+            }
             let finalize_sequence = manifest.finalize_sequence;
             let volume_committed_ends = manifest.volume_committed_ends.clone();
             self.volume_committed_ends = Some(volume_committed_ends.clone());
@@ -1539,6 +1586,88 @@ impl ArchiveReader {
         }
 
         Ok(())
+    }
+
+    /// R2-08: decrypt the local manifest block, retrying once with the reserved backup
+    /// header's AAD fields when the active header was tampered in a field bound into the
+    /// manifest AAD (archive_id/epoch_id/volume_sequence).
+    ///
+    /// The manifest block AEAD authenticates its AAD, so a successful retry proves that
+    /// the backup header carries the authentic archive identity. The caller adopts that
+    /// header and the manifest digest table then authenticates its bytes.
+    async fn decrypt_manifest_block(
+        &self,
+        reader_idx: usize,
+        aead_ctx: &XChaCha20Poly1305Context,
+        nonce: &[u8; NONCE_SIZE],
+        ciphertext: &[u8],
+        manifest_block_id: u32,
+        active_aad: ([u8; 16], u32, u16),
+    ) -> Result<(Vec<u8>, ([u8; 16], u32, u16), Option<SuperHeader>)> {
+        let make_aad = |archive_id: &[u8; 16], epoch_id: u32, sequence: u16| {
+            build_aad(
+                archive_id,
+                epoch_id,
+                BlockType::Manifest,
+                u32::from(sequence),
+                BlockId::new(u64::from(manifest_block_id)),
+            )
+        };
+        let (active_archive_id, active_epoch_id, active_sequence) = active_aad;
+        let active_aad_bytes = make_aad(&active_archive_id, active_epoch_id, active_sequence);
+        if let Ok(plaintext) = aead_ctx.decrypt(nonce, &active_aad_bytes, ciphertext) {
+            return Ok((plaintext, active_aad, None));
+        }
+
+        let Some((backup_header, _)) = self.manifest_backup_header_candidate(reader_idx).await
+        else {
+            return Err(EraError::IntegrityError(format!(
+                "Volume {active_sequence} manifest block failed to decrypt and no parseable backup header is available"
+            )));
+        };
+        let backup_archive_id = *backup_header.archive_id().0.as_bytes();
+        let backup_epoch_id = backup_header.epoch_id();
+        let backup_sequence = backup_header.volume_sequence();
+        let backup_aad = make_aad(&backup_archive_id, backup_epoch_id, backup_sequence);
+        if let Ok(plaintext) = aead_ctx.decrypt(nonce, &backup_aad, ciphertext) {
+            return Ok((
+                plaintext,
+                (backup_archive_id, backup_epoch_id, backup_sequence),
+                Some(backup_header),
+            ));
+        }
+        Err(EraError::IntegrityError(format!(
+            "Volume {active_sequence} manifest block failed to decrypt with both the active and the reserved backup header AAD"
+        )))
+    }
+
+    /// Return the reserved backup header when its on-disk bytes differ from the active
+    /// primary header and it parses. Used to retry manifest decryption (R2-08).
+    async fn manifest_backup_header_candidate(
+        &self,
+        reader_idx: usize,
+    ) -> Option<(SuperHeader, Bytes)> {
+        let reader = self.volume_readers.get(reader_idx)?;
+        let footer = reader.footer()?;
+        let backup_offset = footer.backup_header_offset();
+        if backup_offset < era_volume::DATA_REGION_START
+            || backup_offset.checked_add(era_volume::HEADER_SIZE as u64)? > reader.size()
+        {
+            return None;
+        }
+        let primary_bytes = reader.read_raw(0, era_volume::HEADER_SIZE).await.ok()?;
+        if primary_bytes.len() != era_volume::HEADER_SIZE {
+            return None;
+        }
+        let backup_bytes = reader
+            .read_raw(backup_offset, era_volume::HEADER_SIZE)
+            .await
+            .ok()?;
+        if backup_bytes.len() != era_volume::HEADER_SIZE || backup_bytes == primary_bytes {
+            return None;
+        }
+        let backup_header = SuperHeader::from_bytes(&backup_bytes).ok()?;
+        Some((backup_header, backup_bytes))
     }
 
     async fn verify_recovered_backup_headers(
@@ -2295,56 +2424,46 @@ impl ArchiveReader {
             match result {
                 Ok(decoded) => {
                     consecutive_failures = 0;
-                    let block_bytes = decoded
-                        .chunks
-                        .iter()
-                        .try_fold(0u64, |acc, (_, chunk_data)| {
-                            acc.checked_add(chunk_data.len() as u64)
-                        });
+                    // R2-03/R2-04: charge the global output budget against bytes actually
+                    // written to disk, not the decoded block payload. process_chunks fans a
+                    // single deduplicated chunk out to every catalog entry that references it,
+                    // so counting decoded bytes would let a crafted catalog amplify disk writes
+                    // far past the configured budget. The increment of stats.bytes_written
+                    // captures the real write volume, including dedup/fan-out.
+                    let bytes_written_before_block = stats.bytes_written;
+                    if let Err(err) = context.process_chunks(decoded.chunks, &mut stats) {
+                        return Self::fail_extraction_with_context(err, &mut context).await;
+                    }
 
-                    let block_bytes = match block_bytes {
-                        Some(v) => v,
-                        None => {
-                            return Self::fail_extraction_with_context(
-                                EraError::Security(
-                                    "Extraction memory budget exceeded: possible decompression bomb"
-                                        .to_string(),
-                                ),
-                                &mut context,
-                            )
-                            .await;
-                        }
-                    };
-
-                    cumulative_bytes_extracted = match cumulative_bytes_extracted
-                        .checked_add(block_bytes)
-                    {
-                        Some(v) => v,
-                        None => {
-                            return Self::fail_extraction_with_context(
+                    if let Some(budget) = options.max_total_output_bytes {
+                        let block_bytes = stats
+                            .bytes_written
+                            .saturating_sub(bytes_written_before_block);
+                        cumulative_bytes_extracted = match cumulative_bytes_extracted
+                            .checked_add(block_bytes)
+                        {
+                            Some(v) => v,
+                            None => {
+                                return Self::fail_extraction_with_context(
                                     EraError::Security(
-                                        "Extraction memory budget exceeded: possible decompression bomb"
+                                        "Extraction output size overflow: possible decompression bomb"
                                             .to_string(),
                                     ),
                                     &mut context,
                                 )
                                 .await;
+                            }
+                        };
+
+                        if cumulative_bytes_extracted > budget {
+                            return Self::fail_extraction_with_context(
+                                EraError::Security(format!(
+                                    "Extraction output budget exceeded: wrote {cumulative_bytes_extracted} bytes to disk in one pass, configured limit is {budget} bytes (possible decompression bomb, deduplicated fan-out, or oversized archive)"
+                                )),
+                                &mut context,
+                            )
+                            .await;
                         }
-                    };
-
-                    if cumulative_bytes_extracted > MAX_EXTRACTION_MEMORY {
-                        return Self::fail_extraction_with_context(
-                            EraError::Security(
-                                "Extraction memory budget exceeded: possible decompression bomb"
-                                    .to_string(),
-                            ),
-                            &mut context,
-                        )
-                        .await;
-                    }
-
-                    if let Err(err) = context.process_chunks(decoded.chunks, &mut stats) {
-                        return Self::fail_extraction_with_context(err, &mut context).await;
                     }
                 }
                 Err(e) => {
@@ -2764,6 +2883,7 @@ impl ArchiveReader {
                 ));
             }
         }
+        self.verify_redundant_footers(&mut stats).await;
         self.verify_backup_headers(&mut stats).await;
         let mut damaged_primary_catalogs = Vec::new();
         for (reader_idx, reader) in self.volume_readers.iter().enumerate() {
@@ -2813,6 +2933,153 @@ impl ArchiveReader {
         stats.archive_health = self.classify_archive_health(&stats);
         self.log_verify_result(&stats);
         Ok(stats)
+    }
+
+    /// Authenticate the *active* (primary) header of every volume against the
+    /// manifest header-digest table.
+    ///
+    /// LL-04: the SuperHeader carries the archive `config` (compression, erasure,
+    /// distribution) and the encrypted volume key, but block AEAD AAD does not cover
+    /// the header bytes. The manifest's authenticated `volume_header_digests` table is
+    /// the only commitment binding the on-disk header to the archive state. Volumes
+    /// recovered from the backup header are authenticated by
+    /// [`Self::verify_recovered_backup_headers`]; every remaining volume must have its
+    /// primary header match the authenticated digest.
+    async fn verify_active_primary_headers(
+        &mut self,
+        header_digests: &[[u8; 32]],
+        local_header_digests: &HashMap<u16, [u8; 32]>,
+    ) -> Result<()> {
+        for idx in 0..self.volume_readers.len() {
+            if self.volume_readers[idx].header_recovered_from_backup() {
+                continue;
+            }
+            let seq = self.volume_readers[idx].header().volume_sequence();
+            let expected_digest = header_digests
+                .get(usize::from(seq))
+                .or_else(|| local_header_digests.get(&seq))
+                .ok_or_else(|| {
+                    EraError::IntegrityError(format!(
+                        "Volume {seq} primary header is missing from the authenticated manifest header digest table"
+                    ))
+                })?;
+            let primary_bytes = self.volume_readers[idx]
+                .read_raw(0, era_volume::HEADER_SIZE)
+                .await?;
+            if primary_bytes.len() == era_volume::HEADER_SIZE
+                && blake3::hash(&primary_bytes).as_bytes() == expected_digest
+            {
+                continue;
+            }
+
+            // The primary header parsed but its bytes are not the ones committed to in
+            // the authenticated manifest (bit rot in the header, including regions the
+            // parser treats as padding). Recover by adopting the reserved backup header
+            // ONLY when it matches the same authenticated digest, so a corrupted archive
+            // becomes degraded-and-repairable instead of unopenable. If the backup does
+            // not authenticate either, fail closed: no trusted header provenance exists.
+            let backup_offset = self.volume_readers[idx]
+                .footer()
+                .map(|footer| footer.backup_header_offset())
+                .filter(|offset| *offset >= era_volume::DATA_REGION_START);
+            let mut adopted = false;
+            if let Some(offset) = backup_offset {
+                if let Ok(backup_bytes) = self.volume_readers[idx]
+                    .read_raw(offset, era_volume::HEADER_SIZE)
+                    .await
+                {
+                    if backup_bytes.len() == era_volume::HEADER_SIZE
+                        && blake3::hash(&backup_bytes).as_bytes() == expected_digest
+                    {
+                        let backup_header = era_volume::SuperHeader::from_bytes(&backup_bytes)
+                            .map_err(|error| {
+                                EraError::IntegrityError(format!(
+                                    "Volume {seq} authenticated backup header cannot be parsed: {error}"
+                                ))
+                            })?;
+                        if backup_header.volume_sequence() == seq {
+                            warn!(
+                                "Volume {seq}: primary header does not match the authenticated manifest digest; using the authenticated backup header (primary header requires repair)"
+                            );
+                            self.volume_readers[idx]
+                                .adopt_authenticated_backup_header(backup_header);
+                            adopted = true;
+                        }
+                    }
+                }
+            }
+            if !adopted {
+                return Err(EraError::IntegrityError(format!(
+                    "Volume {seq} primary header bytes do not match the authenticated manifest header digest and no authenticated backup header is available"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify that both on-disk footer copies are present, parseable and identical.
+    ///
+    /// A volume stores its footer twice: at the end of the file and in the reserved
+    /// gap at offset [`era_volume::HEADER_SIZE`]. `VolumeReader::open` silently falls
+    /// back to the reserved copy, so without this check a damaged primary footer or a
+    /// bit-rotted backup footer would never surface in `verify()`.
+    async fn verify_redundant_footers(&self, stats: &mut VerifyStats) {
+        for reader in &self.volume_readers {
+            // Erasure-coded volumes may legitimately have no footer at all.
+            if reader.footer().is_none() {
+                continue;
+            }
+            let seq = reader.header().volume_sequence();
+            let size = reader.size();
+            let primary = Self::read_footer_bytes(
+                reader,
+                size.saturating_sub(era_volume::FOOTER_SIZE as u64),
+            )
+            .await;
+            let backup = Self::read_footer_bytes(reader, era_volume::HEADER_SIZE as u64).await;
+            let backup_ok = backup.is_some();
+
+            if reader.footer_recovered_from_backup() || primary.is_none() {
+                stats.warnings.push(format!(
+                    "Volume {seq}: using backup footer; primary footer still requires repair"
+                ));
+                if !backup_ok {
+                    stats.warnings.push(format!(
+                        "Volume {seq}: both footer copies are damaged; footer redundancy requires repair"
+                    ));
+                }
+                continue;
+            }
+
+            match (primary, backup) {
+                (Some(primary_bytes), Some(backup_bytes)) if primary_bytes != backup_bytes => {
+                    stats.warnings.push(format!(
+                        "Volume {seq}: backup footer does not match the primary footer; backup footer requires repair"
+                    ));
+                }
+                (Some(_), None) => {
+                    stats.warnings.push(format!(
+                        "Volume {seq}: backup footer damaged or unreadable; backup footer requires repair"
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Read and parse one footer copy; `None` means missing, truncated or corrupt.
+    async fn read_footer_bytes(
+        reader: &VolumeReader<era_storage::LocalStorageReader>,
+        offset: u64,
+    ) -> Option<Bytes> {
+        let bytes = reader
+            .read_raw(offset, era_volume::FOOTER_SIZE)
+            .await
+            .ok()?;
+        if bytes.len() != era_volume::FOOTER_SIZE || Footer::from_bytes(&bytes).is_err() {
+            return None;
+        }
+        Some(bytes)
     }
 
     async fn verify_backup_headers(&self, stats: &mut VerifyStats) {
@@ -3712,6 +3979,145 @@ mod tests {
         assert_eq!(stats.extracted, 1);
         assert_eq!(stats.bytes_written, u64::try_from(expected.len()).unwrap());
         assert_eq!(fs::read(output_path).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_extract_with_iterator_default_has_no_global_output_cap() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("extracted");
+        let output_path = output_dir.join("partial.txt");
+        let first = Bytes::from(vec![0x11u8; 1024 * 1024]);
+        let second = Bytes::from(vec![0x22u8; 1024 * 1024]);
+        let catalog = two_chunk_catalog(&first, &second);
+        let options = ExtractOptions::new(&output_dir);
+        assert!(
+            options.max_total_output_bytes.is_none(),
+            "default extraction options must not install a hidden global byte cap"
+        );
+        let mut iter = injected_iterator(vec![
+            Ok(decoded_block(0, &first)),
+            Ok(decoded_block(1, &second)),
+        ]);
+
+        let stats = ArchiveReader::extract_with_iterator(&catalog, &mut iter, &options)
+            .await
+            .expect("default extraction must not enforce a global output cap");
+
+        let expected = [first.as_ref(), second.as_ref()].concat();
+        assert_eq!(stats.extracted, 1);
+        assert_eq!(stats.bytes_written, u64::try_from(expected.len()).unwrap());
+        assert_eq!(fs::read(output_path).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_extract_with_iterator_explicit_output_budget_fails_and_cleans_up() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("extracted");
+        let output_path = output_dir.join("partial.txt");
+        let first = Bytes::from(vec![0x33u8; 700 * 1024]);
+        let second = Bytes::from(vec![0x44u8; 700 * 1024]);
+        let catalog = two_chunk_catalog(&first, &second);
+        let options = ExtractOptions::new(&output_dir).max_total_output_bytes(Some(1024 * 1024));
+        let mut iter = injected_iterator(vec![
+            Ok(decoded_block(0, &first)),
+            Ok(decoded_block(1, &second)),
+        ]);
+
+        let err = ArchiveReader::extract_with_iterator(&catalog, &mut iter, &options)
+            .await
+            .expect_err("explicit output budget must abort extraction");
+
+        match err {
+            EraError::Security(message) => {
+                assert!(message.contains("budget"), "unexpected message: {message}");
+                assert!(message.contains("limit"), "unexpected message: {message}");
+            }
+            other => panic!("expected Security error, got {other:?}"),
+        }
+        assert!(
+            !output_path.exists(),
+            "partial output must be removed when the output budget is exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_with_iterator_explicit_output_budget_allows_whole_archive() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("extracted");
+        let output_path = output_dir.join("partial.txt");
+        let first = Bytes::from(vec![0x55u8; 700 * 1024]);
+        let second = Bytes::from(vec![0x66u8; 700 * 1024]);
+        let catalog = two_chunk_catalog(&first, &second);
+        let total = u64::try_from(first.len() + second.len()).unwrap();
+        let options = ExtractOptions::new(&output_dir).max_total_output_bytes(Some(total));
+        let mut iter = injected_iterator(vec![
+            Ok(decoded_block(0, &first)),
+            Ok(decoded_block(1, &second)),
+        ]);
+
+        let stats = ArchiveReader::extract_with_iterator(&catalog, &mut iter, &options)
+            .await
+            .expect("budget equal to the decoded size must allow extraction");
+
+        let expected = [first.as_ref(), second.as_ref()].concat();
+        assert_eq!(stats.bytes_written, total);
+        assert_eq!(fs::read(output_path).unwrap(), expected);
+    }
+
+    fn dedup_two_file_catalog(chunk: &Bytes) -> Catalog {
+        let length = u32::try_from(chunk.len()).unwrap();
+        let mut catalog = Catalog::new();
+        for name in ["dedup-a.bin", "dedup-b.bin"] {
+            catalog.add(
+                FileEntry::file(PathBuf::from(name), u64::from(length))
+                    .with_chunks(vec![ChunkRef::new(era_crypto::hash(chunk), 0, length)]),
+            );
+        }
+        catalog
+    }
+
+    #[tokio::test]
+    async fn test_extract_output_budget_charges_actual_fanout_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("extracted");
+        let chunk = Bytes::from(vec![0x77u8; 256 * 1024]);
+        let catalog = dedup_two_file_catalog(&chunk);
+        let decoded_bytes = u64::try_from(chunk.len()).unwrap();
+        let written_bytes = decoded_bytes * 2;
+
+        // R2-03: the budget must bound bytes actually written to disk. The decoded
+        // block holds the chunk once, but both catalog entries reference it, so a
+        // budget between one and two copies must fail instead of being bypassed.
+        let options =
+            ExtractOptions::new(&output_dir).max_total_output_bytes(Some(decoded_bytes + 1));
+        let mut iter = injected_iterator(vec![Ok(decoded_block(0, &chunk))]);
+        let err = ArchiveReader::extract_with_iterator(&catalog, &mut iter, &options)
+            .await
+            .expect_err("budget must be charged against bytes actually written to disk");
+        match err {
+            EraError::Security(message) => {
+                assert!(message.contains("budget"), "unexpected message: {message}");
+                assert!(message.contains("limit"), "unexpected message: {message}");
+            }
+            other => panic!("expected Security error, got {other:?}"),
+        }
+        assert!(!output_dir.join("dedup-a.bin").exists());
+        assert!(!output_dir.join("dedup-b.bin").exists());
+
+        let options = ExtractOptions::new(&output_dir).max_total_output_bytes(Some(written_bytes));
+        let mut iter = injected_iterator(vec![Ok(decoded_block(0, &chunk))]);
+        let stats = ArchiveReader::extract_with_iterator(&catalog, &mut iter, &options)
+            .await
+            .expect("budget covering the actual write volume must allow extraction");
+        assert_eq!(stats.bytes_written, written_bytes);
+        assert_eq!(
+            fs::read(output_dir.join("dedup-a.bin")).unwrap().as_slice(),
+            chunk.as_ref()
+        );
+        assert_eq!(
+            fs::read(output_dir.join("dedup-b.bin")).unwrap().as_slice(),
+            chunk.as_ref()
+        );
     }
 
     #[tokio::test]

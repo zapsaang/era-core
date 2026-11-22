@@ -11,6 +11,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -43,12 +44,13 @@ jobs:
       - name: cargo fmt (check)
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy (-D warnings)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo clippy (-D warnings, --locked)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test-era-cli:
     name: test-era-cli
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -76,12 +78,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test -p era-cli (release)
-        run: cargo test --release -p era-cli
+      - name: cargo test -p era-cli (release, --locked, ulimit -n 1024)
+        run: |
+          # GitHub Actions runners default to a 1024 open-file limit. Pin it so
+          # FD-exhaustion regressions fail here exactly as they do locally.
+          ulimit -n 1024
+          ulimit -n
+          cargo test --release --locked -p era-cli
 
   test-workspace:
     name: test-workspace
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -109,7 +117,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test --workspace (release)
+      - name: cargo test --workspace (release, --locked, ulimit -n 1024)
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --release --workspace
+        run: |
+          ulimit -n 1024
+          ulimit -n
+          cargo test --release --locked --workspace

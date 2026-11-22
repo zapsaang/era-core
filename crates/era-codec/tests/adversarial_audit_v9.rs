@@ -128,11 +128,13 @@ fn v9_d2d_lz4_malformed_input() {
     let compressor = LZ4Compressor::default();
     let garbage = vec![0xFF; 100];
     let result = compressor.decompress(&garbage);
-    // Should fail, not panic
-    match result {
-        Ok(_) => println!("V9-D2d: LZ4 accepted malformed input without error"),
-        Err(e) => println!("V9-D2d: LZ4 properly rejected malformed input: {}", e),
-    }
+    // Must reject malformed input (the 0xFFFFFFFF size prefix exceeds the
+    // bounded-allocation limit) instead of accepting it or panicking.
+    let error = result.expect_err("V9-D2d: LZ4 must reject malformed input");
+    assert!(
+        error.to_string().contains("LZ4"),
+        "V9-D2d: malformed input must be reported as an LZ4 decompression error, got: {error}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════

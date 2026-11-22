@@ -102,10 +102,63 @@ fn v2_sec_10_shard_read_errors_logged() {
     assert!(source.contains("tracing::warn!"));
 }
 
-#[test]
-fn v2_sec_11_global_extraction_memory_budget_present() {
-    let source = include_str!("../src/reader.rs");
-    assert!(source.contains("MAX_EXTRACTION_MEMORY"));
+#[tokio::test]
+async fn v2_sec_11_extraction_output_budget_is_opt_in_and_enforced() {
+    // Behavior-level guard (replaces the former source-string assertion): the default
+    // extraction options must not install a hidden global byte cap, and an explicitly
+    // configured budget must fail closed with a Security error while cleaning up
+    // partial output.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let archive = temp_dir.path().join("budget.era");
+    let mut writer = ArchiveWriter::builder(&archive)
+        .password("v2-sec-11")
+        .enable_erasure(false)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .add_bytes("payload.bin", &vec![0x5Au8; 256 * 1024])
+        .await
+        .expect("add bytes");
+    writer.finalize().await.expect("finalize");
+
+    let default_options = era_engine::ExtractOptions::new(temp_dir.path().join("out_default"));
+    assert!(
+        default_options.max_total_output_bytes.is_none(),
+        "default extraction options must not install a hidden global output cap"
+    );
+    let mut reader = era_engine::ArchiveReader::open(&archive, "v2-sec-11")
+        .await
+        .expect("open archive");
+    let stats = reader
+        .extract_all(&default_options)
+        .await
+        .expect("default extraction must succeed");
+    assert_eq!(stats.extracted, 1);
+
+    let budget_dir = temp_dir.path().join("out_budget");
+    let budget_options =
+        era_engine::ExtractOptions::new(&budget_dir).max_total_output_bytes(Some(1024));
+    let mut reader = era_engine::ArchiveReader::open(&archive, "v2-sec-11")
+        .await
+        .expect("open archive");
+    let err = reader
+        .extract_all(&budget_options)
+        .await
+        .expect_err("explicit output budget must abort extraction");
+    match err {
+        era_common::EraError::Security(message) => {
+            assert!(
+                message.contains("budget"),
+                "unexpected security error message: {message}"
+            );
+        }
+        other => panic!("expected Security error, got {other:?}"),
+    }
+    assert!(
+        !budget_dir.join("payload.bin").exists(),
+        "failed extraction must not leave output files behind"
+    );
 }
 
 #[test]

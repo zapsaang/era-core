@@ -266,14 +266,18 @@ fn test_secure_buffer_mlock_config() {
     assert_eq!(buffer.as_ref().len(), 32);
 }
 
-/// Test that disable_core_dumps doesn't crash
+/// Test that disable_core_dumps never panics.
+///
+/// Hardening the core-dump limit may legitimately fail depending on the
+/// platform and system configuration, so success is not asserted. It MUST NOT
+/// panic: this runs on the archive-creation security path.
 #[test]
 fn test_disable_core_dumps() {
-    // This should succeed or gracefully fail on all platforms
-    let result = disable_core_dumps();
-    // We don't assert success because it depends on system configuration
-    // Just ensure it doesn't panic
-    let _ = result;
+    let outcome = std::panic::catch_unwind(disable_core_dumps);
+    assert!(
+        outcome.is_ok(),
+        "disable_core_dumps must not panic regardless of platform support"
+    );
 }
 
 /// Test HKDF derivation is deterministic (same MK + block index → same block key)

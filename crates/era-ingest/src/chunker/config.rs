@@ -40,7 +40,12 @@ impl Default for ChunkerConfig {
 }
 
 impl ChunkerConfig {
-    /// Create a new configuration with custom sizes
+    /// Create a new configuration with custom sizes.
+    ///
+    /// This constructor is infallible for backwards compatibility and stores the
+    /// sizes verbatim; it never panics. Sizes coming from untrusted input should
+    /// go through [`ChunkerConfig::try_new`] (or be checked with
+    /// [`ChunkerConfig::validate`]) before use.
     pub fn new(min_size: usize, avg_size: usize, max_size: usize) -> Self {
         Self::new_with_params(
             min_size,
@@ -51,7 +56,12 @@ impl ChunkerConfig {
         )
     }
 
-    /// Create a new configuration with custom sizes, normalization, and seed
+    /// Create a new configuration with custom sizes, normalization, and seed.
+    ///
+    /// Infallible for backwards compatibility: the values are stored verbatim and
+    /// never asserted, so an invalid configuration cannot panic here. Prefer
+    /// [`ChunkerConfig::try_new_with_params`] when the sizes are not already
+    /// known to satisfy [`ChunkerConfig::validate`].
     pub fn new_with_params(
         min_size: usize,
         avg_size: usize,
@@ -59,8 +69,6 @@ impl ChunkerConfig {
         normalization_level: NormalizationLevel,
         rolling_hash_seed: u64,
     ) -> Self {
-        assert!(min_size <= avg_size, "min_size must be <= avg_size");
-        assert!(avg_size <= max_size, "avg_size must be <= max_size");
         Self {
             min_size,
             avg_size,
@@ -68,6 +76,44 @@ impl ChunkerConfig {
             normalization_level,
             rolling_hash_seed,
         }
+    }
+
+    /// Create a validated configuration with custom sizes.
+    ///
+    /// # Errors
+    /// Returns [`EraError::InvalidConfig`] if the sizes are out of order or
+    /// outside FastCDC's bounds.
+    pub fn try_new(min_size: usize, avg_size: usize, max_size: usize) -> Result<Self> {
+        Self::try_new_with_params(
+            min_size,
+            avg_size,
+            max_size,
+            NormalizationLevel::default(),
+            0,
+        )
+    }
+
+    /// Create a validated configuration with custom sizes, normalization, and seed.
+    ///
+    /// # Errors
+    /// Returns [`EraError::InvalidConfig`] if the sizes are out of order or
+    /// outside FastCDC's bounds.
+    pub fn try_new_with_params(
+        min_size: usize,
+        avg_size: usize,
+        max_size: usize,
+        normalization_level: NormalizationLevel,
+        rolling_hash_seed: u64,
+    ) -> Result<Self> {
+        let config = Self::new_with_params(
+            min_size,
+            avg_size,
+            max_size,
+            normalization_level,
+            rolling_hash_seed,
+        );
+        config.validate()?;
+        Ok(config)
     }
 
     /// Check that these sizes can be used with FastCDC.

@@ -338,6 +338,161 @@ struct HeaderRepair {
     is_backup: bool,
 }
 
+struct FooterRepair {
+    volume_path: PathBuf,
+    offset: u64,
+    bytes: Bytes,
+    /// Optional file length to truncate to after writing the footer bytes. Used when
+    /// rebuilding the canonical layout from a floating footer drops unreferenced trailing
+    /// garbage so the primary footer is the last `FOOTER_SIZE` bytes again.
+    truncate_to: Option<u64>,
+}
+
+/// Read one footer copy and return its bytes only if it parses (magic + checksum).
+async fn read_valid_footer(
+    reader: &VolumeReader<era_storage::LocalStorageReader>,
+    offset: u64,
+) -> Option<Bytes> {
+    let bytes = reader
+        .read_raw(offset, era_volume::FOOTER_SIZE)
+        .await
+        .ok()?;
+    if bytes.len() != era_volume::FOOTER_SIZE || Footer::from_bytes(&bytes).is_err() {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Detect whether either on-disk footer copy is damaged or the copies disagree.
+async fn volume_needs_footer_repair(
+    reader: &VolumeReader<era_storage::LocalStorageReader>,
+) -> bool {
+    if reader.footer().is_none() {
+        return false;
+    }
+    if reader.footer_recovered_from_backup() {
+        return true;
+    }
+    let size = reader.size();
+    let primary_offset = size.saturating_sub(era_volume::FOOTER_SIZE as u64);
+    let Some(primary) = read_valid_footer(reader, primary_offset).await else {
+        return true;
+    };
+    match read_valid_footer(reader, era_volume::HEADER_SIZE as u64).await {
+        None => true,
+        Some(backup) => primary != backup,
+    }
+}
+
+/// Plan the writes needed to restore footer redundancy from the surviving copy.
+async fn plan_volume_footer_repairs(
+    reader: &VolumeReader<era_storage::LocalStorageReader>,
+    volume_path: &Path,
+) -> Result<Vec<FooterRepair>> {
+    let Some(footer) = reader.footer() else {
+        return Ok(Vec::new());
+    };
+    let size = reader.size();
+    let primary_offset = size.saturating_sub(era_volume::FOOTER_SIZE as u64);
+    let primary = read_valid_footer(reader, primary_offset).await;
+    let backup = read_valid_footer(reader, era_volume::HEADER_SIZE as u64).await;
+
+    match (primary, backup) {
+        (Some(primary_bytes), Some(backup_bytes)) => {
+            if primary_bytes == backup_bytes {
+                return Ok(Vec::new());
+            }
+            // The primary footer at the end of the volume is the canonical copy.
+            Ok(vec![FooterRepair {
+                volume_path: volume_path.to_path_buf(),
+                offset: era_volume::HEADER_SIZE as u64,
+                bytes: primary_bytes,
+                truncate_to: None,
+            }])
+        }
+        (Some(primary_bytes), None) => Ok(vec![FooterRepair {
+            volume_path: volume_path.to_path_buf(),
+            offset: era_volume::HEADER_SIZE as u64,
+            bytes: primary_bytes,
+            truncate_to: None,
+        }]),
+        (None, Some(backup_bytes)) => {
+            // Only restore the primary copy when the recovered footer describes the
+            // finalized layout. Checkpointed in-progress volumes have no primary
+            // footer yet, and writing one would overwrite live data blocks.
+            let canonical_primary_offset = footer
+                .backup_header_offset()
+                .checked_add(era_volume::HEADER_SIZE as u64);
+            if footer.backup_header_offset() < DATA_REGION_START
+                || canonical_primary_offset != Some(primary_offset)
+            {
+                tracing::warn!(
+                    "Volume {}: primary footer is missing outside the finalized layout; skipping footer repair",
+                    volume_path.display()
+                );
+                return Ok(Vec::new());
+            }
+            Ok(vec![FooterRepair {
+                volume_path: volume_path.to_path_buf(),
+                offset: primary_offset,
+                bytes: backup_bytes,
+                truncate_to: None,
+            }])
+        }
+        (None, None) => {
+            // R2-02: neither canonical copy is readable, but VolumeReader::open may have
+            // recovered the footer through the floating reverse scan. That footer is the
+            // only trustworthy description of the volume layout, so rebuild both canonical
+            // copies from it instead of reporting a no-op success.
+            let canonical_primary_offset = footer
+                .backup_header_offset()
+                .checked_add(era_volume::HEADER_SIZE as u64);
+            let canonical_end = canonical_primary_offset
+                .and_then(|offset| offset.checked_add(era_volume::FOOTER_SIZE as u64));
+            let layout_is_canonical = footer.backup_header_offset() >= DATA_REGION_START
+                && footer.data_end_offset() == footer.backup_header_offset();
+            let (Some(primary_offset), Some(canonical_end), true) =
+                (canonical_primary_offset, canonical_end, layout_is_canonical)
+            else {
+                tracing::warn!(
+                    "Volume {}: both footer copies are unreadable and the floating footer does not describe a canonical finalized layout",
+                    volume_path.display()
+                );
+                return Err(EraError::IntegrityError(format!(
+                    "Volume {}: footer redundancy is unrecoverable (floating footer cannot be turned into a canonical layout)",
+                    volume_path.display()
+                )));
+            };
+            if size < canonical_end {
+                return Err(EraError::IntegrityError(format!(
+                    "Volume {}: canonical finalized layout ends at {canonical_end} bytes but the volume is only {size} bytes",
+                    volume_path.display()
+                )));
+            }
+            let footer_bytes = Bytes::copy_from_slice(&footer.to_bytes()?);
+            // Bytes beyond the canonical end are not part of the finalized volume (the
+            // append path truncates the old footer before staging new data), so they are
+            // unreferenced garbage. Truncate them so the rebuilt primary footer is the last
+            // FOOTER_SIZE bytes again, which is what verify() and the read path expect.
+            let truncate_to = (size > canonical_end).then_some(canonical_end);
+            Ok(vec![
+                FooterRepair {
+                    volume_path: volume_path.to_path_buf(),
+                    offset: era_volume::HEADER_SIZE as u64,
+                    bytes: footer_bytes.clone(),
+                    truncate_to: None,
+                },
+                FooterRepair {
+                    volume_path: volume_path.to_path_buf(),
+                    offset: primary_offset,
+                    bytes: footer_bytes,
+                    truncate_to,
+                },
+            ])
+        }
+    }
+}
+
 fn validate_header_repair_provenance(
     reader: &VolumeReader<era_storage::LocalStorageReader>,
     archive: &ArchiveReader,
@@ -461,18 +616,41 @@ async fn plan_volume_header_repairs(
     if backup_offset == 0 {
         return Ok(Vec::new());
     }
-    let (validated_backup_offset, manifest_offset) =
-        validate_header_repair_provenance(reader, archive)?;
+    // Provenance: the reserved backup header must live at the finalized backup-header
+    // location. The active header can disagree with the archive identity when it was
+    // parseably tampered in a manifest-AAD field (R2-08), so validate the header that
+    // will actually be restored - the reserved backup when it parses, otherwise the
+    // active header - against the authenticated archive.
+    if backup_offset < DATA_REGION_START || backup_offset != footer.data_end_offset() {
+        return Err(EraError::IntegrityError(
+            "Recovered header is outside the finalized backup-header location".into(),
+        ));
+    }
+    let manifest_offset = footer.manifest_offset();
     let primary_bytes = reader.read_raw(0, HEADER_SIZE).await?;
     if primary_bytes.len() != HEADER_SIZE {
         return Err(EraError::IntegrityError(
             "Primary header is truncated".into(),
         ));
     }
-    let backup_bytes_opt = match reader.read_raw(validated_backup_offset, HEADER_SIZE).await {
+    let backup_bytes_opt = match reader.read_raw(backup_offset, HEADER_SIZE).await {
         Ok(bytes) if bytes.len() == HEADER_SIZE => Some(bytes),
         _ => None,
     };
+    let restored_header = backup_bytes_opt
+        .as_ref()
+        .and_then(|bytes| era_volume::SuperHeader::from_bytes(bytes).ok())
+        .unwrap_or_else(|| reader.header().clone());
+    if restored_header.archive_id() != archive.header().archive_id()
+        || restored_header.epoch_id() != archive.epoch_id()
+        || restored_header.total_volumes() != archive.header().total_volumes()
+        || restored_header.volume_sequence() >= restored_header.total_volumes()
+    {
+        return Err(EraError::IntegrityError(
+            "Recovered header has no matching on-volume manifest".into(),
+        ));
+    }
+    let validated_backup_offset = backup_offset;
     let expected_digest =
         authenticated_header_digest_opt(reader, archive, validated_backup_offset, manifest_offset)
             .await?;
@@ -550,6 +728,58 @@ async fn apply_header_repairs(
         }
     }
     Ok(())
+}
+
+async fn apply_footer_repairs(
+    repairs: &[FooterRepair],
+    options: &RepairOptions,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<()> {
+    for repair in repairs {
+        if options.dry_run {
+            info!(
+                "Dry run: would restore footer copy at offset {} for {}",
+                repair.offset,
+                repair.volume_path.display()
+            );
+            if let Some(len) = repair.truncate_to {
+                info!(
+                    "Dry run: would truncate {} to {len} bytes",
+                    repair.volume_path.display()
+                );
+            }
+        } else {
+            check_cancelled(cancel_flag, "footer repair")?;
+            info!(
+                "Restoring footer copy at offset {} for {}",
+                repair.offset,
+                repair.volume_path.display()
+            );
+            apply_metadata_repair(&repair.volume_path, repair.offset, repair.bytes.clone()).await?;
+            if let Some(len) = repair.truncate_to {
+                info!(
+                    "Truncating {} to {len} bytes after footer restoration",
+                    repair.volume_path.display()
+                );
+                truncate_volume(&repair.volume_path, len).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Truncate a volume to `len` bytes. Used to drop unreferenced trailing garbage when
+/// rebuilding the canonical footer layout from a floating footer.
+async fn truncate_volume(path: &Path, len: u64) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        file.set_len(len)?;
+        file.sync_all()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| EraError::Other(format!("Footer repair truncation task failed: {e}")))?
 }
 
 async fn local_header_digest(
@@ -685,7 +915,8 @@ pub async fn repair_archive_with_providers(
     }
 
     let needs_header = volume_needs_header_repair(&volume_reader).await;
-    if erasure_config.is_none() && !needs_header {
+    let needs_footer = volume_needs_footer_repair(&volume_reader).await;
+    if erasure_config.is_none() && !needs_header && !needs_footer {
         return Err(EraError::ErasureError(
             "Archive does not use erasure coding - repair not available".into(),
         ));
@@ -702,28 +933,34 @@ pub async fn repair_archive_with_providers(
     let has_catalog = volume_reader
         .footer()
         .is_some_and(|footer| footer.has_catalog_location());
-    let (header_repairs, catalog_repairs, verify_stats) = if needs_header || has_catalog {
-        let mut archive = ArchiveReader::open_with_providers(path, providers).await?;
-        let repairs = if needs_header {
-            plan_volume_header_repairs(&volume_reader, path, &archive).await?
-        } else {
-            Vec::new()
-        };
-        let verify_stats = if erasure_config.is_none() {
-            Some(archive.verify().await?)
-        } else {
-            None
-        };
-        let catalogs = if erasure_config.is_some() {
-            archive.plan_catalog_repairs().await?
-        } else {
-            Vec::new()
-        };
-        (repairs, catalogs, verify_stats)
+    let footer_repairs = if needs_footer {
+        plan_volume_footer_repairs(&volume_reader, path).await?
     } else {
-        let _mk_array = try_unlock_with_providers(header, &providers)?;
-        (Vec::new(), Vec::new(), None)
+        Vec::new()
     };
+    let (header_repairs, catalog_repairs, verify_stats) =
+        if needs_header || needs_footer || has_catalog {
+            let mut archive = ArchiveReader::open_with_providers(path, providers).await?;
+            let repairs = if needs_header {
+                plan_volume_header_repairs(&volume_reader, path, &archive).await?
+            } else {
+                Vec::new()
+            };
+            let verify_stats = if erasure_config.is_none() {
+                Some(archive.verify().await?)
+            } else {
+                None
+            };
+            let catalogs = if erasure_config.is_some() {
+                archive.plan_catalog_repairs().await?
+            } else {
+                Vec::new()
+            };
+            (repairs, catalogs, verify_stats)
+        } else {
+            let _mk_array = try_unlock_with_providers(header, &providers)?;
+            (Vec::new(), Vec::new(), None)
+        };
 
     // Create compressor (kept for future decode-based validation if needed)
     let _compressor: Box<dyn era_codec::Compressor> =
@@ -748,6 +985,7 @@ pub async fn repair_archive_with_providers(
     }
 
     apply_header_repairs(&header_repairs, &options, &cancel_flag).await?;
+    apply_footer_repairs(&footer_repairs, &options, &cancel_flag).await?;
     for repair in catalog_repairs {
         apply_catalog_repair(path, repair, &options, &cancel_flag).await?;
     }
@@ -1290,12 +1528,19 @@ async fn repair_archive_matrix_with_providers(
             break;
         }
     }
+    let mut footer_repair_needed = false;
+    for reader in &volume_readers {
+        if volume_needs_footer_repair(reader).await {
+            footer_repair_needed = true;
+            break;
+        }
+    }
     let has_catalog = volume_readers.iter().any(|reader| {
         reader
             .footer()
             .is_some_and(|footer| footer.has_catalog_location())
     });
-    if erasure_config.is_none() && !header_repair_needed && !has_catalog {
+    if erasure_config.is_none() && !header_repair_needed && !footer_repair_needed && !has_catalog {
         return Err(EraError::ErasureError(
             "Archive does not use erasure coding".into(),
         ));
@@ -1303,10 +1548,11 @@ async fn repair_archive_matrix_with_providers(
 
     // Verify credentials before proceeding with repair
     let mut header_repairs = Vec::new();
+    let mut footer_repairs = Vec::new();
     let mut catalog_repairs = Vec::new();
     let mut authenticated_committed_ends = None;
     let mut verify_stats = None;
-    let session = if header_repair_needed || has_catalog {
+    let session = if header_repair_needed || footer_repair_needed || has_catalog {
         let mut archive = ArchiveReader::open_with_providers(path, _providers).await?;
         authenticated_committed_ends = archive
             .manifest()
@@ -1314,6 +1560,7 @@ async fn repair_archive_matrix_with_providers(
             .map(|manifest| manifest.volume_committed_ends.clone());
         for (reader, volume_path) in volume_readers.iter().zip(&volume_paths) {
             header_repairs.extend(plan_volume_header_repairs(reader, volume_path, &archive).await?);
+            footer_repairs.extend(plan_volume_footer_repairs(reader, volume_path).await?);
         }
         for repair in archive.plan_catalog_repairs().await? {
             let index = volume_indices
@@ -1325,7 +1572,8 @@ async fn repair_archive_matrix_with_providers(
             catalog_repairs.push((index, repair));
         }
         if erasure_config.is_none() {
-            if header_repairs.is_empty() && catalog_repairs.is_empty() {
+            if header_repairs.is_empty() && footer_repairs.is_empty() && catalog_repairs.is_empty()
+            {
                 return Err(EraError::ErasureError(
                     "Archive does not use erasure coding".into(),
                 ));
@@ -1370,6 +1618,7 @@ async fn repair_archive_matrix_with_providers(
     }
 
     apply_header_repairs(&header_repairs, &options, &cancel_flag).await?;
+    apply_footer_repairs(&footer_repairs, &options, &cancel_flag).await?;
     for (index, repair) in catalog_repairs {
         apply_catalog_repair(&volume_paths[index], repair, &options, &cancel_flag).await?;
     }

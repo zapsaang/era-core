@@ -11,6 +11,103 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::traits::{StorageBackend, StorageMetadata, StorageReader, StorageWriter};
 
+/// O_NOFOLLOW for unix targets whose value is known here.
+///
+/// The local backend creates volume files in directories that may be writable by
+/// other users (shared directories, removable media, restored backups). A symlink
+/// planted at a volume path must not redirect the truncating open to an arbitrary
+/// file, so create() refuses to follow a symlink final component.
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(all(
+    unix,
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )
+))]
+const O_NOFOLLOW: i32 = 0x0100;
+
+/// Build the open options used by StorageBackend::create.
+///
+/// create() keeps its historical truncate-and-overwrite semantics for regular
+/// files (volume rotation and crash-retry rely on it) but never follows a symlink
+/// final component on platforms where O_NOFOLLOW is known.
+fn create_open_options() -> OpenOptions {
+    // custom_flags below is unix-only, so mut is unused on other targets.
+    #[allow(unused_mut)]
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(any(
+        all(unix, any(target_os = "linux", target_os = "android")),
+        all(
+            unix,
+            any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd",
+                target_os = "dragonfly"
+            )
+        )
+    ))]
+    options.custom_flags(O_NOFOLLOW);
+    options
+}
+
+/// Directory whose entry must be made durable after creating `path`.
+///
+/// `Path::parent` is not a usable answer on its own: a bare relative file name
+/// such as `backup.era` has `Some("")` as its parent, and `File::open("")` fails
+/// with ENOENT, which silently disabled the directory fsync for the most common
+/// CLI invocation (`era create -o backup.era ...`). The parent of a bare name is
+/// the current directory, and a path without any parent (e.g. `/`) is handled
+/// through the same fallback so the helper never returns an unopenable path.
+#[cfg(unix)]
+fn parent_directory_for_fsync(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Best-effort fsync of the directory that holds a newly created storage object.
+///
+/// A power loss right after create() would otherwise be allowed to drop the new
+/// directory entry even though create() returned success. Failure is logged, not
+/// propagated: some platforms and filesystems reject directory fsync, and this is
+/// a hardening measure on top of the writer's explicit sync()/close().
+#[cfg(unix)]
+async fn sync_parent_directory(path: &Path) {
+    let parent = parent_directory_for_fsync(path);
+    match File::open(parent).await {
+        Ok(directory) => {
+            if let Err(error) = directory.sync_all().await {
+                tracing::warn!(
+                    parent = %parent.display(),
+                    %error,
+                    "failed to fsync storage parent directory after create (best-effort)"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                parent = %parent.display(),
+                %error,
+                "failed to open storage parent directory for fsync (best-effort)"
+            );
+        }
+    }
+}
+
+/// Directory fsync has no portable non-unix equivalent; do not warn about it.
+#[cfg(not(unix))]
+async fn sync_parent_directory(_path: &Path) {}
+
 /// Local filesystem storage backend
 #[derive(Debug, Clone)]
 pub struct LocalStorageBackend {
@@ -51,7 +148,21 @@ impl StorageBackend for LocalStorageBackend {
                 .map_err(EraError::Io)?;
         }
 
-        let file = File::create(&full_path).await.map_err(EraError::Io)?;
+        // Reject an explicit symlink with a typed error; O_NOFOLLOW in
+        // create_open_options() is the race-free guard for the check-then-open gap.
+        let is_symlink = tokio::fs::symlink_metadata(&full_path)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if is_symlink {
+            return Err(EraError::PermissionDenied { path: full_path });
+        }
+
+        let options = create_open_options();
+        let file = options.open(&full_path).await.map_err(EraError::Io)?;
+
+        // Make the new directory entry durable before callers treat the volume as
+        // created; failures are logged inside the helper (best-effort).
+        sync_parent_directory(&full_path).await;
 
         Ok(LocalStorageWriter { file, size: 0 })
     }
@@ -196,6 +307,12 @@ impl StorageReader for LocalStorageReader {
     }
 
     async fn read_all_from(&self, offset: u64) -> Result<Bytes> {
+        // At or past EOF there is nothing left to read; return an empty buffer
+        // instead of underflowing size - offset (debug panic / release capacity
+        // overflow in the old code).
+        if offset >= self.size {
+            return Ok(Bytes::new());
+        }
         let len = (self.size - offset) as usize;
         self.read_at(offset, len).await
     }
@@ -312,6 +429,31 @@ mod tests {
         writer.close().await.unwrap();
 
         assert!(backend.exists(Path::new("test.dat")).await);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_directory_for_fsync_normalizes_empty_and_missing_parents() {
+        // R2-STOR-01: the parent of a bare relative file name is the current
+        // directory, not the empty path (File::open("") is ENOENT).
+        assert_eq!(
+            parent_directory_for_fsync(Path::new("backup.era")),
+            Path::new(".")
+        );
+        assert_eq!(
+            parent_directory_for_fsync(Path::new("./backup.era")),
+            Path::new(".")
+        );
+        assert_eq!(
+            parent_directory_for_fsync(Path::new("out/backup.era")),
+            Path::new("out")
+        );
+        assert_eq!(
+            parent_directory_for_fsync(Path::new("/tmp/backup.era")),
+            Path::new("/tmp")
+        );
+        // A path with no parent at all still maps to an openable directory.
+        assert_eq!(parent_directory_for_fsync(Path::new("/")), Path::new("."));
     }
 
     #[tokio::test]

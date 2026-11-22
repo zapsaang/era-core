@@ -1388,6 +1388,7 @@ async fn e2e_full_lifecycle_anyofn() {
         .extract_all(&ExtractOptions {
             output_dir: output_dir.clone(),
             overwrite: true,
+            max_total_output_bytes: None,
         })
         .await
         .unwrap();
@@ -1462,6 +1463,7 @@ async fn e2e_threshold_2of2_works() {
         .extract_all(&ExtractOptions {
             output_dir: output_dir.clone(),
             overwrite: true,
+            max_total_output_bytes: None,
         })
         .await
         .unwrap();

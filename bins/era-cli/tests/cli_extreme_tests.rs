@@ -2991,10 +2991,46 @@ mod header_footer_recovery_tests {
 
         corrupt_footer(&archive);
 
+        // ENG-RC-02: verify() must surface the lost footer redundancy as Degraded
+        // (non-zero exit) instead of silently reporting success via the backup footer.
         era_cmd()
             .args(["verify", archive.to_str().unwrap(), "--password", "pwd"])
             .assert()
+            .failure()
+            .stderr(predicate::str::contains("degraded").and(predicate::str::contains("footer")));
+    }
+
+    /// ENG-RC-02: a bit-rotted backup footer (offset 4096) is invisible to
+    /// `verify()` because the primary footer still opens the archive, so it must be
+    /// reported as Degraded instead of Healthy.
+    #[test]
+    fn test_verify_backup_footer_corrupted_is_degraded() {
+        let temp = TempDir::new().unwrap();
+        let data = vec![0xEE; 64 * 1024];
+        let input = create_test_file(temp.path(), "bftr_verify.bin", &data);
+        let archive = temp.path().join("bftr_verify.era");
+
+        era_cmd()
+            .args([
+                "create",
+                input.to_str().unwrap(),
+                "--output",
+                archive.to_str().unwrap(),
+                "--password",
+                "pwd",
+                "--no-compression",
+            ])
+            .assert()
             .success();
+
+        // Backup footer lives at offset 4096 (HEADER_SIZE), in the reserved gap.
+        corrupt_archive_shard(&archive, 4096);
+
+        era_cmd()
+            .args(["verify", archive.to_str().unwrap(), "--password", "pwd"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("degraded").and(predicate::str::contains("footer")));
     }
 
     /// When both primary and backup footers are corrupted, VolumeReader::open
@@ -3057,11 +3093,14 @@ mod header_footer_recovery_tests {
             "floating footer recovery must produce correct data"
         );
 
-        // Verify command should also succeed via the same recovery path
+        // ENG-RC-02: data is still readable through the floating-footer recovery path,
+        // but both redundant footer copies are damaged, so verification must report
+        // Degraded (non-zero exit) instead of silently claiming full health.
         era_cmd()
             .args(["verify", archive.to_str().unwrap(), "--password", "pwd"])
             .assert()
-            .success();
+            .failure()
+            .stderr(predicate::str::contains("degraded").and(predicate::str::contains("footer")));
     }
 }
 

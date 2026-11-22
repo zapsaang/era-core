@@ -55,10 +55,20 @@ pub struct StreamingChunkerZeroCopy<R> {
 }
 
 impl<R: AsyncRead + Unpin> StreamingChunkerZeroCopy<R> {
-    /// Create a new zero-copy streaming chunker
+    /// Create a new zero-copy streaming chunker.
+    ///
+    /// As with `StreamingChunker::new`, the configuration is validated when
+    /// `StreamingChunkerZeroCopy::next_chunk` runs; an invalid configuration
+    /// returns `era_common::EraError::InvalidConfig` and does not allocate the
+    /// read buffer (so a bogus max chunk size cannot abort the process).
     pub fn new(reader: R, config: ChunkerConfig) -> Self {
-        // Match the original buffer size calculation
-        let buffer_size = config.max_size * 3;
+        // Match the original buffer size calculation, but only for a validated
+        // configuration: `max_size` is otherwise untrusted input.
+        let buffer_size = if config.validate().is_ok() {
+            config.max_size.saturating_mul(3)
+        } else {
+            0
+        };
 
         Self {
             reader,
@@ -118,7 +128,12 @@ impl<R: AsyncRead + Unpin> StreamingChunkerZeroCopy<R> {
     /// Get the next chunk using FastCDC algorithm
     ///
     /// This returns a `Bytes` view into the buffer without copying.
+    ///
+    /// # Errors
+    /// Returns `era_common::EraError::InvalidConfig` if the configuration passed
+    /// to `StreamingChunkerZeroCopy::new` is invalid.
     pub async fn next_chunk(&mut self) -> Result<Option<UniqueChunk>> {
+        self.config.validate()?;
         loop {
             // Ensure we have data to process
             if !self.ensure_data().await.map_err(era_common::EraError::Io)? {
@@ -292,6 +307,7 @@ mod tests {
             for data in &boundary_data {
                 // When: chunking identical data via the slice path and the zero-copy path
                 let chunks_slice: Vec<(usize, _)> = Chunker::new(config.clone())
+                    .expect("test config must be valid")
                     .chunk_all(data)
                     .iter()
                     .map(|c| (c.data.len(), c.hash))

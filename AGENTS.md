@@ -1,10 +1,10 @@
 # ERA-CORE KNOWLEDGE BASE
 
-**Generated:** 2026-09-23
-**Commit:** 5bf28de
+**Generated:** 2026-11-22
+**Commit:** b22a07e (+ 2026-11-22 audit revisions in working tree)
 **Branch:** feat_fly
 
-Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing. ~141.7k LOC (~53.2k src), 265 .rs files, 10 workspace members.
+Post-quantum encrypted archival storage engine in Rust. 3-layer envelope encryption, FastCDC chunking, Reed-Solomon erasure coding, Shamir's secret sharing. ~145.9k LOC (~54.3k src), 272 .rs files, 10 workspace members.
 
 ## STRUCTURE
 
@@ -21,7 +21,7 @@ era-core/
 │   ├── era-storage/     L1: StorageBackend trait (Local/Memory)
 │   ├── era-crypto/      L0: XChaCha20-Poly1305, ML-KEM-768, HKDF, Argon2id, SecureBuffer
 │   └── era-common/      L0: EraError, Result, protobuf (proto/), config + types/
-├── doc_gen/             Security audit reports + design iterations (ARCHIVAL, frozen 2026-04)
+├── doc_gen/             Security audit reports + design iterations (archival; last touched 2026-09-24)
 └── bench_data/          PEM fixtures for crypto benches
 ```
 
@@ -38,22 +38,22 @@ L0: era-crypto, era-common
 
 ## CODE MAP
 
-Refs = production-source reference count (tests/benches excluded).
+Refs = production-source reference lines at the commit above: `git grep -w <symbol> b22a07e -- 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' 'bins/era-cli/src/*.rs' 'bins/era-cli/src/**/*.rs'` (separate tests/benches excluded).
 
 | Symbol | File | Refs | Role |
 |--------|------|-----:|------|
-| `EraError` | `crates/era-common/src/error.rs` | 860 | workspace error enum (~49 variants), most cross-cut type |
-| `ChunkHash` | `crates/era-common/src/types/ids.rs` | 245 | BLAKE3 content address |
-| `KeySession` | `crates/era-crypto/src/key_session.rs` | 96 | MK/IK/VK envelope state |
-| `SuperHeader` | `crates/era-volume/src/header.rs` | 81 | on-disk header v8.2, dynamic `recipients: Vec<RecipientSlot>` |
-| `VolumeReader` | `crates/era-volume/src/reader.rs` | 69 | async volume read, MAX_SHARD_SIZE validation |
-| `Catalog` | `crates/era-ingest/src/entry.rs` | 65 | file inventory + chunk refs |
-| `ArchiveManifest` | `crates/era-common/src/types/manifest.rs` | 55 | v8.2 manifest: epochs, committed horizons |
-| `ArchiveWriter` | `crates/era-engine/src/writer.rs` | 50 | create pipeline orchestrator |
-| `VolumePool` | `crates/era-volume/src/volume_pool.rs` | 40 | volume rotation + matrix shard distribution |
-| `ArchiveReader` | `crates/era-engine/src/reader.rs` | 31 | extract pipeline orchestrator |
-| `StorageBackend` | `crates/era-storage/src/traits.rs` | 29 | async I/O abstraction (Local/Memory; S3 planned) |
-| `IndexReader` | `crates/era-index/src/reader.rs` | 27 | Bloom + L1/L2 lookup + cold recovery |
+| `EraError` | `crates/era-common/src/error.rs` | 1135 | workspace error enum (~49 variants), most cross-cut type |
+| `ChunkHash` | `crates/era-common/src/types/ids.rs` | 253 | BLAKE3 content address |
+| `KeySession` | `crates/era-crypto/src/key_session.rs` | 102 | MK/IK/VK envelope state |
+| `SuperHeader` | `crates/era-volume/src/header.rs` | 96 | on-disk header v8.2, dynamic `recipients: Vec<RecipientSlot>` |
+| `VolumeReader` | `crates/era-volume/src/reader.rs` | 82 | async volume read, MAX_SHARD_SIZE validation |
+| `Catalog` | `crates/era-ingest/src/entry.rs` | 143 | file inventory + chunk refs |
+| `ArchiveManifest` | `crates/era-common/src/types/manifest.rs` | 67 | v8.2 manifest: epochs, committed horizons |
+| `ArchiveWriter` | `crates/era-engine/src/writer.rs` | 67 | create pipeline orchestrator |
+| `VolumePool` | `crates/era-volume/src/volume_pool.rs` | 54 | volume rotation + matrix shard distribution |
+| `ArchiveReader` | `crates/era-engine/src/reader.rs` | 66 | extract pipeline orchestrator |
+| `StorageBackend` | `crates/era-storage/src/traits.rs` | 33 | async I/O abstraction (Local/Memory; S3 planned) |
+| `IndexReader` | `crates/era-index/src/reader.rs` | 26 | Bloom + L1/L2 lookup + cold recovery |
 
 ## ANTI-PATTERNS (enforced by audit suites + clippy `-D warnings`)
 
@@ -101,7 +101,7 @@ Refs = production-source reference count (tests/benches excluded).
 
 ```bash
 # Full CI check (matches ci.yml exactly — lint + BOTH test jobs)
-cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --release -p era-cli && cargo test --release --workspace
+cargo fmt --all -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --release --locked -p era-cli && cargo test --release --locked --workspace
 
 # Per-crate / suite
 cargo test -p era-engine
@@ -110,7 +110,7 @@ cargo bench -p era-crypto
 
 # CLI
 cargo run --manifest-path bins/era-cli/Cargo.toml -- --help
-cargo test --release -p era-cli
+cargo test --release --locked -p era-cli
 
 # Fuzz (nightly, separate workspace — NOT present in repo; fuzz.yml is workflow_dispatch only)
 cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
@@ -131,11 +131,12 @@ cd fuzz && cargo +nightly fuzz run fuzz_footer_parse -- -max_total_time=60
 - Volume format: v8.2, magic `ERA\x08\x02`.
 - Audit numbering (`adversarial_audit_vN`) is workspace-global lineage v1–v30, not per-crate; each crate owns the waves that touched it. "6 audit suites" = era-engine's competitor/second/third/fourth + adversarial v5 + v2 baseline.
 - `crates/era-storage/src/cache/` is an EMPTY placeholder dir.
-- `crates/era-packing/src/{integration_performance_tests.rs,test_helpers.rs}` are test code living in src/ (cfg(test)-gated); `test_helpers.rs` is the cross-crate fixture source.
+- `crates/era-packing/src/{integration_performance_tests.rs,test_helpers.rs}` are test code living in src/ (cfg(test)-gated); `test_helpers.rs` is the fixture source for this crate's own cfg(test) modules (not cross-crate). `crates/era-engine/src/block_iter/multi_volume_session_tests.rs` is a third test-only source file.
 - `crates/era-engine/src/checkpoint.rs`: `commit()`/`sync()` DEPRECATED (v2.2+) → use `commit_to_volume()`.
 - Only `unsafe` in workspace src: `crates/era-crypto/src/secure_memory.rs` (mlock/prctl).
 - No `[workspace.lints]`, no clippy.toml/rustfmt.toml/deny.toml — enforcement is CI's `-D warnings` only. `rust-toolchain.toml` tracks `stable` matching `.github/workflows/ci.yml`.
-- `doc_gen/` is archival (content frozen 2026-04-28).
+- `doc_gen/` is archival; last content update 2026-09-24 (`c25b7da` regenerated the AGENTS knowledge base).
+- CI is reproducibility-pinned: cargo build/lint/test commands use `--locked`, test jobs set `ulimit -n 1024`, and every job has `timeout-minutes`. `crates/era-engine/tests/hygiene_guards_test.rs` enforces the CI/README invariants and the no-tautological-test invariant.
 
 ## Project Review Rules
 

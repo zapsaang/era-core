@@ -83,7 +83,7 @@ fn bench_chunking_configs(c: &mut Criterion) {
             normalization_level: Default::default(),
             rolling_hash_seed: 0,
         };
-        let chunker = Chunker::new(config);
+        let chunker = Chunker::new(config).expect("benchmark chunker config must be valid");
 
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(

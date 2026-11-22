@@ -3491,12 +3491,12 @@ mod repair_tests {
         let assert_result = era_cmd()
             .args(["repair", "/nonexistent/archive.era", "--password", "pwd"])
             .assert()
-            .success();
+            .failure();
 
         let stderr = String::from_utf8_lossy(&assert_result.get_output().stderr);
         assert!(
-            stderr.contains("Nothing to repair") || stderr.contains("No archive"),
-            "repair should report nothing to repair: {}",
+            stderr.contains("Archive not found") && stderr.contains("/nonexistent/archive.era"),
+            "repair on a missing archive must fail and name the path: {}",
             stderr
         );
     }

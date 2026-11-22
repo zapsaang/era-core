@@ -242,7 +242,10 @@ impl FileReader {
         self
     }
 
-    /// Set custom CDC configuration
+    /// Set custom CDC configuration.
+    ///
+    /// The configuration is validated when chunking runs; invalid sizes are
+    /// reported as `EraError::InvalidConfig` instead of panicking.
     pub fn with_chunker_config(mut self, config: ChunkerConfig) -> Self {
         self.chunker_config = config;
         self
@@ -283,6 +286,7 @@ impl FileReader {
         &self,
         path: &Path,
     ) -> Result<std::pin::Pin<Box<dyn Stream<Item = Result<UniqueChunk>> + Send>>> {
+        self.chunker_config.validate()?;
         let file = File::open(path).await.map_err(EraError::Io)?;
         let metadata = file.metadata().await.map_err(EraError::Io)?;
         let single_chunk_limit = CDC_THRESHOLD.min(self.chunker_config.max_size);
@@ -320,13 +324,14 @@ impl FileReader {
         let config = self.chunker_config.clone();
         let data = self.read_bytes(path).await?;
 
-        // Offload CPU-bound chunking + hashing to blocking thread
-        tokio::task::spawn_blocking(move || {
-            let chunker = Chunker::new(config);
-            chunker.chunk_all(&data)
+        // Offload CPU-bound chunking + hashing to blocking thread. An invalid
+        // configuration is reported as an error instead of panicking.
+        tokio::task::spawn_blocking(move || -> Result<Vec<UniqueChunk>> {
+            let chunker = Chunker::try_new(config)?;
+            Ok(chunker.chunk_all(&data))
         })
         .await
-        .map_err(|e| EraError::AsyncError(format!("Chunking task failed: {}", e)))
+        .map_err(|e| EraError::AsyncError(format!("Chunking task failed: {}", e)))?
     }
 
     /// Read a file and compute its hash without loading all data at once

@@ -51,8 +51,13 @@ enum Commands {
     /// Create a new ERA archive
     #[command(
         long_about = "Create a new ERA archive from one or more files or directories.\n\n\
-        Directories are walked recursively. By default, archives use Zstd level 3\n\
-        compression and 4:2 Reed-Solomon erasure coding for redundancy.\n\n\
+        Directories are walked recursively. By default, symbolic links and special\n\
+        files found inside walked directories are rejected because the archive\n\
+        stores regular files only; pass --skip-symlinks to skip (and count) those\n\
+        links instead. Symbolic links named explicitly on the command line are\n\
+        followed. Empty directories are reported as skipped, not stored.\n\
+        By default, archives use Zstd level 3 compression and 4:2 Reed-Solomon\n\
+        erasure coding for redundancy.\n\n\
         Provide --password on the command line or omit it to be prompted interactively.\n\
         Use --certificate for key-based access without sharing a password.\n\
         Use --hybrid-certificate for post-quantum key-based access.\n\
@@ -69,6 +74,7 @@ enum Commands {
         era create -o backup.era --certificate pub.pem -p secret ./data\n  \
         era create -o backup.era -p pw1 -p pw2 --threshold 2 --shares 2 ./data\n  \
         era create -o backup.era --erasure 6:3 --volumes 9 ./data\n  \
+        era create -o backup.era --skip-symlinks ./data\n  \
         era create -o backup.era -C config.toml ./data\n  \
         era create -o backup.era --no-compression ./videos")]
     Create {
@@ -159,19 +165,29 @@ enum Commands {
         /// Use compact preset: Zstd-19, 16 MB blocks, k=32 (high compression, slower writes)
         #[arg(long)]
         compact: bool,
+
+        /// Skip symbolic links found inside walked directories instead of failing.
+        /// Skipped links are reported and counted; the exit code stays 0. Symbolic
+        /// links named explicitly as inputs are still followed.
+        #[arg(long)]
+        skip_symlinks: bool,
     },
 
     /// Extract files from an ERA archive
     #[command(
         long_about = "Extract all files from an ERA archive to a directory.\n\n\
         By default, files are extracted to the current directory. Use --output to\n\
-        specify a different location. Existing files are skipped unless --force is set."
+        specify a different location. Existing files are skipped unless --force is set.\n\n\
+        Extraction enforces per-block/per-file decompression-bomb guards but no\n\
+        global output cap by default. Use --max-output-bytes to bound the total\n\
+        decoded output of one extraction pass (recommended for untrusted archives)."
     )]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
         era extract -i backup.era -o ./restored\n  \
         era extract backup.era -o ./restored\n  \
         era extract -i backup.era -o ./restored -p secret\n  \
         era extract -i backup.era -o ./restored --key private.pem\n  \
+        era extract -i backup.era -o ./restored --max-output-bytes 1073741824\n  \
         era extract -i backup.era -o ./restored --force")]
     Extract {
         /// Input archive path
@@ -211,6 +227,12 @@ enum Commands {
         /// Overwrite existing files
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Maximum total decoded output size in bytes for this extraction pass.
+        /// Default: unlimited. Exceeding it fails the run and removes files
+        /// written by that pass.
+        #[arg(long)]
+        max_output_bytes: Option<u64>,
     },
 
     /// List contents of an ERA archive
@@ -320,7 +342,10 @@ enum Commands {
         Without --force, runs in dry-run mode (analysis only).\n\
         With --force, applies Reed-Solomon repairs or discards an interrupted-create checkpoint.\n\n\
         Archives created with erasure coding can recover from corrupted shards.\n\
-        Archives without erasure coding have limited repair options."
+        Archives without erasure coding have limited repair options.\n\n\
+        Exit status: 0 when the archive is healthy or was repaired successfully;\n\
+        non-zero when the archive path is missing, verification fails, or the\n\
+        damage cannot be repaired with the available redundancy."
     )]
     #[command(after_help = "\x1b[1mExamples:\x1b[0m\n  \
         era repair backup.era                        Analyze only (dry run)\n  \
@@ -541,6 +566,7 @@ async fn main() -> anyhow::Result<()> {
             flush_threshold,
             block_target_size,
             compact,
+            skip_symlinks,
         } => {
             commands::create(commands::CreateArgs {
                 inputs: &input,
@@ -563,6 +589,7 @@ async fn main() -> anyhow::Result<()> {
                 flush_threshold,
                 block_target_size,
                 compact,
+                skip_symlinks,
             })
             .await
         }
@@ -575,6 +602,7 @@ async fn main() -> anyhow::Result<()> {
             key,
             key_passphrase,
             force,
+            max_output_bytes,
         } => {
             let input = input
                 .or(archive)
@@ -586,6 +614,7 @@ async fn main() -> anyhow::Result<()> {
                 &key,
                 key_passphrase.as_deref(),
                 force,
+                max_output_bytes,
             )
             .await
         }

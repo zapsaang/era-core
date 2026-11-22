@@ -29,6 +29,8 @@ pub struct VolumeReader<R: StorageReader> {
     footer: Option<Footer>,
     /// Whether the primary header was unreadable and the backup header was used
     header_recovered_from_backup: bool,
+    /// Whether the primary footer was unreadable and the reserved backup footer was used
+    footer_recovered_from_backup: bool,
 }
 
 impl<R: StorageReader> VolumeReader<R> {
@@ -56,19 +58,27 @@ impl<R: StorageReader> VolumeReader<R> {
 
         // === FOOTER RECOVERY ===
         // 1. Try primary footer (at end of file)
-        let footer = match Self::try_read_footer(&reader, size).await {
-            Ok(f) => Some(f),
-            Err(primary_err) => {
-                tracing::warn!(
-                    "Primary footer corrupted: {}. Attempting backup recovery...",
-                    primary_err
-                );
-                // 2. Try backup footer at offset HEADER_SIZE (4096)
-                Self::try_read_footer_at(&reader, HEADER_SIZE as u64)
-                    .await
-                    .ok()
-            }
-        };
+        let (footer, footer_recovered_from_backup) =
+            match Self::try_read_footer(&reader, size).await {
+                Ok(f) => (Some(f), false),
+                Err(primary_err) => {
+                    tracing::warn!(
+                        "Primary footer corrupted: {}. Attempting backup recovery...",
+                        primary_err
+                    );
+                    // 2. Try backup footer at offset HEADER_SIZE (4096)
+                    match Self::try_read_footer_at(&reader, HEADER_SIZE as u64).await {
+                        Ok(backup_footer) => (Some(backup_footer), true),
+                        Err(backup_err) => {
+                            tracing::warn!(
+                                "Backup footer corrupted: {}. Attempting floating recovery...",
+                                backup_err
+                            );
+                            (None, false)
+                        }
+                    }
+                }
+            };
 
         // 3. If still no footer, try Floating Footer Recovery (Reverse Scan) for legacy volumes
         let footer = if footer.is_none() {
@@ -143,6 +153,7 @@ impl<R: StorageReader> VolumeReader<R> {
             header,
             footer,
             header_recovered_from_backup,
+            footer_recovered_from_backup,
         })
     }
 
@@ -242,6 +253,33 @@ impl<R: StorageReader> VolumeReader<R> {
     #[must_use]
     pub fn header_recovered_from_backup(&self) -> bool {
         self.header_recovered_from_backup
+    }
+
+    /// Return whether the primary footer was recovered from the backup footer.
+    #[must_use]
+    pub fn footer_recovered_from_backup(&self) -> bool {
+        self.footer_recovered_from_backup
+    }
+
+    /// Adopt a backup header that the caller has authenticated against an
+    /// out-of-band commitment (for example the archive manifest's
+    /// `volume_header_digests` table) after the primary header failed that
+    /// check.
+    ///
+    /// The caller MUST verify the supplied header bytes against an authenticated
+    /// digest before calling this method; this method performs no authentication.
+    /// After adoption, [`Self::header_recovered_from_backup`] reports `true` so
+    /// that `verify` surfaces the degraded state and `repair` can rewrite the
+    /// primary header from the authenticated copy.
+    pub fn adopt_authenticated_backup_header(&mut self, backup_header: SuperHeader) {
+        self.header = backup_header;
+        self.header_recovered_from_backup = true;
+    }
+
+    /// Total size of the underlying volume file in bytes.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.reader.size()
     }
 
     /// Get the volume footer

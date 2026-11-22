@@ -473,6 +473,8 @@ pub struct CreateArgs<'a> {
     pub flush_threshold: Option<usize>,
     pub block_target_size: Option<usize>,
     pub compact: bool,
+    /// Skip symbolic links found while walking directories instead of failing.
+    pub skip_symlinks: bool,
 }
 
 fn validate_and_register_create_entry(
@@ -518,29 +520,88 @@ fn validate_and_register_create_entry(
     Ok(())
 }
 
+/// Files collected from the CLI inputs, plus entries the archive format cannot
+/// currently represent (empty directories).
+struct CollectedCreateInputs {
+    files: Vec<(PathBuf, PathBuf)>,
+    skipped_empty_dirs: Vec<PathBuf>,
+    skipped_symlinks: Vec<PathBuf>,
+}
+
+/// Collect the files to archive from the CLI inputs.
+///
+/// Input collection must never silently drop data: traversal errors (unreadable
+/// subtrees, path-length errors, ...) and unarchivable entries (symlinks, special
+/// files) are hard errors that carry the offending path, while empty directories
+/// and (with the explicit opt-in policy) symlinks are tracked so the caller can
+/// report them as skipped.
 fn collect_create_inputs(
     inputs: &[PathBuf],
     excluded_paths: &std::collections::HashSet<PathBuf>,
-) -> Result<Vec<(PathBuf, PathBuf)>> {
+    skip_symlinks: bool,
+) -> Result<CollectedCreateInputs> {
     let mut files_to_process = Vec::new();
+    let mut skipped_empty_dirs = Vec::new();
+    let mut skipped_symlinks = Vec::new();
     let mut seen_stored_paths = std::collections::HashMap::new();
 
     for input in inputs {
         let path = input.as_path();
+        // Explicit inputs keep their historical semantics: metadata() follows a
+        // symlink named on the command line (that is the user's stated intent).
+        // Symlink entries encountered while walking a directory are rejected
+        // below, because skipping them would silently omit data.
         let metadata = std::fs::metadata(path).with_context(|| {
             format!(
                 "Input path is inaccessible or does not exist: {}",
                 path.display()
             )
         })?;
+        let input_type = metadata.file_type();
 
-        if metadata.is_dir() {
+        if input_type.is_dir() {
             let base = path.parent().unwrap_or(path);
-            for entry in walkdir::WalkDir::new(path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                if entry.file_type().is_file() {
+            for entry in walkdir::WalkDir::new(path) {
+                // walkdir errors (permission denied, I/O errors, ...) must not be
+                // swallowed: dropping them silently loses whole subtrees from the
+                // backup while still reporting success.
+                let entry = entry.map_err(|err| {
+                    let culprit = err
+                        .path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    anyhow::anyhow!(
+                        "Failed to traverse input directory '{}': {} (at '{}')",
+                        path.display(),
+                        err,
+                        culprit
+                    )
+                })?;
+                let entry_type = entry.file_type();
+                // An explicitly named symlink to a directory is followed by walkdir
+                // (root links are followed by default) and its entries are archived
+                // under the link name; treat the root entry as the directory it
+                // resolves to instead of rejecting it.
+                if entry.depth() == 0 && entry_type.is_symlink() {
+                    if directory_is_empty(entry.path())? {
+                        skipped_empty_dirs.push(entry.path().to_path_buf());
+                    }
+                    continue;
+                }
+                if entry_type.is_symlink() {
+                    // Default policy stays fail-closed (data must not be dropped
+                    // silently). --skip-symlinks is the explicit opt-in that turns
+                    // this into a counted, reported skip.
+                    if skip_symlinks {
+                        skipped_symlinks.push(entry.path().to_path_buf());
+                        continue;
+                    }
+                    anyhow::bail!(
+                        "Refusing to archive symbolic link '{}': symlinks are not supported; pass --skip-symlinks to skip them (with a warning) or remove the link and re-run",
+                        entry.path().display()
+                    );
+                }
+                if entry_type.is_file() {
                     let disk_path = entry.path().to_path_buf();
                     if let Ok(canonical) = disk_path.canonicalize() {
                         if excluded_paths.contains(&canonical) {
@@ -559,9 +620,18 @@ fn collect_create_inputs(
                         &mut seen_stored_paths,
                         &mut files_to_process,
                     )?;
+                } else if entry_type.is_dir() {
+                    if directory_is_empty(entry.path())? {
+                        skipped_empty_dirs.push(entry.path().to_path_buf());
+                    }
+                } else {
+                    anyhow::bail!(
+                        "Refusing to archive '{}': unsupported file type (not a regular file or directory)",
+                        entry.path().display()
+                    );
                 }
             }
-        } else {
+        } else if input_type.is_file() {
             if let Ok(canonical) = path.canonicalize() {
                 if excluded_paths.contains(&canonical) {
                     info!("Skipping archive output file: {}", path.display());
@@ -577,10 +647,25 @@ fn collect_create_inputs(
                 &mut seen_stored_paths,
                 &mut files_to_process,
             )?;
+        } else {
+            anyhow::bail!(
+                "Refusing to archive '{}': unsupported input file type (not a regular file or directory)",
+                path.display()
+            );
         }
     }
 
-    Ok(files_to_process)
+    Ok(CollectedCreateInputs {
+        files: files_to_process,
+        skipped_empty_dirs,
+        skipped_symlinks,
+    })
+}
+
+fn directory_is_empty(path: &Path) -> Result<bool> {
+    let mut entries = std::fs::read_dir(path)
+        .with_context(|| format!("Failed to read directory '{}'", path.display()))?;
+    Ok(entries.next().is_none())
 }
 
 fn cleanup_created_volume_files(
@@ -626,6 +711,7 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         flush_threshold,
         block_target_size,
         compact,
+        skip_symlinks,
     } = args;
     let mut config = if let Some(path) = config_path {
         info!("Loading configuration from: {}", path.display());
@@ -793,7 +879,30 @@ pub async fn create(args: CreateArgs<'_>) -> Result<()> {
         .filter(|p| p.exists())
         .cloned()
         .collect();
-    let files_to_process = collect_create_inputs(inputs, &excluded_paths)?;
+    let collected_inputs = collect_create_inputs(inputs, &excluded_paths, skip_symlinks)?;
+    if !collected_inputs.skipped_symlinks.is_empty() {
+        let count = collected_inputs.skipped_symlinks.len();
+        warn!(
+            "Skipped {} symbolic link{}: the archive format stores regular files only (--skip-symlinks).",
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+        for link in &collected_inputs.skipped_symlinks {
+            warn!("  - {}", link.display());
+        }
+    }
+    if !collected_inputs.skipped_empty_dirs.is_empty() {
+        let count = collected_inputs.skipped_empty_dirs.len();
+        warn!(
+            "Skipped {} empty director{}: the archive format stores files only, so empty directories cannot be preserved.",
+            count,
+            if count == 1 { "y" } else { "ies" }
+        );
+        for dir in &collected_inputs.skipped_empty_dirs {
+            warn!("  - {}", dir.display());
+        }
+    }
+    let files_to_process = collected_inputs.files;
 
     let mut writer = builder
         .build()
@@ -861,6 +970,7 @@ pub async fn extract(
     key_paths: &[PathBuf],
     key_passphrase: Option<&str>,
     force: bool,
+    max_output_bytes: Option<u64>,
 ) -> Result<()> {
     info!("Opening archive: {}", input.display());
 
@@ -869,7 +979,11 @@ pub async fn extract(
         .await
         .context("Failed to open archive")?;
 
-    let options = ExtractOptions::new(output).overwrite(force);
+    // Default stays None (no global cap; per-block/per-file bomb guards still
+    // apply). --max-output-bytes is the explicit opt-in for untrusted archives.
+    let options = ExtractOptions::new(output)
+        .overwrite(force)
+        .max_total_output_bytes(max_output_bytes);
 
     info!("Extracting to: {}", output.display());
 
@@ -1068,12 +1182,32 @@ pub async fn verify(
                     warn!("  {}. {}", i + 1, warning);
                 }
             }
-            anyhow::bail!(
-                "Archive verification degraded: expected volumes={}, found={}, missing sequences={:?}",
-                expected_volumes,
-                found_volumes,
-                missing_indices
-            )
+            // Degraded is caused either by genuinely missing volumes or by damaged
+            // redundancy metadata (e.g. backup header in use, damaged primary
+            // Catalog). Report the actual cause instead of always describing it as
+            // "missing volumes".
+            // The warning details have already been printed in the Warnings list
+            // above; repeating them in the bail message duplicated every warning on
+            // stderr (R2-VERIFY-01). The error carries only a summary here.
+            if missing_indices.is_empty() {
+                let detail = if stats.warnings.is_empty() {
+                    "redundancy metadata is degraded".to_string()
+                } else {
+                    "the archive is not fully healthy (see the warnings listed above)".to_string()
+                };
+                anyhow::bail!(
+                    "Archive verification degraded: all {} expected volume(s) are present, but {}",
+                    expected_volumes,
+                    detail
+                )
+            } else {
+                anyhow::bail!(
+                    "Archive verification degraded: missing volume files (expected volumes={}, found={}, missing sequences={:?})",
+                    expected_volumes,
+                    found_volumes,
+                    missing_indices
+                )
+            }
         }
         ArchiveHealthStatus::Incomplete {
             expected_volumes,
@@ -1160,8 +1294,12 @@ pub async fn repair(
     info!("");
 
     if !status.checkpoint_exists && !status.archive_exists {
-        info!("❌ No archive or checkpoint found. Nothing to repair.");
-        return Ok(());
+        // A missing path is an operator error (typo, unmounted backup disk), not a
+        // successful "nothing to repair" outcome: surface it via a non-zero exit.
+        anyhow::bail!(
+            "Archive not found: {} (no archive file or recovery checkpoint exists)",
+            archive.display()
+        );
     }
 
     if !status.recovery_needed {
@@ -1188,34 +1326,21 @@ pub async fn repair(
 
         let verify_stats = reader.verify().await.context("Verification failed")?;
 
-        if matches!(verify_stats.archive_health, ArchiveHealthStatus::Healthy)
-            && !verify_stats.needs_repair()
-        {
-            info!("✅ Archive is intact. No repair needed.");
-            return Ok(());
-        }
-
-        if matches!(verify_stats.archive_health, ArchiveHealthStatus::Healthy)
-            && verify_stats.needs_repair()
-        {
-            info!("⚠️  Archive is readable but has recoverable shard corruption.");
-            for warn in &verify_stats.warnings {
-                info!("  - {}", warn);
+        // VerifyStats::needs_repair() is defined as !is_healthy(), so the old
+        // "Healthy && needs_repair()" check was unsatisfiable dead code (R2-REPAIR-01).
+        // A single exhaustive match is now the only place that interprets the
+        // health status: the Healthy arm is the terminal success path, and the
+        // Degraded/Incomplete arms feed the repair decision below.
+        let (missing_volume_sequences, expected_vs_found) = match &verify_stats.archive_health {
+            ArchiveHealthStatus::Healthy => {
+                info!("✅ Archive is intact. No repair needed.");
+                return Ok(());
             }
-            info!("");
-        }
-
-        let mut missing_volume_sequences = Vec::new();
-        let mut expected_vs_found: Option<(usize, usize)> = None;
-        match &verify_stats.archive_health {
-            ArchiveHealthStatus::Healthy => {}
             ArchiveHealthStatus::Degraded {
                 expected_volumes,
                 found_volumes,
                 missing_indices,
             } => {
-                missing_volume_sequences = missing_indices.clone();
-                expected_vs_found = Some((*expected_volumes, *found_volumes));
                 info!("⚠️  Archive data is readable but archive health is degraded:");
                 if !missing_indices.is_empty() {
                     info!("  Expected volumes:  {}", expected_volumes);
@@ -1226,6 +1351,10 @@ pub async fn repair(
                     info!("  - {}", warn);
                 }
                 info!("");
+                (
+                    missing_indices.clone(),
+                    Some((*expected_volumes, *found_volumes)),
+                )
             }
             ArchiveHealthStatus::Incomplete {
                 expected_volumes,
@@ -1233,8 +1362,6 @@ pub async fn repair(
                 missing_indices,
                 reason,
             } => {
-                missing_volume_sequences = missing_indices.clone();
-                expected_vs_found = Some((*expected_volumes, *found_volumes));
                 info!("❌ Archive is incomplete:");
                 if !missing_indices.is_empty() {
                     info!("  Expected volumes:  {}", expected_volumes);
@@ -1252,8 +1379,12 @@ pub async fn repair(
                 }
 
                 info!("");
+                (
+                    missing_indices.clone(),
+                    Some((*expected_volumes, *found_volumes)),
+                )
             }
-        }
+        };
 
         if !missing_volume_sequences.is_empty() {
             let (expected, found) = expected_vs_found.unwrap_or((0, 0));
@@ -2232,6 +2363,7 @@ mod tests {
             flush_threshold: None,
             block_target_size: None,
             compact: false,
+            skip_symlinks: false,
         })
         .await
         .expect("hybrid create should succeed");
@@ -2276,6 +2408,7 @@ mod tests {
             flush_threshold: None,
             block_target_size: None,
             compact: false,
+            skip_symlinks: false,
         })
         .await
         .unwrap();
@@ -2312,6 +2445,7 @@ mod tests {
             flush_threshold: None,
             block_target_size: None,
             compact: false,
+            skip_symlinks: false,
         })
         .await
         .expect_err("4 volumes for 4+2 should fail");
@@ -2351,6 +2485,7 @@ mod tests {
             flush_threshold: None,
             block_target_size: None,
             compact: false,
+            skip_symlinks: false,
         })
         .await
         .expect_err("max_volume_size below 1 MiB should fail");
@@ -2441,6 +2576,7 @@ mod tests {
             flush_threshold: None,
             block_target_size: Some(64 * 1024),
             compact: false,
+            skip_symlinks: false,
         })
         .await
         .unwrap();
@@ -2491,6 +2627,7 @@ mod tests {
             flush_threshold: None,
             block_target_size: None,
             compact: false,
+            skip_symlinks: false,
         })
         .await
         .unwrap();

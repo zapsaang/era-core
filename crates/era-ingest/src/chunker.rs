@@ -32,19 +32,48 @@ pub struct Chunker {
 }
 
 impl Chunker {
-    /// Create a new chunker with the given configuration
-    pub fn new(config: ChunkerConfig) -> Self {
-        Self { config }
+    /// Create a new chunker with the given configuration.
+    ///
+    /// # Errors
+    /// Returns [`era_common::EraError::InvalidConfig`] if the configuration does
+    /// not satisfy [`ChunkerConfig::validate`].
+    ///
+    /// An invalid configuration is rejected: this constructor never substitutes
+    /// [`ChunkerConfig::default`] behind the caller's back. The FastCDC chunk
+    /// sizes determine chunk boundaries, deduplication and the resulting archive
+    /// layout, so silently changing them would be a data-layout drift.
+    pub fn new(config: ChunkerConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    /// Create a new chunker, rejecting an invalid configuration.
+    ///
+    /// Alias for [`Chunker::new`], kept for callers that prefer an explicitly
+    /// fallible constructor name.
+    ///
+    /// # Errors
+    /// Returns [`era_common::EraError::InvalidConfig`] if the configuration does
+    /// not satisfy [`ChunkerConfig::validate`].
+    pub fn try_new(config: ChunkerConfig) -> Result<Self> {
+        Self::new(config)
     }
 
     /// Create a chunker with default configuration
+    ///
+    /// The default configuration is known to be valid, so this is infallible.
     pub fn default_config() -> Self {
-        Self::new(ChunkerConfig::default())
+        Self {
+            config: ChunkerConfig::default(),
+        }
     }
 
     /// Chunk data from a byte slice
     ///
     /// Returns an iterator over chunks with their hashes.
+    ///
+    /// The configuration was validated when this chunker was constructed, so this
+    /// method never panics on chunk-size parameters.
     pub fn chunk_bytes<'a>(&'a self, data: &'a [u8]) -> ChunkIterator<'a> {
         ChunkIterator {
             data,
@@ -75,12 +104,12 @@ impl Chunker {
     /// Use this method when calling from async contexts.
     pub async fn chunk_all_async(&self, data: Bytes) -> Result<Vec<UniqueChunk>> {
         let config = self.config.clone();
-        tokio::task::spawn_blocking(move || {
-            let chunker = Chunker::new(config);
-            chunker.chunk_all(&data)
+        tokio::task::spawn_blocking(move || -> Result<Vec<UniqueChunk>> {
+            let chunker = Chunker::try_new(config)?;
+            Ok(chunker.chunk_all(&data))
         })
         .await
-        .map_err(|e| era_common::EraError::AsyncError(format!("Chunking task failed: {}", e)))
+        .map_err(|e| era_common::EraError::AsyncError(format!("Chunking task failed: {}", e)))?
     }
 
     /// Chunk a file into UniqueChunks
@@ -88,6 +117,7 @@ impl Chunker {
     /// Reads the entire file into memory first. For very large files,
     /// consider using streaming chunking.
     pub async fn chunk_file(&self, path: &std::path::Path) -> Result<Vec<UniqueChunk>> {
+        self.config.validate()?;
         let data = tokio::fs::read(path).await?;
         Ok(self.chunk_all(&data))
     }
@@ -126,6 +156,15 @@ impl<'a> Iterator for ChunkIterator<'a> {
 /// Unlike the naive approach of creating a new FastCDC instance for each chunk,
 /// this implementation maintains the chunking state across multiple reads,
 /// ensuring proper chunk size distribution (avg 64KB, not fixed 256KB).
+///
+/// # Error contract
+///
+/// Construction is infallible for backwards compatibility: an invalid
+/// [`ChunkerConfig`] does not panic and does not allocate the read buffer, but
+/// the first [`StreamingChunker::next_chunk`] call returns
+/// [`era_common::EraError::InvalidConfig`] (and [`StreamingChunker::into_stream`]
+/// yields that error as its first item). Callers that want construction-time
+/// rejection should validate with [`ChunkerConfig::validate`] first.
 pub struct StreamingChunker<R> {
     reader: R,
     config: ChunkerConfig,
@@ -140,13 +179,23 @@ pub struct StreamingChunker<R> {
 }
 
 impl<R: AsyncRead + Unpin> StreamingChunker<R> {
-    /// Create a new streaming chunker
+    /// Create a new streaming chunker.
+    ///
+    /// The configuration is validated when [`StreamingChunker::next_chunk`] is
+    /// called (it returns [`era_common::EraError::InvalidConfig`] for an invalid
+    /// configuration). Only a validated configuration allocates the read buffer,
+    /// so an arbitrary [`ChunkerConfig::max_size`] cannot turn construction into
+    /// an out-of-memory abort.
     pub fn new(reader: R, config: ChunkerConfig) -> Self {
         // Buffer needs to be large enough to:
         // 1. Hold at least one max_size chunk
         // 2. Have room for the next read while processing
         // Use 3x max_size for optimal performance
-        let buffer_size = config.max_size * 3;
+        let buffer_size = if config.validate().is_ok() {
+            config.max_size.saturating_mul(3)
+        } else {
+            0
+        };
 
         Self {
             reader,
@@ -195,7 +244,13 @@ impl<R: AsyncRead + Unpin> StreamingChunker<R> {
     }
 
     /// Get the next chunk using FastCDC algorithm
+    ///
+    /// # Errors
+    /// Returns [`era_common::EraError::InvalidConfig`] if the configuration
+    /// passed to [`StreamingChunker::new`] is invalid (construction itself is
+    /// infallible for backwards compatibility).
     pub async fn next_chunk(&mut self) -> Result<Option<UniqueChunk>> {
+        self.config.validate()?;
         loop {
             // Ensure we have data to process
             if !self.ensure_data().await.map_err(era_common::EraError::Io)? {
@@ -312,7 +367,8 @@ mod tests {
 
     #[test]
     fn test_chunk_boundaries_are_content_defined() {
-        let chunker = Chunker::new(ChunkerConfig::new(64, 256, 1024));
+        let chunker =
+            Chunker::new(ChunkerConfig::new(64, 256, 1024)).expect("test config must be valid");
 
         // Create data with a distinctive pattern
         let mut data1 = vec![0u8; 2048];
@@ -336,7 +392,7 @@ mod tests {
     fn test_chunk_respects_max_size() {
         // Use larger sizes that meet fastcdc's minimum requirements
         let config = ChunkerConfig::new(2048, 8192, 16384);
-        let chunker = Chunker::new(config.clone());
+        let chunker = Chunker::new(config.clone()).expect("test config must be valid");
 
         // Data that won't trigger any natural boundaries
         let data = vec![0x42u8; 50000];
@@ -350,7 +406,7 @@ mod tests {
     fn test_chunk_respects_min_size() {
         // Use larger sizes that meet fastcdc's minimum requirements
         let config = ChunkerConfig::new(2048, 8192, 16384);
-        let chunker = Chunker::new(config.clone());
+        let chunker = Chunker::new(config.clone()).expect("test config must be valid");
 
         // Large enough data
         let data = vec![0x42u8; 50000];

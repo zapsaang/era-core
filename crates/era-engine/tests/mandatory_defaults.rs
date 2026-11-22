@@ -3,7 +3,7 @@
 //! These tests verify that the default builder configuration produces
 //! correct archives with expected properties.
 
-use era_engine::ArchiveWriter;
+use era_engine::{ArchiveReader, ArchiveWriter};
 use era_storage::LocalStorageBackend;
 use era_volume::VolumeReader;
 use tempfile::TempDir;
@@ -42,11 +42,71 @@ async fn test_mandatory_memory_index_default() {
     );
 }
 
-#[test]
-fn test_mandatory_cdc_enabled() {
-    // We can't introspect `enable_cdc` easily without reflection,
-    // but we can trust that if we refactored the defaults in builder, it's true.
-    // We will verify this by checking the refactor application in code.
-    // Or we could run a benchmark that relies on CDC?
-    // Let's rely on the code change for CDC, and use this test file for the observable LSM side-effect.
+/// The default builder configuration must enable content-defined chunking.
+///
+/// This is verified behaviourally: a large file added to the default builder is
+/// stored as several chunks, while the same file under enable_cdc(false) is
+/// stored as a single chunk. (Audit H-03: this test previously had an empty
+/// body and therefore never verified the mandatory CDC default.)
+#[tokio::test]
+async fn test_mandatory_cdc_enabled() {
+    let temp_dir = TempDir::new().unwrap();
+    let source_path = temp_dir.path().join("large_source.bin");
+    // 1 MiB of mixed content is large enough for FastCDC to emit several chunks.
+    let payload: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&source_path, &payload).unwrap();
+
+    let default_path = temp_dir.path().join("cdc_default.era");
+    let mut writer = ArchiveWriter::builder(&default_path)
+        .password("test1234")
+        .build()
+        .await
+        .expect("Failed to build writer");
+    writer
+        .add_file(&source_path)
+        .await
+        .expect("Failed to add file");
+    writer.finalize().await.expect("Finalize failed");
+
+    let mut reader = ArchiveReader::open(&default_path, "test1234")
+        .await
+        .expect("Failed to open default archive");
+    let files = reader.list_files().await.expect("Failed to list files");
+    let entry = files
+        .iter()
+        .find(|entry| entry.path.ends_with("large_source.bin"))
+        .expect("source file missing from catalog");
+    let default_chunks = entry.chunks.len();
+    assert!(
+        default_chunks > 1,
+        "default builder must enable CDC: expected a large file to be split into \
+         multiple chunks, got {default_chunks}"
+    );
+
+    let disabled_path = temp_dir.path().join("cdc_disabled.era");
+    let mut writer = ArchiveWriter::builder(&disabled_path)
+        .password("test1234")
+        .enable_cdc(false)
+        .build()
+        .await
+        .expect("Failed to build writer");
+    writer
+        .add_file(&source_path)
+        .await
+        .expect("Failed to add file");
+    writer.finalize().await.expect("Finalize failed");
+
+    let mut reader = ArchiveReader::open(&disabled_path, "test1234")
+        .await
+        .expect("Failed to open non-CDC archive");
+    let files = reader.list_files().await.expect("Failed to list files");
+    let entry = files
+        .iter()
+        .find(|entry| entry.path.ends_with("large_source.bin"))
+        .expect("source file missing from catalog");
+    assert_eq!(
+        entry.chunks.len(),
+        1,
+        "explicit enable_cdc(false) must store the file as a single chunk"
+    );
 }

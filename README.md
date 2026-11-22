@@ -8,7 +8,7 @@ An encrypted archival storage engine written in Rust, featuring 3-layer envelope
 
 **Status**: Pre-alpha — API unstable, breaking changes expected. Not production-ready.
 
-**Last Verified**: September 2026 — workspace verification recorded 2737 passed, 0 failed, 18 ignored.
+**Last Verified**: 2026-11-22 (working tree on `b22a07e` + audit revisions) — `cargo test --release --workspace` under `ulimit -n 1024`: 2974 passed, 0 failed, 17 ignored (171 suites/doc-tests).
 
 ## Features
 
@@ -98,6 +98,33 @@ era keygen -t hybrid -f ./my_hybrid_key
 era keygen --no-passphrase -f ./my_plaintext_key
 ```
 
+### Create, extract and repair policies
+
+**Directory inputs (`era create`)** are walked recursively and only regular
+files are stored:
+
+- Symbolic links found inside walked directories are rejected by default: the
+  command fails and names the offending path. Pass `--skip-symlinks` to skip
+  them instead - each skipped link is reported and counted, and the exit code
+  stays 0. Symbolic links named explicitly on the command line are still
+  followed.
+- Special files (sockets, FIFOs, devices) are rejected.
+- Empty directories are reported as skipped (the archive format stores files
+  only, so they cannot be preserved).
+
+**Extraction output budget (`era extract`)**: per-block (256 MiB decompressed),
+per-shard and per-file limits apply to every extraction, but there is no global
+end-to-end cap by default. Use `--max-output-bytes <BYTES>` to bound the total
+decoded output of one extraction pass; exceeding it fails the run and removes the
+files written by that pass. Recommended when extracting archives from untrusted
+sources.
+
+**Repair exit status (`era repair`)**: exit code 0 means the archive is healthy
+or was repaired successfully. A non-zero exit code means the archive path is
+missing (typo or unmounted disk), verification failed, or the damage cannot be
+repaired with the available redundancy. `era repair --help` documents the exit
+status.
+
 ### Advanced Usage
 
 ```bash
@@ -115,6 +142,9 @@ era create --output archive.era --certificate public.pem /path/to/files
 
 # Extract with the matching private key
 era extract --input archive.era --output /restored --key private.pem
+
+# Bound the total decoded output of one extraction pass (untrusted archives)
+era extract --input archive.era --output /restored --max-output-bytes 1073741824 -p "secret"
 
 # Passphrase-protected private keys are supported. Unlock with (highest priority first):
 #   --key-passphrase <pass> · ERA_KEY_PASSPHRASE env · first --password · interactive prompt (TTY)
@@ -200,7 +230,7 @@ era-core/
 │   ├── era-ingest/        File ingestion, FastCDC chunking
 │   ├── era-index/         V2.1 embedded deduplication index (Bloom + L1/L2)
 │   └── era-engine/        Archive orchestration, async pipeline
-└── fuzz/                  Fuzzing targets (separate workspace)
+└── fuzz/                  (planned; fuzz workspace is not present in this repo)
 ```
 
 ### Layered Dependency Ordering
@@ -342,7 +372,7 @@ ERA Core has undergone multiple rounds of adversarial security auditing (279+ te
 | `adversarial_audit_v2` | 53 | Skeptical baseline verification (all fixed) |
 | `index_persistence_audit` | 30 | V2.1 embedded index: Bloom correctness, L1/L2 pages, cold recovery |
 
-Workspace verification recorded 2737 passed, 0 failed, 18 ignored. Vulnerabilities identified during audits have been addressed according to the Post-Fix Registry. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
+Workspace verification recorded 2974 passed, 0 failed, 17 ignored (2026-11-22, working tree on `b22a07e` + audit revisions). The independent two-round audit verdict, fixed findings, and residual accepted risks are recorded in `docs/final-audit-and-remediation-2026-11-22.md`. Note: Both legacy X25519 certificate mode and hybrid KEM (X25519 + ML-KEM-768) certificate mode are supported via CLI.
 
 ## Development
 
@@ -354,24 +384,27 @@ GitHub Actions runs on every push and PR:
 # 1. Format check
 cargo fmt --all -- --check
 
-# 2. Lint (warnings = errors)
-cargo clippy --all-targets --all-features -- -D warnings
+# 2. Lint (warnings = errors; resolves from the tracked Cargo.lock)
+cargo clippy --locked --all-targets --all-features -- -D warnings
 
-# 3. Full test suite
-cargo test --workspace
+# 3. Test suite (release; CI runs the CLI job and the workspace job)
+cargo test --release --locked -p era-cli && cargo test --release --locked --workspace
 ```
+
+CI pins `ulimit -n 1024` on the Linux runners and gives every job a `timeout-minutes` bound, so a local run above matches CI's resource limits.
 
 Run locally before committing:
 
 ```bash
 cargo fmt --all -- --check && \
-cargo clippy --all-targets --all-features -- -D warnings && \
-cargo test --workspace
+cargo clippy --locked --all-targets --all-features -- -D warnings && \
+cargo test --release --locked -p era-cli && \
+cargo test --release --locked --workspace
 ```
 
 ### Testing
 
-September 2026 workspace verification recorded 2737 passed, 0 failed, 18 ignored across 10 crates, covering:
+2026-11-22 workspace verification recorded 2974 passed, 0 failed, 17 ignored across 10 crates, covering:
 
 - **279+ adversarial audit tests** across multiple security audit suites (historical and V5)
 - Unit tests for all cryptographic operations (AEAD, KEM, KDF, secret sharing)
@@ -385,13 +418,13 @@ September 2026 workspace verification recorded 2737 passed, 0 failed, 18 ignored
 - CLI integration tests (130+ tests covering auth modes, repack, repair, roundtrip, and edge cases)
 
 ```bash
-cargo test --workspace                        # Full workspace suite
+cargo test --release --locked --workspace    # Full workspace suite
 cargo test --package era-engine               # Engine crate only
 cargo test -p era-engine --test fourth_audit  # Specific audit suite
 cargo test -p era-engine --test second_audit  # Second audit suite
 cargo test -p era-engine --test third_audit   # Third audit suite
 cargo test -p era-index --test index_persistence_audit  # V2.1 index audit
-cargo test -p era-cli                         # CLI integration tests
+cargo test --release --locked -p era-cli    # CLI integration tests
 ```
 
 ### Fuzzing
@@ -482,7 +515,7 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 
 1. Read [AGENTS.md](AGENTS.md) for architecture mandates and security constraints
 2. Fork, branch, and make changes following the coding standards
-3. Run all CI checks locally (`fmt`, `clippy -D warnings`, `test --workspace`)
+3. Run all CI checks locally (`fmt`, `clippy -D warnings`, `test --release --workspace`)
 4. Submit a PR — all checks must pass, code review required
 
 ### Coding Standards
@@ -504,8 +537,8 @@ Too many missing or corrupted volumes. With 4+2 erasure coding, you can lose up 
 |--------|-------|
 | Language | Rust 100% |
 | Lines of Code | ~141,700 (53,200 `src` + 85,650 `tests` + benches/examples) |
-| Source Files | 265 `.rs` files |
-| Tests | Workspace verification (`ulimit -n 1024`): 2916 passed, 0 failed, 17 ignored (164 suites/doc-tests) |
+| Source Files | 272 `.rs` files (265 tracked at `b22a07e` + 7 audit regression files) |
+| Tests | `cargo test --release --workspace` under `ulimit -n 1024` (2026-11-22, working tree on `b22a07e` + audit revisions): 2974 passed, 0 failed, 17 ignored (171 suites/doc-tests) |
 | Security Audit Tests | 350+ across multiple suites |
 | Fuzz Targets | Planned (fuzz workspace not yet in repo) |
 | Crates | 9 library + 1 binary |

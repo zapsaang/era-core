@@ -2601,7 +2601,7 @@ fn test_list_nonexistent_archive_fails() {
 }
 
 #[test]
-fn test_repair_nonexistent_archive_graceful() {
+fn test_repair_nonexistent_archive_fails() {
     let assert = era_cmd()
         .args([
             "repair",
@@ -2610,12 +2610,12 @@ fn test_repair_nonexistent_archive_graceful() {
             "pwd",
         ])
         .assert()
-        .success();
+        .failure();
 
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("Nothing to repair") || stderr.contains("No archive"),
-        "repair should report nothing to repair: {}",
+        stderr.contains("Archive not found") && stderr.contains("/nonexistent/path/to/archive.era"),
+        "repair on a missing archive must fail and name the path: {}",
         stderr
     );
 }
